@@ -164,7 +164,10 @@ class PublishScanTests(unittest.TestCase):
             sample = write(root, name, data)
             self.assertIn("Lua 5.0.2", CONFIG["assets"]["binary_allowlist_origins"][name])
             self.assertEqual(publish_scan.asset_scan(root, CONFIG, [sample]), [])
-            sample.write_bytes(sample.read_bytes() + b"changed")
+            # A Windows checkout (core.autocrlf) writes CRLF: still the reviewed file.
+            sample.write_bytes(data.replace(b"\n", b"\r\n"))
+            self.assertEqual(publish_scan.asset_scan(root, CONFIG, [sample]), [])
+            sample.write_bytes(data + b"changed")
             self.assertIn("binary file not on the allowlist", publish_scan.asset_scan(root, CONFIG, [sample])[0])
 
     def test_gitleaks_pins_every_platform(self):

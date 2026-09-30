@@ -129,6 +129,13 @@ class LiveSessionSources(unittest.TestCase):
             self.assertIn(message, mode)
         self.assertIn("audio_sfx_contracts", read("tests/presentation/audio/CMakeLists.txt"))
 
+    def test_lane_mute_applies_before_mode_selection_and_survives_battle_start(self):
+        host = read("apps/viewer/src/viewer_host.cpp")
+        self.assertLess(host.index("mute_lane_audio_output();"), host.index("get_cmdline_user_args()"))
+        self.assertIn('get_environment("EAWR_AUDIO_MUTE")', read("apps/viewer/src/audio_output.hpp"))
+        self.assertIn("options_.muted = options_.muted || audio_output_muted();",
+                      read("apps/viewer/src/battle_audio.cpp"))
+
     def test_ui07_scheduler_feeds_the_simulation_thread(self):
         # The UI-07 contract: one scheduler, OrderInput on it, taken by the session's command
         # source on the simulation thread; the scheduler outlives the session.
@@ -145,7 +152,8 @@ class LiveSessionSources(unittest.TestCase):
 
     def test_simulation_thread_is_the_pool(self):
         source = read("src/platform/live_session.cpp")
-        self.assertIn("const ThreadWorkerAdapter executor(options_.workers);", source)
+        # #656: the live tick dispatches by cost on the pool.
+        self.assertIn("const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);", source)
         self.assertIn("thread_ = std::thread", source)
 
 
@@ -176,7 +184,7 @@ class LiveSessionSources(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "set EAWR_GODOT_VIEWER_RUNTIME_TEST, EAWR_GODOT_EXECUTABLE and EAWR_EAW_GAME_ROOT")
 class LiveSessionGraphical(unittest.TestCase):
-    def _run(self, directory: pathlib.Path, name: str, extra=(), session=("--eawr-live-session", "m2"), camera=CAMERA):
+    def _run(self, directory: pathlib.Path, name: str, extra=(), session=("--eawr-live-session", "m2"), camera=CAMERA, env=None):
         executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
         self.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
         report = directory / f"{name}.json"
@@ -185,7 +193,7 @@ class LiveSessionGraphical(unittest.TestCase):
              "--eawr-map", CORUSCANT, "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
              "--eawr-report", str(report), "--eawr-capture", str(directory / f"{name}.png"),
              "--eawr-populate", "--eawr-map-camera-config", str(camera), *session, *extra],
-            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+            cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
         self.assertTrue(report.is_file(), completed.stdout[-4000:])
         return completed.returncode, strict_json(report.read_text(encoding="utf-8"))
 
@@ -508,6 +516,29 @@ class LiveSessionGraphical(unittest.TestCase):
             self.assertEqual(last_tick, baseline,
                               f"--eawr-live-step {step} must pose every missile's trail to the exact same "
                               "last tick as step 1, tick by tick, not just in aggregate (#491)")
+
+    def test_lane_mute_keeps_the_audio_event_log(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-lane-mute-") as temporary:
+            directory = pathlib.Path(temporary)
+            results = []
+            for name, flag, mute in (("explicit", "off", "0"), ("lane", "on", "1")):
+                code, report = self._run(directory, name, (
+                    *DUEL_ARGS, "--eawr-live-ticks", "750", "--eawr-live-audio-pace", "on",
+                    "--eawr-audio", flag, "--eawr-live-input", "30:click:unit=1",
+                    "--eawr-live-input", "60:rclick:unit=2"),
+                    session=("--eawr-live-session", "replay"), camera=DUEL_CAMERA,
+                    env=dict(os.environ, EAWR_AUDIO_MUTE=mute))
+                self.assertEqual(code, 0, report.get("failure"))
+                self.assertIs(report["battle_audio"]["muted"], True)
+                self.assertIs(report["live_session"]["headless_hashes_equal"], True)
+                results.append(report)
+            before, after = results
+            self.assertEqual(before["live_session"]["final_state_sha256"],
+                             after["live_session"]["final_state_sha256"])
+            for field in ("requested", "responses", "music", "abilities", "ability_starts"):
+                self.assertEqual(before["battle_audio"][field], after["battle_audio"][field], field)
+            self.assertTrue(after["battle_audio"]["requested"])
+            self.assertTrue(after["battle_audio"]["responses"])
 
     def test_duel_plays_its_sounds(self):
         # #84: the duel's shots, hits and the Tartan's death start FoC's SFXEvents, the player's
@@ -1359,7 +1390,7 @@ class LiveSessionGraphical(unittest.TestCase):
             replay = pathlib.Path(live["failure_replay"])
             try:
                 self.assertEqual(replay.parent.name, "logs", replay)
-                self.assertRegex(replay.name, r"^eawr-live-failure-[0-9]+-tick7\.eawr-replay$")
+                self.assertRegex(replay.name, r"^eawr-live-failure-[0-9]+-pid[0-9]+-usec[0-9]+-tick7\.eawr-replay$")
                 self.assertTrue(replay.read_bytes().startswith(b"EAWRPLY"), replay)
             finally:
                 replay.unlink(missing_ok=True)

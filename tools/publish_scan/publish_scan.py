@@ -52,6 +52,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def pinned_digest(path: Path, relpath: str, digest: str, scan: dict[str, Any]) -> str:
+    """The digest a pin is compared with. Reviewed non-UTF-8 text (text_encodings) is pinned with LF line
+    endings, and a Windows checkout (core.autocrlf) writes CRLF, so such files are hashed as LF."""
+    if relpath not in scan.get("text_encodings", {}):
+        return digest
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+
 def read_text(path: Path, encoding: str = "utf-8") -> str | None:
     """Decode text with UTF-8 or an explicitly reviewed encoding; return None for other files."""
     if path.stat().st_size > TEXT_LIMIT:
@@ -168,7 +176,8 @@ def asset_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
         if suffix in images:
             if scan["image_allowlist"].get(relpath) != digest:
                 hits.append(f"{relpath}: image not on the reviewed allowlist (sha256 {digest})")
-        elif read_text(path) is None and scan["binary_allowlist"].get(relpath) != digest:
+        elif read_text(path) is None and scan["binary_allowlist"].get(relpath) != pinned_digest(path, relpath,
+                                                                                               digest, scan):
             hits.append(f"{relpath}: binary file not on the allowlist")
     return hits
 

@@ -1,4 +1,5 @@
 #include "viewer_host_internal.hpp"
+#include "audio_output.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace viewer_host_detail {
@@ -118,6 +119,7 @@ ViewerHost::~ViewerHost() { shutdown_trace::mark("viewer host freed (members fol
 void ViewerHost::_bind_methods() {}
 
 void ViewerHost::_ready() {
+    mute_lane_audio_output();
     set_process(true);
     // UI-07: a text control taking focus cancels held world input (UI-I3).
     get_viewport()->connect("gui_focus_changed", callable_mp(this, &ViewerHost::on_gui_focus_changed));

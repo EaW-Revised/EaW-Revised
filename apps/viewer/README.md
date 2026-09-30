@@ -623,3 +623,7 @@ accepts the same `--mod-root` value alongside `--game-root`; replay mode stays
 independent of installed content. The opt-in HUD corpus uses
 `EAWR_MOD_HUD_ROOTS="name=leaf;parent|other=leaf"` with `EAWR_EAW_GAME_ROOT` set.
 For installed submods 2794270450 and 3229239424, list 1770851727 as their parent.
+
+GPU lane launchers can set `EAWR_AUDIO_MUTE=1` to mute the master bus in every viewer mode,
+including interactive live sessions and runs with `--eawr-audio on`. This keeps battle
+audio events, voice scheduling and upstream mixing active; it only silences output.

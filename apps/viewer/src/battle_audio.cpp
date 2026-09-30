@@ -1,4 +1,5 @@
 #include "battle_audio.hpp"
+#include "audio_output.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/skirmish/start.hpp"
@@ -202,6 +203,7 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
         host_->add_child(track.player);
     }
     // The viewer has no other sound: muting the master bus mutes the battle.
+    options_.muted = options_.muted || audio_output_muted();
     godot::AudioServer::get_singleton()->set_bus_mute(0, options_.muted);
 }
 

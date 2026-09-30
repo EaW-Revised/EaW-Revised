@@ -12,6 +12,7 @@
 #include "viewer_path.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -1838,8 +1839,13 @@ void LiveSessionView::save_failure_replay() {
     const std::filesystem::path directory =
         ViewerPath{std::string(global.get_data(), static_cast<std::size_t>(global.length()))}.native().parent_path();
     const auto seconds = static_cast<std::int64_t>(godot::Time::get_singleton()->get_unix_time_from_system());
+    // Concurrent lanes may fail at the same second and tick. Include the process
+    // and monotonic time so even a shared custom log directory keeps both replays.
+    const auto process = godot::OS::get_singleton()->get_process_id();
+    const auto usec = godot::Time::get_singleton()->get_ticks_usec();
     const std::filesystem::path path = directory
-        / ("eawr-live-failure-" + std::to_string(seconds) + "-tick" + std::to_string(replay.final_tick_count) + ".eawr-replay");
+        / ("eawr-live-failure-" + std::to_string(seconds) + "-pid" + std::to_string(process)
+           + "-usec" + std::to_string(usec) + "-tick" + std::to_string(replay.final_tick_count) + ".eawr-replay");
     std::error_code error;
     std::filesystem::create_directories(directory, error);
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
