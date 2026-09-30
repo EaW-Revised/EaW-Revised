@@ -1,0 +1,820 @@
+{
+  "fixture": {
+    "file": "original-v1.eawr-replay",
+    "bytes": 1480,
+    "sha256": "fcf7f050a4ae8be540def3e4609fc7ff68a21e4ed4fce59e46c1fc62e59a4f90",
+    "header_offsets": {
+      "magic": [
+        0,
+        8
+      ],
+      "format_version": [
+        8,
+        2
+      ],
+      "header_size": [
+        10,
+        2
+      ],
+      "sim_rules_version": [
+        12,
+        4
+      ],
+      "math_version": [
+        16,
+        4
+      ],
+      "fractional_bits": [
+        20,
+        4
+      ],
+      "tick_numerator": [
+        24,
+        4
+      ],
+      "tick_denominator": [
+        28,
+        4
+      ],
+      "seed": [
+        32,
+        8
+      ],
+      "final_tick_count": [
+        40,
+        8
+      ],
+      "initial_entity_count": [
+        48,
+        8
+      ],
+      "command_count": [
+        56,
+        8
+      ],
+      "content_identity": [
+        64,
+        32
+      ]
+    },
+    "hex_prefix_128_bytes": "45415752504c590001006000010000000100000018000000010000001e000000efcdab89674523010500000000000000020000000000000014000000000000007d31acee7f5473375dfcb7bb6f9130456654d5d8f63f15d094bc981288982fbc0100000000000000e90300000000000000000000000000000000000000000000"
+  },
+  "header": {
+    "format_version": 1,
+    "header_size": 96,
+    "sim_rules_version": 1,
+    "math_version": 1,
+    "fractional_bits": 24,
+    "tick_numerator": 1,
+    "tick_denominator": 30,
+    "seed": "0x0123456789abcdef",
+    "final_tick_count": 5,
+    "initial_entity_count": 2,
+    "command_count": 20,
+    "content_identity": "7d31acee7f5473375dfcb7bb6f9130456654d5d8f63f15d094bc981288982fbc",
+    "content_identity_input_sha256": "7d31acee7f5473375dfcb7bb6f9130456654d5d8f63f15d094bc981288982fbc"
+  },
+  "initial_entities": [
+    {
+      "entity_id": 1,
+      "asset_id": 1001,
+      "position_raw": [
+        0,
+        0,
+        0
+      ],
+      "velocity_raw": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "entity_id": 2,
+      "asset_id": 2002,
+      "position_raw": [
+        20,
+        0,
+        0
+      ],
+      "velocity_raw": [
+        0,
+        0,
+        0
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "index": 0,
+      "offset": 224,
+      "body_offset": 228,
+      "body_length": 56,
+      "payload_offset": 252,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 1,
+      "sequence": 1,
+      "opcode": 3,
+      "entity_id": 1,
+      "values_raw": [
+        5,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 1,
+      "offset": 284,
+      "body_offset": 288,
+      "body_length": 56,
+      "payload_offset": 312,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 2,
+      "sequence": 1,
+      "opcode": 3,
+      "entity_id": 1,
+      "values_raw": [
+        7,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 2,
+      "offset": 344,
+      "body_offset": 348,
+      "body_length": 56,
+      "payload_offset": 372,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 2,
+      "sequence": 2,
+      "opcode": 4,
+      "entity_id": 1,
+      "values_raw": [
+        45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 3,
+      "offset": 404,
+      "body_offset": 408,
+      "body_length": 56,
+      "payload_offset": 432,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 2,
+      "sequence": 3,
+      "opcode": 4,
+      "entity_id": 2,
+      "values_raw": [
+        45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 4,
+      "offset": 464,
+      "body_offset": 468,
+      "body_length": 56,
+      "payload_offset": 492,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 3,
+      "sequence": 1,
+      "opcode": 3,
+      "entity_id": 1,
+      "values_raw": [
+        9,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 5,
+      "offset": 524,
+      "body_offset": 528,
+      "body_length": 56,
+      "payload_offset": 552,
+      "payload_length": 32,
+      "tick": 0,
+      "player_id": 3,
+      "sequence": 2,
+      "opcode": 4,
+      "entity_id": 1,
+      "values_raw": [
+        -45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 6,
+      "offset": 584,
+      "body_offset": 588,
+      "body_length": 88,
+      "payload_offset": 612,
+      "payload_length": 64,
+      "tick": 0,
+      "player_id": 3,
+      "sequence": 3,
+      "opcode": 1,
+      "entity": {
+        "entity_id": 3,
+        "asset_id": 3003,
+        "position_raw": [
+          100,
+          0,
+          0
+        ],
+        "velocity_raw": [
+          75,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "offset": 676,
+      "body_offset": 680,
+      "body_length": 32,
+      "payload_offset": 704,
+      "payload_length": 8,
+      "tick": 1,
+      "player_id": 1,
+      "sequence": 1,
+      "opcode": 2,
+      "entity_id": 2
+    },
+    {
+      "index": 8,
+      "offset": 712,
+      "body_offset": 716,
+      "body_length": 88,
+      "payload_offset": 740,
+      "payload_length": 64,
+      "tick": 1,
+      "player_id": 2,
+      "sequence": 1,
+      "opcode": 1,
+      "entity": {
+        "entity_id": 4,
+        "asset_id": 4004,
+        "position_raw": [
+          -20,
+          0,
+          0
+        ],
+        "velocity_raw": [
+          -75,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "offset": 804,
+      "body_offset": 808,
+      "body_length": 56,
+      "payload_offset": 832,
+      "payload_length": 32,
+      "tick": 1,
+      "player_id": 3,
+      "sequence": 1,
+      "opcode": 4,
+      "entity_id": 3,
+      "values_raw": [
+        -75,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 10,
+      "offset": 864,
+      "body_offset": 868,
+      "body_length": 56,
+      "payload_offset": 892,
+      "payload_length": 32,
+      "tick": 1,
+      "player_id": 3,
+      "sequence": 2,
+      "opcode": 4,
+      "entity_id": 4,
+      "values_raw": [
+        45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 11,
+      "offset": 924,
+      "body_offset": 928,
+      "body_length": 56,
+      "payload_offset": 952,
+      "payload_length": 32,
+      "tick": 2,
+      "player_id": 1,
+      "sequence": 1,
+      "opcode": 3,
+      "entity_id": 3,
+      "values_raw": [
+        500,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 12,
+      "offset": 984,
+      "body_offset": 988,
+      "body_length": 56,
+      "payload_offset": 1012,
+      "payload_length": 32,
+      "tick": 2,
+      "player_id": 2,
+      "sequence": 1,
+      "opcode": 4,
+      "entity_id": 3,
+      "values_raw": [
+        45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 13,
+      "offset": 1044,
+      "body_offset": 1048,
+      "body_length": 88,
+      "payload_offset": 1072,
+      "payload_length": 64,
+      "tick": 2,
+      "player_id": 3,
+      "sequence": 1,
+      "opcode": 1,
+      "entity": {
+        "entity_id": 5,
+        "asset_id": 5005,
+        "position_raw": [
+          -100,
+          0,
+          0
+        ],
+        "velocity_raw": [
+          -45,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 14,
+      "offset": 1136,
+      "body_offset": 1140,
+      "body_length": 32,
+      "payload_offset": 1164,
+      "payload_length": 8,
+      "tick": 3,
+      "player_id": 1,
+      "sequence": 1,
+      "opcode": 2,
+      "entity_id": 1
+    },
+    {
+      "index": 15,
+      "offset": 1172,
+      "body_offset": 1176,
+      "body_length": 32,
+      "payload_offset": 1200,
+      "payload_length": 8,
+      "tick": 3,
+      "player_id": 2,
+      "sequence": 1,
+      "opcode": 2,
+      "entity_id": 3
+    },
+    {
+      "index": 16,
+      "offset": 1208,
+      "body_offset": 1212,
+      "body_length": 56,
+      "payload_offset": 1236,
+      "payload_length": 32,
+      "tick": 3,
+      "player_id": 3,
+      "sequence": 1,
+      "opcode": 3,
+      "entity_id": 4,
+      "values_raw": [
+        -50,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 17,
+      "offset": 1268,
+      "body_offset": 1272,
+      "body_length": 56,
+      "payload_offset": 1296,
+      "payload_length": 32,
+      "tick": 4,
+      "player_id": 1,
+      "sequence": 1,
+      "opcode": 4,
+      "entity_id": 4,
+      "values_raw": [
+        45,
+        0,
+        0
+      ]
+    },
+    {
+      "index": 18,
+      "offset": 1328,
+      "body_offset": 1332,
+      "body_length": 88,
+      "payload_offset": 1356,
+      "payload_length": 64,
+      "tick": 4,
+      "player_id": 2,
+      "sequence": 1,
+      "opcode": 1,
+      "entity": {
+        "entity_id": 6,
+        "asset_id": 6006,
+        "position_raw": [
+          42,
+          0,
+          0
+        ],
+        "velocity_raw": [
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 19,
+      "offset": 1420,
+      "body_offset": 1424,
+      "body_length": 56,
+      "payload_offset": 1448,
+      "payload_length": 32,
+      "tick": 4,
+      "player_id": 3,
+      "sequence": 1,
+      "opcode": 4,
+      "entity_id": 6,
+      "values_raw": [
+        -45,
+        0,
+        0
+      ]
+    }
+  ],
+  "rounding_examples": [
+    {
+      "velocity_raw": 45,
+      "ratio": "45/30",
+      "rounded_displacement_raw": 2
+    },
+    {
+      "velocity_raw": -45,
+      "ratio": "-45/30",
+      "rounded_displacement_raw": -2
+    },
+    {
+      "velocity_raw": 75,
+      "ratio": "75/30",
+      "rounded_displacement_raw": 2
+    },
+    {
+      "velocity_raw": -75,
+      "ratio": "-75/30",
+      "rounded_displacement_raw": -2
+    }
+  ],
+  "ticks": [
+    {
+      "completed_tick": 1,
+      "next_entity_id": 4,
+      "rng_state": "0x9f5abf2108f64a04",
+      "tick_nonce": "0x157a3807a48faa9d",
+      "entities": [
+        {
+          "entity_id": 1,
+          "asset_id": 1001,
+          "position_raw": [
+            7,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 2,
+          "asset_id": 2002,
+          "position_raw": [
+            22,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 3,
+          "asset_id": 3003,
+          "position_raw": [
+            102,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            75,
+            0,
+            0
+          ]
+        }
+      ],
+      "pending_command_indexes": [
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "canonical_state_bytes": 1116,
+      "state_sha256": "5f13df4359da99bbb781435f31303c6184510a08577f86868f58a02766c1da7e"
+    },
+    {
+      "completed_tick": 2,
+      "next_entity_id": 5,
+      "rng_state": "0x3d9238da8840c619",
+      "tick_nonce": "0xd573529b34a1d093",
+      "entities": [
+        {
+          "entity_id": 1,
+          "asset_id": 1001,
+          "position_raw": [
+            5,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 3,
+          "asset_id": 3003,
+          "position_raw": [
+            100,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -75,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 4,
+          "asset_id": 4004,
+          "position_raw": [
+            -18,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        }
+      ],
+      "pending_command_indexes": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "canonical_state_bytes": 868,
+      "state_sha256": "8a45cdf1c63c1e54b56b09a65dcaa1927adf83cad189592d1b24f5644499c98a"
+    },
+    {
+      "completed_tick": 3,
+      "next_entity_id": 6,
+      "rng_state": "0xdbc9b294078b422e",
+      "tick_nonce": "0x2f90b72e996dccbe",
+      "entities": [
+        {
+          "entity_id": 1,
+          "asset_id": 1001,
+          "position_raw": [
+            3,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 3,
+          "asset_id": 3003,
+          "position_raw": [
+            502,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 4,
+          "asset_id": 4004,
+          "position_raw": [
+            -16,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 5,
+          "asset_id": 5005,
+          "position_raw": [
+            -102,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        }
+      ],
+      "pending_command_indexes": [
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "canonical_state_bytes": 720,
+      "state_sha256": "f43e3626a0b5f1ea20aa8e5d53ccf9a12d125533a99e4139bf2d00822f92df54"
+    },
+    {
+      "completed_tick": 4,
+      "next_entity_id": 6,
+      "rng_state": "0x7a012c4d86d5be43",
+      "tick_nonce": "0xa2d419334c4667ec",
+      "entities": [
+        {
+          "entity_id": 4,
+          "asset_id": 4004,
+          "position_raw": [
+            -48,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 5,
+          "asset_id": 5005,
+          "position_raw": [
+            -104,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        }
+      ],
+      "pending_command_indexes": [
+        17,
+        18,
+        19
+      ],
+      "canonical_state_bytes": 460,
+      "state_sha256": "f99072695d44e55bcb3d02986787340221beac6fd6587c7b048f0ea71350eed9"
+    },
+    {
+      "completed_tick": 5,
+      "next_entity_id": 7,
+      "rng_state": "0x1838a60706203a58",
+      "tick_nonce": "0x01404ce914938008",
+      "entities": [
+        {
+          "entity_id": 4,
+          "asset_id": 4004,
+          "position_raw": [
+            -46,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 5,
+          "asset_id": 5005,
+          "position_raw": [
+            -106,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        },
+        {
+          "entity_id": 6,
+          "asset_id": 6006,
+          "position_raw": [
+            40,
+            0,
+            0
+          ],
+          "velocity_raw": [
+            -45,
+            0,
+            0
+          ]
+        }
+      ],
+      "pending_command_indexes": [],
+      "canonical_state_bytes": 312,
+      "state_sha256": "b716e13851efdfd2854dd16ddeefe14f5f031d81c2e8a927aa0109ef67e484bc"
+    }
+  ],
+  "sha256_known_vectors": {
+    "empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "abc": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  },
+  "zero_tick_fixture": {
+    "file": "zero-tick-v1.eawr-replay",
+    "bytes": 96,
+    "sha256": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
+    "expected_output": "header-only UTF-8 hash output (no post-tick rows)"
+  }
+}

@@ -1,0 +1,31 @@
+# Petroglyph-published shader sources: confidential headers, never redistribute.
+# Fetch with: curl -L -o shaders/foc_shaders.zip https://www.petroglyphgames.com/eawmodtool/foc_shaders.zip
+# (sha256 88b9cb03322aab9be7451968ca514e9d2c810973d83f65459fd8cb52e7f96f8d) and unzip into shaders/petroglyph-foc/
+/shaders/
+
+# External reference clones (AlamoEngine-Tools/GlyphX-Reference, alo-viewer, pg-starwarsgame-lsp).
+# See README for URLs. GlyphX-Reference is knowledge-only.
+reference/
+
+# Fonts are never committed: the EmpireAtWar faces are extracted from the player's own
+# FoC executable into out/fonts/ by tools/fonts/extract_eaw_fonts.py (#191, #164).
+# A font the project ships later needs an explicit negation here.
+*.ttf
+*.otf
+*.ttc
+*.woff
+*.woff2
+
+# Build and editor noise
+build/
+out/
+.vs/
+.vscode/
+*.user
+__pycache__/
+*.py[cod]
+
+# Per-machine overrides of config/host-paths.json and config/gpu-hosts.json
+config/host-paths.local.json
+config/gpu-hosts.local.json
+config/build-hosts.local.json

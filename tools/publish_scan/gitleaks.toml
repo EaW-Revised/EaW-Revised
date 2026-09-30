@@ -1,0 +1,10 @@
+# gitleaks for the publish scan (tools/publish_scan/publish_scan.py): the default rules plus
+# narrow allowlists for values reviewed as not secret.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "SHA-256 digests the inventory revalidation test pins (audit: generic-api-key false positive)"
+condition = "AND"
+paths = ['''tests/inventory/acceptance/test_revalidation\.py''']
+regexes = ['''^[0-9a-f]{64}$''']

@@ -1,0 +1,196 @@
+# CI on GitHub-hosted runners only. Every action is GitHub-owned and pinned by commit SHA; the token is
+# read-only and no job uses a secret. Tests that need the game data report "skipped" here, and the
+# graphical viewer tests (they need a GPU) are not run: the viewer extension is built, not exercised.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_CPP_TAG: 10.0.0-stable
+  GODOT_CPP_COMMIT: 507ed9d840c01a3c5b2a39af8bb4000bfac30bf5
+
+jobs:
+  dco:
+    name: DCO sign-off
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Every commit is signed off by its author
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for commit in $(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}"); do
+            author="$(git log -1 --format='%an <%ae>' "$commit")"
+            if ! git log -1 --format=%B "$commit" | grep -qiF "Signed-off-by: ${author}"; then
+              echo "::error::commit ${commit} has no 'Signed-off-by: ${author}' line (git commit -s; see CONTRIBUTING.md)"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+  publish-scan:
+    name: Publish scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Clean-room check
+        run: python tools/cleanroom_check.py
+      - name: Publish scan (security, clean-room, assets, README, gitleaks)
+        run: python tools/publish_scan/publish_scan.py --gitleaks
+
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64-gcc, preset: linux-x64-gcc, os: ubuntu-latest, experimental: false }
+          - { name: linux-x64-clang, preset: linux-x64-clang, os: ubuntu-latest, experimental: false }
+          - { name: linux-arm64-gcc, preset: linux-arm64-gcc, os: ubuntu-24.04-arm, experimental: false }
+          - { name: windows-msvc, preset: windows-msvc, os: windows-latest, experimental: false }
+          - { name: windows-clang, preset: windows-clang, os: windows-latest, experimental: false }
+          # No macOS preset or platform layer exists yet; this job reports how far a plain build gets.
+          - { name: macos-clang (experimental), preset: "", os: macos-latest, experimental: true }
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the Linux toolchain
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14 clang-18
+
+      - name: Install the macOS toolchain
+        if: ${{ runner.os == 'macOS' }}
+        run: brew install ninja
+
+      - name: Install the Python test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Record the toolchain
+        shell: bash
+        run: |
+          cmake --version
+          python --version
+          clang++ --version || true
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then g++-14 --version; fi
+
+      - name: Configure, build and test (preset)
+        if: ${{ matrix.preset != '' }}
+        shell: bash
+        env:
+          PRESET: ${{ matrix.preset }}
+        run: |
+          set -euo pipefail
+          cmake --preset "$PRESET"
+          cmake --build --preset "$PRESET"
+          ctest --preset "$PRESET"
+          python tools/verify_warnings_as_errors.py --root . --preset "$PRESET" --config Release
+
+      - name: Configure, build and test (macOS, experimental)
+        if: ${{ matrix.preset == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B out/build/macos -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DEAWR_WARNINGS_AS_ERRORS=ON -DEAWR_ENABLE_SIM_BOUNDARY_CHECK=ON
+          cmake --build out/build/macos
+          ctest --test-dir out/build/macos --output-on-failure
+
+  viewer:
+    name: viewer-${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, os: ubuntu-latest }
+          - { platform: windows-x64, os: windows-latest }
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache the pinned godot-cpp
+        id: godot-cpp
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: out/godot/deps/godot-cpp
+          key: godot-cpp-${{ env.GODOT_CPP_COMMIT }}
+
+      - name: Fetch the pinned godot-cpp
+        if: ${{ steps.godot-cpp.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$GODOT_CPP_TAG" https://github.com/godotengine/godot-cpp.git out/godot/deps/godot-cpp
+          test "$(git -C out/godot/deps/godot-cpp rev-parse HEAD)" = "$GODOT_CPP_COMMIT"
+
+      - name: Install the Linux toolchain
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14
+
+      - name: Build the viewer extension (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          cmake -S apps/viewer -B out/build/viewer -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build out/build/viewer --target eawr_viewer
+
+      - name: Build the viewer extension (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          cmake -S apps/viewer -B out/build/viewer -G "Visual Studio 17 2022" -A x64
+          cmake --build out/build/viewer --config Release --target eawr_viewer
+
+      - name: The extension is where the Godot project loads it
+        shell: bash
+        run: ls -l apps/viewer/project/bin/

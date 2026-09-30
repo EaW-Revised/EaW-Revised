@@ -1,0 +1,620 @@
+{
+  "schema_version": 1,
+  "issue": 29,
+  "generator": "renderer and behaviour counts from the accepted ledger plan/inventories/particle-plugins.json; selector and pair counts from scan_corpus() in tests/presentation/renderer/test_effect_mode.py (opt-in EAWR_PARTICLE_CORPUS_SCAN); corpus_runs, attachment_run and visual_comparisons from read-only viewer --eawr-effect reports",
+  "provenance": "quad layout and renderer selection from MIT alo-viewer 9bb0053919cc5df8377610d4f91b11d956d6c2f4; blend, depth-write and phase policy from the render state of the public Engine/Prim* effects the legacy selector names",
+  "ledger": {
+    "path": "plan/inventories/particle-plugins.json",
+    "sha256_lf": "c12c9f4775e18c405cfc0b2b4f023a139cbfa033386d11b6cbfaa019e0608cee",
+    "particle_v1_emitters": 8695,
+    "particle_v1_occurrences": 1666
+  },
+  "scan_scope": "physical ALO occurrences in the EaW base, FoC expansion and Remake 4.0 data roots, the ledger's own roots; installation paths and asset bytes stay private",
+  "renderer_families": [
+    {
+      "renderer_id": 22,
+      "name": "Billboard",
+      "disposition": "implemented",
+      "adapter": "eawr-particle-billboard-v1",
+      "corpus_emitters": 7111,
+      "selector_eligible_emitters": 6226,
+      "listed_by_selector": {
+        "4": 672,
+        "5": 141,
+        "11": 72
+      },
+      "cause": "",
+      "note": "selector-eligible emitters still fail closed when the CPU runtime marks them not CPU-ready (mesh emission, parent birth/death, terrain bounce) or when their texture does not resolve"
+    },
+    {
+      "renderer_id": 28,
+      "name": "XYAligned",
+      "disposition": "implemented",
+      "adapter": "eawr-particle-xy-aligned-v1",
+      "corpus_emitters": 366,
+      "selector_eligible_emitters": 359,
+      "listed_by_selector": {
+        "4": 7
+      },
+      "cause": "",
+      "note": "selector-eligible emitters still fail closed when the CPU runtime marks them not CPU-ready (mesh emission, parent birth/death, terrain bounce) or when their texture does not resolve"
+    },
+    {
+      "renderer_id": 52,
+      "name": "Kites",
+      "disposition": "implemented",
+      "adapter": "eawr-particle-kite-v1",
+      "corpus_emitters": 834,
+      "selector_eligible_emitters": 643,
+      "listed_by_selector": {
+        "4": 191
+      },
+      "cause": "",
+      "note": "selector-eligible emitters still fail closed when the CPU runtime marks them not CPU-ready (mesh emission, parent birth/death, terrain bounce) or when their texture does not resolve"
+    },
+    {
+      "renderer_id": 38,
+      "name": "HeatSaturation",
+      "disposition": "implemented",
+      "adapter": "eawr-particle-heat-v1",
+      "corpus_emitters": 384,
+      "selector_eligible_emitters": 384,
+      "listed_by_selector": {
+        "1": 49,
+        "2": 335
+      },
+      "cause": "",
+      "note": "every corpus heat emitter carries selector 1 or 2 with a distortion texture (signed red/green offset, alpha mask); it is drawn with the PrimHeat screen-distortion adapter weighted by that mask, and the authored selector is kept"
+    },
+    {
+      "renderer_id": 23,
+      "name": "Line",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 24,
+      "name": "Chain",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 25,
+      "name": "Volumetric",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 29,
+      "name": "VelocityAligned",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 36,
+      "name": "StretchedTextureChain",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 37,
+      "name": "BumpMap",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 47,
+      "name": "XYAlignedChain",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    },
+    {
+      "renderer_id": 61,
+      "name": "HardwareBillboards",
+      "disposition": "listed",
+      "adapter": "",
+      "corpus_emitters": 0,
+      "selector_eligible_emitters": 0,
+      "listed_by_selector": {},
+      "cause": "no V1 emitter converts to this renderer and the corpus has no V2 system, so the CPU runtime produces no data for it; line, chain, trail, volumetric, bump and hardware geometry therefore has no adapter",
+      "note": ""
+    }
+  ],
+  "legacy_blend_selectors": [
+    {
+      "value": 0,
+      "program": "Engine/PrimOpaque.fx",
+      "technique": "t0",
+      "disposition": "implemented",
+      "blend": "opaque",
+      "render_state": "no blend (SrcBlend ONE, DestBlend ZERO), ZWriteEnable TRUE",
+      "depth_write": true,
+      "corpus_emitters": 86,
+      "cause": ""
+    },
+    {
+      "value": 1,
+      "program": "Engine/PrimAdditive.fx",
+      "technique": "t1",
+      "disposition": "implemented",
+      "blend": "additive",
+      "render_state": "SrcBlend ONE, DestBlend ONE, ZWriteEnable FALSE",
+      "depth_write": false,
+      "corpus_emitters": 5293,
+      "cause": ""
+    },
+    {
+      "value": 2,
+      "program": "Engine/PrimAlpha.fx",
+      "technique": "t1",
+      "disposition": "implemented",
+      "blend": "alpha",
+      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA, ZWriteEnable FALSE",
+      "depth_write": false,
+      "corpus_emitters": 2233,
+      "cause": ""
+    },
+    {
+      "value": 3,
+      "program": "Engine/PrimModulate.fx",
+      "technique": "t0",
+      "disposition": "implemented",
+      "blend": "modulate",
+      "render_state": "SrcBlend ZERO, DestBlend SRCCOLOR, ZWriteEnable FALSE",
+      "depth_write": false,
+      "corpus_emitters": 0,
+      "cause": ""
+    },
+    {
+      "value": 4,
+      "program": "Engine/PrimDepthSpriteAdditive.fx",
+      "technique": "Depth_Sprite_PS20",
+      "disposition": "listed",
+      "blend": "additive",
+      "render_state": "SrcBlend ONE, DestBlend ONE, per-pixel depth output",
+      "depth_write": null,
+      "corpus_emitters": 870,
+      "cause": "depth sprite replaces per-pixel depth from the emitter's depth texture; the replacement is derivable from the public PrimDepthSprite program but is not implemented in this slice"
+    },
+    {
+      "value": 5,
+      "program": "Engine/PrimDepthSpriteAlpha.fx",
+      "technique": "Depth_Sprite_PS20",
+      "disposition": "listed",
+      "blend": "alpha",
+      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA, per-pixel depth output",
+      "depth_write": null,
+      "corpus_emitters": 141,
+      "cause": "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented in this slice"
+    },
+    {
+      "value": 6,
+      "program": "Engine/PrimDepthSpriteModulate.fx",
+      "technique": "Depth_Sprite_PS20",
+      "disposition": "listed",
+      "blend": "modulate",
+      "render_state": "SrcBlend ZERO, DestBlend SRCCOLOR, per-pixel depth output",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": "depth sprite replaces per-pixel depth; not implemented; no corpus emitter selects it"
+    },
+    {
+      "value": 7,
+      "program": "Engine/PrimDiffuseAlpha.fx",
+      "technique": "t1",
+      "disposition": "listed",
+      "blend": "alpha",
+      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": "lit 2x diffuse primitive needs the #25 lighting interface; no corpus emitter selects it"
+    },
+    {
+      "value": 8,
+      "program": "Engine/StencilDarken.fx",
+      "technique": "",
+      "disposition": "listed",
+      "blend": "",
+      "render_state": "",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": "stencil darkening pipeline is not implemented; no corpus emitter selects it"
+    },
+    {
+      "value": 9,
+      "program": "Engine/StencilDarkenFinalBlur.fx",
+      "technique": "",
+      "disposition": "listed",
+      "blend": "",
+      "render_state": "",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": "stencil darkening blur pipeline is not implemented; no corpus emitter selects it"
+    },
+    {
+      "value": 10,
+      "program": "Engine/PrimHeat.fx",
+      "technique": "t2",
+      "disposition": "implemented",
+      "blend": "heat_distortion",
+      "render_state": "AlphaBlendEnable FALSE; the pixel is replaced by an offset screen sample",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": ""
+    },
+    {
+      "value": 11,
+      "program": "Engine/PrimParticleBumpAlpha.fx",
+      "technique": "t0",
+      "disposition": "implemented",
+      "blend": "bump_alpha",
+      "render_state": "alpha blend; normal map lit by one directional light plus a fixed floor, with a fourfold diffuse lift for the authored dim particle colour (approximation of the effect's lighting)",
+      "depth_write": false,
+      "corpus_emitters": 72,
+      "cause": ""
+    },
+    {
+      "value": 12,
+      "program": "Engine/PrimDecalBumpAlpha.fx",
+      "technique": "",
+      "disposition": "listed",
+      "blend": "alpha",
+      "render_state": "",
+      "depth_write": null,
+      "corpus_emitters": 0,
+      "cause": "bump-mapped decal lighting needs the #25 lighting interface; no corpus emitter selects it"
+    },
+    {
+      "value": 13,
+      "program": "Engine/PrimAlphaScanlines.fx",
+      "technique": "t0",
+      "disposition": "listed",
+      "blend": "alpha",
+      "render_state": "SrcBlend SRCALPHA, DestBlend INVSRCALPHA, ZWriteEnable FALSE",
+      "depth_write": false,
+      "corpus_emitters": 0,
+      "cause": "scanline pattern shading is not implemented; no corpus emitter selects it"
+    }
+  ],
+  "family_selector_pairs": [
+    {
+      "renderer_id": 22,
+      "blend_selector": 0,
+      "corpus_emitters": 86
+    },
+    {
+      "renderer_id": 22,
+      "blend_selector": 1,
+      "corpus_emitters": 4278
+    },
+    {
+      "renderer_id": 22,
+      "blend_selector": 2,
+      "corpus_emitters": 1862
+    },
+    {
+      "renderer_id": 22,
+      "blend_selector": 4,
+      "corpus_emitters": 672
+    },
+    {
+      "renderer_id": 22,
+      "blend_selector": 5,
+      "corpus_emitters": 141
+    },
+    {
+      "renderer_id": 22,
+      "blend_selector": 11,
+      "corpus_emitters": 72
+    },
+    {
+      "renderer_id": 28,
+      "blend_selector": 1,
+      "corpus_emitters": 326
+    },
+    {
+      "renderer_id": 28,
+      "blend_selector": 2,
+      "corpus_emitters": 33
+    },
+    {
+      "renderer_id": 28,
+      "blend_selector": 4,
+      "corpus_emitters": 7
+    },
+    {
+      "renderer_id": 38,
+      "blend_selector": 1,
+      "corpus_emitters": 49
+    },
+    {
+      "renderer_id": 38,
+      "blend_selector": 2,
+      "corpus_emitters": 335
+    },
+    {
+      "renderer_id": 52,
+      "blend_selector": 1,
+      "corpus_emitters": 640
+    },
+    {
+      "renderer_id": 52,
+      "blend_selector": 2,
+      "corpus_emitters": 3
+    },
+    {
+      "renderer_id": 52,
+      "blend_selector": 4,
+      "corpus_emitters": 191
+    }
+  ],
+  "behaviour_families": [
+    {
+      "name": "named ALO attachment (P1-03 model attachment transform)",
+      "plugin_id": null,
+      "disposition": "implemented",
+      "corpus_emitters": null,
+      "cause": "",
+      "evidence": "particle_render_contracts follows an animated synthetic bone under fixed time; viewer --eawr-effect-attach on a corpus hardpoint"
+    },
+    {
+      "name": "EnhancedTrail (parent birth attachment)",
+      "plugin_id": 39,
+      "disposition": "listed",
+      "corpus_emitters": 85,
+      "cause": "the CPU runtime has no parent-particle birth hook; the parent relation is retained as data and reported per emitter",
+      "evidence": ""
+    },
+    {
+      "name": "Death (parent death attachment)",
+      "plugin_id": 40,
+      "disposition": "listed",
+      "corpus_emitters": 8,
+      "cause": "the CPU runtime has no parent-particle death hook; the parent relation is retained as data and reported per emitter",
+      "evidence": ""
+    },
+    {
+      "name": "EnhancedMesh (mesh emission)",
+      "plugin_id": 35,
+      "disposition": "listed",
+      "corpus_emitters": 321,
+      "cause": "emission from a host mesh surface needs mesh-surface sampling the CPU runtime does not implement",
+      "evidence": ""
+    },
+    {
+      "name": "TerrainBounce",
+      "plugin_id": 51,
+      "disposition": "listed",
+      "corpus_emitters": 31,
+      "cause": "the MIT reference contains no behaviour implementation",
+      "evidence": ""
+    }
+  ],
+  "sort_policy": "converted V1 renderers construct with sorting disabled: quads draw in CPU particle order inside one mesh; emitters are ordered by index through the material render priority inside their pass range; Godot orders instances within one priority by depth",
+  "coverage_manifest": "plan/inventories/godot-material-coverage.json still lists particles under not_supported; it is owned by P1-01 and should gain these modern_spatial particle adapters when that owner accepts them",
+  "corpus_runs": [
+    {
+      "family": "billboard",
+      "adapter": "eawr-particle-billboard-v1",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_smoke_big00.alo",
+      "sha256": "9e5fc0d0b8f57bb636465121e1451810b5fa5e44232406b54fc466f6893ac383",
+      "frames": 60,
+      "seed": 20260922,
+      "attach": "",
+      "final_stream_hash": "d9f5b56844a758d1",
+      "capture_sha256": "4367ebf6e516d5faf921ca2eab4c6cad62dab1e04820d51285dd8b36811cb83c",
+      "inside_coverage": 0.435728,
+      "milliseconds_per_frame": 30.5629,
+      "live_rids_before_release": 5,
+      "live_rids_after_release": 0
+    },
+    {
+      "family": "xy_aligned",
+      "adapter": "eawr-particle-xy-aligned-v1",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_waypoint_beacon.alo",
+      "sha256": "90e9844613fb1e3edee966ad3b793ed28accdc258e7ac815e9feb0ca63869cb2",
+      "frames": 60,
+      "seed": 20260922,
+      "attach": "",
+      "final_stream_hash": "cd9992d7a01a54c6",
+      "capture_sha256": "a69c384fbd75b4ca15f01546885e5cfb4e323e794e3d5cae64437ef40ab2d10c",
+      "inside_coverage": 0.101256,
+      "milliseconds_per_frame": 30.5552,
+      "live_rids_before_release": 5,
+      "live_rids_after_release": 0
+    },
+    {
+      "family": "kites",
+      "adapter": "eawr-particle-kite-v1",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_turbolaser_burst_med00.alo",
+      "sha256": "02794d28704f3857e70d64f89617b69de9fa13e344dfbe70c73224110aadedee",
+      "frames": 60,
+      "seed": 20260922,
+      "attach": "",
+      "final_stream_hash": "dab792606bfd7895",
+      "capture_sha256": "6d446141d68ada09d9818b84f5dd16764da31c77ea0511102e972dca45d3c5a0",
+      "inside_coverage": 0.166768,
+      "milliseconds_per_frame": 30.686,
+      "live_rids_before_release": 5,
+      "live_rids_after_release": 0
+    }
+  ],
+  "attachment_run": {
+    "profile": "foc",
+    "logical_path": "data/art/models/p_smoke_big00.alo",
+    "sha256": "9e5fc0d0b8f57bb636465121e1451810b5fa5e44232406b54fc466f6893ac383",
+    "attach": "data/art/models/rv_corvette_leia.alo:HP_E_MainEngines",
+    "host_sha256": "e4e2692ef923f480c6718b457182aeace166caebeff802f6254502e32660649d",
+    "animation_logical_path": "data/art/models/rv_corvette_cinematic_00.ala",
+    "animation_sha256": "5f27625fc51f92f813b7367de48f9fb0e1e0cbbfdf6a20affc1747355b732235",
+    "origin_alo": [
+      0.451587,
+      57.2487,
+      -2.89168
+    ],
+    "origin_constant_over_run": true,
+    "final_stream_hash": "060ec202b94d59c9",
+    "capture_sha256": "b575943fc0cc052888491b9511e396e995ee568df3e92a87dd5d773be3a6b8c9",
+    "status": "effect_render_passed"
+  },
+  "visual_comparisons": [
+    {
+      "category": "engine glow",
+      "profile": "foc",
+      "logical_path": "data/art/models/pe_lambdaengines.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "bc851c02319fb117379857c6fd99b401f7d9694012770e7a8d0572316c15f345",
+      "frames": 60,
+      "emitters": 1,
+      "emitters_drawn": 1,
+      "final_stream_hash": "fba70a8ca3a46055",
+      "blocker": ""
+    },
+    {
+      "category": "laser hit",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_turbolaser_burst_med00.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "02794d28704f3857e70d64f89617b69de9fa13e344dfbe70c73224110aadedee",
+      "frames": 60,
+      "emitters": 1,
+      "emitters_drawn": 1,
+      "final_stream_hash": "dab792606bfd7895",
+      "blocker": ""
+    },
+    {
+      "category": "explosion",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_explosion_huge00.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "7d8ca50857d8244e4329a6bc02dc4e187fe6c08bf029d8923451d572a55bd495",
+      "frames": 15,
+      "emitters": 7,
+      "emitters_drawn": 5,
+      "final_stream_hash": "e3b734f9d44cede9",
+      "blocker": "heat renderer with a non-heat selector; its state override is not derived"
+    },
+    {
+      "category": "hyperspace",
+      "profile": "foc",
+      "logical_path": null,
+      "status": "pending_user_authorized_original_capture",
+      "sha256": null,
+      "frames": null,
+      "emitters": null,
+      "emitters_drawn": null,
+      "final_stream_hash": null,
+      "blocker": "no particle ALO named, or referenced from XML, as a hyperspace effect exists in the inventoried EaW, FoC or Remake corpus; the effect's owner (model, shader or engine code) must be identified before a particle comparison can be taken"
+    },
+    {
+      "category": "smoke",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_smoke_big00.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "9e5fc0d0b8f57bb636465121e1451810b5fa5e44232406b54fc466f6893ac383",
+      "frames": 60,
+      "emitters": 1,
+      "emitters_drawn": 1,
+      "final_stream_hash": "d9f5b56844a758d1",
+      "blocker": ""
+    },
+    {
+      "category": "rain",
+      "profile": "foc",
+      "logical_path": "data/art/models/p_rain_med00.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "68348806c0459a240dbf1b02329e805cdeec5c445b4f6da54b0a8e8fdeac4fef",
+      "frames": 60,
+      "emitters": 1,
+      "emitters_drawn": 1,
+      "final_stream_hash": "3a0eb6c3609c7aec",
+      "blocker": ""
+    },
+    {
+      "category": "Remake ground laser muzzle",
+      "profile": "remake",
+      "logical_path": "data/art/models/p_laser_blue_ground_muzzle.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "44708de7997c49017bc55cddd446b367660091ada276fd3270a659e8948e836e",
+      "frames": 2,
+      "emitters": 6,
+      "emitters_drawn": 6,
+      "final_stream_hash": "fc2d65ecf5bad791",
+      "blocker": ""
+    },
+    {
+      "category": "Remake laser glow",
+      "profile": "remake",
+      "logical_path": "data/art/models/p_laser_glow_generic.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "54d54f929f2384cbbeb5354c8dd949337870dffb23427bf87c21c088d64c3f54",
+      "frames": 60,
+      "emitters": 2,
+      "emitters_drawn": 2,
+      "final_stream_hash": "5cc2e61d12592a65",
+      "blocker": ""
+    },
+    {
+      "category": "Remake turbolaser miss",
+      "profile": "remake",
+      "logical_path": "data/art/models/p_damage_turbolaser_miss_medium_green.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "3f1da78ace22c2abdb9e7869f566ffdf51055bb9611e4d559d9805954d0b60d0",
+      "frames": 15,
+      "emitters": 8,
+      "emitters_drawn": 4,
+      "final_stream_hash": "c09d84d498ac6c85",
+      "blocker": "depth sprite replaces per-pixel depth from the emitter's depth texture; not implemented"
+    },
+    {
+      "category": "Remake superlaser glow",
+      "profile": "remake",
+      "logical_path": "data/art/models/p_eclipse_superlaser_glow_r.alo",
+      "status": "pending_user_authorized_original_capture",
+      "sha256": "36b8283df3dba451b55978cf73692e60c8f5fcdbaba0d9fa31e237c4c4c92198",
+      "frames": 60,
+      "emitters": 2,
+      "emitters_drawn": 2,
+      "final_stream_hash": "5188375f9d659e81",
+      "blocker": ""
+    }
+  ]
+}

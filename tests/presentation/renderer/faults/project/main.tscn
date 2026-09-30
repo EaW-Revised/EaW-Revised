@@ -1,0 +1,5 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource path="res://eawr_renderer_fault_probe.gdextension" type="GDExtension" id="1"]
+
+[node name="EawrRendererFaultProbe" type="EawrRendererFaultProbe"]

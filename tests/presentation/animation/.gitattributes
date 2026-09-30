@@ -1,0 +1,4 @@
+# The association audit pins these exact bytes by SHA-256.
+corpus_association_frozen.tsv text eol=lf whitespace=-blank-at-eol
+# The declaration probe pins these exact bytes by SHA-256.
+corpus_declaration_pairs.tsv text eol=lf whitespace=-blank-at-eol

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "_comment": "Example host paths for the maintainer rig and offload tooling (which is not in the public source tree). Copy the keys you need into config/host-paths.local.json (ignored), or point EAWR_HOST_PATHS at another file.",
+  "rigToolsRoot": "",
+  "rigPython": "",
+  "airtestPython": "",
+  "rigAirtestRunnerRoot": "",
+  "rigFeasibilityRoot": "",
+  "focMenuTemplates": "",
+  "linuxBuildHost": "",
+  "linuxBuildUser": "",
+  "linuxBuildIdentity": "",
+  "windowsBuildHost": "",
+  "windowsBuildUser": "",
+  "windowsBuildIdentity": "",
+  "localGpuSlotTool": "",
+  "localLabRoot": ""
+}

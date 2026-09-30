@@ -1,0 +1,606 @@
+{
+  "schema_version": 1,
+  "scope": "physical ALO occurrences in all MEG archives and loose files under supplied roots",
+  "layers": [
+    "eaw",
+    "foc",
+    "remake"
+  ],
+  "counts": {
+    "alo_occurrences": 6213,
+    "model_occurrences": 4547,
+    "particle_v1_emitters": 8695,
+    "particle_v1_occurrences": 1666,
+    "particle_v2_emitters": 0,
+    "particle_v2_occurrences": 0
+  },
+  "plugin_occurrences_by_status": {
+    "cpu-supported": 54450,
+    "metadata-only": 8695,
+    "unsupported": 352
+  },
+  "plugins": [
+    {
+      "id": 0,
+      "name": "Point",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 1,
+      "name": "Trail",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "requires parent-particle attachment"
+    },
+    {
+      "id": 2,
+      "name": "Sphere",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 3,
+      "name": "Box",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 4,
+      "name": "Torus",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 5,
+      "name": "Mesh",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "requires renderer mesh binding"
+    },
+    {
+      "id": 6,
+      "name": "Terrain",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "unsupported by the MIT reference and needs terrain sampling"
+    },
+    {
+      "id": 7,
+      "name": "LinearSize",
+      "family": "modifier",
+      "occurrences": 3226,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 8,
+      "name": "LinearColor",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 9,
+      "name": "LinearRotation",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 10,
+      "name": "Acceleration",
+      "family": "modifier",
+      "occurrences": 506,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 11,
+      "name": "AttractAcceleration",
+      "family": "modifier",
+      "occurrences": 344,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 12,
+      "name": "Turbulence",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "noise contract is not yet ported"
+    },
+    {
+      "id": 13,
+      "name": "Vortex",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 14,
+      "name": "ConstantUV",
+      "family": "modifier",
+      "occurrences": 2413,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 15,
+      "name": "KeyedSize",
+      "family": "modifier",
+      "occurrences": 2162,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 16,
+      "name": "KeyedRotation",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 17,
+      "name": "KeyedColor",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 18,
+      "name": "KeyedUV",
+      "family": "modifier",
+      "occurrences": 6282,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 19,
+      "name": "Age",
+      "family": "killer",
+      "occurrences": 8633,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 20,
+      "name": "Radius",
+      "family": "killer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 21,
+      "name": "Terrain",
+      "family": "killer",
+      "occurrences": 62,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 22,
+      "name": "Billboard",
+      "family": "renderer",
+      "occurrences": 7111,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 23,
+      "name": "Line",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 24,
+      "name": "Chain",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 25,
+      "name": "Volumetric",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 26,
+      "name": "Emitter",
+      "family": "translater",
+      "occurrences": 3186,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 27,
+      "name": "World",
+      "family": "translater",
+      "occurrences": 5509,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 28,
+      "name": "XYAligned",
+      "family": "renderer",
+      "occurrences": 366,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 29,
+      "name": "VelocityAligned",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 30,
+      "name": "RandomUV",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 31,
+      "name": "KeyedAcceleration",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 32,
+      "name": "KeyedFriction",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference has no behavior implementation"
+    },
+    {
+      "id": 33,
+      "name": "SlottedRandomUV",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 34,
+      "name": "Shape",
+      "family": "creator",
+      "occurrences": 8281,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 35,
+      "name": "EnhancedMesh",
+      "family": "creator",
+      "occurrences": 321,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "V1 CPU and EffectMode synthetic graphical proxy binding implemented; original visual comparisons pending"
+    },
+    {
+      "id": 36,
+      "name": "StretchedTextureChain",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 37,
+      "name": "BumpMap",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 38,
+      "name": "HeatSaturation",
+      "family": "renderer",
+      "occurrences": 384,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 39,
+      "name": "EnhancedTrail",
+      "family": "creator",
+      "occurrences": 85,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented for V1 parent birth lifecycle in the portable presentation CPU runtime"
+    },
+    {
+      "id": 40,
+      "name": "Death",
+      "family": "creator",
+      "occurrences": 8,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented for V1 parent death burst in the portable presentation CPU runtime"
+    },
+    {
+      "id": 41,
+      "name": "Attractor",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "target/bone attachment is deferred"
+    },
+    {
+      "id": 42,
+      "name": "SpeedLimit",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 43,
+      "name": "AlignedShape",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "bone alignment is deferred"
+    },
+    {
+      "id": 44,
+      "name": "Target",
+      "family": "killer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "target/bone attachment is deferred"
+    },
+    {
+      "id": 45,
+      "name": "DistanceKeyTime",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference has no behavior implementation"
+    },
+    {
+      "id": 46,
+      "name": "LinearSpeed",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 47,
+      "name": "XYAlignedChain",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 48,
+      "name": "LinearRotationRate",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 49,
+      "name": "KeyedRotationRate",
+      "family": "modifier",
+      "occurrences": 6045,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 50,
+      "name": "OutwardVelocityShape",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference only partially implements this family"
+    },
+    {
+      "id": 51,
+      "name": "TerrainBounce",
+      "family": "modifier",
+      "occurrences": 31,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference has no behavior implementation"
+    },
+    {
+      "id": 52,
+      "name": "Kites",
+      "family": "renderer",
+      "occurrences": 834,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 53,
+      "name": "ColorVariance",
+      "family": "modifier",
+      "occurrences": 198,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 54,
+      "name": "WindAcceleration",
+      "family": "modifier",
+      "occurrences": 1553,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 55,
+      "name": "Torque",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference has no behavior implementation"
+    },
+    {
+      "id": 56,
+      "name": "AxisAttractor",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "MIT reference has no behavior implementation"
+    },
+    {
+      "id": 57,
+      "name": "ConstantSize",
+      "family": "modifier",
+      "occurrences": 3307,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 58,
+      "name": "ConstantRotation",
+      "family": "modifier",
+      "occurrences": 2650,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "cpu-supported",
+      "reason": "implemented in the portable presentation CPU runtime"
+    },
+    {
+      "id": 59,
+      "name": "ConstantColor",
+      "family": "modifier",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "not present in the available V1-converted corpus; behavior is not in this CPU slice"
+    },
+    {
+      "id": 60,
+      "name": "HardwareSpawner",
+      "family": "creator",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "hardware/GPU family is outside the CPU slice"
+    },
+    {
+      "id": 61,
+      "name": "HardwareBillboards",
+      "family": "renderer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "metadata-only",
+      "reason": "RenderingServer adapter and visual comparison are deferred"
+    },
+    {
+      "id": 62,
+      "name": "HardwareStomper",
+      "family": "killer",
+      "occurrences": 0,
+      "occurrence_basis": "inferred V1 conversion plus encoded V2 IDs",
+      "status": "unsupported",
+      "reason": "hardware/GPU family is outside the CPU slice"
+    }
+  ],
+  "conversion_only_plugins": [
+    {
+      "name": "InwardSpeed",
+      "occurrences": 2939,
+      "status": "cpu-supported",
+      "reason": "implemented during legacy V1 conversion; this helper has no encoded V2 plugin ID"
+    },
+    {
+      "name": "KeyedChannelColor",
+      "occurrences": 8695,
+      "status": "cpu-supported",
+      "reason": "implemented during legacy V1 conversion; this helper has no encoded V2 plugin ID"
+    }
+  ],
+  "scan_errors": []
+}

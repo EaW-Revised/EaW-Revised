@@ -1,0 +1,364 @@
+eawr.animation-association-foc	1
+view	foc	expansion:corruption/Data	base:GameData/Data
+rule	retail-model-anim-type-table
+row	1	binding	data/art/models/cis_snail_tank_ftk_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	2	binding	data/art/models/eb_commandcenter_idle_00.ala	binding_failed	data/art/models/eb_commandcenter.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	3	binding	data/art/models/ei_armytrooper_heavy_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	4	binding	data/art/models/ei_armytrooper_heavy_attackflinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	5	binding	data/art/models/ei_armytrooper_heavy_attackflinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	6	binding	data/art/models/ei_armytrooper_heavy_attackflinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	7	binding	data/art/models/ei_armytrooper_heavy_attackflinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	8	binding	data/art/models/ei_armytrooper_heavy_attackflinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	9	binding	data/art/models/ei_armytrooper_heavy_attackflinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	10	binding	data/art/models/ei_armytrooper_heavy_attackflinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	11	binding	data/art/models/ei_armytrooper_heavy_attackidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	12	binding	data/art/models/ei_armytrooper_heavy_attention_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	13	binding	data/art/models/ei_armytrooper_heavy_celebrate_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	14	binding	data/art/models/ei_armytrooper_heavy_chokedeath_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	15	binding	data/art/models/ei_armytrooper_heavy_crouchidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	16	binding	data/art/models/ei_armytrooper_heavy_crouchidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	17	binding	data/art/models/ei_armytrooper_heavy_crouchmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	18	binding	data/art/models/ei_armytrooper_heavy_crouchturnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	19	binding	data/art/models/ei_armytrooper_heavy_crouchturnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	20	binding	data/art/models/ei_armytrooper_heavy_crushed_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	21	binding	data/art/models/ei_armytrooper_heavy_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	22	binding	data/art/models/ei_armytrooper_heavy_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	23	binding	data/art/models/ei_armytrooper_heavy_eaten_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	24	binding	data/art/models/ei_armytrooper_heavy_eaten_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	25	binding	data/art/models/ei_armytrooper_heavy_fl_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	26	binding	data/art/models/ei_armytrooper_heavy_fl_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	27	binding	data/art/models/ei_armytrooper_heavy_flinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	28	binding	data/art/models/ei_armytrooper_heavy_flinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	29	binding	data/art/models/ei_armytrooper_heavy_flinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	30	binding	data/art/models/ei_armytrooper_heavy_flinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	31	binding	data/art/models/ei_armytrooper_heavy_flinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	32	binding	data/art/models/ei_armytrooper_heavy_flinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	33	binding	data/art/models/ei_armytrooper_heavy_flinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	34	binding	data/art/models/ei_armytrooper_heavy_fly_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	35	binding	data/art/models/ei_armytrooper_heavy_fw_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	36	binding	data/art/models/ei_armytrooper_heavy_fw_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	37	binding	data/art/models/ei_armytrooper_heavy_fw_die_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	38	binding	data/art/models/ei_armytrooper_heavy_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	39	binding	data/art/models/ei_armytrooper_heavy_idle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	40	binding	data/art/models/ei_armytrooper_heavy_idle_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	41	binding	data/art/models/ei_armytrooper_heavy_idle_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	42	binding	data/art/models/ei_armytrooper_heavy_idle_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	43	binding	data/art/models/ei_armytrooper_heavy_idle_05.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	44	binding	data/art/models/ei_armytrooper_heavy_idle_06.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	45	binding	data/art/models/ei_armytrooper_heavy_idle_07.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	46	binding	data/art/models/ei_armytrooper_heavy_idle_08.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	47	binding	data/art/models/ei_armytrooper_heavy_land_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	48	binding	data/art/models/ei_armytrooper_heavy_move_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	49	binding	data/art/models/ei_armytrooper_heavy_move_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	50	binding	data/art/models/ei_armytrooper_heavy_ropeland_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	51	binding	data/art/models/ei_armytrooper_heavy_ropeslide_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	52	binding	data/art/models/ei_armytrooper_heavy_talk_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	53	binding	data/art/models/ei_armytrooper_heavy_talk_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	54	binding	data/art/models/ei_armytrooper_heavy_talk_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	55	binding	data/art/models/ei_armytrooper_heavy_talkgesture_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	56	binding	data/art/models/ei_armytrooper_heavy_transition_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	57	binding	data/art/models/ei_armytrooper_heavy_turnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	58	binding	data/art/models/ei_armytrooper_heavy_turnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	59	binding	data/art/models/ei_armytrooper_heavy_walkmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	60	binding	data/art/models/ei_armytrooper_heavy_walkmove_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	61	binding	data/art/models/ei_darktroop_three_armed_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	62	binding	data/art/models/ei_darktroop_three_flying_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	63	binding	data/art/models/ei_darktroop_three_jetpack_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	64	binding	data/art/models/ei_darktroop_three_walk_00.ala	binding_failed	data/art/models/ei_darktroop_three.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	65	binding	data/art/models/ei_darktrooper_one_attackflinchb_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	66	binding	data/art/models/ei_darktrooper_one_attackflinchf_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	67	binding	data/art/models/ei_darktrooper_one_attackflinchf_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	68	binding	data/art/models/ei_darktrooper_one_attackflinchl_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	69	binding	data/art/models/ei_darktrooper_one_attackflinchl_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	70	binding	data/art/models/ei_darktrooper_one_attackflinchr_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	71	binding	data/art/models/ei_darktrooper_one_attackflinchr_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	72	binding	data/art/models/ei_darktrooper_one_flinchb_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	73	binding	data/art/models/ei_darktrooper_one_flinchf_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	74	binding	data/art/models/ei_darktrooper_one_flinchf_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	75	binding	data/art/models/ei_darktrooper_one_flinchl_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	76	binding	data/art/models/ei_darktrooper_one_flinchl_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	77	binding	data/art/models/ei_darktrooper_one_flinchr_00.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	78	binding	data/art/models/ei_darktrooper_one_flinchr_01.ala	binding_failed	data/art/models/ei_darktrooper_one.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	79	binding	data/art/models/ei_shocktrooper_attachflinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	80	binding	data/art/models/ei_shocktrooper_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	81	binding	data/art/models/ei_shocktrooper_attack_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	82	binding	data/art/models/ei_shocktrooper_attack_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	83	binding	data/art/models/ei_shocktrooper_attackflinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	84	binding	data/art/models/ei_shocktrooper_attackflinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	85	binding	data/art/models/ei_shocktrooper_attackflinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	86	binding	data/art/models/ei_shocktrooper_attackflinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	87	binding	data/art/models/ei_shocktrooper_attackflinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	88	binding	data/art/models/ei_shocktrooper_attackflinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	89	binding	data/art/models/ei_shocktrooper_attackflinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	90	binding	data/art/models/ei_shocktrooper_attackidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	91	binding	data/art/models/ei_shocktrooper_attackidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	92	binding	data/art/models/ei_shocktrooper_attention_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	93	binding	data/art/models/ei_shocktrooper_celebrate_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	94	binding	data/art/models/ei_shocktrooper_chokedeath_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	95	binding	data/art/models/ei_shocktrooper_crouchidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	96	binding	data/art/models/ei_shocktrooper_crouchidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	97	binding	data/art/models/ei_shocktrooper_crouchmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	98	binding	data/art/models/ei_shocktrooper_crouchturnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	99	binding	data/art/models/ei_shocktrooper_crouchturnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	100	binding	data/art/models/ei_shocktrooper_crushed_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	101	binding	data/art/models/ei_shocktrooper_deploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	102	binding	data/art/models/ei_shocktrooper_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	103	binding	data/art/models/ei_shocktrooper_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	104	binding	data/art/models/ei_shocktrooper_eaten_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	105	binding	data/art/models/ei_shocktrooper_fl_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	106	binding	data/art/models/ei_shocktrooper_fl_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	107	binding	data/art/models/ei_shocktrooper_flinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	108	binding	data/art/models/ei_shocktrooper_flinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	109	binding	data/art/models/ei_shocktrooper_flinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	110	binding	data/art/models/ei_shocktrooper_flinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	111	binding	data/art/models/ei_shocktrooper_flinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	112	binding	data/art/models/ei_shocktrooper_flinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	113	binding	data/art/models/ei_shocktrooper_flinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	114	binding	data/art/models/ei_shocktrooper_fly_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	115	binding	data/art/models/ei_shocktrooper_fw_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	116	binding	data/art/models/ei_shocktrooper_fw_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	117	binding	data/art/models/ei_shocktrooper_fw_die_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	118	binding	data/art/models/ei_shocktrooper_heavy_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	119	binding	data/art/models/ei_shocktrooper_heavy_attack_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	120	binding	data/art/models/ei_shocktrooper_heavy_attack_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	121	binding	data/art/models/ei_shocktrooper_heavy_attackflinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	122	binding	data/art/models/ei_shocktrooper_heavy_attackflinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	123	binding	data/art/models/ei_shocktrooper_heavy_attackflinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	124	binding	data/art/models/ei_shocktrooper_heavy_attackflinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	125	binding	data/art/models/ei_shocktrooper_heavy_attackflinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	126	binding	data/art/models/ei_shocktrooper_heavy_attackflinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	127	binding	data/art/models/ei_shocktrooper_heavy_attackflinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	128	binding	data/art/models/ei_shocktrooper_heavy_attackidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	129	binding	data/art/models/ei_shocktrooper_heavy_attackidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	130	binding	data/art/models/ei_shocktrooper_heavy_attention_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	131	binding	data/art/models/ei_shocktrooper_heavy_celebrate_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	132	binding	data/art/models/ei_shocktrooper_heavy_chokedeath_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	133	binding	data/art/models/ei_shocktrooper_heavy_crouchidle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	134	binding	data/art/models/ei_shocktrooper_heavy_crouchidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	135	binding	data/art/models/ei_shocktrooper_heavy_crouchmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	136	binding	data/art/models/ei_shocktrooper_heavy_crouchturnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	137	binding	data/art/models/ei_shocktrooper_heavy_crouchturnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	138	binding	data/art/models/ei_shocktrooper_heavy_crushed_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	139	binding	data/art/models/ei_shocktrooper_heavy_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	140	binding	data/art/models/ei_shocktrooper_heavy_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	141	binding	data/art/models/ei_shocktrooper_heavy_eaten_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	142	binding	data/art/models/ei_shocktrooper_heavy_fl_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	143	binding	data/art/models/ei_shocktrooper_heavy_fl_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	144	binding	data/art/models/ei_shocktrooper_heavy_flinchb_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	145	binding	data/art/models/ei_shocktrooper_heavy_flinchf_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	146	binding	data/art/models/ei_shocktrooper_heavy_flinchf_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	147	binding	data/art/models/ei_shocktrooper_heavy_flinchl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	148	binding	data/art/models/ei_shocktrooper_heavy_flinchl_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	149	binding	data/art/models/ei_shocktrooper_heavy_flinchr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	150	binding	data/art/models/ei_shocktrooper_heavy_flinchr_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	151	binding	data/art/models/ei_shocktrooper_heavy_fly_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	152	binding	data/art/models/ei_shocktrooper_heavy_fw_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	153	binding	data/art/models/ei_shocktrooper_heavy_fw_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	154	binding	data/art/models/ei_shocktrooper_heavy_fw_die_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	155	binding	data/art/models/ei_shocktrooper_heavy_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	156	binding	data/art/models/ei_shocktrooper_heavy_idle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	157	binding	data/art/models/ei_shocktrooper_heavy_idle_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	158	binding	data/art/models/ei_shocktrooper_heavy_idle_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	159	binding	data/art/models/ei_shocktrooper_heavy_idle_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	160	binding	data/art/models/ei_shocktrooper_heavy_idle_05.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	161	binding	data/art/models/ei_shocktrooper_heavy_idle_06.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	162	binding	data/art/models/ei_shocktrooper_heavy_idle_07.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	163	binding	data/art/models/ei_shocktrooper_heavy_idle_08.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	164	binding	data/art/models/ei_shocktrooper_heavy_land_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	165	binding	data/art/models/ei_shocktrooper_heavy_move_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	166	binding	data/art/models/ei_shocktrooper_heavy_move_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	167	binding	data/art/models/ei_shocktrooper_heavy_move_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	168	binding	data/art/models/ei_shocktrooper_heavy_ropeland_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	169	binding	data/art/models/ei_shocktrooper_heavy_ropeslide_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	170	binding	data/art/models/ei_shocktrooper_heavy_talk_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	171	binding	data/art/models/ei_shocktrooper_heavy_talk_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	172	binding	data/art/models/ei_shocktrooper_heavy_talk_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	173	binding	data/art/models/ei_shocktrooper_heavy_talkgesture_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	174	binding	data/art/models/ei_shocktrooper_heavy_transition_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	175	binding	data/art/models/ei_shocktrooper_heavy_turnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	176	binding	data/art/models/ei_shocktrooper_heavy_turnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	177	binding	data/art/models/ei_shocktrooper_heavy_walkmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	178	binding	data/art/models/ei_shocktrooper_heavy_walkmove_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	179	binding	data/art/models/ei_shocktrooper_heavy_walkmove_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	180	binding	data/art/models/ei_shocktrooper_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	181	binding	data/art/models/ei_shocktrooper_idle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	182	binding	data/art/models/ei_shocktrooper_idle_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	183	binding	data/art/models/ei_shocktrooper_idle_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	184	binding	data/art/models/ei_shocktrooper_idle_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	185	binding	data/art/models/ei_shocktrooper_idle_05.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	186	binding	data/art/models/ei_shocktrooper_idle_06.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	187	binding	data/art/models/ei_shocktrooper_idle_07.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	188	binding	data/art/models/ei_shocktrooper_idle_08.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	189	binding	data/art/models/ei_shocktrooper_land_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	190	binding	data/art/models/ei_shocktrooper_move_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	191	binding	data/art/models/ei_shocktrooper_move_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	192	binding	data/art/models/ei_shocktrooper_move_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	193	binding	data/art/models/ei_shocktrooper_move_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	194	binding	data/art/models/ei_shocktrooper_move_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	195	binding	data/art/models/ei_shocktrooper_move_05.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	196	binding	data/art/models/ei_shocktrooper_ropeland_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	197	binding	data/art/models/ei_shocktrooper_ropeslide_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	198	binding	data/art/models/ei_shocktrooper_talk_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	199	binding	data/art/models/ei_shocktrooper_talk_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	200	binding	data/art/models/ei_shocktrooper_talk_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	201	binding	data/art/models/ei_shocktrooper_talkgesture_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	202	binding	data/art/models/ei_shocktrooper_transition_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	203	binding	data/art/models/ei_shocktrooper_turnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	204	binding	data/art/models/ei_shocktrooper_turnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	205	binding	data/art/models/ei_shocktrooper_undeploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	206	binding	data/art/models/ei_shocktrooper_walkmove_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	207	binding	data/art/models/ei_shocktrooper_walkmove_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	208	binding	data/art/models/ei_shocktrooper_walkmove_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	209	binding	data/art/models/ei_shocktrooper_walkmove_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	210	binding	data/art/models/ei_shocktrooper_walkmove_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	211	binding	data/art/models/ei_stormcommando_deploy_fire_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	212	binding	data/art/models/ei_stormtrooper_attack_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	213	binding	data/art/models/ei_stormtrooper_attack_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	214	binding	data/art/models/ei_stormtrooper_attackidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	215	binding	data/art/models/ei_stormtrooper_crouchidle_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	216	binding	data/art/models/ei_stormtrooper_move_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	217	binding	data/art/models/ei_stormtrooper_move_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	218	binding	data/art/models/ei_stormtrooper_walkmove_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	219	binding	data/art/models/ei_stormtrooper_walkmove_04.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	220	binding	data/art/models/ei_vader_attack_00.ala	bound	data/art/models/ei_vader.alo	model_stem ATTACK index 0
+row	221	binding	data/art/models/ei_vader_attack_01.ala	bound	data/art/models/ei_vader.alo	model_stem ATTACK index 1
+row	222	binding	data/art/models/empire_secutor_pimp_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	223	binding	data/art/models/empire_secutor_pimp_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	224	binding	data/art/models/empire_tie_eta_deploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	225	binding	data/art/models/empire_tie_eta_undeploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	226	binding	data/art/models/empire_victory_star_destroyer_deploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	227	binding	data/art/models/empire_victory_star_destroyer_undeploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	228	binding	data/art/models/ev_at-aa_turnr_half_00.ala	bound	data/art/models/ev_at-aa.alo	model_stem TURNR_HALF index 0
+row	229	binding	data/art/models/ev_at-aa_turnr_quarter_00.ala	bound	data/art/models/ev_at-aa.alo	model_stem TURNR_QUARTER index 0
+row	230	binding	data/art/models/ev_at-aa_undeploy_00.ala	bound	data/art/models/ev_at-aa.alo	model_stem UNDEPLOY index 0
+row	231	binding	data/art/models/ev_at-barge_land_00.ala	bound	data/art/models/ev_at-barge.alo	model_stem LAND index 0
+row	232	binding	data/art/models/ev_juggernaut_deploy_00.ala	bound	data/art/models/ev_juggernaut.alo	model_stem DEPLOY index 0
+row	233	binding	data/art/models/ev_juggernaut_idle_00.ala	bound	data/art/models/ev_juggernaut.alo	model_stem IDLE index 0
+row	234	binding	data/art/models/ev_juggernaut_turn_left_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	235	binding	data/art/models/ev_juggernaut_turn_right_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	236	binding	data/art/models/ev_juggernaut_undeploy_00.ala	bound	data/art/models/ev_juggernaut.alo	model_stem UNDEPLOY index 0
+row	237	binding	data/art/models/ev_satellite_turret_build_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	238	binding	data/art/models/ev_sentinel_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	239	binding	data/art/models/hapan_star_home_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	240	binding	data/art/models/nb_basepad_deploy.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	241	binding	data/art/models/nb_basepad_undeploy.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	242	binding	data/art/models/neutral_republic_secutor_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	243	binding	data/art/models/neutral_republic_secutor_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	244	binding	data/art/models/ni_ewok_bomb_transiotion_01.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	245	binding	data/art/models/ni_ewok_bomb_transition_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	246	binding	data/art/models/ni_mandalorian_fly_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	247	binding	data/art/models/ni_mustafarian_crouchmove_00.ala	binding_failed	data/art/models/ni_mustafarian.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	248	binding	data/art/models/ni_mustafarian_fl_die_00.ala	binding_failed	data/art/models/ni_mustafarian.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	249	binding	data/art/models/ni_mustafarian_fw_die_00.ala	binding_failed	data/art/models/ni_mustafarian.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	250	binding	data/art/models/ni_mustafarian_talk_01.ala	binding_failed	data/art/models/ni_mustafarian.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	251	binding	data/art/models/ni_pirateplex_attachflinchf_01.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	252	binding	data/art/models/p_kraytdestoyer_detonate_idle_00.ala	binding_failed	data/art/models/p_kraytdestoyer_detonate.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	253	binding	data/art/models/p_kraytdestoyer_detonate_test_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	254	binding	data/art/models/p_kraytdestoyer_presuperblast__idle_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	255	binding	data/art/models/p_kraytdestoyer_presuperblast_idle_00.ala	bound	data/art/models/p_kraytdestoyer_presuperblast.alo	model_stem IDLE index 0
+row	256	binding	data/art/models/p_kraytdestoyer_presuperblast_test_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	257	binding	data/art/models/p_kraytdestoyer_superblast_test.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	258	model_parse	data/art/models/pe_x_wing_land_cinematic_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	259	model_parse	data/art/models/pe_x_wing_land_cinematic_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	260	model_parse	data/art/models/pe_x_wing_land_cinematic_02.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	261	model_parse	data/art/models/pe_x_wing_land_cinematic_03.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	262	model_parse	data/art/models/pe_x_wing_land_deploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	263	model_parse	data/art/models/pe_x_wing_land_undeploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	264	binding	data/art/models/rb_commandcenter_idle_00.ala	binding_failed	data/art/models/rb_commandcenter.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	265	binding	data/art/models/rb_vehicleturret_attack_00.ala	bound	data/art/models/rb_vehicleturret.alo	model_stem ATTACK index 0
+row	266	binding	data/art/models/rep_at_te_move_endfour_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	267	binding	data/art/models/rep_at_te_move_endone_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	268	binding	data/art/models/rep_at_te_move_endthree_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	269	binding	data/art/models/rep_at_te_move_endtwo_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	270	binding	data/art/models/ri_mortarman_crushed_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	271	binding	data/art/models/ri_mortarman_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	272	binding	data/art/models/ri_mortarman_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	273	model_match	data/art/models/ri_padowan_attack_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	274	model_match	data/art/models/ri_padowan_block_blaster_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	275	model_match	data/art/models/ri_padowan_block_blaster_01.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	276	model_match	data/art/models/ri_padowan_block_blaster_02.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	277	model_match	data/art/models/ri_padowan_block_blaster_03.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	278	model_match	data/art/models/ri_padowan_force_healing_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	279	model_match	data/art/models/ri_padowan_force_run_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	280	model_match	data/art/models/ri_padowan_hc_draw_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	281	model_match	data/art/models/ri_padowan_hc_lose_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	282	model_match	data/art/models/ri_padowan_hc_win_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	283	model_match	data/art/models/ri_padowan_idle_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	284	model_match	data/art/models/ri_padowan_idle_blockblaster_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	285	model_match	data/art/models/ri_padowan_idle_blockblaster_01.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	286	model_match	data/art/models/ri_padowan_idle_blockblaster_02.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	287	model_match	data/art/models/ri_padowan_move_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	288	model_match	data/art/models/ri_padowan_move_01.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	289	model_match	data/art/models/ri_padowan_redirect_blaster_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	290	model_match	data/art/models/ri_padowan_redirect_blaster_01.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	291	model_match	data/art/models/ri_padowan_redirect_blaster_02.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	292	model_match	data/art/models/ri_padowan_redirect_blaster_03.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	293	binding	data/art/models/ri_skywalker_fb_attack.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	294	binding	data/art/models/ri_skywalker_fb_hold.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	295	binding	data/art/models/ri_skywalker_fb_release.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	296	binding	data/art/models/rv_aac_hovertank_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	297	binding	data/art/models/rv_aac_hovertank_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	298	binding	data/art/models/rv_aac_hovertank_move_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	299	binding	data/art/models/rv_mdu_rflc_pad_build_00.ala	binding_failed	data/art/models/rv_mdu_rflc.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	300	binding	data/art/models/rv_mdu_rflc_pad_sell_00.ala	binding_failed	data/art/models/rv_mdu_rflc.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	301	binding	data/art/models/rv_mfalcon_takeoff_00.ala	bound	data/art/models/rv_mfalcon.alo	model_stem TAKEOFF index 0
+row	302	binding	data/art/models/rv_nebulonb_d_death_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	303	binding	data/art/models/rv_t1b_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	304	binding	data/art/models/rv_t1b_light_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	305	binding	data/art/models/rv_t1b_light_desert_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	306	binding	data/art/models/rv_t1b_light_desert_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	307	binding	data/art/models/rv_t1b_light_desert_move_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	308	binding	data/art/models/rv_t1b_light_desert_move_endone_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	309	binding	data/art/models/rv_t1b_light_desert_turnl_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	310	binding	data/art/models/rv_t1b_light_desert_turnr_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	311	binding	data/art/models/rv_t2b_attack_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	312	binding	data/art/models/rv_t2b_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	313	binding	data/art/models/rv_t3b_heavy_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	314	binding	data/art/models/rv_t3b_v2_desert_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	315	binding	data/art/models/rv_t3b_v2_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	316	binding	data/art/models/rv_t3b_v2_green_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	317	binding	data/art/models/rv_t4btank_attack_00.ala	bound	data/art/models/rv_t4btank.alo	model_stem ATTACK index 0
+row	318	binding	data/art/models/ub_droidworks_open_00.ala	binding_failed	data/art/models/ub_droidworks.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	319	binding	data/art/models/ub_turretmst50_idle00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	320	binding	data/art/models/ub_turretptl05_idle00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	321	binding	data/art/models/ui_ig88_bombtoss_00.ala	bound	data/art/models/ui_ig88.alo	model_stem BOMBTOSS index 0
+row	322	binding	data/art/models/ui_ig88_contaiminate_loop.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	323	binding	data/art/models/ui_ig88_contaiminate_loop_00.ala	bound	data/art/models/ui_ig88.alo	model_stem CONTAIMINATE_LOOP index 0
+row	324	binding	data/art/models/ui_ig88_contaminate.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	325	binding	data/art/models/ui_ig88_contaminate_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	326	binding	data/art/models/ui_ig88_contaminate_attack.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	327	binding	data/art/models/ui_ig88_contaminate_attack_00.ala	bound	data/art/models/ui_ig88.alo	model_stem CONTAMINATE_ATTACK index 0
+row	328	binding	data/art/models/ui_ig88_contaminate_release.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	329	binding	data/art/models/ui_ig88_contaminate_release_00.ala	bound	data/art/models/ui_ig88.alo	model_stem CONTAMINATE_RELEASE index 0
+row	330	binding	data/art/models/ui_ig88_demolition_00.ala	bound	data/art/models/ui_ig88.alo	model_stem DEMOLITION index 0
+row	331	binding	data/art/models/ui_ig88_fly_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	332	binding	data/art/models/ui_ig88_land_00.ala	bound	data/art/models/ui_ig88.alo	model_stem LAND index 0
+row	333	binding	data/art/models/ui_ig88_transition_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	334	binding	data/art/models/ui_tyber_in_jail_deploy_00.ala	binding_failed	data/art/models/ui_tyber_in_jail.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	335	binding	data/art/models/ui_tyber_in_jail_smashbot.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	336	binding	data/art/models/underworld_black_sun_privateer_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	337	model_match	data/art/models/underworld_hutt_privateer_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	338	binding	data/art/models/uv_f9tztransport_drclosing_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	339	binding	data/art/models/uv_f9tztransport_dropening_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	340	binding	data/art/models/uv_f9tztransport_idle_00.ala	binding_failed	data/art/models/uv_f9tztransport.alo	EAWR-ANIMATION-0002 animation track does not map exactly to model bone name/index
+row	341	binding	data/art/models/uv_mdu_sensor_sell_00.ala	never_loaded	-	the name is not <base>_<TYPE>_NN.ala for any retail type
+row	342	binding	data/art/models/vv_miid_roik_db_deploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	343	binding	data/art/models/vv_miid_roik_db_undeploy_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	344	binding	data/art/models/vv_slave_ship_attack_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	345	model_match	data/art/models/w_allshaders_idle_00.ala	never_loaded	-	no FoC model or anim override name is the base of this <base>_<TYPE>_NN name
+row	346	binding	data/art/models/w_blackhole_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	347	binding	data/art/models/w_planet_gas_silver_idle_00.ala	bound	data/art/models/w_planet_gas_silver.alo	model_stem IDLE index 0
+row	348	binding	data/art/models/w_tree_dec_00yellow_cluster_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	349	binding	data/art/models/w_tree_dec_01red_cluster_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	350	binding	data/art/models/w_tree_dec_canopy_a_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	351	binding	data/art/models/w_tree_dec_canopy_b_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	352	binding	data/art/models/w_tree_dec_nsred_cluster_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	353	binding	data/art/models/w_tree_dec_nsyellow_cluster_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	354	binding	data/art/models/w_tree_ever_canopy_a_idle_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	355	binding	data/art/models/with vultures/neutral_cis_providence_carrierdestroyer_invishand_die_00.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+row	356	binding	data/art/models/with vultures/neutral_cis_providence_carrierdestroyer_invishand_die_01.ala	not_in_foc	-	Remake mod file: absent from the FoC view (FoC-only target)
+total	binding_failed	27
+total	bound	20
+total	never_loaded	53
+total	not_in_foc	256
+receipt	sha256	4f6a9d8da56738ca73c7a3e72d145667e6e739e7fb86206331185ac222df48b7

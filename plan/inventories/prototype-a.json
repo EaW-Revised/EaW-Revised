@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "backend": "SDL3 + wgpu-native C API; exact adapted MeshGloss sph_t0/sph_t0_p0 plus independent original WGSL smoke",
+  "versions": {
+    "sdl": "3.4.16",
+    "wgpu_native": "29.0.1.1",
+    "windows_toolchain": "MSVC 19.44 / CMake 3.31",
+    "linux_toolchain": "Clang 18.1.8 + libc++ 18 / CMake 3.31.8 / Ninja 1.10.0",
+    "arm64_cross_toolchain": "Arm GNU Toolchain 14.2.Rel1"
+  },
+  "platform": {
+    "windows": "Windows 11 Business 10.0.26200 x86_64",
+    "linux": "WSL2 Ubuntu 20.04.6 x86_64, kernel 5.15.167.4",
+    "arm64": "actual cross-compile produced ELF64 AArch64 prototype and support-test executables; moved runtime package statically verified, not run on x86_64 host"
+  },
+  "hardware": {
+    "cpu": "Intel Core i7-12700K",
+    "windows_gpu": "AMD Radeon RX 7900 XTX, driver 32.0.31041.3013",
+    "linux_adapter": "Mesa 21.2.6 llvmpipe (LLVM 12.0.0); software, not GPU acceptance"
+  },
+  "scene_hash": "de673739583babf0a4541feafc6bd1f0c40da36788a962e7d49b284be7611a18",
+  "asset_hashes": {
+    "model": "9fd06b06d1626d8a11bea184fe73768745a6774062d44c9c39636e16202b62fe",
+    "texture": "24cfdf7a9a6d9156e9d218b2d2f6f4a1545dae63096534471dbb08da9af9572b"
+  },
+  "settings": {
+    "resolution": [1280, 720],
+    "vsync": true,
+    "warmup_frames": 120,
+    "sample_frames": 600,
+    "gpu_timing": "not measured",
+    "cpu_timing_boundaries": {
+      "encode_submit": "command encoding through wgpuQueueSubmit return; CPU enqueue only",
+      "whole_loop_present": "events, uniform upload, encoding, submit, present, release and nonblocking poll"
+    },
+    "texture_format": "BC3RGBAUnormSrgb",
+    "uniform_policy": "meshgloss-hemisphere-v1",
+    "supplemental_capture_profile": "supplemental_bounds_v1; target loaded AABB center, eye on frozen camera ray at distance 90; benchmark unchanged"
+  },
+  "samples": {
+    "windows_cpu_frame_count": 600,
+    "linux_cpu_frame_count": 600,
+    "windows_csv": "out/prototypes/sdl_wgpu/windows-followup-frame-times.csv",
+    "linux_csv": "out/prototypes/sdl_wgpu/linux-followup-frame-times.csv"
+  },
+  "metrics": {
+    "accepted_windows_comparison": {
+      "snapshot_adaptation_median_ms": 0.0013,
+      "snapshot_adaptation_p95_ms": 0.0023,
+      "frame_cadence_median_ms": 8.3265,
+      "frame_cadence_p95_ms": 9.0272,
+      "comparison_scope": "snapshot adaptation is comparable adapter-cost evidence; cadence is pacing evidence only; no GPU or engine ranking",
+      "closeup_mask_iou": 0.9886292459,
+      "closeup_rgb_mae_bytes_per_channel": 2.0437646,
+      "colour_comparison": "passed bounded gates with identical 18,22,33 background and identical bounds; pixel identity not claimed"
+    },
+    "windows": {
+      "load_ms": 488.378,
+      "cpu_encode_submit_median_ms": 0.21445,
+      "cpu_encode_submit_p95_ms": 0.322,
+      "cpu_whole_loop_present_median_ms": 8.3304,
+      "cpu_whole_loop_present_p95_ms": 8.5611,
+      "working_set_after_load_mib": 207.309,
+      "working_set_final_mib": 292.441
+    },
+    "linux_software_noncomparable": {
+      "load_ms": 133009,
+      "cpu_encode_submit_median_ms": 0.0865595,
+      "cpu_encode_submit_p95_ms": 0.147194,
+      "cpu_whole_loop_present_median_ms": 26.6372,
+      "cpu_whole_loop_present_p95_ms": 32.7449,
+      "working_set_after_load_mib": 135.621,
+      "working_set_final_mib": 180.77
+    }
+  },
+  "effort": {
+    "observed_hours": 5.5,
+    "main_friction": [
+      "D3D9 POSITION and combined sampler required mechanical WebGPU adaptation",
+      "exact 1296-byte legacy uniform packing",
+      "slow SDL configuration and asset access on WSL DrvFS"
+    ]
+  },
+  "limitations": [
+    "Linux draw uses lavapipe because no WSL dzn Vulkan ICD is installed; not a GPU visual pass",
+    "Linux ARM64 executables cross-compiled but not run because host is x86_64",
+    "selected Hangar submesh is intentionally very small under the frozen common camera",
+    "no GPU timestamp measurements",
+    "skinning, particles, terrain, UI and audio are unimplemented estimates only"
+  ],
+  "artifacts": {
+    "report": "docs/prototypes/sdl-wgpu.md",
+    "windows_capture": "out/prototypes/sdl_wgpu/windows-final.png",
+    "linux_capture": "out/prototypes/sdl_wgpu/linux-vulkan.png",
+    "shader_rejection_log": "out/prototypes/sdl_wgpu/raw-spv-rejection.log",
+    "private_adapted_shader_root": "out/prototypes/sdl_wgpu/shaders",
+    "windows_capture_sha256": "369643110140d5092ea8d4678c8951d1358daf430feb08d784965a0497b0f69b",
+    "linux_capture_sha256": "f2a7c36c53d80f7ce32c64aa5611f751ec6669a34cb9d4e2055d28e5f3af1230",
+    "arm64_package_verification": "out/relocatability/arm64-verification.json",
+    "arm64_package_executable_sha256": "71ef61ff53ff0c11fda8369ac847426703b638c18ae40d056192bcfd0cd74014",
+    "x64_package_verification": "out/relocatability/x64-verification.json",
+    "x64_package_executable_sha256": "4dd03ad0d021dcf7c6b3599c7716e7918a111912c244b139a3eff2d0e3b5b038",
+    "windows_followup_baseline": "out/prototypes/sdl_wgpu/windows-baseline-followup.png",
+    "windows_followup_baseline_sha256_ppm": "ce9d16d385d61906523012f211bc20d1b9db7fa1ba84ee5adb534433d7d77c12",
+    "windows_closeup": "out/prototypes/sdl_wgpu/windows-closeup-followup.png",
+    "windows_closeup_sha256_ppm": "46796c454931707d1b999728a063685afb0b2d40175385de2dea4c3f2a95c471",
+    "modern_smoke": "out/prototypes/sdl_wgpu/windows-modern-smoke.png",
+    "modern_smoke_sha256_ppm": "74af2418cf22ed131dcf4fae5727899367f87097866133b4eff15a44ed04feda",
+    "linux_followup_baseline_sha256_ppm": "25260033a798eb84a118d221dfb94be213769b971891bc2e2959d189328a4617",
+    "linux_modern_smoke_sha256_ppm": "f775c03d3610535c1a9a391d862f21c44bcc75aff95800086c07169d3c80ba6f"
+  },
+  "acceptance": {
+    "windows_gpu_visual": "pass",
+    "linux_surface_draw_visual": "pass on software Vulkan only",
+    "linux_gpu_visual": "blocked: Mesa 21.2.6 has no dzn ICD and its D3D12 Gallium GL selector cannot create a DRI screen",
+    "windows_linux_orbit_resize_shutdown": "pass",
+    "snapshot_transform": "pass",
+    "headless_replay_independence": "pass",
+    "arm64_build": "pass (cross-compiled ELF64 AArch64; runtime not attempted on x86_64)",
+    "arm64_relocatable_package": "pass static inspection after move; DT_NEEDED names are relative and RPATH is $ORIGIN/lib; native runtime gate remains open",
+    "x64_relocatable_package": "pass after move, including host-native loader reaching application argument validation",
+    "modern_wgsl_program": "pass on Windows D3D12 hardware and Linux Vulkan/lavapipe",
+    "cross_prototype_pixel_comparison": "passed bounded independent Windows comparison: identical background/bounds, close-up IoU 0.9886292459 and RGB MAE 2.0437646; pixel identity not claimed",
+    "common_snapshot_timing": "passed as comparable adapter-cost evidence; no renderer/GPU ranking",
+    "engine_selection": "open"
+  }
+}

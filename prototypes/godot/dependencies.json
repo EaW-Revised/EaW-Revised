@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "godot": {
+    "version": "4.7.2-stable",
+    "commit": "ed1daf0bf001b61586d9930840f2f1394092c079",
+    "source": "https://github.com/godotengine/godot/tree/4.7.2-stable",
+    "license": "MIT",
+    "windows_x86_64_zip_sha512": "83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993",
+    "linux_x86_64_zip_sha512": "9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65"
+  },
+  "godot_cpp": {
+    "version": "10.0.0-stable",
+    "commit": "507ed9d840c01a3c5b2a39af8bb4000bfac30bf5",
+    "api_version": "4.7",
+    "source": "https://github.com/godotengine/godot-cpp/tree/10.0.0-stable",
+    "license": "MIT"
+  },
+  "arm_gnu_toolchain": {
+    "version": "14.2.Rel1",
+    "target": "aarch64-none-linux-gnu",
+    "source_url": "https://developer.arm.com/-/media/Files/downloads/gnu/14.2.rel1/binrel/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu.tar.xz",
+    "source_sha256": "47aeefc02b0ee39f6d4d1812110952975542d365872a7474b5306924bca4faa1",
+    "license": "GPL-3.0-or-later with GCC Runtime Library Exception"
+  },
+  "gdextension_compatibility_minimum": "4.7"
+}

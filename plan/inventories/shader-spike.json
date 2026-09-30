@@ -1,0 +1,64 @@
+{
+  "archive_sha256": "88b9cb03322aab9be7451968ca514e9d2c810973d83f65459fd8cb52e7f96f8d",
+  "effects": [
+    {
+      "cleanup_passes": 0,
+      "draw_passes": 2,
+      "effect": "MESHGLOSS",
+      "manifest_id": "8f64324d0933a3b21273a19b6ea19c0d720c6f4679742afbef1082167df2eed3",
+      "root_sha256": "d44c399eb75bfa27f274a85d80c24727f4ef73c4b08d485c965c14ad88b5abd0",
+      "validated_stages": 4
+    },
+    {
+      "cleanup_passes": 0,
+      "draw_passes": 3,
+      "effect": "MESHBUMPCOLORIZE",
+      "manifest_id": "ad6e4f05ff0a73cef0a1a828e669f2e2a315ff30d0428cb547711ea68d464e85",
+      "root_sha256": "ff9d1c2dd058eb9f9f95d058dfd8d5ca9c704d06e6e52d9151318c199f30605e",
+      "validated_stages": 6
+    },
+    {
+      "cleanup_passes": 0,
+      "draw_passes": 2,
+      "effect": "RSKINGLOSSCOLORIZE",
+      "manifest_id": "3471e1e56bc41c712412e7dab57263530b8e3af72fd65d00ab5edb1c1b08adba",
+      "root_sha256": "befa202bf009de1797eaaabc397f5ef038984963c7f8348fbb69944dd0cf1406",
+      "validated_stages": 4
+    },
+    {
+      "cleanup_passes": 2,
+      "draw_passes": 3,
+      "effect": "MESHSHIELD",
+      "manifest_id": "5bc08bb1f28b5ca5429f3dbd3d0d0ceda9bdffddca3c48631c3c10637d46b192",
+      "root_sha256": "7f5111fee8ba8d61580e30ce78a7cc575567411c4354e64e20a9b62f566f524e",
+      "validated_stages": 6
+    },
+    {
+      "cleanup_passes": 0,
+      "draw_passes": 1,
+      "effect": "PRIMALPHA",
+      "manifest_id": "dd5676819caef20b5401bf04d0758391564c3ecae1fbdd59d0c2a229207903b5",
+      "root_sha256": "936301924b4bf7e9c65423913a398205f0b4fe353db27feb661cdc2cd9c38376",
+      "validated_stages": 2
+    }
+  ],
+  "renderer_ingestion": {
+    "godot": "not_tested_p0_12",
+    "wgpu": "not_tested_p0_11"
+  },
+  "schema_version": 1,
+  "spirv_tools": {
+    "commit": "fbe4f3ad913c44fe8700545f8ffe35d1382b7093",
+    "version": "v2026.1"
+  },
+  "status": "compiler_and_validator_qualified",
+  "tool": {
+    "name": "eawr-shader-spike",
+    "version": "1.0.0"
+  },
+  "toolchain": {
+    "glslang_archive_sha256": "06b71298b750268c127f2ee7ae0ef7525e2068120c6c8a3a08b2f58ca6f325ce",
+    "glslang_version": "16.5.0",
+    "spirv_headers_commit": "04f10f650d514df88b76d25e83db360142c7b174"
+  }
+}

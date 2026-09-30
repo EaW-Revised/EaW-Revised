@@ -1,0 +1,286 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "EAWR_ENABLE_SIM_BOUNDARY_CHECK": "ON",
+        "EAWR_WARNINGS_AS_ERRORS": "ON",
+        "EAWR_EXPECTED_ARCH": "x64"
+      }
+    },
+    {
+      "name": "ninja-release",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows x64 / MSVC",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-clang",
+      "displayName": "Windows x64 / clang-cl",
+      "inherits": "base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "toolset": "ClangCL",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-ninja",
+      "hidden": true,
+      "inherits": "ninja-release",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-msvc-ninja",
+      "displayName": "Windows x64 / MSVC, Ninja (x64 developer environment; build hosts' --iterate)",
+      "inherits": "windows-ninja",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "windows-clang-ninja",
+      "displayName": "Windows x64 / clang-cl, Ninja (x64 developer environment; build hosts' --iterate)",
+      "inherits": "windows-ninja",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
+      }
+    },
+    {
+      "name": "linux-x64-gcc",
+      "displayName": "Linux x64 / GCC 14",
+      "inherits": "ninja-release",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++-14"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-x64-clang",
+      "displayName": "Linux x64 / Clang 18",
+      "inherits": "ninja-release",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "clang++-18"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-arm64-gcc",
+      "displayName": "Linux ARM64 / GCC 14 (native runner)",
+      "inherits": "ninja-release",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "g++-14",
+        "EAWR_EXPECTED_ARCH": "arm64"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release",
+      "jobs": 4
+    },
+    {
+      "name": "windows-clang",
+      "configurePreset": "windows-clang",
+      "configuration": "Release",
+      "jobs": 4
+    },
+    {
+      "name": "windows-msvc-ninja",
+      "configurePreset": "windows-msvc-ninja",
+      "jobs": 4
+    },
+    {
+      "name": "windows-clang-ninja",
+      "configurePreset": "windows-clang-ninja",
+      "jobs": 4
+    },
+    {
+      "name": "linux-x64-gcc",
+      "configurePreset": "linux-x64-gcc"
+    },
+    {
+      "name": "linux-x64-clang",
+      "configurePreset": "linux-x64-clang"
+    },
+    {
+      "name": "linux-arm64-gcc",
+      "configurePreset": "linux-arm64-gcc"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-msvc",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "windows-clang",
+      "configurePreset": "windows-clang",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "windows-msvc-ninja",
+      "configurePreset": "windows-msvc-ninja",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "windows-clang-ninja",
+      "configurePreset": "windows-clang-ninja",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "linux-x64-gcc",
+      "configurePreset": "linux-x64-gcc",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "linux-x64-clang",
+      "configurePreset": "linux-x64-clang",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "linux-arm64-gcc",
+      "configurePreset": "linux-arm64-gcc",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "windows-msvc",
+      "steps": [
+        { "type": "configure", "name": "windows-msvc" },
+        { "type": "build", "name": "windows-msvc" },
+        { "type": "test", "name": "windows-msvc" }
+      ]
+    },
+    {
+      "name": "windows-clang",
+      "steps": [
+        { "type": "configure", "name": "windows-clang" },
+        { "type": "build", "name": "windows-clang" },
+        { "type": "test", "name": "windows-clang" }
+      ]
+    },
+    {
+      "name": "linux-x64-gcc",
+      "steps": [
+        { "type": "configure", "name": "linux-x64-gcc" },
+        { "type": "build", "name": "linux-x64-gcc" },
+        { "type": "test", "name": "linux-x64-gcc" }
+      ]
+    },
+    {
+      "name": "linux-x64-clang",
+      "steps": [
+        { "type": "configure", "name": "linux-x64-clang" },
+        { "type": "build", "name": "linux-x64-clang" },
+        { "type": "test", "name": "linux-x64-clang" }
+      ]
+    },
+    {
+      "name": "linux-arm64-gcc",
+      "steps": [
+        { "type": "configure", "name": "linux-arm64-gcc" },
+        { "type": "build", "name": "linux-arm64-gcc" },
+        { "type": "test", "name": "linux-arm64-gcc" }
+      ]
+    }
+  ]
+}

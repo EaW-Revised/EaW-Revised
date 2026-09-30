@@ -1,0 +1,281 @@
+// #424: FoC's battle UI in the world (docs/behaviour/foc-battle-world-ui.md): the selection circle,
+// the bar sizes, scale, levels, colours and visibility rules, the squadron icon's health and the
+// hardpoint reticle art and tint. The Godot half draws them (tests/presentation/renderer/
+// test_battle_input.py).
+
+#include "eawr/presentation/ui/world_ui.hpp"
+#include "ui_test_support.hpp"
+
+#include <array>
+#include <cmath>
+#include <iostream>
+#include <vector>
+
+namespace {
+using namespace eawr;
+namespace ui = presentation::ui;
+using test::ui::expect;
+
+bool close_to(const float a, const float b) { return std::abs(a - b) <= 1.0e-3F; }
+
+void circles() {
+    // WU-02: Nebulon-B (Select_Box_Scale 300, Scale_Factor 0.7) and a fighter (70, 0.7).
+    const auto nebulon = ui::selection_circle_side(300.0F, 0.7F);
+    expect(nebulon && close_to(*nebulon, 210.0F), "the Nebulon-B circle is 210 units across");
+    const auto fighter = ui::selection_circle_side(70.0F, 0.7F);
+    expect(fighter && close_to(*fighter, 49.0F), "a fighter's circle is 49 units across");
+    expect(!ui::selection_circle_side(0.0F, 1.0F), "no Select_Box_Scale, no circle (a squadron container)");
+}
+
+void bars() {
+    expect(ui::bar_size("fighter", std::nullopt) == ui::BarSize::small, "a fighter has the small bars");
+    expect(ui::bar_size("bomber", std::nullopt) == ui::BarSize::small, "a bomber has the small bars");
+    expect(ui::bar_size("corvette", std::nullopt) == ui::BarSize::medium, "a corvette has the medium bars");
+    expect(ui::bar_size("frigate", std::nullopt) == ui::BarSize::large, "a frigate has the large bars");
+    expect(ui::bar_size("capital_ship", std::nullopt) == ui::BarSize::large, "a capital ship has the large bars");
+    expect(ui::bar_size("", std::nullopt) == ui::BarSize::medium, "a station without a class has the medium bars");
+    expect(ui::bar_size("frigate", 0) == ui::BarSize::small, "GUI_Bracket_Size wins");
+    expect(close_to(ui::bar_width(ui::BarSize::large), 102.0F) && close_to(ui::bar_width(ui::BarSize::small), 34.0F),
+           "the bar widths are the atlas widths");
+
+    expect(close_to(ui::bar_scale(3000.0F), 1.0F), "far away the bar keeps its size");
+    expect(close_to(ui::bar_scale(750.0F), 2.0F), "at half Health_Bar_Scale it doubles");
+
+    expect(ui::bar_level(1.0F) == 10 && ui::bar_level(0.0F) == 0, "full and empty levels");
+    expect(ui::bar_level(0.91F) == 10 && ui::bar_level(0.9F) == 9, "the level is the ceiling of ten times the fraction");
+    expect(ui::bar_level(0.01F) == 1, "any health shows level 1");
+    expect(ui::health_bar_colour(10) == ui::Rgb{0, 255, 0}, "full health is green");
+    expect(ui::health_bar_colour(5) == ui::Rgb{255, 147, 0}, "half health is orange");
+    expect(ui::health_bar_colour(3) == ui::Rgb{255, 0, 0}, "a third is red");
+
+    ui::BarUnit ship;
+    ship.has_health = true;
+    ship.health = 1.0F;
+    ship.shielded = true;
+    expect(!ui::bar_visibility(ship).health, "an unselected, unhovered, healthy ship shows no bars");
+    ship.selected = true;
+    auto shown = ui::bar_visibility(ship);
+    expect(shown.health && shown.shield, "a selected ship shows its shield and health bars");
+    ship.selected = false;
+    ship.hovered = true;
+    shown = ui::bar_visibility(ship);
+    expect(shown.health && shown.shield, "a hovered ship shows them");
+    ship.hovered = false;
+    ship.health = 0.05F;
+    expect(ui::bar_visibility(ship).health, "a ship below 10 % health shows them");
+    ship.fogged = true;
+    expect(!ui::bar_visibility(ship).health, "a fogged ship shows none");
+
+    ui::BarUnit craft;
+    craft.has_health = true;
+    craft.health = 1.0F;
+    craft.shielded = true;
+    craft.squadron_member = true;
+    craft.selected = true;
+    expect(!ui::bar_visibility(craft).health, "a craft of a selected squadron shows no bar of its own");
+    craft.selected = false;
+    craft.hovered = true;
+    shown = ui::bar_visibility(craft);
+    expect(shown.health && !shown.shield, "a hovered craft shows its own health bar, never a shield bar");
+    craft.hovered = false;
+    expect(!ui::bar_visibility(craft).health, "#502: the pointer over the squadron icon shows no craft bars");
+
+    // WU-18: a 10 x 20 x 30 half box seen from straight above (camera up +Y) lifts by 20.
+    expect(close_to(ui::bar_anchor_lift({10.0F, 20.0F, 30.0F}, {0.0F, 1.0F, 0.0F}, 1.0F), 20.0F),
+           "the bars sit at the bounds' top along the camera's up");
+    expect(close_to(ui::bar_anchor_lift({3.0F, 4.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, 0.5F), 2.5F),
+           "another GUI_Bounds_Scale scales the bounds' half diagonal");
+    expect(close_to(ui::squadron_health(150.0F, 200.0F), 0.75F), "a squadron's health is its craft's sum over their maximum");
+
+    // WU-24 (#500): the icon's Y offset is 4.8 % of the screen height, so it hovers below the
+    // squadron's projected centre instead of covering it (never over 5 % even at a tall viewport).
+    expect(close_to(ui::squadron_icon_screen_offset(720.0F), 34.56F), "the offset is 0.048 of the screen height");
+    expect(close_to(ui::squadron_icon_screen_offset(1080.0F), 51.84F), "it scales with the viewport, not a fixed pixel count");
+    expect(ui::squadron_icon_screen_offset(720.0F) > 0.0F, "it moves the icon down the screen (+Y), never up or in place");
+}
+
+// WU-16 (#435 review, #502): FoC's candidates are the hovered unit and the selection only, so
+// critical health alone never gives an unhovered, unselected unit its bars, and hovering a
+// squadron's icon (never a candidate itself: bar_candidate has no such input any more) shows none
+// of its craft.
+void candidates() {
+    expect(!ui::bar_candidate(false, false), "an unhovered, unselected unit is no bar candidate");
+    expect(ui::bar_candidate(true, false), "the hovered unit is a candidate");
+    expect(ui::bar_candidate(false, true), "a selected unit is a candidate");
+    ui::BarUnit dying;
+    dying.has_health = true;
+    dying.health = 0.05F;
+    expect(ui::bar_visibility(dying).health, "a candidate below 10 % shows its health bar");
+
+    // #502 (owner): hovering the squadron icon must not draw a bar over every member craft.
+    ui::BarUnit craft;
+    craft.has_health = true;
+    craft.health = 1.0F;
+    craft.squadron_member = true;
+    expect(!ui::bar_visibility(craft).health, "an unhovered, unselected squadron craft shows no bar");
+}
+
+// WU-25 to WU-27: the combat grid and the dogfight icon layout.
+void dogfight_grid() {
+    expect(ui::combat_cell_of({100.0F, 100.0F}, {0.0F, 0.0F}) == ui::CombatCell{0, 0}, "a point in the first cell");
+    expect(ui::combat_cell_of({100.0F, 500.0F}, {0.0F, 0.0F}) == ui::CombatCell{-1, 1}, "an odd row is shifted half a cell");
+    const auto centre = ui::combat_cell_point({0, 0}, {0.0F, 0.0F});
+    expect(close_to(centre[0], 200.0F) && close_to(centre[1], 200.0F), "a cell's point is its centre");
+    const auto odd = ui::combat_cell_point({-1, 1}, {0.0F, 0.0F});
+    expect(close_to(odd[0], 0.0F) && close_to(odd[1], 600.0F), "an odd row's point is half a cell further along x");
+
+    const auto lone = ui::combat_grid_slot(0, 1);
+    expect(close_to(lone[0], -15.0F) && close_to(lone[1], 0.0F), "one icon: half a step left of the cell point");
+    const auto second = ui::combat_grid_slot(1, 2);
+    expect(close_to(second[0], 0.0F) && close_to(second[1], 0.0F), "two icons share one row");
+    const auto fourth = ui::combat_grid_slot(3, 5);
+    const auto fifth = ui::combat_grid_slot(4, 5);
+    expect(close_to(fourth[0], -45.0F) && close_to(fourth[1], 30.0F) && close_to(fifth[0], -15.0F),
+           "five icons: three columns, the second row below the first");
+
+    // #457: the sim's records: joined squadrons hold their cell in order; a record alone draws nothing.
+    {
+        ui::CombatGrid sim_cells;
+        const std::array<ui::CombatGrid::Record, 3> records{{{10, {1, 2}, true}, {20, {1, 2}, true}, {30, {4, 4}, false}}};
+        sim_cells.adopt(records);
+        expect(sim_cells.cells().size() == 1 && sim_cells.cells().front().squadrons == std::vector<sim::EntityId>{10, 20},
+               "adopted: two joined squadrons share one cell in ID order");
+        expect(!sim_cells.cell_of(30) && sim_cells.record_of(30) == ui::CombatCell{4, 4},
+               "adopted: a squadron that only records a cell is not drawn in it");
+        sim_cells.adopt({});
+        expect(sim_cells.cells().empty() && !sim_cells.record_of(10), "adopted: an empty frame clears the grid");
+    }
+    using Fight = ui::CombatGrid::Fight;
+    constexpr std::array<float, 2> origin{0.0F, 0.0F};
+    constexpr auto none = sim::invalid_entity_id;
+    ui::CombatGrid grid;
+    // Squadron 10 closes on squadron 20 from beyond its strafe reach: no cell (FA-01).
+    grid.update(std::vector<Fight>{{10, 20, {100.0F, 100.0F}, true}}, origin);
+    expect(!grid.record_of(10) && !grid.cell_of(10), "a squadron closing from beyond its strafe reach holds no cell");
+    // Inside the reach, while its target records no cell, it records the searched cell nearest the
+    // target (100, 100) without joining it, so its icon stays over itself.
+    grid.update(std::vector<Fight>{{10, 20, {100.0F, 100.0F}, false}}, origin);
+    expect(grid.record_of(10) == ui::CombatCell{0, 0}, "the attacker records the cell nearest its target");
+    expect(!grid.cell_of(10) && grid.cells().empty(), "a recorded cell is not joined");
+    // Squadron 20 fights back: it joins the cell 10 records; the next frame 10 joins 20's. Both
+    // rejoin every frame, so the cell lists them in service order. A squadron shooting a ship does
+    // not dogfight.
+    const std::vector<Fight> both{{10, 20, {100.0F, 100.0F}, false}, {20, 10, {150.0F, 150.0F}, false},
+        {30, none, {0.0F, 0.0F}, false}};
+    grid.update(both, origin);
+    expect(grid.cells().size() == 1 && grid.cells()[0].squadrons == std::vector<sim::EntityId>{20},
+           "the target joins the cell its attacker records");
+    grid.update(both, origin);
+    expect(grid.cells().size() == 1 && grid.cells()[0].squadrons == std::vector<sim::EntityId>{10, 20},
+           "the two dogfighting squadrons share one cell, in service order");
+    expect(!grid.cell_of(30) && !grid.record_of(30), "a squadron attacking a ship holds no cell");
+    // A pair next door searches its nine cells: the joined cell (0, 0) scores 0 and beats the
+    // nearer free cell (1, 0), whose point (600, 200) is almost on the target.
+    const std::vector<Fight> neighbours{{10, 20, {100.0F, 100.0F}, false}, {20, 10, {150.0F, 150.0F}, false},
+        {40, 50, {590.0F, 210.0F}, false}};
+    grid.update(neighbours, origin);
+    expect(grid.record_of(40) == ui::CombatCell{0, 0}, "a joined cell wins the search over a nearer free one");
+    // A shared cell keeps a squadron in the dogfight even while its leader is beyond the reach.
+    grid.update(std::vector<Fight>{{10, 20, {100.0F, 100.0F}, true}, {20, 10, {150.0F, 150.0F}, false}}, origin);
+    expect(grid.cell_of(10) == ui::CombatCell{0, 0}, "a squadron sharing its target's cell stays beyond the reach");
+    // Squadron 20 stops: it leaves and forgets its cell; 10, closing with nothing shared, leaves too.
+    grid.update(std::vector<Fight>{{10, 20, {100.0F, 100.0F}, true}}, origin);
+    expect(!grid.record_of(20) && !grid.cell_of(10) && grid.cells().empty(), "a squadron that stops leaves its cell");
+    // A one-sided attack: 10 records nothing, so 20 records its search's cell and no grid is drawn.
+    grid.update(std::vector<Fight>{{20, 10, {150.0F, 150.0F}, false}}, origin);
+    expect(!grid.cell_of(20) && grid.record_of(20) == ui::CombatCell{0, 0}, "a one-sided attack draws no grid");
+    // Equal scores: the first cell in row order from the low corner wins.
+    const ui::CombatGrid tie;
+    expect(tie.search({400.0F, 200.0F}, origin) == ui::CombatCell{0, 0}, "a tie goes to the first cell in row order");
+}
+
+void reticles() {
+    expect(ui::hardpoint_reticle_tint(1.0F, false) == ui::Rgb{32, 255, 32}, "a healthy hardpoint is green");
+    expect(ui::hardpoint_reticle_tint(0.5F, false) == ui::Rgb{255, 255, 32}, "a damaged one is yellow");
+    expect(ui::hardpoint_reticle_tint(0.2F, false) == ui::Rgb{255, 32, 32}, "a badly damaged one is red");
+    expect(ui::hardpoint_reticle_tint(1.0F, true) == ui::Rgb{128, 128, 128}, "a disabled one is grey");
+    expect(ui::hardpoint_reticle_texture("HARD_POINT_WEAPON_LASER") == "i_hard_point_reticle_weapons", "a laser's art");
+    expect(ui::hardpoint_reticle_texture("HARD_POINT_ENGINE") == "i_hard_point_reticle_engines", "an engine's art");
+    expect(ui::hardpoint_reticle_texture("HARD_POINT_FIGHTER_BAY") == "i_hard_point_reticle_docking_bay", "a bay's art");
+    expect(ui::hardpoint_reticle_texture("HARD_POINT_SHIELD_GENERATOR") == "i_hard_point_reticle_shield_gen",
+           "a shield generator's art");
+    expect(ui::hardpoint_reticle_texture("NOT_A_TYPE").empty(), "an unknown type has no reticle");
+}
+
+// A pinhole camera on the -X side of the origin looking along +X (screen right is +Y, screen down
+// is -Z), `distance` units away, with a vertical field of view of 50 degrees.
+std::array<float, 2> project(const std::array<float, 3>& point, const float distance,
+                             const std::array<float, 2>& viewport) {
+    const float depth = point[0] + distance;
+    const float focal = 0.5F * viewport[1] / std::tan(25.0F * 3.14159265F / 180.0F);
+    return {0.5F * viewport[0] + focal * point[1] / depth, 0.5F * viewport[1] - focal * point[2] / depth};
+}
+
+void reticle_size() {
+    // WU-31 (#515): the reticle is 0.03 of the screen wide and 0.04 of it high at every camera
+    // distance, so a corvette seen from far away shrinks under reticles that do not.
+    for (const std::array<float, 2> viewport : {std::array<float, 2>{1920.0F, 1080.0F}, std::array<float, 2>{1280.0F, 720.0F},
+                                                std::array<float, 2>{1434.0F, 946.0F}}) {
+        float previous_hull = 0.0F;
+        for (const float distance : {300.0F, 1000.0F, 3000.0F, 9000.0F}) {
+            // A corvette-sized hull, 150 units long, and a hardpoint 40 units off its centre.
+            const auto bow = project({0.0F, 75.0F, 0.0F}, distance, viewport);
+            const auto stern = project({0.0F, -75.0F, 0.0F}, distance, viewport);
+            const float hull = bow[0] - stern[0];
+            if (previous_hull > 0.0F) expect(hull < previous_hull, "the hull shrinks as the camera backs off");
+            previous_hull = hull;
+            const auto centre = project({0.0F, 40.0F, 10.0F}, distance, viewport);
+            const ui::ReticleRect rect = ui::hardpoint_reticle_rect(centre, viewport);
+            expect(close_to(rect.width, 0.03F * viewport[0]), "the width is 0.03 of the screen width");
+            expect(close_to(rect.height, 0.04F * viewport[1]), "the height is 0.04 of the screen height");
+            expect(close_to(rect.x + rect.width * 0.5F, centre[0]) && close_to(rect.y + rect.height * 0.5F, centre[1]),
+                   "the reticle is centred on the hardpoint's screen point");
+        }
+    }
+    const ui::ReticleRect hd = ui::hardpoint_reticle_rect({960.0F, 540.0F}, {1920.0F, 1080.0F});
+    expect(close_to(hd.width, 57.6F) && close_to(hd.height, 43.2F), "57.6 x 43.2 pixels at 1920 x 1080");
+}
+
+void reticle_anchor() {
+    const std::array<float, 3> ship{100.0F, 200.0F, 50.0F};
+    // WU-34: yaw only turns the attachment point about +Z.
+    const auto turned = ui::hardpoint_reticle_anchor(ship, 90.0F, 0.0F, 0.0F, {10.0F, 0.0F, 5.0F});
+    expect(close_to(turned[0], 100.0F) && close_to(turned[1], 210.0F) && close_to(turned[2], 55.0F),
+           "a quarter yaw takes forward to +Y");
+    // A 90 degree bank lifts a point on the ship's left (+Y) to straight above it.
+    const auto banked = ui::hardpoint_reticle_anchor(ship, 0.0F, 0.0F, 90.0F, {0.0F, 20.0F, 0.0F});
+    expect(close_to(banked[0], 100.0F) && close_to(banked[1], 200.0F) && close_to(banked[2], 70.0F),
+           "a bank rolls the attachment point with the hull");
+    // A 30 degree pitch (R-ROT-01 sends +X to (cp, 0, -sp)) moves the bow down.
+    const auto pitched = ui::hardpoint_reticle_anchor(ship, 0.0F, 30.0F, 0.0F, {40.0F, 0.0F, 0.0F});
+    expect(close_to(pitched[0], 100.0F + 40.0F * std::cos(0.5235988F)) && close_to(pitched[2], 50.0F - 20.0F),
+           "a pitch tilts the attachment point with the hull");
+    // All three, against the rotation matrix's columns.
+    const float yaw = 30.0F * 3.14159265F / 180.0F;
+    const float pitch = 20.0F * 3.14159265F / 180.0F;
+    const float roll = 15.0F * 3.14159265F / 180.0F;
+    const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cr = std::cos(roll), sr = std::sin(roll);
+    const auto left = ui::hardpoint_reticle_anchor({0.0F, 0.0F, 0.0F}, 30.0F, 20.0F, 15.0F, {0.0F, 1.0F, 0.0F});
+    expect(close_to(left[0], cy * sp * sr - sy * cr) && close_to(left[1], sy * sp * sr + cy * cr)
+               && close_to(left[2], cp * sr),
+           "the ship's +Y goes where the model's rotation sends it");
+}
+
+} // namespace
+
+int main() {
+    circles();
+    bars();
+    candidates();
+    dogfight_grid();
+    reticles();
+    reticle_size();
+    reticle_anchor();
+    if (test::ui::failures() != 0) {
+        std::cerr << test::ui::failures() << " world UI contract(s) failed\n";
+        return 1;
+    }
+    std::cout << "world UI contracts passed\n";
+    return 0;
+}

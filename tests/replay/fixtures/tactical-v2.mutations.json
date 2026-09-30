@@ -1,0 +1,59 @@
+{
+  "mutations": [
+    {
+      "file": "tactical-v2-mutated-rules.eawr-replay",
+      "code": "EAWR-SIM-0302",
+      "change": "tactical rules version at offset 12 changed from 1 to 2"
+    },
+    {
+      "file": "tactical-v2-mutated-tick-rate.eawr-replay",
+      "code": "EAWR-SIM-0302",
+      "change": "tick denominator at offset 28 changed from 30 to 60"
+    },
+    {
+      "file": "tactical-v2-mutated-player-flags.eawr-replay",
+      "code": "EAWR-SIM-0302",
+      "change": "player 1 flags changed from 1 to 3 (unknown bit)"
+    },
+    {
+      "file": "tactical-v2-mutated-owner.eawr-replay",
+      "code": "EAWR-SIM-0305",
+      "change": "unit 9 owner changed from 3 to undeclared player 4"
+    },
+    {
+      "file": "tactical-v2-mutated-rotation.eawr-replay",
+      "code": "EAWR-SIM-0305",
+      "change": "unit 9 rotation w changed from 1 to 0 (zero quaternion)"
+    },
+    {
+      "file": "tactical-v2-mutated-order.eawr-replay",
+      "code": "EAWR-SIM-0304",
+      "change": "first two command records swapped; (tick, player, sequence) decreases"
+    },
+    {
+      "file": "tactical-v2-mutated-issuer.eawr-replay",
+      "code": "EAWR-SIM-0306",
+      "change": "last command issuer changed from player 2 to non-commandable player 3"
+    },
+    {
+      "file": "tactical-v2-mutated-unit-order.eawr-replay",
+      "code": "EAWR-SIM-0308",
+      "change": "command 2 unit list changed from 2,3,4 to 3,2,4"
+    },
+    {
+      "file": "tactical-v2-mutated-length.eawr-replay",
+      "code": "EAWR-SIM-0301",
+      "change": "command 0 body length increased by 8"
+    },
+    {
+      "file": "tactical-v2-mutated-count.eawr-replay",
+      "code": "EAWR-SIM-0301",
+      "change": "command_count at offset 64 incremented by one"
+    },
+    {
+      "file": "tactical-v2-mutated-trailing.eawr-replay",
+      "code": "EAWR-SIM-0301",
+      "change": "one zero byte appended after the final command"
+    }
+  ]
+}

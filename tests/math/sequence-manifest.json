@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "generator": "SplitMix64 with uint64 wrapping",
+  "seed_hex": "d1ceb00c5eed0024",
+  "operation_count": 1000000,
+  "rng_outputs_per_operation": 9,
+  "operation_selector": "first output & 7",
+  "operands": "next eight uint64 outputs bit-cast to int64",
+  "operations": [
+    "checked add",
+    "checked subtract",
+    "checked negate",
+    "Q24 multiply nearest-even",
+    "Q24 divide nearest-even",
+    "signed rational constructor nearest-even",
+    "three-product Q24 dot with one rounding",
+    "four-product Q24 sum with one rounding"
+  ],
+  "injection": "index modulo 4096 cases 0..7 replace operation/operands with division overflow, add overflow, division by zero, four maximum positive products, 130-bit cancellation, and positive/negative halfway products",
+  "record_encoding": "10 bytes per operation: uint8 operation, uint8 status (0 success, 1 overflow, 2 division-by-zero), int64 little-endian payload; failure payload is zero",
+  "hash": "SHA-256 over exactly 10000000 encoded bytes",
+  "oracle": "tools/math_oracle.py using Python unbounded integers and Fraction only for the sequence",
+  "expected_sha256": "ec63b213f045325974e7bd60d0b075b76fb8c208be6b36f608cc21b1893aa458"
+}

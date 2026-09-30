@@ -1,0 +1,2371 @@
+{
+  "schema_version": 1,
+  "source": "FoC debug build StarWarsI.exe",
+  "extraction": "tools/ghidra/FocLuaRegistrationDump.java",
+  "limitations": [
+    "A name is visible on its receiver; signature, behavior, and mode availability are not established.",
+    "Dynamically computed global names are not represented."
+  ],
+  "entries": [
+    {
+      "exposed_name": "_CustomScriptMessage",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_DebugBreak",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_FindStageArea",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_MessagePopup",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_OuputDebug",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_ProduceObject",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_ScriptExit",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "_ScriptMessage",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Activate_Retry_Dialog",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Add_Objective",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Add_Planet_Highlight",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Add_Radar_Blip",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "AITarget",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Allow_Localized_SFX",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Apply_Markup",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Are_On_Opposite_Sides_Of_Shield",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Assemble_Fleet",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "BlockForever",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Budget",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Camera_To_Follow",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Cancel_Fast_Forward",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Check_Story_Flag",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Cinematic_Zoom",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Create_Cinematic_Transport",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Create_Generic_Object",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Create_Position",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Create_Thread",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "DiscreteDistribution",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Do_End_Cinematic_Cleanup",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "DumpCallStack",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Enable_Distance_Fog",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Enable_Fog",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "End_Cinematic_Camera",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "End_Cinematic_Mode",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Evaluate_In_Galactic_Context",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "EvaluatePerception",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "EvaluateTypeList",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Fade_Off",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Fade_On",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Fade_Screen_In",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Fade_Screen_Out",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_All_Objects_Of_Type",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_All_Objects_With_Hint",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Best_Local_Threat_Center",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_First_Object",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Hint",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Nearest",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Nearest_Space_Field",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Object_Type",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Path",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Find_Player",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "FindDeadlyEnemy",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "FindPlanet",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "FindTarget",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "FogOfWar",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Force_Weather",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "FreeStore",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Game_Message",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GameRandom",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Get_Game_Mode",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Get_Most_Defended_Position",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Get_Story_Plot",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GetCurrentTime",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GetEvent",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GetNextGroundbaseType",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GetNextStarbaseType",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GetThreadID",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GiveDesireBonus",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GlobalValue",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Button_Icon",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Blink",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Color",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Enable",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Flash",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Play_Anim",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Stop_Anim",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Stop_Flash",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Text",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Component_Visibility",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "GUI_Text_Color",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Hide_Object",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Hide_Sub_Object",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Is_Campaign_Game",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Is_Multiplayer_Mode",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Is_Point_In_Asteroid_Field",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Is_Point_In_Ion_Storm",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Is_Point_In_Nebula",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "LastService",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "LastUnitService",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "lc",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Letter_Box_In",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Letter_Box_Off",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Letter_Box_On",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Letter_Box_Out",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Lock_Controls",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "LUA_PATH",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Master_Volume_Restore",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Object",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "PlanDefinitionLoad",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Play_Bink_Movie",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Play_Lightning_Effect",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Play_Music",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "PlayerObject",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Point_Camera_At",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Project_By_Unit_Range",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Promote_To_Space_Cinematic_Layer",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Purge_Goals",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Reinforce_Unit",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Remove_All_Text",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Remove_Planet_Highlight",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Remove_Radar_Blip",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Resume_Hyperspace_In",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Resume_Mode_Based_Music",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Rotate_Camera_By",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Rotate_Camera_To",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Script",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Scroll_Camera_To",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Set_Cinematic_Camera_Key",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Set_Cinematic_Environment",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Set_Cinematic_Target_Key",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Set_New_Environment",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "SFXManager",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Spawn_From_Reinforcement_Pool",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Spawn_Special_Weapon",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Spawn_Unit",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Start_Cinematic_Camera",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Start_Cinematic_Mode",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Start_Cinematic_Space_Retreat",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Stop_All_Music",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Stop_All_Speech",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Stop_Bink_Movie",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Story_Event",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "StringCompare",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Suspend_AI",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Target",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Thread",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "ThreadValue",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Transition_Cinematic_Camera_Key",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Transition_Cinematic_Target_Key",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Transition_To_Tactical_Camera",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "WaitForGroundbase",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "WaitForStarbase",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Weather_Audio_Pause",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "WeightedTypeList",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Zoom_Camera",
+      "call_kind": "global",
+      "receiver_type": null
+    },
+    {
+      "exposed_name": "Get_Base_Level",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Bribe_Cost",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Build_Cost",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Combat_Rating",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Max_Range",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Min_Range",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Name",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Score_Cost_Credits",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Tactical_Build_Cost",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Get_Tech_Level",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Affected_By_Laser_Defense",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Affected_By_Missile_Shield",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Affiliated_With",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Build_Locked",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Hero",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Obsolete",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "GameObjectTypeWrapper"
+    },
+    {
+      "exposed_name": "Activate_Ability",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Are_Engines_Online",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Attach_Particle_Effect",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Attack_Move",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Attack_Target",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Build",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Can_Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Can_Garrison_Fire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Can_Land_On_Planet",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Can_Move",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Cancel_Ability",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Cancel_Event_Object_In_Range",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Cancel_Hyperspace",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Change_Owner",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Cinematic_Hyperspace_In",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Contains_Hero",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Contains_Object_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Despawn",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Destroy_Contained_Objects",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Disable_Capture",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Divert",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Eject_Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Enable_Behavior",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Enable_Dynamic_LOD",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Event_Object_In_Range",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Explore_Area",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Face_Immediate",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Fire_Special_Weapon",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Fire_Tactical_Superweapon",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Force_Ability_Recharge",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Force_Test_Space_Conflict",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Affiliated_Indigenous_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_AI_Power_Vs_Unit",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_All_Projectile_Types",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Attack_Target",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Bone_Position",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Build_Pad_Contents",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Contained_Heroes",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Contained_Object_Count",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Current_Projectile_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Distance",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Energy",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Final_Blow_Player",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Game_Scoring_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Garrisoned_Units",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Health",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Hint",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Hull",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Is_Planet_AI_Usable",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Name",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Next_Starbase_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Object_ID",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Owner",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Parent_Mode_Object",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Parent_Mode_Object_ID",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Parent_Object",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Planet_Location",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Position",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Rate_Of_Damage_Taken",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Shield",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Starbase_Level",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Time_Till_Dead",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Get_Type",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Guard_Target",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Has_Ability",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Has_Active_Orders",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Has_Attack_Target",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Has_Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Has_Property",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Hide",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Highlight",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Highlight_Small",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Hyperspace_Away",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "In_End_Cinematic",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Invade",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Ability_Active",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Ability_Autofire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Ability_Ready",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Category",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Corrupted",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Good_Against",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_In_Asteroid_Field",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_In_Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_In_Ion_Storm",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_In_Nebula",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_On_Diversion",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Planet_Destroyed",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Selectable",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Tactical_Superweapon_Ready",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Transport",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Under_Effects_Of_Ability",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Leave_Garrison",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Lock_Build_Pad_Contents",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Lock_Current_Orders",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Make_Invulnerable",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Mark_Parent_Mode_Object_For_Death",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Move_To",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Override_Max_Speed",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Play_Animation",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Play_Cinematic_Engine_Flyby",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Play_SFX_Event",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Prevent_AI_Usage",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Prevent_All_Fire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Prevent_Opportunity_Fire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Release",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Reset_Ability_Counter",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Sell",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Service_Wrapper",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_All_Abilities_Autofire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Cannot_Be_Killed",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Check_Contested_Space",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Garrison_Spawn",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Importance",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_In_Limbo",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Prefer_Ground_Over_Space",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Selectable",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Single_Ability_Autofire",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Targeting_Priorities",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Set_Targeting_Stickiness_Time_Threshold",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Should_Switch_Weapons",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Show_Emitter",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Stop",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Stop_SFX_Event",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Suspend_Locomotor",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Take_Damage",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Teleport",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Teleport_And_Face",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Turn_To_Face",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Unlock_Current_Orders",
+      "call_kind": "method",
+      "receiver_type": "GameObjectWrapper"
+    },
+    {
+      "exposed_name": "Params",
+      "call_kind": "method",
+      "receiver_type": "GetEvent"
+    },
+    {
+      "exposed_name": "Reset",
+      "call_kind": "method",
+      "receiver_type": "GetEvent"
+    },
+    {
+      "exposed_name": "Get",
+      "call_kind": "method",
+      "receiver_type": "GlobalValue"
+    },
+    {
+      "exposed_name": "Set",
+      "call_kind": "method",
+      "receiver_type": "GlobalValue"
+    },
+    {
+      "exposed_name": "Disable_Bombing_Run",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Disable_Orbital_Bombardment",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Enable_Advisor_Hints",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Enable_As_Actor",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Clan_ID",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Credits",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Difficulty",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Enemy",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Faction_Name",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_GameSpy_Stats_Player_ID",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_ID",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Name",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Space_Station",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Team",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get_Tech_Level",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Give_Money",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Give_Random_Sliceable_Tech",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Is_Ally",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Is_Enemy",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Is_Human",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Is_Neutral",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Lock_Tech",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Make_Ally",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Make_Enemy",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Release_Credits_For_Tactical",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Remove_Orbital_Bombardment",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Retreat",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Select_Object",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Set_Black_Market_Tutorial",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Set_Sabotage_Tutorial",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Set_Tech_Level",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Unlock_Tech",
+      "call_kind": "method",
+      "receiver_type": "PlayerWrapper"
+    },
+    {
+      "exposed_name": "Get",
+      "call_kind": "method",
+      "receiver_type": "ThreadValue"
+    },
+    {
+      "exposed_name": "Reset",
+      "call_kind": "method",
+      "receiver_type": "ThreadValue"
+    },
+    {
+      "exposed_name": "Set",
+      "call_kind": "method",
+      "receiver_type": "ThreadValue"
+    },
+    {
+      "exposed_name": "Get_Object_Count",
+      "call_kind": "method",
+      "receiver_type": "ai_freestore"
+    },
+    {
+      "exposed_name": "Is_Object_On_Free_Store",
+      "call_kind": "method",
+      "receiver_type": "ai_freestore"
+    },
+    {
+      "exposed_name": "Get_Distance",
+      "call_kind": "method",
+      "receiver_type": "ai_target_location"
+    },
+    {
+      "exposed_name": "Get_Game_Object",
+      "call_kind": "method",
+      "receiver_type": "ai_target_location"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "ai_target_location"
+    },
+    {
+      "exposed_name": "IsFinished",
+      "call_kind": "method",
+      "receiver_type": "blocking_status"
+    },
+    {
+      "exposed_name": "Result",
+      "call_kind": "method",
+      "receiver_type": "blocking_status"
+    },
+    {
+      "exposed_name": "Allocate_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Flush_All_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Flush_Category",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Flush_Unallocated_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Get_Spendable_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Get_Unallocated_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Give_Resources_To_Goal",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Take_Resources_From_Goal",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Wait_For_Spendable_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Wait_For_Unallocated_Resources",
+      "call_kind": "method",
+      "receiver_type": "budget"
+    },
+    {
+      "exposed_name": "Create",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Get_Current_ID",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Get_Name",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Is_Thread_Active",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Kill",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Kill_All",
+      "call_kind": "method",
+      "receiver_type": "create_thread_command"
+    },
+    {
+      "exposed_name": "Create",
+      "call_kind": "method",
+      "receiver_type": "discrete_distribution"
+    },
+    {
+      "exposed_name": "Insert",
+      "call_kind": "method",
+      "receiver_type": "discrete_distribution"
+    },
+    {
+      "exposed_name": "Sample",
+      "call_kind": "method",
+      "receiver_type": "discrete_distribution"
+    },
+    {
+      "exposed_name": "Get_All_Planets",
+      "call_kind": "method",
+      "receiver_type": "find_planet_command"
+    },
+    {
+      "exposed_name": "Best_Of",
+      "call_kind": "method",
+      "receiver_type": "find_target_command"
+    },
+    {
+      "exposed_name": "Reachable_Target",
+      "call_kind": "method",
+      "receiver_type": "find_target_command"
+    },
+    {
+      "exposed_name": "Undo_Reveal",
+      "call_kind": "method",
+      "receiver_type": "fow_cells"
+    },
+    {
+      "exposed_name": "Disable_Rendering",
+      "call_kind": "method",
+      "receiver_type": "fow_reveal_command"
+    },
+    {
+      "exposed_name": "Reveal",
+      "call_kind": "method",
+      "receiver_type": "fow_reveal_command"
+    },
+    {
+      "exposed_name": "Reveal_All",
+      "call_kind": "method",
+      "receiver_type": "fow_reveal_command"
+    },
+    {
+      "exposed_name": "Temporary_Reveal",
+      "call_kind": "method",
+      "receiver_type": "fow_reveal_command"
+    },
+    {
+      "exposed_name": "Is_Unit_In_Transit",
+      "call_kind": "method",
+      "receiver_type": "galactic_freestore"
+    },
+    {
+      "exposed_name": "Is_Unit_Safe",
+      "call_kind": "method",
+      "receiver_type": "galactic_freestore"
+    },
+    {
+      "exposed_name": "Move_Object",
+      "call_kind": "method",
+      "receiver_type": "galactic_freestore"
+    },
+    {
+      "exposed_name": "Force_Test_Space_Conflict",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Invade",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Is_Raid_Capable",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Land_Units",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Launch_Units",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Raid",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Refit_To_Definition",
+      "call_kind": "method",
+      "receiver_type": "galactic_taskforce"
+    },
+    {
+      "exposed_name": "Free_Random",
+      "call_kind": "method",
+      "receiver_type": "game_random_command"
+    },
+    {
+      "exposed_name": "Get_Float",
+      "call_kind": "method",
+      "receiver_type": "game_random_command"
+    },
+    {
+      "exposed_name": "Frame",
+      "call_kind": "method",
+      "receiver_type": "get_time_command"
+    },
+    {
+      "exposed_name": "Galactic_Time",
+      "call_kind": "method",
+      "receiver_type": "get_time_command"
+    },
+    {
+      "exposed_name": "Attack_Move",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Attack_Target",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Bombing_Run",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Build",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Build_All",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Enable_Attack_Positioning",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Explore_Area",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Find_Closest_Enemy",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Fire_Orbital_Bombardment",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Fire_Special_Weapon",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Get_Distance",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Get_Reserved_Build_Pads",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Guard_Target",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Prepare_Ambush",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Reinforce",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Release_Reinforcements",
+      "call_kind": "method",
+      "receiver_type": "land_taskforce"
+    },
+    {
+      "exposed_name": "Get_XYZ",
+      "call_kind": "method",
+      "receiver_type": "position"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "position"
+    },
+    {
+      "exposed_name": "Call_Function",
+      "call_kind": "method",
+      "receiver_type": "script"
+    },
+    {
+      "exposed_name": "Get_Variable",
+      "call_kind": "method",
+      "receiver_type": "script"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "script"
+    },
+    {
+      "exposed_name": "Set_Variable",
+      "call_kind": "method",
+      "receiver_type": "script"
+    },
+    {
+      "exposed_name": "Debug_Should_Issue_Event_Alert",
+      "call_kind": "method",
+      "receiver_type": "script_host"
+    },
+    {
+      "exposed_name": "Allow_Ambient_VO",
+      "call_kind": "method",
+      "receiver_type": "sfx_commands"
+    },
+    {
+      "exposed_name": "Allow_Enemy_Sighted_VO",
+      "call_kind": "method",
+      "receiver_type": "sfx_commands"
+    },
+    {
+      "exposed_name": "Allow_HUD_VO",
+      "call_kind": "method",
+      "receiver_type": "sfx_commands"
+    },
+    {
+      "exposed_name": "Allow_Localized_SFXEvents",
+      "call_kind": "method",
+      "receiver_type": "sfx_commands"
+    },
+    {
+      "exposed_name": "Allow_Unit_Reponse_VO",
+      "call_kind": "method",
+      "receiver_type": "sfx_commands"
+    },
+    {
+      "exposed_name": "Attack_Move",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Attack_Target",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Build",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Build_All",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Enable_Attack_Positioning",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Explore_Area",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Find_Closest_Enemy",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Fire_Special_Weapon",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Get_Distance",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Get_Reserved_Build_Pads",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Guard_Target",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Prepare_Ambush",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Reinforce",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Release_Reinforcements",
+      "call_kind": "method",
+      "receiver_type": "space_taskforce"
+    },
+    {
+      "exposed_name": "Add_Dialog_Text",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Clear_Dialog_Text",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Set_Dialog",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Set_Event_Parameter",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Set_Reward_Parameter",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Set_Reward_Type",
+      "call_kind": "method",
+      "receiver_type": "story_event"
+    },
+    {
+      "exposed_name": "Activate",
+      "call_kind": "method",
+      "receiver_type": "story_plot"
+    },
+    {
+      "exposed_name": "Get_Event",
+      "call_kind": "method",
+      "receiver_type": "story_plot"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "story_plot"
+    },
+    {
+      "exposed_name": "Reset",
+      "call_kind": "method",
+      "receiver_type": "story_plot"
+    },
+    {
+      "exposed_name": "Suspend",
+      "call_kind": "method",
+      "receiver_type": "story_plot"
+    },
+    {
+      "exposed_name": "Activate_Ability",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Add_Force",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Add_Opportunity_Fire_Event_Subscription",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Are_All_Units_On_Free_Store",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Block_Goal_Proposal",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Can_Garrison",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Clear_Opportunity_Fire_Event_Subscriptions",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Collect_All_Free_Units",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Form_Units",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Garrison",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_AI_Power_Vs_Unit",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Force_Count",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Goal_Type_Name",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Self_Threat_Max",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Self_Threat_Sum",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Stage",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Type_Of_Unit",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Get_Unit_Table",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Is_Valid",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Leave_Garrison",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Move_To",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Produce_Force",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Release_Forces",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Release_Unit",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Remove_Opportunity_Fire_Event_Subscription",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_All_Abilities_Autofire",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_As_Goal_System_Removable",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_Plan_Result",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_Single_Ability_Autofire",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_Targeting_Priorities",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Set_Targeting_Stickiness_Time_Threshold",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Test_Target_Contrast",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Unblock_Goal_Proposal",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Withdraw_Units",
+      "call_kind": "method",
+      "receiver_type": "taskforce"
+    },
+    {
+      "exposed_name": "Is_Pool_Safe",
+      "call_kind": "method",
+      "receiver_type": "user_value"
+    },
+    {
+      "exposed_name": "Create",
+      "call_kind": "method",
+      "receiver_type": "weighted_type_list"
+    },
+    {
+      "exposed_name": "Parse",
+      "call_kind": "method",
+      "receiver_type": "weighted_type_list"
+    }
+  ]
+}

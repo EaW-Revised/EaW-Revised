@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "prototype": "godot-renderingserver-gdextension",
+  "status": "x86_64-complete-arm64-extension-built-template-runtime-open",
+  "backend": {
+    "engine": "Godot",
+    "adapter": "RenderingServer GDExtension",
+    "rendering_method": "gl_compatibility",
+    "material_path": "clean-programmable-semantics-to-Godot-shader"
+  },
+  "versions": {
+    "godot": "4.7.2-stable",
+    "godot_commit": "ed1daf0bf001b61586d9930840f2f1394092c079",
+    "godot_cpp": "10.0.0-stable",
+    "godot_cpp_commit": "507ed9d840c01a3c5b2a39af8bb4000bfac30bf5",
+    "gdextension_api": "4.7"
+  },
+  "platform": {
+    "windows": "Windows 10.0.26200 x86_64",
+    "linux": "WSL2 Ubuntu 20.04.6 x86_64, kernel 5.15.167.4-microsoft-standard-WSL2",
+    "arm64": "Arm GNU 14.2.1 GDExtension cross-build passed; template/package/runtime open"
+  },
+  "hardware": {
+    "windows": "AMD Radeon RX 7900 XTX, OpenGL driver 26.9.1.260826",
+    "linux": "Mesa llvmpipe LLVM 12.0.0, OpenGL 4.5 software renderer",
+    "comparability": "not comparable across platforms"
+  },
+  "scene_hash": {
+    "scene_json": "de673739583babf0a4541feafc6bd1f0c40da36788a962e7d49b284be7611a18",
+    "model": "9fd06b06d1626d8a11bea184fe73768745a6774062d44c9c39636e16202b62fe",
+    "texture": "24cfdf7a9a6d9156e9d218b2d2f6f4a1545dae63096534471dbb08da9af9572b"
+  },
+  "settings": {
+    "resolution": [1280, 720],
+    "vsync_requested": true,
+    "warmup_frames": 120,
+    "sample_frames": 600,
+    "axis_conversion": "x,z,-y",
+    "texture_colour_space": "srgb",
+    "material_technique": "sph_t0",
+    "material_pass": "sph_t0_p0",
+    "tone_mapper": "linear",
+    "exposure": 1.0
+  },
+  "samples": {
+    "windows_count": 600,
+    "linux_export_count": 600,
+    "metric": "CPU snapshot/camera submission milliseconds; presentation excluded",
+    "cross_prototype_timing_comparable": false,
+    "common_metric": "immutable RenderSnapshot Q24 Mat3x4 to column-major float[16], including output allocation; backend calls and presentation excluded",
+    "common_cross_prototype_candidate": true,
+    "common_cross_prototype_timing_comparable": true,
+    "common_comparison_status": "accepted bounded Windows evidence; adapter cost comparable, cadence pacing-only, no renderer/GPU ranking",
+    "gpu_timing": null
+  },
+  "metrics": {
+    "accepted_windows_comparison": {
+      "snapshot_adaptation_median_ms": 0.0022,
+      "snapshot_adaptation_p95_ms": 0.0032,
+      "frame_cadence_median_ms": 8.3459,
+      "frame_cadence_p95_ms": 10.8922,
+      "closeup_mask_iou": 0.9886292459,
+      "closeup_rgb_mae_bytes_per_channel": 2.0437646,
+      "colour_comparison": "passed bounded gates with identical 18,22,33 background and identical bounds; pixel identity not claimed"
+    },
+    "windows": {
+      "cpu_median_ms": 0.00685,
+      "cpu_p95_ms": 0.01,
+      "cpu_snapshot_adaptation_median_ms": 0.0021,
+      "cpu_snapshot_adaptation_p95_ms": 0.0032,
+      "load_time_ms": 514.406,
+      "memory_peak_bytes": 48614268,
+      "draw_calls": 1
+    },
+    "linux_export": {
+      "cpu_median_ms": 0.00864,
+      "cpu_p95_ms": 0.017094,
+      "cpu_snapshot_adaptation_median_ms": 0.001582,
+      "cpu_snapshot_adaptation_p95_ms": 0.002953,
+      "load_time_ms": 32166.19,
+      "memory_peak_bytes": null,
+      "draw_calls": 1
+    },
+    "memory_method": "Godot OS.get_static_memory_peak_usage; unavailable in production export",
+    "load_time_method": "steady clock across scene/VFS/assets/replay/RID initialization"
+  },
+  "effort": {
+    "measurement": "one bounded implementation session; build/run counts recorded instead of invented person-hours",
+    "x86_template_failed_attempt_seconds": 238.81,
+    "x86_template_successful_relink_seconds": 128.74,
+    "integration_friction": [
+      "Godot full template build and linker selection",
+      "PCK-aware common input access",
+      "manual RID lifetime ownership",
+      "per-effect Godot shader-language adaptation and qualification",
+      "WSL software rendering and old ARM64 cross toolchains"
+    ]
+  },
+  "limitations": [
+    "Windows and Linux measurements are non-comparable hardware paths",
+    "WSL selected llvmpipe despite /dev/dxg and could not honor VSync",
+    "GPU timing was not measured",
+    "Godot backend CPU submission excludes presentation and is not directly comparable to the SDL loop metric; only the separately reported snapshot-adapter boundary is common",
+    "common snapshot-adapter comparison passed as bounded adapter-cost evidence; it is not a renderer or GPU ranking",
+    "production export memory counter returned zero and is reported as unavailable",
+    "ARM64 extension cross-build passed, but a genuine ARM64 Godot template and linked/run package remain open",
+    "pixel equivalence with prototype A requires a common graphics rig"
+  ],
+  "artifacts": {
+    "reports": "private ignored out/godot/runs",
+    "screenshots": "private ignored out/godot/runs",
+    "exports": "private ignored out/godot/export",
+    "linux_template_sha256": "ed6c5f6dab697af73a2b24e995e08ff488773b0c7bd6f325c37213bc71ed25a1",
+    "arm64_extension_sha256": "eb51af23ba426ca9783da9e4894b893988d0fbf4bcbab93cc6717432553fd9ca",
+    "windows_capture_sha256": "a8890ed6afb8de2ccba27067143b630ae637f459a4890769243383c76fbd4154",
+    "windows_closeup_sha256": "95e3a6bcf626b684449669402ae037bd1832aaa5828e83217cd2e5560b398fe7",
+    "linux_capture_sha256": "c0078dcbd5f7e9154210cf3c1cdc6888e148055409789528e6ed928ba63d5b51",
+    "linux_closeup_sha256": "2d081e8a8e15f5df0bec62eed5547cdde00c4c9b9dd45d64d07c7fe9ffe44c89"
+  },
+  "acceptance": {
+    "windows_real_draw_capture_controls_resize_shutdown": "passed",
+    "linux_real_draw_capture_controls_resize_shutdown": "passed-with-software-renderer-and-vsync-warning",
+    "renderingserver_rid_ownership": "passed",
+    "sph_t0_material_ingestion": "passed",
+    "independent_modern_shader_smoke": "passed-vertex-fragment-and-bindings",
+    "supplemental_bounds_v1_closeup": "passed-windows-and-linux",
+    "linux_template_exported_application": "passed",
+    "core_replay_without_godot": "passed-windows-and-linux",
+    "godot_headless_startup": "passed-windows-and-exported-linux",
+    "cross_prototype_colour_and_bounds": "passed-bounded-windows-comparison-no-pixel-identity-claim",
+    "common_snapshot_timing": "passed-as-adapter-cost-evidence-no-renderer-ranking",
+    "arm64_extension_cross_build": "passed-arm-gnu-14.2.1-elf64-aarch64",
+    "arm64_template_package_runtime": "open",
+    "engine_selection": "open"
+  }
+}

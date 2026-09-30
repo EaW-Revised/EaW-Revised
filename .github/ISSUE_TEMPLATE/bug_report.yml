@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in EaW Revised does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do not attach game files (models, textures, XML, saves)
+        or paste decompiler output; describe them instead. Screenshots of EaW Revised itself are welcome.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Commands, map, mod and options. Say whether it needs the game data.
+      placeholder: |
+        1. cmake --workflow --preset linux-x64-gcc
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit
+      description: Output of `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - Linux x64
+        - Linux ARM64
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Compiler and version, GPU and driver (for viewer problems), mods in use.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output. It is formatted as code automatically.
+      render: text

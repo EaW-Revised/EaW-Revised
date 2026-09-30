@@ -1,0 +1,2738 @@
+{
+  "derivation": {
+    "pan_speed": "lerp(Tactical_Min_Scroll_Speed, Tactical_Max_Scroll_Speed) on the normalised distance; derived, pending timed original measurement",
+    "pitch_no_spline": "below Pitch_Zoom_Begin_Fraction blend Pitch_When_Zoomed_In to Pitch_Default, otherwise Pitch_Default + Pitch_Per_Zoom_Unit * (t - max(begin, 0)), clamped to [Pitch_Min, Pitch_Max]",
+    "pitch_spline": "Use_Splines=yes evaluates Pitch_Spline piecewise-linearly and supersedes Pitch_Min/Pitch_Max; derived, pending original capture",
+    "spline_format": "flat numeric sequence read two at a time as (zoom fraction, value); ',' and ' ' separators are interchangeable",
+    "zoom_parameter": "t in [0,1]; 0 is fully zoomed in (Distance_Min) and 1 is fully zoomed out (Distance_Max)"
+  },
+  "manifest_id": "ff15653f9d2aecac89e706dff01531b3f384c305ef985cd75ffd8be0b3c12d08",
+  "profiles": [
+    {
+      "camera_source": {
+        "layer_id": "base",
+        "logical_path": "data/xml/tacticalcameras.xml",
+        "sha256": "181f7092d4d092f47c0a4f1a36ee3e4febc3876c2daee93541cfa8472b349df8"
+      },
+      "constants_source": {
+        "layer_id": "base",
+        "logical_path": "data/xml/gameconstants.xml",
+        "sha256": "81eff67cac4b29aa4745a74b278604f567c0a5c5ba36604da86f6d34b074ed12"
+      },
+      "counts": {
+        "camera_fields": 112,
+        "modes": 3,
+        "scroll_constants": 9
+      },
+      "missing_scroll_tags": [],
+      "modes": [
+        {
+          "fields": [
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 460.0,
+              "tag": "Distance_Default",
+              "value": "460.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 460.0,
+              "tag": "Distance_Max",
+              "value": "460.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 170.0,
+              "tag": "Distance_Min",
+              "value": "170.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 100.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "100.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.21,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.21"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  170.0
+                ],
+                [
+                  0.3,
+                  220.0
+                ],
+                [
+                  1.0,
+                  460.0
+                ]
+              ],
+              "tag": "Distance_Spline",
+              "value": "0.0 170.0, 0.3, 220.0, 1.0, 460.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Far_Clip",
+              "value": "7000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 25.0,
+              "tag": "Fov_Min",
+              "value": "25.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.05,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.05"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Location_Height_Down_Smooth_Time",
+              "value": "1.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.3,
+              "tag": "Location_Height_Up_Smooth_Time",
+              "value": "0.3"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 20.0,
+              "tag": "Min_Height_Above_Terrain",
+              "value": "20.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Near_Clip",
+              "value": "10.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 770.0,
+              "tag": "Object_Fade_Begin",
+              "value": "770.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Object_Fade_End",
+              "value": "1000.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Default",
+              "value": "50"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Max",
+              "value": "50"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Min",
+              "value": "50"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -30.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "-30.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  17.0
+                ],
+                [
+                  0.35,
+                  45.0
+                ],
+                [
+                  1.0,
+                  55.0
+                ],
+                [
+                  1.1,
+                  55.0
+                ]
+              ],
+              "tag": "Pitch_Spline",
+              "value": "0.0,17.0, 0.35,45.0, 1.0, 55.0, 1.1,55"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 15.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "15.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 15.0,
+              "tag": "Spline_Steps",
+              "value": "15"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.5"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 4.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "4"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1600.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "1600.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 65.0,
+              "tag": "Tactical_Overview_Pitch",
+              "value": "65.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "tag": "Use_Splines",
+              "value": "yes"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Land_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Distance_Default",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1900.0,
+              "tag": "Distance_Max",
+              "value": "1900.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 200.0,
+              "tag": "Distance_Min",
+              "value": "200.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 500.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "500.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Far_Clip",
+              "value": "7000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Min",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Location_Height_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Near_Clip",
+              "value": "10.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 6000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "6000.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Object_Fade_End",
+              "value": "7000.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Default",
+              "value": "50"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 85.0,
+              "tag": "Pitch_Max",
+              "value": "85.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -10.0,
+              "tag": "Pitch_Min",
+              "value": "-10.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.5,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-1.5"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "50"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "-1.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.8,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.8"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "10"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2200.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "2200.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2900.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "2900.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Space_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 900.0,
+              "tag": "Distance_Default",
+              "value": "900.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Distance_Max",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Distance_Min",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "50.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Far_Clip",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Min",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Location_Height_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "MinHeightAboveTerrain",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Near_Clip",
+              "value": "1.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "10000.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 11000.0,
+              "tag": "Object_Fade_End",
+              "value": "11000.0f"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 34.0,
+              "tag": "Pitch_Default",
+              "value": "34.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Pitch_Max",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Min",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.5,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-1.5"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 34.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "34.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "-1.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 99.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "99"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2500.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "2500.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 360.0,
+              "tag": "Yaw_Max",
+              "value": "360.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -360.0,
+              "tag": "Yaw_Min",
+              "value": "-360.0"
+            },
+            {
+              "layer_id": "base",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Unlocked"
+        }
+      ],
+      "profile": "eaw",
+      "scroll_constants": [
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Land_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Push_Scroll_Speed_Modifier",
+          "value": "2.0"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 0.08,
+          "tag": "Scroll_Acceleration_Factor",
+          "value": "0.08"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1.5,
+          "tag": "Scroll_Deceleration_Factor",
+          "value": "1.5"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Space_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Tactical_Edge_Scroll_Region",
+          "value": "2"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 4000.0,
+          "tag": "Tactical_Max_Scroll_Speed",
+          "value": "4000"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1000.0,
+          "tag": "Tactical_Min_Scroll_Speed",
+          "value": "1000"
+        },
+        {
+          "layer_id": "base",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 50.0,
+          "tag": "Tactical_Offscreen_Scroll_Region",
+          "value": "50"
+        }
+      ],
+      "unexpected_camera_definitions": []
+    },
+    {
+      "camera_source": {
+        "layer_id": "expansion",
+        "logical_path": "data/xml/tacticalcameras.xml",
+        "sha256": "1c775d2e4b9f568968fb00a06c6deeced439b27a2ac1fa8032f20ba4d6e8e0e6"
+      },
+      "constants_source": {
+        "layer_id": "expansion",
+        "logical_path": "data/xml/gameconstants.xml",
+        "sha256": "fb4986e9a9866e2b8ec4f8c44a32050378c8c51bcde7390a5a7446e61f2ca3b1"
+      },
+      "counts": {
+        "camera_fields": 112,
+        "modes": 3,
+        "scroll_constants": 9
+      },
+      "missing_scroll_tags": [],
+      "modes": [
+        {
+          "fields": [
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 460.0,
+              "tag": "Distance_Default",
+              "value": "460.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 460.0,
+              "tag": "Distance_Max",
+              "value": "460.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 170.0,
+              "tag": "Distance_Min",
+              "value": "170.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 100.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "100.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.21,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.21"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  170.0
+                ],
+                [
+                  0.3,
+                  220.0
+                ],
+                [
+                  1.0,
+                  460.0
+                ]
+              ],
+              "tag": "Distance_Spline",
+              "value": "0.0 170.0, 0.3, 220.0, 1.0, 460.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Far_Clip",
+              "value": "7000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 25.0,
+              "tag": "Fov_Min",
+              "value": "25.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.05,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.05"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Location_Height_Down_Smooth_Time",
+              "value": "1.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.3,
+              "tag": "Location_Height_Up_Smooth_Time",
+              "value": "0.3"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 20.0,
+              "tag": "Min_Height_Above_Terrain",
+              "value": "20.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Near_Clip",
+              "value": "10.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1100.0,
+              "tag": "Object_Fade_Begin",
+              "value": "1100.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1300.0,
+              "tag": "Object_Fade_End",
+              "value": "1300.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Default",
+              "value": "50"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Max",
+              "value": "50"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Min",
+              "value": "50"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -30.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "-30.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  27.0
+                ],
+                [
+                  0.35,
+                  45.0
+                ],
+                [
+                  1.0,
+                  55.0
+                ],
+                [
+                  1.1,
+                  55.0
+                ]
+              ],
+              "tag": "Pitch_Spline",
+              "value": "0.0,27.0, 0.35,45.0, 1.0, 55.0, 1.1,55"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 15.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "15.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 15.0,
+              "tag": "Spline_Steps",
+              "value": "15"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.5"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 4.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "4"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1600.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "1600.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 65.0,
+              "tag": "Tactical_Overview_Pitch",
+              "value": "65.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "0.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "tag": "Use_Splines",
+              "value": "yes"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Land_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Distance_Default",
+              "value": "1000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1900.0,
+              "tag": "Distance_Max",
+              "value": "1900.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 200.0,
+              "tag": "Distance_Min",
+              "value": "200.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 500.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "500.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Far_Clip",
+              "value": "7000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Min",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Location_Height_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Near_Clip",
+              "value": "10.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 6000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "6000.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 7000.0,
+              "tag": "Object_Fade_End",
+              "value": "7000.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Default",
+              "value": "50"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 85.0,
+              "tag": "Pitch_Max",
+              "value": "85.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -10.0,
+              "tag": "Pitch_Min",
+              "value": "-10.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.5,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-1.5"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "50"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "-1.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.8,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.8"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "10"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2200.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "2200.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2900.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "2900.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -300.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "-300.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Space_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 900.0,
+              "tag": "Distance_Default",
+              "value": "900.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Distance_Max",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Distance_Min",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "50.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Far_Clip",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Default",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Max",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 55.0,
+              "tag": "Fov_Min",
+              "value": "55.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Location_Height_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "MinHeightAboveTerrain",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Near_Clip",
+              "value": "1.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "10000.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 11000.0,
+              "tag": "Object_Fade_End",
+              "value": "11000.0f"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 34.0,
+              "tag": "Pitch_Default",
+              "value": "34.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Pitch_Max",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Min",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.5,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-1.5"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 34.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "34.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "-1.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 99.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "99"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2500.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "2500.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 360.0,
+              "tag": "Yaw_Max",
+              "value": "360.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -360.0,
+              "tag": "Yaw_Min",
+              "value": "-360.0"
+            },
+            {
+              "layer_id": "expansion",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Unlocked"
+        }
+      ],
+      "profile": "foc",
+      "scroll_constants": [
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Land_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Push_Scroll_Speed_Modifier",
+          "value": "2.0"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 0.08,
+          "tag": "Scroll_Acceleration_Factor",
+          "value": "0.08"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1.5,
+          "tag": "Scroll_Deceleration_Factor",
+          "value": "1.5"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Space_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Tactical_Edge_Scroll_Region",
+          "value": "2"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 4000.0,
+          "tag": "Tactical_Max_Scroll_Speed",
+          "value": "4000"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1000.0,
+          "tag": "Tactical_Min_Scroll_Speed",
+          "value": "1000"
+        },
+        {
+          "layer_id": "expansion",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 50.0,
+          "tag": "Tactical_Offscreen_Scroll_Region",
+          "value": "50"
+        }
+      ],
+      "unexpected_camera_definitions": []
+    },
+    {
+      "camera_source": {
+        "layer_id": "mod",
+        "logical_path": "data/xml/tacticalcameras.xml",
+        "sha256": "5e5b20c9c8c94fb7662e3bed0c29a54117eb2352da6df3d5062002ac1322981d"
+      },
+      "constants_source": {
+        "layer_id": "mod",
+        "logical_path": "data/xml/gameconstants.xml",
+        "sha256": "3738be2c0f08315f8357d88dcb9ba0a4c7c4110371fe01f29d77ff4cea7349a1"
+      },
+      "counts": {
+        "camera_fields": 106,
+        "modes": 3,
+        "scroll_constants": 9
+      },
+      "missing_scroll_tags": [],
+      "modes": [
+        {
+          "fields": [
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 900.0,
+              "tag": "Distance_Default",
+              "value": "900.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1050.0,
+              "tag": "Distance_Max",
+              "value": "1050.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 200.0,
+              "tag": "Distance_Min",
+              "value": "200"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 120.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "120.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.15,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.15"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  170.0
+                ],
+                [
+                  0.3,
+                  220.0
+                ],
+                [
+                  1.0,
+                  460.0
+                ]
+              ],
+              "tag": "Distance_Spline",
+              "value": "0.0 170.0, 0.3, 220.0, 1.0, 460.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 45000.0,
+              "tag": "Far_Clip",
+              "value": "45000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Default",
+              "value": "60"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Max",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 35.0,
+              "tag": "Fov_Min",
+              "value": "35.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 5.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "5.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.15,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.15"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 5.0,
+              "tag": "Min_Height_Above_Terrain",
+              "value": "5"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Near_Clip",
+              "value": "1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 45000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "45000.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50000.0,
+              "tag": "Object_Fade_End",
+              "value": "50000.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Pitch_Default",
+              "value": "50"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 90.0,
+              "tag": "Pitch_Max",
+              "value": "90.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -90.0,
+              "tag": "Pitch_Min",
+              "value": "-90"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -0.45,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-0.45"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "points": [
+                [
+                  0.0,
+                  27.0
+                ],
+                [
+                  0.35,
+                  45.0
+                ],
+                [
+                  1.0,
+                  55.0
+                ],
+                [
+                  1.1,
+                  55.0
+                ]
+              ],
+              "tag": "Pitch_Spline",
+              "value": "0.0,27.0, 0.35,45.0, 1.0, 55.0, 1.1,55"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 15.0,
+              "tag": "Spline_Steps",
+              "value": "15"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.5"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "10"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1200.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "1200.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1500.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "1500.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "tag": "Use_Splines",
+              "value": "no"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.45,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "0.45"
+            }
+          ],
+          "name": "Land_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Bottom_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2000.0,
+              "tag": "Distance_Default",
+              "value": "2000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2000.0,
+              "tag": "Distance_Max",
+              "value": "2000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Distance_Min",
+              "value": "1000"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 200.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "200.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 200000.0,
+              "tag": "Far_Clip",
+              "value": "200000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Default",
+              "value": "60"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Max",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 25.0,
+              "tag": "Fov_Min",
+              "value": "25.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "10"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Near_Clip",
+              "value": "1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 24900.0,
+              "tag": "Object_Fade_Begin",
+              "value": "24900f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 250000.0,
+              "tag": "Object_Fade_End",
+              "value": "250000f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Pitch_Default",
+              "value": "60"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 90.0,
+              "tag": "Pitch_Max",
+              "value": "90.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -90.0,
+              "tag": "Pitch_Min",
+              "value": "-90"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -0.45,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-0.45"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Side_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "1.5"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "10"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 5000.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "5000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 6000.0,
+              "tag": "Tactical_Overview_Distance2",
+              "value": "6000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 70.0,
+              "tag": "Tactical_Overview_FOV2",
+              "value": "70.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 80.0,
+              "tag": "Tactical_Overview_Pitch2",
+              "value": "80.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -9999999.0,
+              "tag": "Top_Bounds_Buffer",
+              "value": "-9999999.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1000.0,
+              "tag": "Yaw_Max",
+              "value": "1000"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -1000.0,
+              "tag": "Yaw_Min",
+              "value": "-1000"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.45,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "0.45"
+            }
+          ],
+          "name": "Space_Mode"
+        },
+        {
+          "fields": [
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 900.0,
+              "tag": "Distance_Default",
+              "value": "900.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Distance_Max",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Distance_Min",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 50.0,
+              "tag": "Distance_Per_Mouse_Unit",
+              "value": "50.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Distance_Smooth_Time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60000.0,
+              "tag": "Far_Clip",
+              "value": "60000.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Default",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Max",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Fov_Min",
+              "value": "60.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Fov_Per_Mouse_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.1,
+              "tag": "Fov_Smooth_time",
+              "value": "0.1"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Location_Follows_Terrain",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.0,
+              "tag": "Near_Clip",
+              "value": "1.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 10000.0,
+              "tag": "Object_Fade_Begin",
+              "value": "10000.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 11000.0,
+              "tag": "Object_Fade_End",
+              "value": "11000.0f"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 60.0,
+              "tag": "Pitch_Default",
+              "value": "60"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 90.0,
+              "tag": "Pitch_Max",
+              "value": "90.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -90.0,
+              "tag": "Pitch_Min",
+              "value": "-90"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -0.45,
+              "tag": "Pitch_Per_Mouse_Unit",
+              "value": "-0.45"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Per_Zoom_Unit",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_When_Zoomed_In",
+              "value": "0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Pitch_Zoom_Begin_Fraction",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Tactical_Overview_Click_Time",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 99.0,
+              "tag": "Tactical_Overview_Clicks",
+              "value": "99"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 2500.0,
+              "tag": "Tactical_Overview_Distance",
+              "value": "2500.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 0.0,
+              "tag": "Yaw_Default",
+              "value": "0.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 360.0,
+              "tag": "Yaw_Max",
+              "value": "360.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": -360.0,
+              "tag": "Yaw_Min",
+              "value": "-360.0"
+            },
+            {
+              "layer_id": "mod",
+              "logical_path": "data/xml/tacticalcameras.xml",
+              "number": 1.5,
+              "tag": "Yaw_Per_Mouse_Unit",
+              "value": "1.5"
+            }
+          ],
+          "name": "Unlocked"
+        }
+      ],
+      "profile": "remake",
+      "scroll_constants": [
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Land_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Push_Scroll_Speed_Modifier",
+          "value": "2.0"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 0.08,
+          "tag": "Scroll_Acceleration_Factor",
+          "value": "0.08"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1.5,
+          "tag": "Scroll_Deceleration_Factor",
+          "value": "1.5"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "tag": "Space_Tactical_Camera_Locked",
+          "value": "True"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 2.0,
+          "tag": "Tactical_Edge_Scroll_Region",
+          "value": "2"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 4000.0,
+          "tag": "Tactical_Max_Scroll_Speed",
+          "value": "4000"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 1000.0,
+          "tag": "Tactical_Min_Scroll_Speed",
+          "value": "1000"
+        },
+        {
+          "layer_id": "mod",
+          "logical_path": "data/xml/gameconstants.xml",
+          "number": 50.0,
+          "tag": "Tactical_Offscreen_Scroll_Region",
+          "value": "50"
+        }
+      ],
+      "unexpected_camera_definitions": []
+    }
+  ],
+  "schema_version": 1,
+  "sources": {
+    "camera": "data/xml/tacticalcameras.xml",
+    "constants": "data/xml/gameconstants.xml"
+  },
+  "summary": {
+    "camera_fields": 330,
+    "missing_scroll_tags": 0,
+    "modes": 9,
+    "profiles": 3,
+    "scroll_constants": 27,
+    "unexpected_camera_definitions": 0
+  },
+  "tool": "camera_inventory",
+  "tool_sources": [
+    {
+      "path": "tools/inventory/common.py",
+      "sha256": "f5324c262c7d20d1e968de645dc5787cf93bdeff819df73bea453c9fcce7a2d0"
+    },
+    {
+      "path": "tools/inventory/corpus.py",
+      "sha256": "963a0f9820c368ca5dd5e20e2feacf32034d4beff1190716986f6837f2e4fe1f"
+    },
+    {
+      "path": "tools/inventory/camera_inventory.py",
+      "sha256": "fa7635c06c3cdebd93314f2f6315671fe36626b1b92021ba8ec71f4564eb8671"
+    }
+  ],
+  "tool_version": "1.0.0"
+}

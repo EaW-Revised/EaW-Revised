@@ -1,0 +1,516 @@
+{
+  "contract": "docs/behaviour/space-hardpoints.md",
+  "seed": "0x5eed000000000072",
+  "content_identity": "7355e046d3d095645949a6ecd10a2767e8bd0c750bde02ea005ee1dc76baa91e",
+  "replay_sha256": "2270ed3ef7d06312b75760da2ca400f69afba543cb78f3764ff1abf974374135",
+  "rules_raw": {
+    "hull_vs_hardpoints": 3355443,
+    "engines_disabled_speed": 6710886,
+    "damaged_fraction": 5536481
+  },
+  "profiles": [
+    {
+      "type_id": 10,
+      "foc_type": "Nebulon_B_Frigate",
+      "hull_raw": 90596966400,
+      "max_speed_raw": 36909875,
+      "hardpoints": [
+        {
+          "role": "weapon",
+          "health_raw": 6543114240,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 6543114240,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 6543114240,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 6543114240,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "engine",
+          "health_raw": 6543114240,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        }
+      ]
+    },
+    {
+      "type_id": 20,
+      "foc_type": "Acclamator_Assault_Ship",
+      "hull_raw": 50331648000,
+      "max_speed_raw": 36909875,
+      "hardpoints": [
+        {
+          "role": "weapon",
+          "health_raw": 3523215360,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 3523215360,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 4026531840,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 3523215360,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 3523215360,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 4026531840,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "engine",
+          "health_raw": 4278190080,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "fighter_bay",
+          "health_raw": 2516582400,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        }
+      ]
+    },
+    {
+      "type_id": 30,
+      "foc_type": "Corellian_Corvette",
+      "hull_raw": 18874368000,
+      "max_speed_raw": 52009370,
+      "hardpoints": [
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        },
+        {
+          "role": "weapon",
+          "health_raw": 0,
+          "repair_amount_raw": 0,
+          "repair_cost_raw": 0
+        }
+      ]
+    },
+    {
+      "type_id": 40,
+      "foc_type": "Skirmish_Empire_Star_Base_1",
+      "hull_raw": 40265318400,
+      "max_speed_raw": null,
+      "hardpoints": [
+        {
+          "role": "special_ability",
+          "health_raw": 11324620800,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 21810381
+        },
+        {
+          "role": "special_ability",
+          "health_raw": 11324620800,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 21810381
+        },
+        {
+          "role": "weapon",
+          "health_raw": 16357785600,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 21810381
+        },
+        {
+          "role": "weapon",
+          "health_raw": 11324620800,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 21810381
+        },
+        {
+          "role": "weapon",
+          "health_raw": 11324620800,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 21810381
+        },
+        {
+          "role": "shield_generator",
+          "health_raw": 16357785600,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 25165824
+        },
+        {
+          "role": "fighter_bay",
+          "health_raw": 25165824000,
+          "repair_amount_raw": 8388608,
+          "repair_cost_raw": 25165824
+        }
+      ]
+    }
+  ],
+  "nebulon_max_speed_without_engines_raw": 14763949,
+  "ticks": [
+    {
+      "completed_tick": 1,
+      "state_sha256": "fb0399a408702b33d6cbb2dddbcf5dab277ce0baf710dc92613dbec9161c04da",
+      "snapshot_sha256": "09cadafa2c9f3787ab224ab952d078d4ec7ca55f12e1da45dd8011263a673d66",
+      "health_raw": {
+        "1": [
+          90596966400,
+          3187671040,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "2": [
+          50331648000,
+          3523215360,
+          3523215360,
+          4026531840,
+          3523215360,
+          3523215360,
+          4026531840,
+          4278190080,
+          2516582400
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          16357785600,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "completed_tick": 2,
+      "state_sha256": "a4be2066d53fbf367161390e3c27c7659ca2c155a6761989605c4715d62b1c41",
+      "snapshot_sha256": "34a318b2b7acbd3378f000b0de01f2b7cc790d0b0ac25522943f54020ab5634d",
+      "health_raw": {
+        "1": [
+          90596966400,
+          1509949440,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "2": [
+          50331648000,
+          3523215360,
+          3523215360,
+          4026531840,
+          3523215360,
+          3523215360,
+          4026531840,
+          4278190080,
+          0
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          0,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "completed_tick": 3,
+      "state_sha256": "acec8d0b63e237317c050a32c1acc5c701cb94a3402898ab02473a91daf92d5f",
+      "snapshot_sha256": "3ae6e8a9317d11338408d5816a3635a978f831774e6d9b95bfd2bb56ef9c5def",
+      "health_raw": {
+        "1": [
+          90596966400,
+          0,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "2": [
+          50331648000,
+          3523215360,
+          3523215360,
+          4026531840,
+          3523215360,
+          3523215360,
+          4026531840,
+          4278190080,
+          0
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          0,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "completed_tick": 4,
+      "state_sha256": "f6026da2fea9ffff745c1142989b2d7ad0616e31912f1601dde10279aa586e93",
+      "snapshot_sha256": "d336ac0e934a6d9d990fb021fdbf214fa8b871e3afd1a57bee5c7eb8e7441d66",
+      "health_raw": {
+        "1": [
+          90596966400,
+          0,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "2": [
+          16777216000,
+          2185414703,
+          2185414703,
+          2497616803,
+          2185414703,
+          2185414703,
+          2497616803,
+          2653717854,
+          0
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          0,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "completed_tick": 5,
+      "state_sha256": "b5f50d5fecb80c4b557d7fc5a16a487e4e84f40ce15cf143f39bf18dcc4094aa",
+      "snapshot_sha256": "1153526913de9ff85dcfb74fc3236bb144d8444b49bee4bccaa17b6f55ad9f06",
+      "health_raw": {
+        "1": [
+          90596966400,
+          0,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          0,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        3,
+        4,
+        5
+      ]
+    },
+    {
+      "completed_tick": 6,
+      "state_sha256": "36224bf4320abd279aa783c156306daff7f4471f44ebc660ef6d577bd9ea031f",
+      "snapshot_sha256": "168ce495ddf63108cd13e85f753a2063c786cec4c294c19cacdd7224e2261fea",
+      "health_raw": {
+        "1": [
+          90596966400,
+          0,
+          6543114240,
+          6543114240,
+          6543114240,
+          0
+        ],
+        "3": [
+          18874368000,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "4": [
+          40265318400,
+          11324620800,
+          11324620800,
+          16357785600,
+          11324620800,
+          11324620800,
+          0,
+          25165824000
+        ]
+      },
+      "live_units": [
+        1,
+        3,
+        4,
+        5
+      ]
+    }
+  ]
+}

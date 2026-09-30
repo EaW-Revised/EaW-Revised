@@ -1,0 +1,126 @@
+{
+  "_comment": "Rules of tools/publish_scan/publish_scan.py: what no commit of the public tree may contain. A new image or binary file is added here with its reason after review.",
+  "security": {
+    "regex": {
+      "private-ipv4": "(?<![\\d.])(?:10(?:\\.(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}|192\\.168(?:\\.(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)){2}|172\\.(?:1[6-9]|2\\d|3[01])(?:\\.(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)){2})(?![\\d.]*\\d)",
+      "user-path": "(?i)\\b[a-z]:[\\\\/]+users[\\\\/]+(?!public\\b|default\\b|runneradmin\\b|<|%|\\$|\\{)[a-z0-9._-]+",
+      "home-path": "/home/(?!runner\\b|user\\b|<|\\$)[a-z0-9._-]+",
+      "binary-address": "\\b0x14[0-9A-Fa-f]{7}\\b",
+      "decompiler-name": "\\b(?:FUN|DAT|LAB|PTR|thunk_FUN)_[0-9a-fA-F]{6,}\\b",
+      "lan-host": "\\b[\\w-]+\\.lan\\b",
+      "ssh-key-name": "\\bid_(?:ed25519|rsa|ecdsa)_\\w+"
+    },
+    "allow": [
+      {
+        "path": "third_party/lua/doc/manual.html",
+        "regex": "/home/roberto",
+        "reason": "upstream Lua manual example path"
+      },
+      {
+        "path": "tests/assets/test_mtd_inventory.py",
+        "regex": "PRIVATE|/home/private",
+        "reason": "a made-up private path the test proves is never echoed"
+      },
+      {
+        "path": "tests/scene/test_scene_inventory.py",
+        "regex": "PrivateUser",
+        "reason": "a made-up private path the test proves is never echoed"
+      },
+      {
+        "path": "tools/publish_scan/config.json",
+        "regex": "\"regex\": ",
+        "reason": "this file's own allow rules quote the made-up paths they allow"
+      }
+    ]
+  },
+  "cleanroom": {
+    "skip": [
+      "third_party/",
+      "tools/cleanroom_check.py"
+    ]
+  },
+  "assets": {
+    "retail_suffixes": [
+      ".alo",
+      ".ala",
+      ".meg",
+      ".mtd",
+      ".ted",
+      ".tga",
+      ".dds",
+      ".fx",
+      ".fxo",
+      ".fxh",
+      ".bik",
+      ".wav",
+      ".mp3",
+      ".ogg",
+      ".ogv",
+      ".ttf",
+      ".otf",
+      ".ttc",
+      ".pgso",
+      ".dat",
+      ".sav"
+    ],
+    "retail_suffix_allow": [
+      "tests/shaders/fixtures/"
+    ],
+    "image_suffixes": [
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".bmp",
+      ".webp",
+      ".ico",
+      ".xpm",
+      ".tif",
+      ".tiff",
+      ".svg"
+    ],
+    "image_allowlist": {
+      "third_party/lua/doc/logo.gif": "9c3a3208ef05e12110f9b7b491cef676e650e4ebf3d36c4414268666bcc95d8a",
+      "third_party/lua/etc/lua.ico": "7a4ecc09ce82d90535591c6d98c1882527803747338b8c698422e56ec45169ee",
+      "third_party/lua/etc/lua.xpm": "f66f6bf46cfcede08d06dee7a970469c5ad13face51f218d08281fbfb9915fd7"
+    },
+    "binary_allowlist": [
+      "tests/replay/fixtures/*.eawr-replay",
+      "tests/fidelity/fixtures/*.eawr-replay",
+      "tests/skirmish/fixtures/*.eawr-replay",
+      "tests/fog/fixtures/*.eawr-fog",
+      "tests/fog/fixtures/mutations/*.eawr-fog",
+      "third_party/"
+    ]
+  },
+  "readme": {
+    "forbidden": [
+      "star wars"
+    ]
+  },
+  "gitleaks": {
+    "version": "8.30.1",
+    "assets": {
+      "windows_x64": {
+        "file": "gitleaks_8.30.1_windows_x64.zip",
+        "sha256": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"
+      },
+      "linux_x64": {
+        "file": "gitleaks_8.30.1_linux_x64.tar.gz",
+        "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      },
+      "linux_arm64": {
+        "file": "gitleaks_8.30.1_linux_arm64.tar.gz",
+        "sha256": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      },
+      "darwin_x64": {
+        "file": "gitleaks_8.30.1_darwin_x64.tar.gz",
+        "sha256": "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+      },
+      "darwin_arm64": {
+        "file": "gitleaks_8.30.1_darwin_arm64.tar.gz",
+        "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      }
+    }
+  }
+}

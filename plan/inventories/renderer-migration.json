@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "ticket": "P1-01",
+  "issue": 22,
+  "backend": {
+    "engine": "Godot",
+    "api": "RenderingServer through C++ GDExtension",
+    "godot": "4.7.2-stable",
+    "godot_commit": "ed1daf0bf001b61586d9930840f2f1394092c079",
+    "godot_cpp": "10.0.0-stable",
+    "godot_cpp_commit": "507ed9d840c01a3c5b2a39af8bb4000bfac30bf5"
+  },
+  "frozen_scene": {
+    "rendering_method": "gl_compatibility",
+    "sha256":"de673739583babf0a4541feafc6bd1f0c40da36788a962e7d49b284be7611a18",
+    "accepted_windows_capture_sha256": "4e746a8e10e6e44b152c6d2a1659230791e3b63326d5cca2b7b4ba582cf9eaf7",
+    "production_windows_capture_sha256": "4e746a8e10e6e44b152c6d2a1659230791e3b63326d5cca2b7b4ba582cf9eaf7",
+    "comparison": "byte-identical"
+  },
+  "production_paths": [
+    "include/eawr/presentation/renderer.hpp",
+    "include/eawr/presentation/godot/renderer.hpp",
+    "src/presentation/godot/",
+    "apps/viewer/",
+    "tests/presentation/renderer/"
+  ],
+  "prototype_migration": {
+    "status": "partial",
+    "ported": [
+      "RenderingServer RID mesh/texture/material/instance lifecycle",
+      "frozen MeshGloss programmable adapter",
+      "independent modern spatial shader route",
+      "immutable Q24 snapshot adaptation",
+      "fixed-camera PNG capture and SHA-256",
+      "headless startup/replay probe",
+      "Windows x64, Linux x64 and Linux ARM64 extension builds",
+      "Linux x64 software-rendered capture and default resource-URI startup"
+    ],
+    "retained": "prototypes/godot",
+    "reason": "Linux x64 warm-cache build and software-rendered capture are reproduced, and the default resource-URI defect is corrected. Retain historical evidence and reproduction metadata until Linux capture tolerance, modern shader failure diagnostics, executable pass scheduling and remaining issue 22 acceptance gates are resolved."
+  },
+  "private_outputs": "ignored under out/ and apps/viewer/project/bin/common",
+  "original_assets_tracked": false
+}

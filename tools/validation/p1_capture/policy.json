@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "policy_id": "eawr-p1-capture-policy-v1",
+  "profiles": [
+    {
+      "name": "exact-decoded-repeat",
+      "evidence_requirement": "Two baseline captures with complete identity must compare at zero decoded-pixel error before this contract is approved and before any candidate capture is evaluated.",
+      "limits": {
+        "rgb_mae": 0.0,
+        "rgb_p95": 0.0,
+        "alpha_mae": 0.0,
+        "changed_pixel_ratio": 0.0,
+        "edge_iou": 1.0
+      }
+    },
+    {
+      "name": "same-godot-windows-linux-v1",
+      "evidence_requirement": "Freeze these ceilings from the previously accepted Godot 4.7.2 Windows and llvmpipe captures, then approve the contract before recapturing a candidate package.",
+      "limits": {
+        "rgb_mae": 0.6,
+        "rgb_p95": 2.0,
+        "alpha_mae": 0.0,
+        "changed_pixel_ratio": 0.2,
+        "edge_iou": 0.94
+      }
+    }
+  ]
+}

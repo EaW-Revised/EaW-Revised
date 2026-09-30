@@ -1,0 +1,987 @@
+{
+  "fixture": {
+    "file": "tactical-v2.eawr-replay",
+    "bytes": 1512,
+    "sha256": "eca2fa370c29f9b44b610ca285ac4d94034c0a238caee1700dfc81eb4b749ffa",
+    "header_offsets": {
+      "magic": [
+        0,
+        8
+      ],
+      "format_version": [
+        8,
+        2
+      ],
+      "header_size": [
+        10,
+        2
+      ],
+      "tactical_rules_version": [
+        12,
+        4
+      ],
+      "math_version": [
+        16,
+        4
+      ],
+      "fractional_bits": [
+        20,
+        4
+      ],
+      "tick_numerator": [
+        24,
+        4
+      ],
+      "tick_denominator": [
+        28,
+        4
+      ],
+      "seed": [
+        32,
+        8
+      ],
+      "final_tick_count": [
+        40,
+        8
+      ],
+      "player_count": [
+        48,
+        4
+      ],
+      "reserved": [
+        52,
+        4
+      ],
+      "unit_count": [
+        56,
+        8
+      ],
+      "command_count": [
+        64,
+        8
+      ],
+      "content_identity": [
+        72,
+        32
+      ]
+    },
+    "player_table": [
+      104,
+      72
+    ],
+    "unit_table": [
+      176,
+      720
+    ],
+    "command_offsets": [
+      896,
+      972,
+      1032,
+      1100,
+      1176,
+      1228,
+      1280,
+      1332,
+      1384,
+      1452
+    ]
+  },
+  "header": {
+    "format_version": 2,
+    "tactical_rules_version": 1,
+    "tick": "1/30",
+    "seed": "0x5eed000000000066",
+    "final_tick_count": 6,
+    "content_identity": "3742568d91976a9a0e3ad533bbad509bcfce3aa5f6f7c10bed1b393f0bc6e63b"
+  },
+  "players": [
+    {
+      "player_id": 1,
+      "team_id": 0,
+      "faction_id": 4097,
+      "flags": 1
+    },
+    {
+      "player_id": 2,
+      "team_id": 1,
+      "faction_id": 4098,
+      "flags": 1
+    },
+    {
+      "player_id": 3,
+      "team_id": 3,
+      "faction_id": 4099,
+      "flags": 0
+    }
+  ],
+  "units": [
+    {
+      "entity_id": 1,
+      "type_id": 101,
+      "owner": 1,
+      "position_raw": [
+        -63937970176,
+        74826383360,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        15385715,
+        -6689899
+      ],
+      "matrix_raw": [
+        [
+          -11442034,
+          12270079,
+          0,
+          -63937970176
+        ],
+        [
+          -12270079,
+          -11442034,
+          0,
+          74826383360
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 2,
+      "type_id": 102,
+      "owner": 1,
+      "position_raw": [
+        -78198603776,
+        85765128192,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        3488179,
+        -16410594
+      ],
+      "matrix_raw": [
+        [
+          15326750,
+          6823908,
+          0,
+          -78198603776
+        ],
+        [
+          -6823908,
+          15326750,
+          0,
+          85765128192
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 3,
+      "type_id": 102,
+      "owner": 1,
+      "position_raw": [
+        -77183582208,
+        84729135104,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        3488179,
+        -16410594
+      ],
+      "matrix_raw": [
+        [
+          15326750,
+          6823908,
+          0,
+          -77183582208
+        ],
+        [
+          -6823908,
+          15326750,
+          0,
+          84729135104
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 4,
+      "type_id": 103,
+      "owner": 1,
+      "position_raw": [
+        -78852915200,
+        86402662400,
+        -203423744
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        3488179,
+        -16410594
+      ],
+      "matrix_raw": [
+        [
+          15326750,
+          6823908,
+          0,
+          -78852915200
+        ],
+        [
+          -6823908,
+          15326750,
+          0,
+          86402662400
+        ],
+        [
+          0,
+          0,
+          16777216,
+          -203423744
+        ]
+      ]
+    },
+    {
+      "entity_id": 5,
+      "type_id": 201,
+      "owner": 2,
+      "position_raw": [
+        61824040960,
+        -69977767936,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        6420363,
+        15500126
+      ],
+      "matrix_raw": [
+        [
+          11863283,
+          -11863284,
+          0,
+          61824040960
+        ],
+        [
+          11863284,
+          11863283,
+          0,
+          -69977767936
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 6,
+      "type_id": 202,
+      "owner": 2,
+      "position_raw": [
+        69088575488,
+        -83483426816,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        16167036,
+        4483516
+      ],
+      "matrix_raw": [
+        [
+          -14380880,
+          -8640905,
+          0,
+          69088575488
+        ],
+        [
+          8640905,
+          -14380880,
+          0,
+          -83483426816
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 7,
+      "type_id": 203,
+      "owner": 2,
+      "position_raw": [
+        70128762880,
+        -82208358400,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        16777216,
+        0
+      ],
+      "matrix_raw": [
+        [
+          -16777216,
+          0,
+          0,
+          70128762880
+        ],
+        [
+          0,
+          -16777216,
+          0,
+          -82208358400
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    },
+    {
+      "entity_id": 8,
+      "type_id": 204,
+      "owner": 2,
+      "position_raw": [
+        67947724800,
+        -84557168640,
+        511705088
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        16167036,
+        4483516
+      ],
+      "matrix_raw": [
+        [
+          -14380880,
+          -8640905,
+          0,
+          67947724800
+        ],
+        [
+          8640905,
+          -14380880,
+          0,
+          -84557168640
+        ],
+        [
+          0,
+          0,
+          16777216,
+          511705088
+        ]
+      ]
+    },
+    {
+      "entity_id": 9,
+      "type_id": 301,
+      "owner": 3,
+      "position_raw": [
+        0,
+        0,
+        0
+      ],
+      "rotation_raw": [
+        0,
+        0,
+        0,
+        16777216
+      ],
+      "matrix_raw": [
+        [
+          16777216,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          16777216,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          16777216,
+          0
+        ]
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "offset": 896,
+      "body_length": 72,
+      "tick": 0,
+      "player": 1,
+      "sequence": 1,
+      "kind": "move",
+      "units": [
+        2,
+        3
+      ],
+      "destination_raw": [
+        -16777216000,
+        16777216000,
+        0
+      ],
+      "target": 0
+    },
+    {
+      "offset": 972,
+      "body_length": 56,
+      "tick": 0,
+      "player": 2,
+      "sequence": 1,
+      "kind": "attack",
+      "units": [
+        6,
+        7
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 2
+    },
+    {
+      "offset": 1032,
+      "body_length": 64,
+      "tick": 1,
+      "player": 1,
+      "sequence": 2,
+      "kind": "attack",
+      "units": [
+        2,
+        3,
+        4
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 5
+    },
+    {
+      "offset": 1100,
+      "body_length": 72,
+      "tick": 1,
+      "player": 1,
+      "sequence": 3,
+      "kind": "move",
+      "units": [
+        5,
+        6
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 0
+    },
+    {
+      "offset": 1176,
+      "body_length": 48,
+      "tick": 1,
+      "player": 2,
+      "sequence": 2,
+      "kind": "attack",
+      "units": [
+        8
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 7
+    },
+    {
+      "offset": 1228,
+      "body_length": 48,
+      "tick": 3,
+      "player": 1,
+      "sequence": 4,
+      "kind": "stop",
+      "units": [
+        2,
+        42
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 0
+    },
+    {
+      "offset": 1280,
+      "body_length": 48,
+      "tick": 3,
+      "player": 2,
+      "sequence": 3,
+      "kind": "attack",
+      "units": [
+        6
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 9
+    },
+    {
+      "offset": 1332,
+      "body_length": 48,
+      "tick": 3,
+      "player": 2,
+      "sequence": 4,
+      "kind": "attack",
+      "units": [
+        7
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 77
+    },
+    {
+      "offset": 1384,
+      "body_length": 64,
+      "tick": 5,
+      "player": 1,
+      "sequence": 5,
+      "kind": "move",
+      "units": [
+        4
+      ],
+      "destination_raw": [
+        -2067791872,
+        7658799104,
+        119537664
+      ],
+      "target": 0
+    },
+    {
+      "offset": 1452,
+      "body_length": 56,
+      "tick": 5,
+      "player": 2,
+      "sequence": 5,
+      "kind": "stop",
+      "units": [
+        6,
+        7,
+        8
+      ],
+      "destination_raw": [
+        0,
+        0,
+        0
+      ],
+      "target": 0
+    }
+  ],
+  "next_entity_id": 10,
+  "rng_state": "0x5eed000000000066",
+  "ticks": [
+    {
+      "completed_tick": 1,
+      "state_bytes": 1328,
+      "state_sha256": "3fef995c65e5520377f5eb3499d3a0f0301498d983ba878211ada86bc8515e3e",
+      "snapshot_bytes": 1564,
+      "snapshot_sha256": "3d949665f99e78e966ed2c23ea40cd7cca60c5f1daa06dbade92f580b66b14a9",
+      "event_count": 4,
+      "orders": {
+        "2": {
+          "kind": "move",
+          "issued_tick": 0,
+          "destination_raw": [
+            -16777216000,
+            16777216000,
+            0
+          ],
+          "target": 0
+        },
+        "3": {
+          "kind": "move",
+          "issued_tick": 0,
+          "destination_raw": [
+            -16777216000,
+            16777216000,
+            0
+          ],
+          "target": 0
+        },
+        "6": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        },
+        "7": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        }
+      }
+    },
+    {
+      "completed_tick": 2,
+      "state_bytes": 1328,
+      "state_sha256": "ea7133f031f30385fe952c2897de350073072d85c06a875481575d0470b8a957",
+      "snapshot_bytes": 1628,
+      "snapshot_sha256": "5c45ae88f42ea3925d479fa3c9f8d88992743dcd992f903794f4552c172cd2fa",
+      "event_count": 6,
+      "orders": {
+        "2": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "3": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "4": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "6": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        },
+        "7": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        }
+      }
+    },
+    {
+      "completed_tick": 3,
+      "state_bytes": 1328,
+      "state_sha256": "ef156df872605518b3afa07438f9ec19e0e96e15317fceddc24d470eaf020c54",
+      "snapshot_bytes": 1436,
+      "snapshot_sha256": "f3c5532f5e88848810c0177eff94c5a9a6ad3a61d5bbe16acb7696c815a148d9",
+      "event_count": 0,
+      "orders": {
+        "2": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "3": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "4": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "6": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        },
+        "7": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        }
+      }
+    },
+    {
+      "completed_tick": 4,
+      "state_bytes": 1328,
+      "state_sha256": "5900e2f1e73de894b378141536a6daa09b7b62fe9de11a4f109475f3249151aa",
+      "snapshot_bytes": 1564,
+      "snapshot_sha256": "b0791cee2369a19ade758e3975c7b3b7e1ea45c8cb6e3abcbfc64c6cbaaf889f",
+      "event_count": 4,
+      "orders": {
+        "2": {
+          "kind": "stop",
+          "issued_tick": 3,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        },
+        "3": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "4": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "6": {
+          "kind": "attack",
+          "issued_tick": 3,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 9
+        },
+        "7": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        }
+      }
+    },
+    {
+      "completed_tick": 5,
+      "state_bytes": 1328,
+      "state_sha256": "2fba8e629a221f0d7a76dfccf4ccbeeeae0e89ea2d4e9772a0b8e06669d25e48",
+      "snapshot_bytes": 1436,
+      "snapshot_sha256": "335f3817c26698f59538bd3bb238350803647d290af12671b3a08bed45a535fc",
+      "event_count": 0,
+      "orders": {
+        "2": {
+          "kind": "stop",
+          "issued_tick": 3,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        },
+        "3": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "4": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "6": {
+          "kind": "attack",
+          "issued_tick": 3,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 9
+        },
+        "7": {
+          "kind": "attack",
+          "issued_tick": 0,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 2
+        }
+      }
+    },
+    {
+      "completed_tick": 6,
+      "state_bytes": 1328,
+      "state_sha256": "3d9b27f149b1d4414471507f5adc4cad4d4f865948542472e0f1693b2432a398",
+      "snapshot_bytes": 1564,
+      "snapshot_sha256": "cfb5938aca5749becebd838dcdec3b23a147b894a2597ced1354b18bdb760cbd",
+      "event_count": 4,
+      "orders": {
+        "2": {
+          "kind": "stop",
+          "issued_tick": 3,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        },
+        "3": {
+          "kind": "attack",
+          "issued_tick": 1,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 5
+        },
+        "4": {
+          "kind": "move",
+          "issued_tick": 5,
+          "destination_raw": [
+            -2067791872,
+            7658799104,
+            119537664
+          ],
+          "target": 0
+        },
+        "6": {
+          "kind": "stop",
+          "issued_tick": 5,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        },
+        "7": {
+          "kind": "stop",
+          "issued_tick": 5,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        },
+        "8": {
+          "kind": "stop",
+          "issued_tick": 5,
+          "destination_raw": [
+            0,
+            0,
+            0
+          ],
+          "target": 0
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,500 @@
+{
+  "schema_version": 5,
+  "status": "pinned_against_read_only_installed_corpus",
+  "generator": "asset_validate --profile <profile> --game-root <GAME_ROOT> --inspect-map <logical-path>",
+  "provenance": "Logical VFS paths, content hashes and counts only. No install root, no retail bytes, no screenshots.",
+  "resolution_policy": "Placement type CRCs resolve against the profile's active XML catalog winners; model chains and terrain/cloud textures resolve against the effective VFS; skydome fields resolve against catalog object ids. Every declared reference stays in its denominator whether or not it resolves.",
+  "role_policy": "m1_reference marks the owner's FoC M1 reference maps (decision 2026-09-25, plan/phase-1/README.md): exactly one land and one space map. regression_fixture keeps the earlier EaW multiplayer and Alderaan campaign pins. Consumers select an entry by role and kind, or by profile and logical_path, never by position or logical_path alone.",
+  "references": [
+    {
+      "role": "m1_reference",
+      "profile": "foc",
+      "logical_path": "data/art/maps/_mp_land_naboo.ted",
+      "sha256": "c2d8eadb44e17eb259fa169ef58733e42ca49119398fe4569c37fdb8d9662d70",
+      "checkpoint": {
+        "kind": "land",
+        "semantic_complete": true,
+        "stored_size": 4384075,
+        "terrain_width": 249,
+        "terrain_height": 249,
+        "terrain_samples": 62001,
+        "terrain_materials": 64,
+        "environments": 2,
+        "water_records": 17,
+        "placements": 1697,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 1697,
+        "placements_model_renderable": 1697,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 112,
+        "textures_resolved": 112,
+        "sky_references": 2,
+        "skies_resolved": 2,
+        "skies_model_renderable": 2,
+        "notices": 1
+      },
+      "semantics": {
+        "volumes": 1,
+        "water_textures": 2,
+        "declared_extents": true,
+        "issues": {
+          "water_stream_invalid": 1
+        },
+        "terrain_height_range": [
+          -4065,
+          5428
+        ],
+        "terrain_checkpoints": [
+          {
+            "index": 0,
+            "height": 137,
+            "material": 0,
+            "intensity": 255
+          },
+          {
+            "index": 1,
+            "height": -294,
+            "material": 16,
+            "intensity": 255
+          },
+          {
+            "index": 248,
+            "height": 716,
+            "material": 17,
+            "intensity": 255
+          },
+          {
+            "index": 31000,
+            "height": 2706,
+            "material": 59,
+            "intensity": 255
+          },
+          {
+            "index": 61752,
+            "height": 716,
+            "material": 0,
+            "intensity": 255
+          },
+          {
+            "index": 62000,
+            "height": 723,
+            "material": 0,
+            "intensity": 255
+          }
+        ],
+        "three_axis_records": []
+      }
+    },
+    {
+      "role": "m1_reference",
+      "profile": "foc",
+      "logical_path": "data/art/maps/_mp_space_coruscant.ted",
+      "sha256": "91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286",
+      "checkpoint": {
+        "kind": "space",
+        "semantic_complete": true,
+        "stored_size": 94765,
+        "terrain_width": 0,
+        "terrain_height": 0,
+        "terrain_samples": 0,
+        "terrain_materials": 0,
+        "environments": 1,
+        "water_records": 0,
+        "placements": 58,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 58,
+        "placements_model_renderable": 58,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 1,
+        "textures_resolved": 1,
+        "sky_references": 2,
+        "skies_resolved": 2,
+        "skies_model_renderable": 2,
+        "notices": 2
+      },
+      "semantics": {
+        "volumes": 2,
+        "water_textures": 0,
+        "declared_extents": true,
+        "issues": {
+          "orientation_three_axis": 2
+        },
+        "three_axis_records": [
+          {
+            "ordinal": 1,
+            "object_id": 67169,
+            "type_crc": "0xAEF6E282",
+            "type": "N_Gravity_Well_Station",
+            "position": [
+              -228.943024,
+              52.1383057,
+              0
+            ],
+            "euler_degrees": [
+              338.98999,
+              138,
+              181
+            ]
+          },
+          {
+            "ordinal": 16,
+            "object_id": 4415,
+            "type_crc": "0x95CBD2EC",
+            "type": "Urban_Backdrop_Large",
+            "position": [
+              2212.72339,
+              1270.88721,
+              -4300
+            ],
+            "euler_degrees": [
+              0,
+              329,
+              254
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "role": "regression_fixture",
+      "profile": "eaw",
+      "logical_path": "data/art/maps/_mp_land_naboo.ted",
+      "sha256": "d9ec66494bcbe5d48d9998eed5e95d6438bed1d2ccf3ec2441276cb7002c442c",
+      "checkpoint": {
+        "kind": "land",
+        "semantic_complete": true,
+        "stored_size": 3211461,
+        "terrain_width": 249,
+        "terrain_height": 249,
+        "terrain_samples": 62001,
+        "terrain_materials": 64,
+        "environments": 2,
+        "water_records": 17,
+        "placements": 1709,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 1709,
+        "placements_model_renderable": 1709,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 106,
+        "textures_resolved": 106,
+        "sky_references": 2,
+        "skies_resolved": 2,
+        "skies_model_renderable": 2,
+        "notices": 1
+      },
+      "semantics": {
+        "volumes": 1,
+        "water_textures": 2,
+        "declared_extents": false,
+        "issues": {
+          "water_stream_invalid": 1
+        },
+        "terrain_height_range": [
+          -4065,
+          5428
+        ],
+        "terrain_checkpoints": [
+          {
+            "index": 0,
+            "height": 137,
+            "material": 0,
+            "intensity": 255
+          },
+          {
+            "index": 1,
+            "height": -294,
+            "material": 16,
+            "intensity": 255
+          },
+          {
+            "index": 248,
+            "height": 716,
+            "material": 17,
+            "intensity": 255
+          },
+          {
+            "index": 31000,
+            "height": 2706,
+            "material": 7,
+            "intensity": 255
+          },
+          {
+            "index": 61752,
+            "height": 716,
+            "material": 0,
+            "intensity": 255
+          },
+          {
+            "index": 62000,
+            "height": 723,
+            "material": 0,
+            "intensity": 255
+          }
+        ],
+        "three_axis_records": []
+      }
+    },
+    {
+      "role": "regression_fixture",
+      "profile": "eaw",
+      "logical_path": "data/art/maps/_mp_space_coruscant.ted",
+      "sha256": "745b0f89d10867a4875eaeddae109154fef2e3f77adfe6b02888576b2cdd139c",
+      "checkpoint": {
+        "kind": "space",
+        "semantic_complete": true,
+        "stored_size": 65219,
+        "terrain_width": 0,
+        "terrain_height": 0,
+        "terrain_samples": 0,
+        "terrain_materials": 0,
+        "environments": 1,
+        "water_records": 0,
+        "placements": 60,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 60,
+        "placements_model_renderable": 60,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 1,
+        "textures_resolved": 1,
+        "sky_references": 2,
+        "skies_resolved": 2,
+        "skies_model_renderable": 2,
+        "notices": 1
+      },
+      "semantics": {
+        "volumes": 2,
+        "water_textures": 0,
+        "declared_extents": false,
+        "issues": {
+          "orientation_three_axis": 1
+        },
+        "three_axis_records": [
+          {
+            "ordinal": 24,
+            "object_id": 4415,
+            "type_crc": "0x95CBD2EC",
+            "type": "Urban_Backdrop_Large",
+            "position": [
+              2212.72339,
+              1270.88721,
+              -4300
+            ],
+            "euler_degrees": [
+              0,
+              329,
+              254
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "role": "regression_fixture",
+      "profile": "eaw",
+      "logical_path": "data/art/maps/_land_planet_alderaan_02.ted",
+      "sha256": "e4b5980c05f99d685a5faa37ea6fbeb5923f0ef62c8890c4ce786f7dde08dc12",
+      "checkpoint": {
+        "kind": "land",
+        "semantic_complete": true,
+        "stored_size": 1375866,
+        "terrain_width": 187,
+        "terrain_height": 187,
+        "terrain_samples": 34969,
+        "terrain_materials": 64,
+        "environments": 4,
+        "water_records": 21,
+        "placements": 606,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 606,
+        "placements_model_renderable": 606,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 96,
+        "textures_resolved": 96,
+        "sky_references": 4,
+        "skies_resolved": 4,
+        "skies_model_renderable": 4,
+        "notices": 3
+      },
+      "semantics": {
+        "volumes": 1,
+        "water_textures": 2,
+        "declared_extents": false,
+        "issues": {
+          "orientation_three_axis": 2,
+          "water_stream_invalid": 1
+        },
+        "terrain_height_range": [
+          -570,
+          7410
+        ],
+        "terrain_checkpoints": [
+          {
+            "index": 0,
+            "height": 148,
+            "material": 19,
+            "intensity": 255
+          },
+          {
+            "index": 1,
+            "height": 237,
+            "material": 19,
+            "intensity": 255
+          },
+          {
+            "index": 186,
+            "height": -61,
+            "material": 0,
+            "intensity": 255
+          },
+          {
+            "index": 17484,
+            "height": 1025,
+            "material": 35,
+            "intensity": 254
+          },
+          {
+            "index": 34782,
+            "height": 3034,
+            "material": 1,
+            "intensity": 255
+          },
+          {
+            "index": 34968,
+            "height": 5090,
+            "material": 1,
+            "intensity": 255
+          }
+        ],
+        "three_axis_records": [
+          {
+            "ordinal": 47,
+            "object_id": 32831,
+            "type_crc": "0x8BE3542C",
+            "type": "Land_Speeder",
+            "position": [
+              1861.21484,
+              2330.83643,
+              149.937393
+            ],
+            "euler_degrees": [
+              -0.318490565,
+              -0.226374283,
+              218.881042
+            ]
+          },
+          {
+            "ordinal": 48,
+            "object_id": 32830,
+            "type_crc": "0x8BE3542C",
+            "type": "Land_Speeder",
+            "position": [
+              1900.28833,
+              2374.08276,
+              149.912109
+            ],
+            "euler_degrees": [
+              -0.132363409,
+              0.378899276,
+              221.327698
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "role": "regression_fixture",
+      "profile": "eaw",
+      "logical_path": "data/art/maps/_space_planet_alderaan_01.ted",
+      "sha256": "148c4dbb1a9f2a51b1e8f510f2f2596db0bfd161dbcacebf64b9ce7adb4710de",
+      "checkpoint": {
+        "kind": "space",
+        "semantic_complete": true,
+        "stored_size": 44696,
+        "terrain_width": 0,
+        "terrain_height": 0,
+        "terrain_samples": 0,
+        "terrain_materials": 0,
+        "environments": 1,
+        "water_records": 0,
+        "placements": 41,
+        "placements_crc_absent": 0,
+        "placements_crc_missing": 0,
+        "placements_crc_collision": 0,
+        "placements_crc_unique": 41,
+        "placements_model_renderable": 41,
+        "placements_model_unresolved": 0,
+        "placements_model_undeclared": 0,
+        "placements_model_unknown": 0,
+        "texture_references": 1,
+        "textures_resolved": 1,
+        "sky_references": 2,
+        "skies_resolved": 2,
+        "skies_model_renderable": 2,
+        "notices": 2
+      },
+      "semantics": {
+        "volumes": 2,
+        "water_textures": 0,
+        "declared_extents": false,
+        "issues": {
+          "orientation_three_axis": 2
+        },
+        "three_axis_records": [
+          {
+            "ordinal": 15,
+            "object_id": 19636,
+            "type_crc": "0x31A5FA23",
+            "type": "Asteroid Huge",
+            "position": [
+              -2615.72119,
+              1329.76367,
+              -140
+            ],
+            "euler_degrees": [
+              71,
+              145,
+              26
+            ]
+          },
+          {
+            "ordinal": 19,
+            "object_id": 19489,
+            "type_crc": "0x31A5FA23",
+            "type": "Asteroid Huge",
+            "position": [
+              2936.90796,
+              630.880676,
+              -140
+            ],
+            "euler_degrees": [
+              42,
+              0,
+              82.67556
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "semantics_policy": "semantics pins decoded compatibility scalars only: typed notice counts, 1/259 volume and water-texture counts, the six terrain checkpoints (index y*width+x, raw i16 height, material slot, vertex intensity), the i16 height range, and every gated three-axis placement (ordinal, serialized id, type CRC, resolved type, source position, raw Euler degrees). No file bytes."
+}

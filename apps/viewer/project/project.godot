@@ -1,0 +1,22 @@
+; Production P1 viewer bootstrap. Godot owns window/device/swapchain lifecycle.
+config_version=5
+
+[application]
+config/name="EAWR Viewer"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+
+[display/window]
+vsync/vsync_mode=1
+
+[rendering]
+renderer/rendering_method="forward_plus"
+rendering_device/driver.windows="vulkan"
+rendering_device/fallback_to_d3d12=true
+rendering_device/fallback_to_opengl3=true
+textures/default_filters/use_nearest_mipmap_filter=false

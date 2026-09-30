@@ -1,0 +1,57 @@
+{
+  "about": "Perturbation hints of the tag perturbation check (docs/tag-applied-check.md), keyed by Class/tag path: perturb (auto, scale:<f>, flip, drop, set:<value>) or skip (why it cannot be checked headless). Rows without a hint use auto.",
+  "hints": {
+    "SpaceUnit/Layer_Z_Adjust": {
+      "perturb": "set:40",
+      "why": "the M2 craft do not author it (their height is the default); set: gives every checked object one"
+    },
+    "SpaceUnit/Armor_Type": {
+      "perturb": "set:Armor_Fighter",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "StarBase/Armor_Type": {
+      "perturb": "set:Armor_Frigate",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "SpaceUnit/Shield_Armor_Type": {
+      "perturb": "set:Shield_Fighter",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "StarBase/Shield_Armor_Type": {
+      "perturb": "set:Shield_Frigate",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "SpaceUnit/Damage_Type": {
+      "perturb": "set:Damage_Default",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "HardPoint/Damage_Type": {
+      "perturb": "set:Damage_Default",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "Projectile/Damage_Type": {
+      "perturb": "set:Damage_Default",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "HardPoint/Fire_Projectile_Type": {
+      "perturb": "set:Proj_Ship_Concussion_Missile",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "SpaceUnit/Space_Layer": {
+      "perturb": "set:Capital",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "StarBase/Space_Layer": {
+      "perturb": "set:Frigate",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "SpaceUnit/Targeting_Priority_Set": {
+      "perturb": "set:Frigate",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    },
+    "SpaceUnit/Ship_Class": {
+      "perturb": "set:frigate",
+      "why": "a single name has no automatic change: another valid value, the same for every checked object"
+    }
+  }
+}

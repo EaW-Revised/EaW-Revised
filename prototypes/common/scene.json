@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "scene_id": "remake-mc50-meshgloss",
+  "resolution": { "width": 1280, "height": 720 },
+  "vfs_profile": "remake",
+  "model": {
+    "logical_path": "data/art/models/rebel_mon_calamari_mc_50.alo",
+    "sha256": "9fd06b06d1626d8a11bea184fe73768745a6774062d44c9c39636e16202b62fe",
+    "source_expectation": "mod loose file in the accepted Remake profile"
+  },
+  "geometry": {
+    "mesh_name": "Hangar",
+    "submesh_selector": { "shader_ascii_casefold": "meshgloss.fx" },
+    "draw": "all matching indexed triangles"
+  },
+  "material": {
+    "shader": "MeshGloss.fx",
+    "runtime_technique": "sph_t0",
+    "runtime_pass": "sph_t0_p0",
+    "parameter_policy": "bind the typed ALO values without numeric modification",
+    "parameters": {
+      "Emissive": { "source": "alo_parameter" },
+      "Diffuse": { "source": "alo_parameter" },
+      "Specular": { "source": "alo_parameter" },
+      "Shininess": { "source": "alo_parameter" },
+      "BaseTexture": {
+        "source": "alo_parameter",
+        "expected_value_ascii_casefold": "hangar_3.dds",
+        "logical_path": "data/art/textures/hangar_3.dds",
+        "sha256": "24cfdf7a9a6d9156e9d218b2d2f6f4a1545dae63096534471dbb08da9af9572b",
+        "colour_space": "srgb"
+      }
+    }
+  },
+  "model_transform": {
+    "scale": [1.0, 1.0, 1.0],
+    "rotation_degrees_xyz": [0.0, 0.0, 0.0],
+    "translation": [0.0, 0.0, 0.0]
+  },
+  "team_colour": {
+    "linear_rgba": [0.125, 0.5, 1.0, 1.0],
+    "application": "common shader team-colour input; do not gamma-convert"
+  },
+  "axis_conversion": {
+    "asset_convention": "right-handed row-vector; +X right, +Y forward, +Z up",
+    "common_scene_convention": "right-handed column-vector; +X right, +Y up, -Z forward",
+    "position_xyz_to_common_xyz": ["x", "z", "-y"],
+    "triangle_winding": "preserve; the axis map is a proper rotation with determinant +1",
+    "uv_origin": "top-left",
+    "normal_and_tangent": "apply the same orthonormal axis map; preserve tangent handedness"
+  },
+  "camera": {
+    "projection": "perspective",
+    "vertical_fov_degrees": 45.0,
+    "near": 1.0,
+    "far": 20000.0,
+    "eye": [0.0, 420.0, 1050.0],
+    "target": [0.0, 0.0, 0.0],
+    "up": [0.0, 1.0, 0.0]
+  },
+  "lighting": {
+    "programmable_uniform_policy": "meshgloss-hemisphere-v1",
+    "light_scale_linear_rgba": [1.0, 1.0, 1.0, 1.0],
+    "ambient_linear_rgb": [0.08, 0.08, 0.10],
+    "directional": {
+      "direction_toward_light": [0.35, 0.75, 0.56],
+      "linear_rgb": [1.0, 0.94, 0.86],
+      "intensity": 2.0
+    },
+    "clear_linear_rgba": [0.006, 0.008, 0.015, 1.0]
+  },
+  "capture": {
+    "vsync": true,
+    "warmup_frames": 120,
+    "sample_frames": 600,
+    "fixed_camera_frame": 120
+  }
+}

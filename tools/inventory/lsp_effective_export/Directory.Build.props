@@ -1,0 +1,8 @@
+<Project>
+  <!-- Keep build products in the ignored repository out/ tree, never beside the tracked source. -->
+  <PropertyGroup>
+    <EawrOutRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../out/lsp_effective_export/'))</EawrOutRoot>
+    <BaseIntermediateOutputPath>$(EawrOutRoot)obj/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(EawrOutRoot)bin/</BaseOutputPath>
+  </PropertyGroup>
+</Project>

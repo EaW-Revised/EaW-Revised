@@ -1,0 +1,14 @@
+{
+  "which": {
+    "bash": "C:\\Windows\\System32\\bash.exe",
+    "git": "C:\\Program Files\\Git\\cmd\\git.exe"
+  },
+  "environment": {
+    "ProgramW6432": "C:\\Program Files",
+    "ProgramFiles": "C:\\Program Files",
+    "ProgramFiles(x86)": "C:\\Program Files (x86)",
+    "LOCALAPPDATA": "C:\\Users\\runneradmin\\AppData\\Local"
+  },
+  "shadowed_bash": "C:\\Windows\\System32\\bash.exe",
+  "expected": "C:\\Program Files\\Git\\bin\\bash.exe"
+}

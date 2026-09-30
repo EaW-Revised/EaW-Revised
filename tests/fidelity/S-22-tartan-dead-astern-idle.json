@@ -1,0 +1,233 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "S-22",
+  "label": "tartan-dead-astern-idle",
+  "title": "Tartan, target dead astern, idle",
+  "intent": "Measure facing, translation and each weapon hardpoint shot for 60 seconds with a target at 180 degrees off the shooter bow without orders.",
+  "behaviour": {
+    "note": "docs/behaviour/space-weapon-fire.md",
+    "cases": [
+      "S-22"
+    ],
+    "rules": [
+      "W-07",
+      "G-W2"
+    ]
+  },
+  "executable": {
+    "path": "corruption/StarWarsI.exe",
+    "sha256": "0a1bafa49ac608d8e591f4301105cb5a792ac7c5d080b0eac57fbc92dd71a4ed"
+  },
+  "content": [
+    {
+      "archive": "corruption/Data/Maps.meg",
+      "path": "DATA/ART/MAPS/_MP_SPACE_CORUSCANT.TED",
+      "sha256": "91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/FACTIONS.XML",
+      "sha256": "27c880a17e0b642dbfbe40ff0b0bad620d63cb72a6ac06f1ebf4ef7e03998a15"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/GAMECONSTANTS.XML",
+      "sha256": "fb4986e9a9866e2b8ec4f8c44a32050378c8c51bcde7390a5a7446e61f2ca3b1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MULTIPLAYER_STRUCTURE_MARKERS.XML",
+      "sha256": "18de78b0ff7fe1233bd00e7e17c8b88f98dadb86c21af2ad17a38379153947f7"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MARKERS.XML",
+      "sha256": "74fe3b607d75b65e40ea9c52ade5abbe9fa86ac3b4f05c147b92d0dd72eaa3e1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/STARBASES.XML",
+      "sha256": "07b602d8810c4c4f6afba3d3ac852482b2182a3501838d180c621f3ee8921578"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/CAMPAIGNS_UNDERWORLD_GC.XML",
+      "sha256": "5d9c49c968061ac8672c13d7cbed10ac24d039a66cd659805bfb72b0039b81ee"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/SPACEUNITSCORVETTES.XML",
+      "sha256": "0d14f23d9ce3070537c05970a22fdfe8690866157c6717570dd97f8f67209949"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFRIGATES.XML",
+      "sha256": "57da2b587e513980ea8dfd29928e76f714ce0b67439aa7f4cbfa4946457aacba"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFIGHTERS.XML",
+      "sha256": "28b569b62a88641791447d0f3ad75a0a36edca3e94b0ab53ecfb5f200f0d4958"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SQUADRONS.XML",
+      "sha256": "e2a1a512efc1abf46e64ce73030b55c78e923886239ef900f868b3c3de48aa78"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/HARDPOINTS.XML",
+      "sha256": "c059f2701d1a9b304919c1a17b4bf6157f1471b23c4e7b8c1f7526da2fd2f434"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/UNITS_SPACE_EMPIRE_TIE_INTERCEPTOR.XML",
+      "sha256": "35261c0267c9f7490582f7c2a7bcc3ead123c5988b4d1b032556caf2b90b86ca"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/DIFFICULTYADJUSTMENTS.XML",
+      "sha256": "576176423b06476153bc744ac5d527a9335a24824540c20cae482567e2c6fb91"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PLAYERS/BASICEMPIREPLAYER.XML",
+      "sha256": "f4003cfbdb5ca70d54beb1c664f848e8fde2f1ee755e3199980da8eb7892cb82"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PERCEPTUALEQUATIONS/OFFENSIVESPACEEQUATIONS.XML",
+      "sha256": "663083391c6d09b606f3df65a883c436002d3a8d1ffd807af4d9cbb58d9ce03f"
+    }
+  ],
+  "map": {
+    "path": "data/art/maps/_mp_space_coruscant.ted"
+  },
+  "players": [
+    {
+      "label": "empire",
+      "faction": "Empire"
+    },
+    {
+      "label": "rebel",
+      "faction": "Rebel"
+    }
+  ],
+  "staging": {
+    "fog": "revealed",
+    "ai": "suspended"
+  },
+  "units": [
+    {
+      "label": "shooter",
+      "type": "Tartan_Patrol_Cruiser",
+      "owner": "empire",
+      "position": [
+        0,
+        -1500,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "target",
+      "type": "Nebulon_B_Frigate",
+      "owner": "rebel",
+      "position": [
+        -800,
+        -1500,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": [
+        "hold_fire",
+        "invulnerable"
+      ]
+    }
+  ],
+  "hardpoints": [
+    {
+      "label": "shooter/hp_tartan_cruiser_00",
+      "unit": "shooter",
+      "hardpoint": "HP_Tartan_Cruiser_00",
+      "range": 1000,
+      "priority_set": "Corvette",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance and SPACEUNITSCORVETTES.XML / SPACEUNITSFRIGATES.XML Targeting_Priority_Set"
+    },
+    {
+      "label": "shooter/hp_tartan_cruiser_01",
+      "unit": "shooter",
+      "hardpoint": "HP_Tartan_Cruiser_01",
+      "range": 1000,
+      "priority_set": "Corvette",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance and SPACEUNITSCORVETTES.XML / SPACEUNITSFRIGATES.XML Targeting_Priority_Set"
+    },
+    {
+      "label": "shooter/hp_tartan_cruiser_02",
+      "unit": "shooter",
+      "hardpoint": "HP_Tartan_Cruiser_02",
+      "range": 1000,
+      "priority_set": "Corvette",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance and SPACEUNITSCORVETTES.XML / SPACEUNITSFRIGATES.XML Targeting_Priority_Set"
+    },
+    {
+      "label": "shooter/hp_tartan_cruiser_03",
+      "unit": "shooter",
+      "hardpoint": "HP_Tartan_Cruiser_03",
+      "range": 1000,
+      "priority_set": "Corvette",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance and SPACEUNITSCORVETTES.XML / SPACEUNITSFRIGATES.XML Targeting_Priority_Set"
+    },
+    {
+      "label": "shooter/hp_tartan_cruiser_04",
+      "unit": "shooter",
+      "hardpoint": "HP_Tartan_Cruiser_04",
+      "range": 1000,
+      "priority_set": "Corvette",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance and SPACEUNITSCORVETTES.XML / SPACEUNITSFRIGATES.XML Targeting_Priority_Set"
+    }
+  ],
+  "events": [],
+  "duration_ticks": 1800,
+  "tolerances": {
+    "alive": 0,
+    "hull": 0,
+    "shield": 1024,
+    "pos.x": 2048,
+    "pos.y": 2048,
+    "pos.z": 2048,
+    "fwd.x": 25,
+    "fwd.y": 25,
+    "fwd.z": 25,
+    "shots": "ignore",
+    "target": 0
+  },
+  "expect": [],
+  "fire_windows": [
+    {
+      "hardpoints": [
+        "shooter/hp_tartan_cruiser_00",
+        "shooter/hp_tartan_cruiser_01",
+        "shooter/hp_tartan_cruiser_02",
+        "shooter/hp_tartan_cruiser_03",
+        "shooter/hp_tartan_cruiser_04"
+      ],
+      "from_tick": 0,
+      "to_tick": 1799,
+      "min_shots": 0,
+      "max_shots": 0,
+      "text": "idle, target dead astern: no hardpoint fires"
+    }
+  ],
+  "notes": [
+    "FoC debug build, Coruscant quick load, seed 12345, tick 0 at frame 345, 30 logical ticks/s; fog revealed to both players and player AI suspended.",
+    "No hold_position flag on either ship: locomotors remain active so a combat turn can be observed. The target has fire disabled and is invulnerable so the shooter survives the 60-second window.",
+    "The ordered case issues GameObject.Attack_Target on tick 30; earlier frames are an idle control.",
+    "Record-only: compare facing, position, and per-hardpoint shots from the saved trace; shot timing follows retail random recharge and is not a row-wise expectation."
+  ],
+  "record_only": true
+}

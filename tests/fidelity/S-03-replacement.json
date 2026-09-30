@@ -1,0 +1,133 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "S-03",
+  "label": "replacement",
+  "title": "Removed target is replaced when the fire countdown ends",
+  "intent": "The retained fighter is removed while a bomber is in range; the target clears in the next tick and the hardpoint takes the bomber at its first service after the removal, which waits for the rest of its fire countdown (a pulse delay or a recharge), not for the half-second rescan interval.",
+  "behaviour": {"note": "docs/behaviour/space-targeting.md", "cases": ["C-04"], "rules": ["R-03"]},
+  "executable": {
+    "path": "corruption/StarWarsI.exe",
+    "sha256": "0a1bafa49ac608d8e591f4301105cb5a792ac7c5d080b0eac57fbc92dd71a4ed"
+  },
+  "content": [
+    {
+      "archive": "corruption/Data/config.meg",
+      "path": "DATA/XML/SPACEUNITTARGETINGPRIORITIES.XML",
+      "sha256": "364da1bfe2774bb993b5b86b0a2df28aff762d95f83a470ec6ba3e66099b4164"
+    },
+    {
+      "archive": "corruption/Data/config.meg",
+      "path": "DATA/XML/UNITS_SPACE_EMPIRE_TIE_DEFENDER.XML",
+      "sha256": "c33c4d0be6c7b3bcbc1e0f6ecb7b405bcce8a244c66274b6bb0841f136c06d53"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/HARDPOINTS_UNDERWORLD.XML",
+      "sha256": "9b84a63d0405515a67658892482ca32855f8232fbbfc531dded86222d099a104"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFIGHTERS.XML",
+      "sha256": "28b569b62a88641791447d0f3ad75a0a36edca3e94b0ab53ecfb5f200f0d4958"
+    },
+    {
+      "archive": "corruption/Data/maps.meg",
+      "path": "DATA/ART/MAPS/_MP_SPACE_CORUSCANT.TED",
+      "sha256": "91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286"
+    }
+  ],
+  "map": {"path": "data/art/maps/_mp_space_coruscant.ted"},
+  "players": [{"label": "empire", "faction": "Empire"}, {"label": "rebel", "faction": "Rebel"}],
+  "staging": {"fog": "revealed", "ai": "suspended"},
+  "units": [
+    {
+      "label": "defender",
+      "type": "TIE_Defender",
+      "owner": "empire",
+      "position": [0, 0, 0],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": ["hold_position", "invulnerable"]
+    },
+    {
+      "label": "fighter.1",
+      "type": "X-Wing",
+      "owner": "rebel",
+      "position": [250, 20, 0],
+      "facing_degrees": 180,
+      "spawn": "start",
+      "staging": ["hold_position", "hold_fire", "invulnerable"]
+    },
+    {
+      "label": "bomber.1",
+      "type": "Y-Wing",
+      "owner": "rebel",
+      "position": [400, -30, 0],
+      "facing_degrees": 180,
+      "spawn": "event",
+      "staging": ["hold_position", "hold_fire", "invulnerable"]
+    }
+  ],
+  "hardpoints": [
+    {
+      "label": "defender/ion",
+      "unit": "defender",
+      "hardpoint": "HP_TIE_DEFENDER_ION_00",
+      "range": 700,
+      "priority_set": "Fighter",
+      "source": "HARDPOINTS_UNDERWORLD.XML: Fire_Range_Distance 700.0, fixed 45x45 cone, opportunity fire when idle and when targeting, no Fire_Category_Restrictions; TIE_Defender Targeting_Priority_Set Fighter = Transport 1.0, Bomber 2.0, Fighter 3.0 (SPACEUNITTARGETINGPRIORITIES.XML)"
+    }
+  ],
+  "events": [
+    {"tick": 150, "action": "spawn", "unit": "bomber.1"},
+    {"tick": 210, "action": "remove", "unit": "fighter.1"}
+  ],
+  "duration_ticks": 300,
+  "tolerances": {
+    "alive": 0,
+    "hull": 0,
+    "shield": 0,
+    "pos.x": 0,
+    "pos.y": 0,
+    "pos.z": 0,
+    "fwd.x": 16,
+    "fwd.y": 16,
+    "fwd.z": 16,
+    "shots": "ignore",
+    "target": 0
+  },
+  "expect": [
+    {
+      "kind": "first_target",
+      "hardpoint": "defender/ion",
+      "value": "fighter.1",
+      "text": "The X-Wing is acquired first."
+    },
+    {
+      "kind": "holds_target",
+      "hardpoint": "defender/ion",
+      "value": "fighter.1",
+      "until_tick": 209,
+      "text": "The X-Wing is kept while the Y-Wing is in range (as in S-02)."
+    },
+    {
+      "kind": "retarget",
+      "hardpoint": "defender/ion",
+      "value": "bomber.1",
+      "after_tick": 210,
+      "max_ticks": 14,
+      "text": "The Y-Wing is the target 14 ticks after the removal, when the hardpoint's fire countdown lets it be serviced again (the second shot of a two-shot pulse in the recordings)."
+    }
+  ],
+  "notes": [
+    "Re-pinned from the Remake Outrider (HP_Outrider_R_HLC_01) to retail FoC: FoC has no Outrider, and TIE_Defender is the only FoC unit with the Fighter priority set and weapon hardpoints.",
+    "Retail FoC's Fighter set ranks Transport 1.0, Bomber 2.0, Fighter 3.0 (the Remake set used by the targeting note ranks Bomber first); X-Wing (Fighter | AntiBomber) scores 3.0 and Y-Wing (Bomber | AntiCapital) 2.0.",
+    "Targets stay within 450 units and 8 degrees of the defender's nose: inside the 700 range and the 45-degree cone with a wide margin.",
+    "Original recordings (#43 part B, FoC debug build, quick-loaded map, seed 12345, staging from logical frame 300 so tick 0 is frame 345): three runs agree bit for bit in every field, so the original's spread is 0. Each tolerance is the larger of that spread and the conversion bound (docs/traces.md): positions, hull and shield are whole numbers held for the whole recording, exact in binary32 and in Q24, so 0; fwd allows 16 raw units for the trig of a whole-degree facing on either side; shots stay ignored because fire times follow synchronized random recharge draws the scenario does not control.",
+    "In every recorded tick the hardpoint's target is its opportunity target; its attack-target slot stays empty while the defender's own weapon targets the X-Wing, so the risk noted for part B did not occur.",
+    "The hardpoint neither scans nor fires while its fighter parent is in the idle locomotor state or while its recharge countdown runs; the countdown starts at spawn with a random length (26 frames in one staging, 100 in the recorded one), so the first acquisition comes at the first service after both clear: tick 100 in the recordings.",
+    "The bomber spawns at tick 150 and the X-Wing is removed at tick 210, both after the latest possible first acquisition; with the spawn at tick 60 the recording acquired the bomber first and the replacement was not exercised.",
+    "Removal clears the retained target in the next tick (empty from tick 211), but the replacement scan runs only at the first hardpoint service its fire countdown admits. The removal came one tick after the first shot of a two-shot pulse, so the Y-Wing was acquired with the second shot at tick 224, 14 ticks after the removal. The latency is the remaining fire countdown (up to one pulse delay or one recharge, 0.5-3.5 s), not the scan cadence; an earlier shake-out staging whose removal fell 3 ticks before a recharge ended replaced in 3 ticks. max_ticks is the recorded 14 for this staging; C-04 in the targeting note states the rule."
+  ]
+}

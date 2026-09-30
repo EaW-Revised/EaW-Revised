@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "_comment": "Example GPU-host table for the maintainer rig tooling (which is not in the public source tree). Copy to config/gpu-hosts.local.json (ignored) and fill in your own hosts, or point EAWR_GPU_HOSTS at a table. Contributors run the viewer locally (apps/viewer/README.md) and need none of this.",
+  "legacyQueueHost": "GPU-HOST-1",
+  "hosts": [
+    {
+      "name": "GPU-HOST-1",
+      "aliases": [
+        "gpu1"
+      ],
+      "connection": "local",
+      "gpuProfile": "example-gpu",
+      "adapter": "Example GPU",
+      "gameRoot": "C:\\Games\\Star Wars Empire at War",
+      "gpuLanes": 1,
+      "note": "Placeholder host."
+    }
+  ]
+}

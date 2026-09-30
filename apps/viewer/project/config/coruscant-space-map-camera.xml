@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored camera policy for the FoC M1 space reference map (#30), not retail camera data.
+     Bounds: the map's inner TED source volume (pair 1, -6100..6100), read here as the playable area.
+     Pose: Team_01_Spawn_Point_Marker record 55 at source (4118.37, -4976, 0),
+     local player 1; distance 1200 (of 100..1900, zoom 0.611111) and Space_Mode Yaw_Default (0).
+     Project deviation (owner, #337/#348): FoC opens at Space_Mode Distance_Default 1000; the
+     owner wanted the default a bit further out, so 1200 (+20%, 22% of the way from FoC's
+     Distance_Min 200 to Distance_Max). The marker is read from the FoC Coruscant TED.
+     Project deviation (owner, #390): the camera zooms in to 100 instead of Space_Mode's
+     Distance_Min 200, so a corvette fills most of the frame height; Tactical_Min_Scroll_Speed
+     moves with it so the pan speed keeps FoC's line through 200..1900 (see docs/camera.md).
+     Project deviation (owner, #390): Pitch_Min -60 instead of Space_Mode's -10, so a Ctrl + middle
+     drag can look up at the battle from well under the plane; Pitch_Max stays FoC's 85.
+     Project deviation (owner, #413): five outward wheel clicks at Distance_Max enter each
+     overview stage instead of Space_Mode's ten. -->
+<map_camera schema="eawr-space-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/_mp_space_coruscant.ted"
+  map_sha256="91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286">
+  <bounds min_x="-6100" max_x="6100" min_y="-6100" max_y="6100"
+    source_id="coruscant-source-volume-1" authority="project-authored"/>
+  <initial target_x="4118.37" target_y="-4976" target_height="0" zoom="0.611111" yaw_degrees="0"/>
+  <bindings path="space-map-camera-bindings.json"/>
+  <constant_overrides schema="eawr-map-camera-overrides" version="1"
+    source_id="space-camera-owner-deviations" authority="project-authored">
+    <override tag="Distance_Min" value="100"/>
+    <override tag="Tactical_Min_Scroll_Speed" value="823.529412"/>
+    <override tag="Pitch_Min" value="-60"/>
+    <override tag="Tactical_Overview_Clicks" value="5"/>
+  </constant_overrides>
+</map_camera>

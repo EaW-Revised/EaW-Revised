@@ -1,0 +1,26 @@
+name: Feature or behaviour request
+description: Propose a feature, or report where EaW Revised behaves differently from the original game.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a difference from the original game, describe what the original does in your own words
+        (what you saw while playing, or what the game's data files say). Please do not paste
+        decompiler output, binary addresses or original source code.
+  - type: textarea
+    id: request
+    attributes:
+      label: What you would like
+    validations:
+      required: true
+  - type: textarea
+    id: original
+    attributes:
+      label: How the original game behaves (if relevant)
+      description: What you observed, and how (playing, a recording, the XML data).
+  - type: textarea
+    id: mods
+    attributes:
+      label: Mods affected
+      description: Mods that rely on this, if any.

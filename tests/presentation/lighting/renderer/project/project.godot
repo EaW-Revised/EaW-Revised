@@ -1,0 +1,14 @@
+; Isolated synthetic ship-hull shadow probe; the measured offscreen viewport is 480x480.
+config_version=5
+
+[application]
+config/name="EAWR Lighting Renderer Probe"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=400
+window/size/viewport_height=200
+
+[rendering]
+renderer/rendering_method="forward_plus"
+rendering_device/driver.windows="vulkan"

@@ -1,0 +1,208 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "S-52",
+  "label": "ywing-ion-shot-stuns-tartan",
+  "title": "Y-wing ion cannon shot at a moving Tartan",
+  "intent": "A Y-wing squadron attacks a Tartan that holds fire and cruises under a move order; at tick 150 the squadron fires its team ION_CANNON_SHOT at the Tartan. Sample the Tartan's shield, hull and position each tick, so the stun's effect on a move already under way shows.",
+  "behaviour": {
+    "note": "docs/behaviour/space-abilities.md",
+    "cases": [],
+    "rules": [
+      "AB-61",
+      "AB-66",
+      "IS-01",
+      "IS-05"
+    ]
+  },
+  "executable": {
+    "path": "corruption/StarWarsI.exe",
+    "sha256": "0a1bafa49ac608d8e591f4301105cb5a792ac7c5d080b0eac57fbc92dd71a4ed"
+  },
+  "content": [
+    {
+      "archive": "corruption/Data/Maps.meg",
+      "path": "DATA/ART/MAPS/_MP_SPACE_CORUSCANT.TED",
+      "sha256": "91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/FACTIONS.XML",
+      "sha256": "27c880a17e0b642dbfbe40ff0b0bad620d63cb72a6ac06f1ebf4ef7e03998a15"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/GAMECONSTANTS.XML",
+      "sha256": "fb4986e9a9866e2b8ec4f8c44a32050378c8c51bcde7390a5a7446e61f2ca3b1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MULTIPLAYER_STRUCTURE_MARKERS.XML",
+      "sha256": "18de78b0ff7fe1233bd00e7e17c8b88f98dadb86c21af2ad17a38379153947f7"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MARKERS.XML",
+      "sha256": "74fe3b607d75b65e40ea9c52ade5abbe9fa86ac3b4f05c147b92d0dd72eaa3e1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/STARBASES.XML",
+      "sha256": "07b602d8810c4c4f6afba3d3ac852482b2182a3501838d180c621f3ee8921578"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/CAMPAIGNS_UNDERWORLD_GC.XML",
+      "sha256": "5d9c49c968061ac8672c13d7cbed10ac24d039a66cd659805bfb72b0039b81ee"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/SPACEUNITSCORVETTES.XML",
+      "sha256": "0d14f23d9ce3070537c05970a22fdfe8690866157c6717570dd97f8f67209949"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFRIGATES.XML",
+      "sha256": "57da2b587e513980ea8dfd29928e76f714ce0b67439aa7f4cbfa4946457aacba"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFIGHTERS.XML",
+      "sha256": "28b569b62a88641791447d0f3ad75a0a36edca3e94b0ab53ecfb5f200f0d4958"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SQUADRONS.XML",
+      "sha256": "e2a1a512efc1abf46e64ce73030b55c78e923886239ef900f868b3c3de48aa78"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/HARDPOINTS.XML",
+      "sha256": "c059f2701d1a9b304919c1a17b4bf6157f1471b23c4e7b8c1f7526da2fd2f434"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/UNITS_SPACE_EMPIRE_TIE_INTERCEPTOR.XML",
+      "sha256": "35261c0267c9f7490582f7c2a7bcc3ead123c5988b4d1b032556caf2b90b86ca"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/DIFFICULTYADJUSTMENTS.XML",
+      "sha256": "576176423b06476153bc744ac5d527a9335a24824540c20cae482567e2c6fb91"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PLAYERS/BASICEMPIREPLAYER.XML",
+      "sha256": "f4003cfbdb5ca70d54beb1c664f848e8fde2f1ee755e3199980da8eb7892cb82"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PERCEPTUALEQUATIONS/OFFENSIVESPACEEQUATIONS.XML",
+      "sha256": "663083391c6d09b606f3df65a883c436002d3a8d1ffd807af4d9cbb58d9ce03f"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/SPACEUNITSCAPITAL.XML",
+      "sha256": "12e6e979fda4b2b2526a8cd6e6588f163911f75de0bfccd0c3841c5d18caf853"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/PROJECTILES.XML",
+      "sha256": "3916a021bbcd3d4e42a5e45321d7f36888b2208bb352711a1c1bf26915459855"
+    }
+  ],
+  "map": {
+    "path": "data/art/maps/_mp_space_coruscant.ted"
+  },
+  "players": [
+    {
+      "label": "empire",
+      "faction": "Empire"
+    },
+    {
+      "label": "rebel",
+      "faction": "Rebel"
+    }
+  ],
+  "staging": {
+    "fog": "revealed",
+    "ai": "suspended"
+  },
+  "units": [
+    {
+      "label": "ywing",
+      "type": "Y-Wing_Squadron",
+      "owner": "rebel",
+      "position": [
+        -1400,
+        -1500,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "tartan",
+      "type": "Tartan_Patrol_Cruiser",
+      "owner": "empire",
+      "position": [
+        1800,
+        -1500,
+        0
+      ],
+      "facing_degrees": 180,
+      "spawn": "start",
+      "staging": [
+        "hold_fire"
+      ]
+    }
+  ],
+  "hardpoints": [],
+  "events": [
+    {
+      "tick": 30,
+      "action": "attack",
+      "unit": "ywing",
+      "target": "tartan"
+    },
+    {
+      "tick": 30,
+      "action": "move",
+      "unit": "tartan",
+      "position": [
+        -3500,
+        -1500,
+        0
+      ]
+    },
+    {
+      "tick": 150,
+      "action": "ability",
+      "unit": "ywing",
+      "ability": "ION_CANNON_SHOT",
+      "target": "tartan"
+    }
+  ],
+  "duration_ticks": 1200,
+  "tolerances": {
+    "alive": 0,
+    "hull": 1024,
+    "shield": 1024,
+    "pos.x": 2048,
+    "pos.y": 2048,
+    "pos.z": 2048,
+    "fwd.x": 25,
+    "fwd.y": 25,
+    "fwd.z": 25
+  },
+  "expect": [],
+  "record_only": true,
+  "notes": [
+    "FoC debug build, Coruscant quick load, seed 12345, tick 0 at frame 345, 30 logical ticks/s; fog revealed to both players and player AI suspended.",
+    "The Tartan holds fire, so only the Y-wings change its shield. On tick 30 the squadron gets an Attack_Target order at the Tartan, and the Tartan gets a Move_To order that takes it past the squadron.",
+    "On tick 150 the recorder fires the squadron's ION_CANNON_SHOT at the Tartan with Lua Activate_Ability(name, target) on the squadron and on each Y-wing. A remake ability event with a target does the same.",
+    "Observed in the private retail clip: the stunned Tartan shows the blue stun aura for about 3 seconds and keeps its cruise speed (IS-05). What the remake predicts: every Y-wing fires one ion bolt (AB-61), each bolt does 50 to the shield and stuns the Tartan (IS-01), and its move under way keeps its speed.",
+    "Record-only: no retail trace is committed; the eye check for #561 compares the two clips."
+  ]
+}

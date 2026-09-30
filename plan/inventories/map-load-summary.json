@@ -1,0 +1,2242 @@
+{
+  "schema_version": 2,
+  "status": "complete_read_only_corpus_run",
+  "format": "ted",
+  "views": [
+    "effective",
+    "physical"
+  ],
+  "generator": "asset_validate --profile <profile> --view <effective|raw> --game-root <GAME_ROOT> [--mod-root <REMAKE_DATA>] --only-format ted --report <OUT>/map-<profile>-<view>.json",
+  "view_naming": "The validator's raw view is this inventory's physical view; the effective view is the layered mount the running game sees.",
+  "denominator_policy": "Every enumerated TED record, including acquisition and parser failures, is included in its selected VFS-view denominator. Every persisted-object record and every declared reference stays in its resolution denominator whether or not it resolves; no row is dropped to improve a rate.",
+  "semantic_completion_policy": "A structurally retained raw-only TED is not counted as a semantic map.",
+  "resolution_policy": "Placement type CRCs resolve against the profile's active XML catalog winners. A uniquely typed placement's model chain is the resolved effective object's Land_Model_Name (land), Space_Model_Name (space) or Model_Name, probed against the effective VFS under data/art/models/ with .alo suffix substitution. Terrain-material, water-surface (1/257/0 minis 0x1D/0x1E) and cloud textures probe data/art/textures/ with .tga/.dds stem substitution. Environment skydome fields name XML objects, so they resolve against the catalog and their own model chain is reported separately. References are probed against the effective mount in both views, because the question is whether the running game would find the asset.",
+  "catalog_gate": "These rates are measured against the currently loadable XML catalog. P0-05 (#5) is not accepted, so they are evidence for #26 and do not by themselves close its catalog-acceptance gate.",
+  "provenance": "Generated inventories contain logical paths, source IDs, hashes, and aggregate counts only; no install roots or file bytes.",
+  "completed_views": [
+    {
+      "profile": "eaw",
+      "view": "effective",
+      "discovered": 176,
+      "loaded": 176,
+      "failed": 0,
+      "notices": 1018,
+      "semantic_maps": 176,
+      "terrain_samples": 3084368,
+      "placements": 137499,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 13,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 137486,
+      "placements_model_renderable": 137231,
+      "placements_model_unresolved": 2,
+      "placements_model_undeclared": 253,
+      "placements_model_unknown": 13,
+      "texture_references": 6780,
+      "textures_resolved": 6778,
+      "texture_slots_untextured": 0,
+      "sky_references": 397,
+      "skies_resolved": 397,
+      "skies_model_renderable": 397,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 137486,
+          "total": 137499,
+          "rate": 0.999905,
+          "meets_99_percent": true
+        },
+        "placement_model_renderability": {
+          "resolved": 137231,
+          "total": 137499,
+          "rate": 0.998051,
+          "meets_99_percent": true
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 6778,
+          "total": 6780,
+          "rate": 0.999705,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 397,
+          "total": 397,
+          "rate": 1.0,
+          "meets_99_percent": true
+        },
+        "environment_sky_models": {
+          "resolved": 397,
+          "total": 397,
+          "rate": 1.0,
+          "meets_99_percent": true
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 2
+          },
+          {
+            "crc32": "0xb22635cd",
+            "maps": 1
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          }
+        ],
+        "model_names": [
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 1
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 1
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 1
+          }
+        ],
+        "sky_object_ids": []
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/space_unit_testbed.ted",
+            "count": 3
+          },
+          {
+            "logical_path": "data/art/maps/benchmark_space.ted",
+            "count": 3
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_land_alderaan_(shield).ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_land_alderaan.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/_pm6_empire_land_planet_ilum_.ted",
+            "count": 1
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space_geonosis.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/rm08a_cargo_woes.ted",
+            "count": 16
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space.ted",
+            "count": 15
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 144,
+          "occurrences": 995
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 9,
+          "occurrences": 13
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 9,
+          "occurrences": 9
+        }
+      ]
+    },
+    {
+      "profile": "eaw",
+      "view": "physical",
+      "discovered": 196,
+      "loaded": 196,
+      "failed": 0,
+      "notices": 1071,
+      "semantic_maps": 196,
+      "terrain_samples": 3397443,
+      "placements": 144204,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 14,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 144190,
+      "placements_model_renderable": 143935,
+      "placements_model_unresolved": 2,
+      "placements_model_undeclared": 253,
+      "placements_model_unknown": 14,
+      "texture_references": 7216,
+      "textures_resolved": 7214,
+      "texture_slots_untextured": 0,
+      "sky_references": 445,
+      "skies_resolved": 445,
+      "skies_model_renderable": 445,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 144190,
+          "total": 144204,
+          "rate": 0.999903,
+          "meets_99_percent": true
+        },
+        "placement_model_renderability": {
+          "resolved": 143935,
+          "total": 144204,
+          "rate": 0.998135,
+          "meets_99_percent": true
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 7214,
+          "total": 7216,
+          "rate": 0.999723,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 445,
+          "total": 445,
+          "rate": 1.0,
+          "meets_99_percent": true
+        },
+        "environment_sky_models": {
+          "resolved": 445,
+          "total": 445,
+          "rate": 1.0,
+          "meets_99_percent": true
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 3
+          },
+          {
+            "crc32": "0xb22635cd",
+            "maps": 1
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          }
+        ],
+        "model_names": [
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 1
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 1
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 1
+          }
+        ],
+        "sky_object_ids": []
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/space_unit_testbed.ted",
+            "count": 3
+          },
+          {
+            "logical_path": "data/art/maps/benchmark_space.ted",
+            "count": 3
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_land_alderaan_(shield).ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_land_alderaan.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/_pm6_empire_land_planet_ilum_.ted",
+            "count": 1
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space_geonosis.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/rm08a_cargo_woes.ted",
+            "count": 16
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space.ted",
+            "count": 15
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 162,
+          "occurrences": 1046
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 10,
+          "occurrences": 14
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 10,
+          "occurrences": 10
+        }
+      ]
+    },
+    {
+      "profile": "foc",
+      "view": "effective",
+      "discovered": 269,
+      "loaded": 269,
+      "failed": 0,
+      "notices": 5702,
+      "semantic_maps": 269,
+      "terrain_samples": 5840721,
+      "placements": 191083,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 36,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 191047,
+      "placements_model_renderable": 190469,
+      "placements_model_unresolved": 3,
+      "placements_model_undeclared": 575,
+      "placements_model_unknown": 36,
+      "texture_references": 11042,
+      "textures_resolved": 11038,
+      "texture_slots_untextured": 0,
+      "sky_references": 566,
+      "skies_resolved": 566,
+      "skies_model_renderable": 564,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 191047,
+          "total": 191083,
+          "rate": 0.999812,
+          "meets_99_percent": true
+        },
+        "placement_model_renderability": {
+          "resolved": 190469,
+          "total": 191083,
+          "rate": 0.996787,
+          "meets_99_percent": true
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 11038,
+          "total": 11042,
+          "rate": 0.999638,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 566,
+          "total": 566,
+          "rate": 1.0,
+          "meets_99_percent": true
+        },
+        "environment_sky_models": {
+          "resolved": 564,
+          "total": 566,
+          "rate": 0.996466,
+          "meets_99_percent": true
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x1e32d4a0",
+            "maps": 1
+          },
+          {
+            "crc32": "0x2288e7f7",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a92f8d1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85b8701d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 1
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf5f393f2",
+            "maps": 1
+          }
+        ],
+        "model_names": [
+          {
+            "name": "Cin_DeathStar_High.alo",
+            "maps": 1
+          },
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 1
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 3
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 1
+          }
+        ],
+        "sky_object_ids": []
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/_pm9_empire_land_planet_anaxes_.ted",
+            "count": 15
+          },
+          {
+            "logical_path": "data/art/maps/um08_rebel_eviction.ted",
+            "count": 10
+          },
+          {
+            "logical_path": "data/art/maps/benchmark_space.ted",
+            "count": 3
+          },
+          {
+            "logical_path": "data/art/maps/space_unit_testbed.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_land_alderaan_(shield).ted",
+            "count": 1
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 1
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space_geonosis.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/_space_planet_moncalamari_piracy.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 230,
+          "occurrences": 5638
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 10,
+          "occurrences": 36
+        },
+        {
+          "name": "preview_not_decoded",
+          "maps": 3,
+          "occurrences": 3
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 24,
+          "occurrences": 24
+        }
+      ]
+    },
+    {
+      "profile": "foc",
+      "view": "physical",
+      "discovered": 439,
+      "loaded": 439,
+      "failed": 0,
+      "notices": 7407,
+      "semantic_maps": 439,
+      "terrain_samples": 9565198,
+      "placements": 293360,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 522,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 292838,
+      "placements_model_renderable": 292240,
+      "placements_model_unresolved": 5,
+      "placements_model_undeclared": 593,
+      "placements_model_unknown": 522,
+      "texture_references": 17053,
+      "textures_resolved": 17047,
+      "texture_slots_untextured": 0,
+      "sky_references": 977,
+      "skies_resolved": 977,
+      "skies_model_renderable": 974,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 292838,
+          "total": 293360,
+          "rate": 0.998221,
+          "meets_99_percent": true
+        },
+        "placement_model_renderability": {
+          "resolved": 292240,
+          "total": 293360,
+          "rate": 0.996182,
+          "meets_99_percent": true
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 17047,
+          "total": 17053,
+          "rate": 0.999648,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 977,
+          "total": 977,
+          "rate": 1.0,
+          "meets_99_percent": true
+        },
+        "environment_sky_models": {
+          "resolved": 974,
+          "total": 977,
+          "rate": 0.996929,
+          "meets_99_percent": true
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x1e32d4a0",
+            "maps": 4
+          },
+          {
+            "crc32": "0x2288e7f7",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a92f8d1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x62bbfac9",
+            "maps": 1
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x68fcf047",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85b8701d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 4
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf5f393f2",
+            "maps": 1
+          }
+        ],
+        "model_names": [
+          {
+            "name": "Cin_DeathStar_High.alo",
+            "maps": 1
+          },
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 2
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 4
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 2
+          }
+        ],
+        "sky_object_ids": []
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/_land_planet_dagobah_02.ted",
+            "count": 244
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_jabiim_02.ted",
+            "count": 126
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_nalhutta_02.ted",
+            "count": 111
+          },
+          {
+            "logical_path": "data/art/maps/_pm9_empire_land_planet_anaxes_.ted",
+            "count": 15
+          },
+          {
+            "logical_path": "data/art/maps/um08_rebel_eviction.ted",
+            "count": 10
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 1
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_space_geonosis.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/_space_planet_moncalamari_piracy.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 368,
+          "occurrences": 6846
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 17,
+          "occurrences": 522
+        },
+        {
+          "name": "preview_not_decoded",
+          "maps": 3,
+          "occurrences": 3
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 35,
+          "occurrences": 35
+        }
+      ]
+    },
+    {
+      "profile": "remake",
+      "view": "effective",
+      "discovered": 375,
+      "loaded": 375,
+      "failed": 0,
+      "notices": 9992,
+      "semantic_maps": 375,
+      "terrain_samples": 11829063,
+      "placements": 239417,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 1819,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 237598,
+      "placements_model_renderable": 237013,
+      "placements_model_unresolved": 6,
+      "placements_model_undeclared": 579,
+      "placements_model_unknown": 1819,
+      "texture_references": 12389,
+      "textures_resolved": 12378,
+      "texture_slots_untextured": 0,
+      "sky_references": 600,
+      "skies_resolved": 542,
+      "skies_model_renderable": 542,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 237598,
+          "total": 239417,
+          "rate": 0.992402,
+          "meets_99_percent": true
+        },
+        "placement_model_renderability": {
+          "resolved": 237013,
+          "total": 239417,
+          "rate": 0.989959,
+          "meets_99_percent": false
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 12378,
+          "total": 12389,
+          "rate": 0.999112,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 542,
+          "total": 600,
+          "rate": 0.903333,
+          "meets_99_percent": false
+        },
+        "environment_sky_models": {
+          "resolved": 542,
+          "total": 600,
+          "rate": 0.903333,
+          "meets_99_percent": false
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x03f56f23",
+            "maps": 2
+          },
+          {
+            "crc32": "0x05e58b73",
+            "maps": 1
+          },
+          {
+            "crc32": "0x07cd2cb6",
+            "maps": 1
+          },
+          {
+            "crc32": "0x0c470f91",
+            "maps": 1
+          },
+          {
+            "crc32": "0x0ccb6142",
+            "maps": 8
+          },
+          {
+            "crc32": "0x0f2c3b67",
+            "maps": 1
+          },
+          {
+            "crc32": "0x10d2077d",
+            "maps": 4
+          },
+          {
+            "crc32": "0x19484151",
+            "maps": 1
+          },
+          {
+            "crc32": "0x198e0703",
+            "maps": 1
+          },
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x1a9a45b6",
+            "maps": 1
+          },
+          {
+            "crc32": "0x1e32d4a0",
+            "maps": 1
+          },
+          {
+            "crc32": "0x20b8be7b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x2288e7f7",
+            "maps": 1
+          },
+          {
+            "crc32": "0x24be5a14",
+            "maps": 3
+          },
+          {
+            "crc32": "0x2544b761",
+            "maps": 13
+          },
+          {
+            "crc32": "0x27c46ea7",
+            "maps": 4
+          },
+          {
+            "crc32": "0x2a6736bf",
+            "maps": 9
+          },
+          {
+            "crc32": "0x2d5d7f2d",
+            "maps": 14
+          },
+          {
+            "crc32": "0x2f65f161",
+            "maps": 1
+          },
+          {
+            "crc32": "0x31a5fa23",
+            "maps": 23
+          },
+          {
+            "crc32": "0x32466f48",
+            "maps": 9
+          },
+          {
+            "crc32": "0x32908927",
+            "maps": 2
+          },
+          {
+            "crc32": "0x352bab51",
+            "maps": 2
+          },
+          {
+            "crc32": "0x35676d3a",
+            "maps": 1
+          },
+          {
+            "crc32": "0x3de4f0cc",
+            "maps": 21
+          },
+          {
+            "crc32": "0x3e62befa",
+            "maps": 4
+          },
+          {
+            "crc32": "0x40374681",
+            "maps": 1
+          },
+          {
+            "crc32": "0x41d96152",
+            "maps": 4
+          },
+          {
+            "crc32": "0x422c9bc7",
+            "maps": 3
+          },
+          {
+            "crc32": "0x446a789d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x45053313",
+            "maps": 3
+          },
+          {
+            "crc32": "0x45415fde",
+            "maps": 12
+          },
+          {
+            "crc32": "0x463b8bbe",
+            "maps": 8
+          },
+          {
+            "crc32": "0x51025c79",
+            "maps": 1
+          },
+          {
+            "crc32": "0x53b44113",
+            "maps": 6
+          },
+          {
+            "crc32": "0x54ed74c2",
+            "maps": 6
+          },
+          {
+            "crc32": "0x58230cc1",
+            "maps": 12
+          },
+          {
+            "crc32": "0x58ec28a6",
+            "maps": 7
+          },
+          {
+            "crc32": "0x59d7666a",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a82c33a",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a92f8d1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5b37aa86",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5f54864b",
+            "maps": 3
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x6e893795",
+            "maps": 1
+          },
+          {
+            "crc32": "0x715d190d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x71bf8056",
+            "maps": 6
+          },
+          {
+            "crc32": "0x74c2eb0b",
+            "maps": 15
+          },
+          {
+            "crc32": "0x74f25fb5",
+            "maps": 2
+          },
+          {
+            "crc32": "0x76103a0b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x78c3b76f",
+            "maps": 4
+          },
+          {
+            "crc32": "0x7bf3482d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x7c82e00c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x7d84e7a1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x808756b9",
+            "maps": 1
+          },
+          {
+            "crc32": "0x829fd7d5",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85b8701d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85f36c2e",
+            "maps": 2
+          },
+          {
+            "crc32": "0x87c64f77",
+            "maps": 3
+          },
+          {
+            "crc32": "0x895ec15b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8b1717de",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c480a68",
+            "maps": 3
+          },
+          {
+            "crc32": "0x93c20358",
+            "maps": 3
+          },
+          {
+            "crc32": "0x9949c071",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9a36e49e",
+            "maps": 17
+          },
+          {
+            "crc32": "0x9d79e796",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9f7aec1f",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa08f7adc",
+            "maps": 18
+          },
+          {
+            "crc32": "0xa3dc34b4",
+            "maps": 13
+          },
+          {
+            "crc32": "0xa4a3de35",
+            "maps": 6
+          },
+          {
+            "crc32": "0xa594b6c0",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa5b96700",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa66e0071",
+            "maps": 2
+          },
+          {
+            "crc32": "0xab4f3ef2",
+            "maps": 27
+          },
+          {
+            "crc32": "0xac22faeb",
+            "maps": 8
+          },
+          {
+            "crc32": "0xb1c1dd57",
+            "maps": 2
+          },
+          {
+            "crc32": "0xb37bbba7",
+            "maps": 7
+          },
+          {
+            "crc32": "0xb48ca216",
+            "maps": 1
+          },
+          {
+            "crc32": "0xb6d1e60a",
+            "maps": 1
+          },
+          {
+            "crc32": "0xb79b09a7",
+            "maps": 11
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xbd6ccf7a",
+            "maps": 4
+          },
+          {
+            "crc32": "0xbf2722ba",
+            "maps": 25
+          },
+          {
+            "crc32": "0xcaf5977d",
+            "maps": 3
+          },
+          {
+            "crc32": "0xcd6ea5b4",
+            "maps": 3
+          },
+          {
+            "crc32": "0xd116df19",
+            "maps": 8
+          },
+          {
+            "crc32": "0xd377e533",
+            "maps": 11
+          },
+          {
+            "crc32": "0xd6835af0",
+            "maps": 1
+          },
+          {
+            "crc32": "0xd9d44eaa",
+            "maps": 1
+          },
+          {
+            "crc32": "0xdb25ca7d",
+            "maps": 6
+          },
+          {
+            "crc32": "0xdc480e64",
+            "maps": 17
+          },
+          {
+            "crc32": "0xe40d6534",
+            "maps": 2
+          },
+          {
+            "crc32": "0xe4c533ce",
+            "maps": 3
+          },
+          {
+            "crc32": "0xf0740904",
+            "maps": 3
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf5f393f2",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf780662f",
+            "maps": 1
+          },
+          {
+            "crc32": "0xfb357115",
+            "maps": 2
+          }
+        ],
+        "model_names": [
+          {
+            "name": "Cin_DeathStar_High.alo",
+            "maps": 1
+          },
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 1
+          },
+          {
+            "name": "W_Planet_Urban.ALO",
+            "maps": 3
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 3
+          },
+          {
+            "name": "w_acid_01",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_concrete",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_tiles",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_tiles_b",
+            "maps": 1
+          },
+          {
+            "name": "w_urbanstreet_b2",
+            "maps": 1
+          },
+          {
+            "name": "w_urbanstreet_b2_bc",
+            "maps": 1
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 2
+          }
+        ],
+        "sky_object_ids": [
+          {
+            "name": "SKY_BESPIN_00",
+            "maps": 1
+          },
+          {
+            "name": "STAR_BACKDROP_BLUE",
+            "maps": 5
+          },
+          {
+            "name": "STAR_BACKDROP_BLUE_STEEL",
+            "maps": 3
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN",
+            "maps": 12
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN_ORANGE",
+            "maps": 8
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN_ORANGE_2",
+            "maps": 9
+          },
+          {
+            "name": "STAR_BACKDROP_ORANGE",
+            "maps": 1
+          },
+          {
+            "name": "STAR_BACKDROP_ORANGE_2",
+            "maps": 4
+          },
+          {
+            "name": "STAR_BACKDROP_PURPLE",
+            "maps": 1
+          },
+          {
+            "name": "STAR_BACKDROP_PURPLE_2",
+            "maps": 3
+          },
+          {
+            "name": "STAR_BACKDROP_RED",
+            "maps": 2
+          },
+          {
+            "name": "STAR_BACKDROP_RED_LIGHT",
+            "maps": 4
+          },
+          {
+            "name": "STAR_BACKDROP_RED_VIVID",
+            "maps": 5
+          }
+        ]
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 268
+          },
+          {
+            "logical_path": "data/art/maps/um06_dark_ally.ted",
+            "count": 87
+          },
+          {
+            "logical_path": "data/art/maps/um01_a_crimelord_unleashed.ted",
+            "count": 86
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_felucia_tutorial.ted",
+            "count": 68
+          },
+          {
+            "logical_path": "data/art/maps/_space_planet_mandalore_piracy_prologue.ted",
+            "count": 60
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/kuat repair yards.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/_space_planet_kuat_01.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/_mp_space_kuat.ted",
+            "count": 1
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/rm08a_cargo_woes.ted",
+            "count": 25
+          },
+          {
+            "logical_path": "data/art/maps/menuspacehapes.ted",
+            "count": 20
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 311,
+          "occurrences": 7978
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 104,
+          "occurrences": 1819
+        },
+        {
+          "name": "preview_not_decoded",
+          "maps": 174,
+          "occurrences": 174
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 20,
+          "occurrences": 20
+        }
+      ]
+    },
+    {
+      "profile": "remake",
+      "view": "physical",
+      "discovered": 648,
+      "loaded": 648,
+      "failed": 0,
+      "notices": 14754,
+      "semantic_maps": 648,
+      "terrain_samples": 17166742,
+      "placements": 373816,
+      "placements_crc_absent": 0,
+      "placements_crc_missing": 3912,
+      "placements_crc_collision": 0,
+      "placements_crc_unique": 369904,
+      "placements_model_renderable": 369293,
+      "placements_model_unresolved": 8,
+      "placements_model_undeclared": 603,
+      "placements_model_unknown": 3912,
+      "texture_references": 20525,
+      "textures_resolved": 20512,
+      "texture_slots_untextured": 0,
+      "sky_references": 1223,
+      "skies_resolved": 992,
+      "skies_model_renderable": 992,
+      "resolution": {
+        "placement_type_resolution": {
+          "resolved": 369904,
+          "total": 373816,
+          "rate": 0.989535,
+          "meets_99_percent": false
+        },
+        "placement_model_renderability": {
+          "resolved": 369293,
+          "total": 373816,
+          "rate": 0.9879,
+          "meets_99_percent": false
+        },
+        "terrain_and_cloud_textures": {
+          "resolved": 20512,
+          "total": 20525,
+          "rate": 0.999367,
+          "meets_99_percent": true
+        },
+        "environment_skies": {
+          "resolved": 992,
+          "total": 1223,
+          "rate": 0.81112,
+          "meets_99_percent": false
+        },
+        "environment_sky_models": {
+          "resolved": 992,
+          "total": 1223,
+          "rate": 0.81112,
+          "meets_99_percent": false
+        }
+      },
+      "unresolved": {
+        "placement_type_crcs": [
+          {
+            "crc32": "0x03f56f23",
+            "maps": 2
+          },
+          {
+            "crc32": "0x05e58b73",
+            "maps": 6
+          },
+          {
+            "crc32": "0x07cd2cb6",
+            "maps": 1
+          },
+          {
+            "crc32": "0x0c470f91",
+            "maps": 1
+          },
+          {
+            "crc32": "0x0ccb6142",
+            "maps": 26
+          },
+          {
+            "crc32": "0x0f2c3b67",
+            "maps": 1
+          },
+          {
+            "crc32": "0x0f348a0b",
+            "maps": 7
+          },
+          {
+            "crc32": "0x10d2077d",
+            "maps": 30
+          },
+          {
+            "crc32": "0x19484151",
+            "maps": 1
+          },
+          {
+            "crc32": "0x198e0703",
+            "maps": 1
+          },
+          {
+            "crc32": "0x19e1f53d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x1a9a45b6",
+            "maps": 1
+          },
+          {
+            "crc32": "0x1e32d4a0",
+            "maps": 4
+          },
+          {
+            "crc32": "0x20b8be7b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x2288e7f7",
+            "maps": 1
+          },
+          {
+            "crc32": "0x24be5a14",
+            "maps": 39
+          },
+          {
+            "crc32": "0x2544b761",
+            "maps": 14
+          },
+          {
+            "crc32": "0x27c46ea7",
+            "maps": 4
+          },
+          {
+            "crc32": "0x2a6736bf",
+            "maps": 35
+          },
+          {
+            "crc32": "0x2d5d7f2d",
+            "maps": 15
+          },
+          {
+            "crc32": "0x2f65f161",
+            "maps": 1
+          },
+          {
+            "crc32": "0x31a5fa23",
+            "maps": 124
+          },
+          {
+            "crc32": "0x3240dfc3",
+            "maps": 2
+          },
+          {
+            "crc32": "0x32466f48",
+            "maps": 9
+          },
+          {
+            "crc32": "0x32908927",
+            "maps": 2
+          },
+          {
+            "crc32": "0x352bab51",
+            "maps": 2
+          },
+          {
+            "crc32": "0x35676d3a",
+            "maps": 7
+          },
+          {
+            "crc32": "0x3de4f0cc",
+            "maps": 22
+          },
+          {
+            "crc32": "0x3e62befa",
+            "maps": 4
+          },
+          {
+            "crc32": "0x40374681",
+            "maps": 1
+          },
+          {
+            "crc32": "0x41d96152",
+            "maps": 51
+          },
+          {
+            "crc32": "0x422c9bc7",
+            "maps": 3
+          },
+          {
+            "crc32": "0x446a789d",
+            "maps": 3
+          },
+          {
+            "crc32": "0x45053313",
+            "maps": 3
+          },
+          {
+            "crc32": "0x45415fde",
+            "maps": 12
+          },
+          {
+            "crc32": "0x463b8bbe",
+            "maps": 36
+          },
+          {
+            "crc32": "0x51025c79",
+            "maps": 1
+          },
+          {
+            "crc32": "0x53b44113",
+            "maps": 21
+          },
+          {
+            "crc32": "0x54ed74c2",
+            "maps": 23
+          },
+          {
+            "crc32": "0x58230cc1",
+            "maps": 13
+          },
+          {
+            "crc32": "0x58ec28a6",
+            "maps": 31
+          },
+          {
+            "crc32": "0x59b68206",
+            "maps": 3
+          },
+          {
+            "crc32": "0x59d7666a",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a82c33a",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5a92f8d1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5b37aa86",
+            "maps": 1
+          },
+          {
+            "crc32": "0x5f54864b",
+            "maps": 3
+          },
+          {
+            "crc32": "0x60ce2f46",
+            "maps": 31
+          },
+          {
+            "crc32": "0x62bbfac9",
+            "maps": 1
+          },
+          {
+            "crc32": "0x664ee489",
+            "maps": 1
+          },
+          {
+            "crc32": "0x68fcf047",
+            "maps": 1
+          },
+          {
+            "crc32": "0x6a30d0e2",
+            "maps": 11
+          },
+          {
+            "crc32": "0x6a53b14d",
+            "maps": 2
+          },
+          {
+            "crc32": "0x6e893795",
+            "maps": 1
+          },
+          {
+            "crc32": "0x715d190d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x71bf8056",
+            "maps": 14
+          },
+          {
+            "crc32": "0x74c2eb0b",
+            "maps": 89
+          },
+          {
+            "crc32": "0x74f25fb5",
+            "maps": 3
+          },
+          {
+            "crc32": "0x76103a0b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x77e64b86",
+            "maps": 31
+          },
+          {
+            "crc32": "0x77f1d56c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x78c3b76f",
+            "maps": 7
+          },
+          {
+            "crc32": "0x7bf3482d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x7c82e00c",
+            "maps": 1
+          },
+          {
+            "crc32": "0x7d84e7a1",
+            "maps": 1
+          },
+          {
+            "crc32": "0x7f361eec",
+            "maps": 2
+          },
+          {
+            "crc32": "0x808756b9",
+            "maps": 1
+          },
+          {
+            "crc32": "0x829fd7d5",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85b8701d",
+            "maps": 1
+          },
+          {
+            "crc32": "0x85f36c2e",
+            "maps": 2
+          },
+          {
+            "crc32": "0x87c64f77",
+            "maps": 3
+          },
+          {
+            "crc32": "0x895ec15b",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8b1717de",
+            "maps": 23
+          },
+          {
+            "crc32": "0x8c0f02b2",
+            "maps": 1
+          },
+          {
+            "crc32": "0x8c480a68",
+            "maps": 15
+          },
+          {
+            "crc32": "0x93c20358",
+            "maps": 3
+          },
+          {
+            "crc32": "0x9949c071",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9a36e49e",
+            "maps": 18
+          },
+          {
+            "crc32": "0x9d79e796",
+            "maps": 1
+          },
+          {
+            "crc32": "0x9d9d65a8",
+            "maps": 5
+          },
+          {
+            "crc32": "0x9f7aec1f",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa08f7adc",
+            "maps": 18
+          },
+          {
+            "crc32": "0xa3dc34b4",
+            "maps": 13
+          },
+          {
+            "crc32": "0xa4a3de35",
+            "maps": 17
+          },
+          {
+            "crc32": "0xa594b6c0",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa5b96700",
+            "maps": 1
+          },
+          {
+            "crc32": "0xa66e0071",
+            "maps": 2
+          },
+          {
+            "crc32": "0xa6771e57",
+            "maps": 1
+          },
+          {
+            "crc32": "0xab4f3ef2",
+            "maps": 28
+          },
+          {
+            "crc32": "0xac22faeb",
+            "maps": 8
+          },
+          {
+            "crc32": "0xb08a0285",
+            "maps": 3
+          },
+          {
+            "crc32": "0xb1c1dd57",
+            "maps": 2
+          },
+          {
+            "crc32": "0xb37bbba7",
+            "maps": 7
+          },
+          {
+            "crc32": "0xb434d25f",
+            "maps": 9
+          },
+          {
+            "crc32": "0xb48ca216",
+            "maps": 1
+          },
+          {
+            "crc32": "0xb6d1e60a",
+            "maps": 1
+          },
+          {
+            "crc32": "0xb79b09a7",
+            "maps": 12
+          },
+          {
+            "crc32": "0xbc21d348",
+            "maps": 2
+          },
+          {
+            "crc32": "0xbd6ccf7a",
+            "maps": 4
+          },
+          {
+            "crc32": "0xbf2722ba",
+            "maps": 26
+          },
+          {
+            "crc32": "0xc5fafc87",
+            "maps": 2
+          },
+          {
+            "crc32": "0xcaf5977d",
+            "maps": 3
+          },
+          {
+            "crc32": "0xcd6ea5b4",
+            "maps": 3
+          },
+          {
+            "crc32": "0xd116df19",
+            "maps": 8
+          },
+          {
+            "crc32": "0xd377e533",
+            "maps": 12
+          },
+          {
+            "crc32": "0xd6835af0",
+            "maps": 1
+          },
+          {
+            "crc32": "0xd9d44eaa",
+            "maps": 1
+          },
+          {
+            "crc32": "0xdb25ca7d",
+            "maps": 6
+          },
+          {
+            "crc32": "0xdc480e64",
+            "maps": 17
+          },
+          {
+            "crc32": "0xe40d6534",
+            "maps": 2
+          },
+          {
+            "crc32": "0xe4c533ce",
+            "maps": 3
+          },
+          {
+            "crc32": "0xee702c98",
+            "maps": 13
+          },
+          {
+            "crc32": "0xf0740904",
+            "maps": 3
+          },
+          {
+            "crc32": "0xf474c776",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf5f393f2",
+            "maps": 1
+          },
+          {
+            "crc32": "0xf780662f",
+            "maps": 1
+          },
+          {
+            "crc32": "0xfb357115",
+            "maps": 2
+          }
+        ],
+        "model_names": [
+          {
+            "name": "Cin_DeathStar_High.alo",
+            "maps": 1
+          },
+          {
+            "name": "W_Bush_Swmp00.ALO",
+            "maps": 2
+          },
+          {
+            "name": "W_Planet_Urban.ALO",
+            "maps": 3
+          }
+        ],
+        "texture_names": [
+          {
+            "name": "W_RivRock00_B.tga",
+            "maps": 4
+          },
+          {
+            "name": "w_acid_01",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_concrete",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_tiles",
+            "maps": 1
+          },
+          {
+            "name": "w_theed_hangar_tiles_b",
+            "maps": 1
+          },
+          {
+            "name": "w_urbanstreet_b2",
+            "maps": 1
+          },
+          {
+            "name": "w_urbanstreet_b2_bc",
+            "maps": 1
+          },
+          {
+            "name": "\u00f6?\u00b1>\u00d0\u00f3\u00ce\u00bd",
+            "maps": 3
+          }
+        ],
+        "sky_object_ids": [
+          {
+            "name": "SKY_BESPIN_00",
+            "maps": 3
+          },
+          {
+            "name": "STAR_BACKDROP_BLUE",
+            "maps": 18
+          },
+          {
+            "name": "STAR_BACKDROP_BLUE_STEEL",
+            "maps": 10
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN",
+            "maps": 56
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN_ORANGE",
+            "maps": 29
+          },
+          {
+            "name": "STAR_BACKDROP_GREEN_ORANGE_2",
+            "maps": 42
+          },
+          {
+            "name": "STAR_BACKDROP_ORANGE",
+            "maps": 1
+          },
+          {
+            "name": "STAR_BACKDROP_ORANGE_2",
+            "maps": 10
+          },
+          {
+            "name": "STAR_BACKDROP_PURPLE",
+            "maps": 4
+          },
+          {
+            "name": "STAR_BACKDROP_PURPLE_2",
+            "maps": 19
+          },
+          {
+            "name": "STAR_BACKDROP_RED",
+            "maps": 4
+          },
+          {
+            "name": "STAR_BACKDROP_RED_LIGHT",
+            "maps": 6
+          },
+          {
+            "name": "STAR_BACKDROP_RED_VIVID",
+            "maps": 29
+          }
+        ]
+      },
+      "top_unresolved_maps": {
+        "placements_crc_missing": [
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 268
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_dagobah_02.ted",
+            "count": 244
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_jabiim_02.ted",
+            "count": 126
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_nalhutta_02.ted",
+            "count": 111
+          },
+          {
+            "logical_path": "data/art/maps/um06_dark_ally.ted",
+            "count": 87
+          }
+        ],
+        "placements_crc_collision": [],
+        "placements_model_unresolved": [
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/_land_planet_bestine_02.ted",
+            "count": 2
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/kuat repair yards.ted",
+            "count": 1
+          },
+          {
+            "logical_path": "data/art/maps/_space_planet_kuat_01.ted",
+            "count": 1
+          }
+        ],
+        "placements_model_undeclared": [
+          {
+            "logical_path": "data/art/maps/rm08a_cargo_woes.ted",
+            "count": 25
+          },
+          {
+            "logical_path": "data/art/maps/menuspacehapes.ted",
+            "count": 20
+          },
+          {
+            "logical_path": "data/art/maps/um11_raiders_of_the_lost_holocron.ted",
+            "count": 18
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_vol.ted",
+            "count": 17
+          },
+          {
+            "logical_path": "data/art/maps/skirmish_demo_ground_desert.ted",
+            "count": 17
+          }
+        ]
+      },
+      "map_issues": [
+        {
+          "name": "optional_section_absent",
+          "maps": 1,
+          "occurrences": 1
+        },
+        {
+          "name": "orientation_three_axis",
+          "maps": 541,
+          "occurrences": 10625
+        },
+        {
+          "name": "placement_type_missing",
+          "maps": 305,
+          "occurrences": 3912
+        },
+        {
+          "name": "preview_not_decoded",
+          "maps": 178,
+          "occurrences": 178
+        },
+        {
+          "name": "water_stream_invalid",
+          "maps": 38,
+          "occurrences": 38
+        }
+      ]
+    }
+  ],
+  "effective_aggregate": {
+    "scope": "sum of the three effective profile views; a logical map present in multiple profiles counts once in each profile view",
+    "catalog_status": "provisional_until_p0_05_acceptance",
+    "profiles": [
+      "eaw",
+      "foc",
+      "remake"
+    ],
+    "discovered": 820,
+    "loaded": 820,
+    "failed": 0,
+    "placement_type_resolution": {
+      "resolved": 566131,
+      "total": 567999,
+      "rate": 0.996711,
+      "meets_99_percent": true
+    }
+  },
+  "acceptance_denominator": "Per the clean TED contract, the effective VFS view is the acceptance denominator for the 99 percent placement-type target. The physical view is provenance only: shadowed duplicates are reported, never counted toward or against acceptance.",
+  "map_issue_policy": "map_issues lists each typed TED notice (MapIssue) with the maps that carry it and its total occurrences. Only framing errors fail a load; a failed semantic view is a notice with the raw chunk tree retained."
+}

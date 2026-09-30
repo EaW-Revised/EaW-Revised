@@ -1,0 +1,255 @@
+{
+  "schema": "eawr.godot-material-coverage",
+  "schema_version": 1,
+  "owner": "P1-01/#22 production renderer with P1-03/#24 animation adapters",
+  "consumer_binding_contract": {
+    "material_description_schema_version": 1,
+    "required_fields": ["route", "pass", "program", "technique", "pass_name", "bindings"],
+    "binding_value_types": ["integer", "scalar", "vector3", "vector4", "texture"],
+    "selection_rule": "An unsupported route, pass, legacy selector, structural preflight failure, or Godot compiler rejection is an error; no fallback route is selected.",
+    "asset_io": "Consumers provide decoded Model and Texture values. Renderer headers neither name paths nor persist capture output.",
+    "snapshot_boundary": "Consumers submit shared_ptr<const sim::RenderSnapshot>; Q24 conversion occurs only inside presentation."
+  },
+  "routes": {
+    "legacy_effect": {
+      "status": "implemented, fail-closed; P1-03 adds bounded skinned/articulated fallbacks; P1-11 adds fixed-function BatchMeshGloss, MeshAlpha, MeshAlphaGloss and BatchMeshAlpha",
+      "selectors": [
+        {"program": "MeshGloss.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0"},
+        {"program": "MeshGlossColorize.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "opaque", "basis": "file family src/presentation/godot/legacy/mesh_gloss_colorize.hpp; its GlossTexture is its own upload binding (MULTITEX-01), so the laser pads NV_LDS_PAD.ALO draw (#80)"},
+        {"program": "MeshBumpColorize.fx", "technique": "sph_t2", "pass_name": "sph_t2_p0", "render_pass": "opaque", "basis": "file family src/presentation/godot/legacy/bump_colorize.hpp (file_family_selectors row, #199): the DX9 technique retail selects at the Highest shader detail; the fixed-function t0/t0_p0 row stays renderer-admitted for the pinned hull fixtures but is no scene selection"},
+        {"program": "RSkinBumpColorize.fx", "technique": "sph_t2", "pass_name": "sph_t2_p0", "render_pass": "opaque", "basis": "file family src/presentation/godot/legacy/bump_colorize.hpp (file_family_selectors row, #199); the fixed-function sph_t0/sph_t0_p0 row stays renderer-admitted but is no scene selection"},
+        {"program": "RSkinGloss.fx", "technique": "sph_t1", "pass_name": "sph_t1_p0"},
+        {"program": "RSkinGlossColorize.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0"},
+        {"program": "BatchMeshGloss.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "opaque", "basis": "file family src/presentation/godot/legacy/dx8_mesh.hpp (file_family_selectors row, #200): the DX8 technique retail selects at the Highest shader detail; the P1-11 fixed-function sph_t1/sph_t1_p0 row and its fixed fog variant stay renderer-admitted for the pinned fog and lighting fixtures but are no scene selection"},
+        {"program": "MeshAlpha.fx", "technique": "sph_t1", "pass_name": "sph_t1_p0", "render_pass": "transparent", "basis": "P1-11 fixed-function adapter derived from the P1-02 descriptor source_states; engine lights use the placeholder hemisphere rig until #25; the fog-of-war stage is the identity until #28."},
+        {"program": "MeshAlphaGloss.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "transparent", "basis": "file family src/presentation/godot/legacy/dx8_mesh.hpp (file_family_selectors row, #200); the fixed-function sph_t1/sph_t1_p0 row stays renderer-admitted but is no scene selection"},
+        {"program": "BatchMeshAlpha.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "transparent", "basis": "file family src/presentation/godot/legacy/dx8_mesh.hpp (file_family_selectors row, #200); the P1-11 fixed-function sph_t1/sph_t1_p0 row and its fixed fog variant stay renderer-admitted for the pinned fog fixtures but are no scene selection"},
+        {"program": "MeshAdditive.fx", "technique": "t0", "pass_name": "t0_p0", "render_pass": "transparent", "basis": "file family src/presentation/godot/legacy/mesh_additive.hpp (file_family_selectors row); scene-admitted for #32 (reinforcement points and build-pad glows on the land reference map)"},
+        {"program": "MeshAdditiveOffset.fx", "technique": "t0", "pass_name": "t0_p0", "render_pass": "transparent", "basis": "file family src/presentation/godot/legacy/mesh_additive_offset.hpp (file_family_selectors row); scene-admitted for #32"},
+        {"program": "Tree.fx", "technique": "sph_t1", "pass_name": "sph_t1_p0", "render_pass": "opaque", "basis": "file family src/presentation/godot/legacy/tree.hpp from docs/behaviour/vegetation-effects.md T-01..T-08; with LIGHT_SCALE.a = 1 the pass is alpha-tested (GREATER 128) and unblended, so the declared Transparent phase draws in the opaque pass with an alpha scissor; no wind source (static)"},
+        {"program": "Grass.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "transparent", "basis": "file family src/presentation/godot/legacy/grass.hpp from docs/behaviour/vegetation-effects.md G-01..G-09; project policy: TIME 0, no wind, distance fade or fog-of-war stage, and no clump billboarding (cards as authored, culling off)"}
+      ],
+      "supported_passes": ["opaque", "transparent"],
+      "rejection": "EAWR-RENDER-0001 names the first selector outside this table: unknown family, then technique, pass_name, then a render pass the family's adapter lacks; caller text is echoed as at most 48 printable ASCII bytes.",
+      "compiler_observation": "Every adapter source, including its derived shadow-receiving variant, must reflect its declared BaseTexture in RenderingServer.get_shader_parameter_list after shader_set_code, i.e. Godot's shading-language compiler must accept it; otherwise upload fails with EAWR-RENDER-0007 naming the selector and variant and frees the partial RIDs. A valid RID is not success. The failure branch has no live or unit negative (no production input can make the fixed adapter sources fail), and the backend/driver GLSL compile of each variant is not observed.",
+      "implementation": "clean-room Godot spatial adapters; native BONE/WEIGHT streams plus per-instance RenderingServer skeleton palettes",
+      "lighting": {"input": "eawr_sph_r/g/b irradiance matrices (SPH_LIGHT_ALL) on every selector above (the #200 DX8 rows also read the sun direction and specular for their vertex specular) except the bump colorize sph_t2 pair, which reads eawr_sph_fill_r/g/b (SPH_LIGHT_FILL) and eawr_light_diffuse and lights the sun per pixel (#199); without a lighting state the frozen P0 meshgloss-hemisphere-v1 constants are bound, with GodotRenderer::set_lighting the P1-04 sh or hemisphere policy is bound", "shadows": "when a lighting state requests shadows before upload, each selector above is compiled in a derived shadow-receiving variant (unshaded -> ambient_light_disabled plus light() = mix(shadow_floor, 1, ATTENUATION)) against one orthogonal Godot directional shadow map", "effects_declaring_no_light_inputs": 0, "declaration_note": "every descriptor lists SPH_LIGHT_ALL, SPH_LIGHT_FILL, DIR_LIGHT_* and GLOBAL_AMBIENT because they come from the shared engine include; the declaration therefore does not show per-pass consumption, so no effect is failed closed on it and the count is 0"},
+      "file_family_selectors": {
+        "owner": "WP-43 (#32/#27): one adapter file per family under src/presentation/godot/legacy/, registered in legacy/registry.hpp; validate_material and the upload selection consult the registry only for selectors (program and technique) outside the original selector table, so no existing adapter source, binding or pass changes; a family may add a technique to an original program (#199)",
+        "status": "renderer-admitted and fail-closed; MeshAdditive and MeshAdditiveOffset are also scene-admitted (#32) and listed in selectors, which tests/scene holds equal to the scene table; MeshGlossColorize is scene-admitted since #80 (its GlossTexture is its own upload binding); MeshSolidColor (editor markers) stays out of the scene route",
+        "rows": [
+          {"program": "MeshAdditive.fx", "technique": "t0", "pass_name": "t0_p0", "render_pass": "transparent", "adapter_file": "src/presentation/godot/legacy/mesh_additive.hpp", "basis": "docs/behaviour/meshadditive-sun-billboard.md A-01..A-10 (the programmable t0 pass the MIT alo-viewer reference selects at DX8 and above): UV = first UV + TIME x UVScrollRate.xy, per-vertex colour saturate(Color.rgb x LIGHT_SCALE.rgb x LIGHT_SCALE.a), RGB = texel.rgb x colour, ONE/ONE. The effect declares Color float3 (1,1,1); the P1-02 descriptor omits Color because its parameter extraction drops a declaration that follows an included function body and a line directive, which was the cause recorded under p1_11_left_fail_closed.", "render_state": "unshaded, fog_disabled, blend_add with fragment alpha 1 (ONE/ONE on RGB), depth_draw_never, depth_test_default, cull_back (renderer baseline, as every legacy adapter); transparent pass priority", "bindings": "Color float3/float4 -> eawr_color rgb, effect initializer (1,1,1) when unauthored; UVScrollRate float3/float4 -> xy, initializer (0,0); any other kind, a duplicate or a non-finite component fails EAWR-RENDER-0001; TIME fixed at 0 s (legacy-meshadditive-inputs-v1, gate TIME-01); LIGHT_SCALE is the renderer's legacy constant (1,1,1,1)", "colour_policy": "stored-value output with the P1-06 fitted Compatibility compensation (the accepted sky MeshAdditive route's policy), not the linear policy of the lit adapters", "lighting": "reads no light input; compiled unshaded even when shadows are requested, which is not a shadow-variant failure", "fog": "the selected pass has no fog-of-war stage (fog-stub-v1 reports it unsupported); engine distance fog disabled as for every legacy adapter", "scene_admission": "admitted (#32): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)", "tests/presentation/renderer/test_legacy_family_runtime.py with tests/presentation/renderer/legacy/ (CTest legacy_family_runtime; graphical run opt-in)"]},
+          {"program": "MeshAdditiveOffset.fx", "technique": "t0", "pass_name": "t0_p0", "render_pass": "transparent", "adapter_file": "src/presentation/godot/legacy/mesh_additive_offset.hpp", "basis": "the MeshAdditive t0 pixel stage, vertex colour and ONE/ONE no-depth-write state with UV = first UV + UVOffset.xy and no TIME term; the effect declares UVOffset float4 (0,0,0,0) and Color float3 (1,1,1) (same descriptor extraction gap as MeshAdditive)", "render_state": "identical to MeshAdditive.fx t0_p0", "bindings": "Color float3/float4 -> rgb, initializer (1,1,1); UVOffset float3/float4 -> xy, initializer (0,0); malformed bindings fail EAWR-RENDER-0001", "colour_policy": "stored-value output as MeshAdditive", "lighting": "reads no light input; compiled unshaded under shadows", "fog": "no fog-of-war stage; engine distance fog disabled", "scene_admission": "admitted (#32): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)", "tests/presentation/renderer/test_legacy_family_runtime.py with tests/presentation/renderer/legacy/ (CTest legacy_family_runtime; graphical run opt-in)"]},
+          {"program": "MeshSolidColor.fx", "technique": "t0", "pass_name": "t0_p0", "render_pass": "opaque", "adapter_file": "src/presentation/godot/legacy/mesh_solid_color.hpp", "basis": "the effect's t0 pass writes the authored Color saturated to [0,1] and reads no texture, normal or light; declared AlphaBlendEnable FALSE (ONE/ZERO), ZWriteEnable FALSE, ZFunc LESSEQUAL; render phase Opaque", "render_state": "unshaded, fog_disabled, no blend, depth_draw_never, depth_test_default, cull_back; opaque pass priority. Without depth writes its visibility against other opaque geometry depends on Godot's engine-managed opaque order (gate SOLID-ORDER-01); transparent work behind it still draws over it, as declared", "bindings": "Color float3/float4 -> rgb, initializer (0,0,1) when unauthored; its alpha reaches no visible output with blending off; malformed bindings fail EAWR-RENDER-0001. BaseTexture is declared only as the renderer's legacy compile probe and is not sampled", "colour_policy": "stored-value output with the P1-06 fitted Compatibility compensation", "lighting": "reads no light input; compiled unshaded under shadows", "fog": "no fog-of-war stage; engine distance fog disabled", "scene_admission": "pending: src/scene/scene.cpp selector row {\"MeshSolidColor.fx\", \"t0\", \"t0_p0\", false}; the P1-11 scene-content question (whether the flag and screen marker objects that use this effect draw in game) is unchanged and belongs to #32", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)", "tests/presentation/renderer/test_legacy_family_runtime.py with tests/presentation/renderer/legacy/ (CTest legacy_family_runtime; graphical run opt-in)"]},
+          {"program": "MeshGlossColorize.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "opaque", "adapter_file": "src/presentation/godot/legacy/mesh_gloss_colorize.hpp", "basis": "vertex stage identical to MeshGloss sph_t0 (SPH_LIGHT_ALL diffuse, pow(N.H, 16) light-0 specular); pixel stage surface = mix(base.rgb, Colorization.rgb x base.rgb, base.a), RGB = 2 x surface x D.rgb + S x gloss.r, alpha = LIGHT_SCALE.a", "render_state": "unshaded (shadow-receiving variant under shadows), fog_disabled, depth_draw_opaque, depth_test_default, cull_back; opaque pass only (the declared blend applies only when LIGHT_SCALE.a < 1 and no transparent LIGHT_SCALE source exists)", "bindings": "Emissive, Diffuse, Specular and Colorization float3/float4 -> rgb with the effect initializers when unauthored; Colorization is the consumer's binding (authored or team colour); Shininess is not read by this pass (fixed exponent 16). GlossTexture reaches the upload as its own per-binding texture (MULTITEX-01, #80; the black placeholder when unresolved); a missing or non-texture GlossTexture fails EAWR-RENDER-0001", "colour_policy": "the MeshGloss adapter's linear policy; ps_1_1 input saturation not reproduced, exactly as for MeshGloss", "lighting": "same eawr_sph_r/g/b, light direction and specular inputs as MeshGloss; derived shadow-receiving variant when shadows are requested", "fog": "no fog-of-war stage in the selected pass; engine distance fog disabled", "scene_admission": "admitted (#80): src/scene/scene.cpp selector row {\"MeshGlossColorize.fx\", \"sph_t0\", \"sph_t0_p0\", false}; a private census found 157 of 160 EaW MeshGlossColorize surfaces bind a distinct GlossTexture, which now uploads as its own binding", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)", "tests/presentation/renderer/test_legacy_family_runtime.py with tests/presentation/renderer/legacy/ (CTest legacy_family_runtime; graphical run opt-in)"]},
+          {"program": "MeshBumpColorize.fx", "technique": "sph_t2", "pass_name": "sph_t2_p0", "render_pass": "opaque", "adapter_file": "src/presentation/godot/legacy/bump_colorize.hpp", "basis": "the FoC shader source (sph_t2 vertex and pixel stages, BumpColorize.fxh): vertex fill D = saturate(Diffuse x SPH_LIGHT_FILL irradiance x LIGHT_SCALE.rgb + Emissive); the sun per pixel against the NormalTexture on the authored tangent frame, RGB = 2 lerp(base, Colorization x base, base.a) (saturate(n.L) Diffuse x light-0 diffuse x LIGHT_SCALE.rgb + D) + light-0 specular x Specular x saturate(n.H)^16 x normal.a; UV + UVOffset.xy; Shininess unread", "render_state": "unshaded, fog_disabled, depth_draw_opaque, depth_test_default, cull_back; opaque pass priority; LIGHT_SCALE.a = 1, so the retail blend is off and the transparent pass is not admitted", "bindings": "Emissive, Diffuse, Specular, Colorization and UVOffset float3/float4 with the effect initializers when unauthored; NormalTexture must be bound once as a texture and must reach the upload as a per-binding texture (MULTITEX-01), never the base texture; any other kind, a duplicate or a non-finite component fails EAWR-RENDER-0001", "colour_policy": "stored-value arithmetic and output with the P1-06 fitted Compatibility compensation; the team colour binds as the stored value (scene LegacySelector.stored_values)", "frame": "object space with the raw tangent frame", "lighting": "eawr_sph_fill_r/g/b (SPH_LIGHT_FILL), the sun direction, diffuse and specular from set_lighting; the P0 constants split into an ambient fill and a directional sun without a lighting state; eye at the camera; shadow-receiving variant as for every lit selector", "geometry": "the authored binormal reaches the vertex stage as CUSTOM0 coefficients of the unit tangent, unit normal and their cross product, so it survives skinning; Godot BINORMAL is not used", "scene_admission": "admitted (#199): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)"]},
+          {"program": "RSkinBumpColorize.fx", "technique": "sph_t2", "pass_name": "sph_t2_p0", "render_pass": "opaque", "adapter_file": "src/presentation/godot/legacy/bump_colorize.hpp", "basis": "the FoC shader source (sph_t2 vertex and pixel stages, BumpColorize.fxh): vertex fill D = saturate(Diffuse x SPH_LIGHT_FILL irradiance x LIGHT_SCALE.rgb + Emissive); the sun per pixel against the NormalTexture on the authored tangent frame, RGB = 2 lerp(base, Colorization x base, base.a) (saturate(n.L) Diffuse x light-0 diffuse x LIGHT_SCALE.rgb + D) + light-0 specular x Specular x saturate(n.H)^16 x normal.a; UV + UVOffset.xy; Shininess unread", "render_state": "unshaded, fog_disabled, depth_draw_opaque, depth_test_default, cull_back; opaque pass priority; LIGHT_SCALE.a = 1, so the retail blend is off and the transparent pass is not admitted", "bindings": "Emissive, Diffuse, Specular, Colorization and UVOffset float3/float4 with the effect initializers when unauthored; NormalTexture must be bound once as a texture and must reach the upload as a per-binding texture (MULTITEX-01), never the base texture; any other kind, a duplicate or a non-finite component fails EAWR-RENDER-0001", "colour_policy": "stored-value arithmetic and output with the P1-06 fitted Compatibility compensation; the team colour binds as the stored value (scene LegacySelector.stored_values)", "frame": "world space after skinning with the raw tangent and binormal and the normalized normal", "lighting": "eawr_sph_fill_r/g/b (SPH_LIGHT_FILL), the sun direction, diffuse and specular from set_lighting; the P0 constants split into an ambient fill and a directional sun without a lighting state; eye at the camera; shadow-receiving variant as for every lit selector", "geometry": "the authored binormal reaches the vertex stage as CUSTOM0 coefficients of the unit tangent, unit normal and their cross product, so it survives skinning; Godot BINORMAL is not used", "scene_admission": "admitted (#199): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)"]},
+          {"program": "BatchMeshGloss.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "opaque", "adapter_file": "src/presentation/godot/legacy/dx8_mesh.hpp", "basis": "the FoC shader source (sph_t0 vertex and pixel stages): vertex stage sph_vs_main: D = saturate(Diffuse.rgb x SPH_LIGHT_ALL irradiance(N) x LIGHT_SCALE.rgb + Emissive), S = saturate(Specular x max(N.H, 0)^16 x light-0 specular) with H from the camera, both clamped as vs_1_1 colour outputs; Shininess unread, D.a = LIGHT_SCALE.a (Diffuse is a float3); pixel RGB = saturate(2 D.rgb x base.rgb + S x base.a), then x the fog-of-war texel", "render_state": "unshaded, fog_disabled, depth_draw_opaque, depth_test_default, cull_back; opaque pass priority; the declared SRCALPHA blend is on D.a = LIGHT_SCALE.a = 1, so the pass draws opaque", "bindings": "Emissive, Diffuse and Specular float3/float4 -> rgb with the effect initializers when unauthored; any other kind, a duplicate or a non-finite component fails EAWR-RENDER-0001", "colour_policy": "stored-value arithmetic and output with the P1-06 fitted Compatibility compensation", "lighting": "eawr_sph_r/g/b (SPH_LIGHT_ALL), the sun direction and specular from set_lighting (the P0 constants without a lighting state); eye at the camera; shadow-receiving variant as for every lit selector", "fog": "the pixel stage's fog-of-war multiply is the derived fog-stub-v1 stage (derived_legacy_fog_variant), applied in every fog mode; the per-vertex distance fade (DISTANCE_FADE_VALS) and engine distance fog are not reproduced", "scene_admission": "admitted (#200): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)"]},
+          {"program": "BatchMeshAlpha.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "transparent", "adapter_file": "src/presentation/godot/legacy/dx8_mesh.hpp", "basis": "the FoC shader source (sph_t0 vertex and pixel stages): vertex stage sph_vs_main: D = saturate(Diffuse.rgb x SPH_LIGHT_ALL irradiance(N) x LIGHT_SCALE.rgb + Emissive), S = saturate(Specular x max(N.H, 0)^16 x light-0 specular) with H from the camera, both clamped as vs_1_1 colour outputs; Shininess unread, D.a = Diffuse.a x LIGHT_SCALE.a; pixel RGB = saturate(2 D.rgb x base.rgb + S), alpha base.a x D.a, then RGB x the fog-of-war texel", "render_state": "unshaded, fog_disabled, blend_mix, depth_draw_never, depth_test_default, cull_back; transparent pass priority", "bindings": "Emissive and Specular float3/float4 -> rgb, Diffuse float3/float4 -> rgba (alpha 1 when a float3 is authored), effect initializers when unauthored; malformed bindings fail EAWR-RENDER-0001", "colour_policy": "stored-value arithmetic and output with the P1-06 fitted Compatibility compensation", "lighting": "eawr_sph_r/g/b (SPH_LIGHT_ALL), the sun direction and specular from set_lighting (the P0 constants without a lighting state); eye at the camera; shadow-receiving variant as for every lit selector", "fog": "as BatchMeshGloss sph_t0: derived fog-stub-v1 stage in every fog mode; distance fade and engine distance fog not reproduced", "scene_admission": "admitted (#200): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)"]},
+          {"program": "MeshAlphaGloss.fx", "technique": "sph_t0", "pass_name": "sph_t0_p0", "render_pass": "transparent", "adapter_file": "src/presentation/godot/legacy/dx8_mesh.hpp", "basis": "the FoC shader source (sph_t0 vertex stage, AlphaGloss.fxh pixel stage): vertex stage sph_vs_main: D = saturate(Diffuse.rgb x SPH_LIGHT_ALL irradiance(N) x LIGHT_SCALE.rgb + Emissive), S = saturate(Specular x max(N.H, 0)^16 x light-0 specular) with H from the camera, both clamped as vs_1_1 colour outputs; Shininess unread, D.a = Diffuse.a x LIGHT_SCALE.a; pixel RGB = saturate(2 D.rgb x base.rgb + S x gloss.r), alpha base.a x D.a; Colorization declared but unread", "render_state": "unshaded, fog_disabled, blend_mix, depth_draw_never, depth_test_default, cull_back; transparent pass priority", "bindings": "Emissive and Specular float3/float4 -> rgb, Diffuse float3/float4 -> rgba, effect initializers when unauthored; GlossTexture must be bound once as a texture and must reach the upload as a per-binding texture (MULTITEX-01), never the base texture; malformed bindings fail EAWR-RENDER-0001", "colour_policy": "stored-value arithmetic and output with the P1-06 fitted Compatibility compensation", "lighting": "eawr_sph_r/g/b (SPH_LIGHT_ALL), the sun direction and specular from set_lighting (the P0 constants without a lighting state); eye at the camera; shadow-receiving variant as for every lit selector", "fog": "no fog-of-war stage in the selected pass; engine distance fog disabled", "scene_admission": "admitted (#200): src/scene/scene.cpp selector row and a selectors row", "evidence": ["tests/presentation/renderer/legacy_family_tests.cpp (CTest legacy_family_contracts)"]}
+        ]
+      }
+    },
+    "modern_spatial": {
+      "status": "implemented, independent of effect selectors",
+      "land_terrain_fog": "Opt-in P1-07 land MapMode fixed fog variants of both authored terrain shaders declare the five GodotRenderer fog uniforms and use world (X,-Z); every uploaded terrain asset is declared as a required consumer. Default shaders remain byte-identical when fog is absent.",
+      "selectors": "technique and pass_name must be empty",
+      "supported_passes": ["opaque", "alpha-tested", "transparent", "post"],
+      "structural_preflight": ["comments and string literals are masked; an unterminated one is refused", "first statement is shader_type spatial;", "balanced braces in code"],
+      "contract_restriction": "void fragment( in code is required by this renderer, not by Godot: a spatial source with only vertex() or light() compiles, so its absence is EAWR-RENDER-0001, checked after the structural preflight",
+      "compiler_observation": "Renderer injects eawr_compile_probe directly after the leading shader_type spatial; declaration and requires it in RenderingServer.get_shader_parameter_list after shader_set_code, so an observed probe means Godot's shading-language compiler accepted the source as spatial; a valid RID is not success, and the backend/driver GLSL compile of each variant is not observed.",
+      "diagnostic": "EAWR-RENDER-0007",
+      "particle_adapters": {"owner": "P1-08/#29 (src/presentation/godot/particle_adapter.cpp)", "families": ["eawr-particle-billboard-v1", "eawr-particle-xy-aligned-v1", "eawr-particle-heat-v1", "eawr-particle-kite-v1"], "materials": ["eawr-particle-opaque-v1", "eawr-particle-additive-v1", "eawr-particle-alpha-v1", "eawr-particle-modulate-v1", "eawr-particle-heat-distortion-v1"], "passes": {"opaque": "opaque", "transparent": "transparent", "heat": "post"}, "fail_closed": "renderer families and legacy blend selectors outside these adapters, and emitters the CPU runtime marks not ready, fail closed per emitter with the cause; counts in plan/inventories/particle-render-families.json"},
+      "land_map_particle_placements": {"owner": "P1-08/#29 (apps/viewer/src/map_mode.cpp)", "status": "synthetic land MapMode composition and ordinary particle fog verified", "materials": "reuses particle_adapters without a new material route; one external fog consumer per drawable emitter material", "capacity": "one fixed aggregate CPU particle budget divided deterministically among confirmed placements; insufficient budget fails with placement identity", "fixed_capture": "presentation clock advances by a fixed 1/30 second step, then holds the final stream through configured and lighting captures; resources and external fog consumers are released before effects_off and terrain_only comparisons", "fog": "opt-in fog-stub-v1 for ordinary opaque, additive, alpha and modulate shaders; selected R8 grid is shared with terrain/unit consumers; source world XY=(X,-Z), nearest texel-centre and half-open bounds, linear RGB attenuated once with alpha and blend unchanged; heat/screen distortion and unsupported depth selectors fail with emitter identity; no retail semantics claimed", "simulation_or_replay_state": false, "original_comparison": "not_performed"},
+      "space_primary_sky_adapter": {
+        "adapter_id": "eawr-space-primary-sky-v1",
+        "owner": "P1-06/#27 E-space-primary-sky-v1 (src/presentation/space/space.cpp plan; apps/viewer/src/space_environment.cpp composition)",
+        "status": "implemented; the diffuse qualification table still holds only the synthetic EawrSyntheticOpaqueDiffuse identity, and the shipped viewer additionally passes the eawr-space-sky-meshgloss-v1 material route, which admits exact MeshGloss.fx star surfaces (a bounded route, not a qualification row or an original-parity claim); the pinned Alderaan primary sky remains undrawn because its sun sibling is rejected",
+        "contract": "modern_spatial, opaque pass, unshaded preview of environment 0's primary sky: one renderer asset per accepted surface bound to that surface's own BaseTexture (normalised to RGBA8 top-left), technique and pass_name empty, cull_disabled and depth_draw_never preview policy, shadow casting disabled before instance creation, explicit --eawr-space-camera fixed camera. Qualification rows use the diffuse program; MeshGloss route surfaces use the clean-room meshgloss_sky_shader under the declared unlit policy space-sky-unlit-v1 (see material_routes). Not the SKYDOME, PLANET or NEBULA effect.",
+        "qualification_rows": [
+          "EawrSyntheticOpaqueDiffuse.fx (invented identity of tests/assets/fixtures/space_environment_fixture.py; not an original shader)"
+        ],
+        "material_routes": [
+          {
+            "route_id": "eawr-space-sky-meshgloss-v1",
+            "shader": "MeshGloss.fx (exact, case-insensitive; .fxo and MeshGlossForStarfields identities are not admitted)",
+            "scope": "shipped viewer route: apps/viewer/src/space_environment.cpp passes space::material_routes() to the planner",
+            "not_in": "apps/sky_scan and plan/inventories/sky-model-surfaces.json use the two-argument, diffuse-only planner by design, so they still record MeshGloss star surfaces as unconsumed_parameter + shader_not_qualified",
+            "fields": "BaseTexture consumed; Emissive, Diffuse and Specular consumed_rgb; Shininess recorded_not_consumed (fixed exponent 16); any other parameter stays unconsumed_parameter",
+            "light_policy": "space-sky-unlit-v1: zero SPH matrices and light-zero specular, unit light scale, so the shipped output is 2 x Emissive.rgb x texel; a slice policy, not a recovered original sky light rig",
+            "report": "docs/reports/P1-06-meshgloss-sky-route.md"
+          },
+          {
+            "route_id": "eawr-space-sky-meshadditive-t0-v1",
+            "shader": "MeshAdditive.fx (exact, non-billboard t0/t0_p0 only)",
+            "scope": "labelled control --eawr-space-control meshadditive-synthetic only; never the shipped sky route",
+            "not_in": "the shipped viewer route, apps/sky_scan and the Alderaan pin; billboard modes 1..7, including the mode-7 sun, stay hierarchy_unsupported",
+            "report": "docs/reports/P1-06-meshadditive-synthetic-route.md"
+          },
+          {
+            "route_id": "eawr-space-planet-t0-v1",
+            "shader": "Planet.fx (exact, case-insensitive; t0/t0_p0 fixed-function fallback only)",
+            "scope": "placed space-environment surface planner and standalone synthetic Godot shader test; viewer placement composition pending integration owner",
+            "fields": "BaseTexture and CloudTexture bound; Emissive, Diffuse and Specular consumed; optional Atmosphere, CityColor, AtmospherePower, CloudScrollRate, NormalTexture and CloudNormalTexture recorded_not_consumed by t0; unknown fields reject",
+            "inputs": "named finite time and light-scale, directional, ambient, diffuse and specular values required; runtime values and t0 selection unestablished",
+            "report": "docs/reports/P1-WP-20-planet-nebula.md"
+          },
+          {
+            "route_id": "eawr-space-nebula-t0-v1",
+            "shader": "Nebula.fx (exact, case-insensitive; t0/t0_p0 programmable pass only)",
+            "scope": "placed space-environment surface planner and standalone synthetic Godot shader test; viewer placement composition pending integration owner",
+            "fields": "BaseTexture, UVScrollRate, DistortionScale, SFreq and TFreq required and consumed; unknown fields reject",
+            "inputs": "named finite TIME and LIGHT_SCALE required; runtime values and t0 selection unestablished",
+            "report": "docs/reports/P1-WP-20-planet-nebula.md"
+          }
+        ],
+        "fail_closed": "Hidden meshes are skipped. Palette skinning, scaled/sheared or billboard bone chains (proper rigid chains are baked), a hidden bone anywhere on a surface's chain (bone_visibility_unsupported), missing/duplicate/wrong-type BaseTexture, any second texture parameter, non-texture parameters neither reviewed by a qualification row nor dispositioned by an admitted route, missing/invalid/non-finite route material values, a shader identity with neither a qualification row nor an admitted route, and unresolved/undecodable/unsupported textures reject the surface and block the whole sky as space_blocked; no grey placeholder texture and no partial-sky success.",
+        "environment_complete": false,
+        "original_comparison": "not_performed",
+        "not_rendered": [
+          "secondary sky: declared_not_rendered",
+          "cloud texture: declared_not_rendered",
+          "Planet: unexamined_blocked",
+          "Nebula: unexamined_blocked",
+          "environments other than index 0: not_selected",
+          "map placements: not composed in environment-only mode"
+        ],
+        "evidence": [
+          {
+            "kind": "cpu",
+            "test": "tests/presentation/space/space_tests.cpp (space_contracts)",
+            "result": "passed: root tree MSVC with warnings as errors, standalone MSVC /W4 /WX, clang 23 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror"
+          },
+          {
+            "kind": "godot_runtime",
+            "test": "tests/presentation/renderer/test_space_map_mode.py (SpaceGraphical)",
+            "backend": "Godot 4.7.2-stable forward_plus, Vulkan, NVIDIA GeForce GTX 970 (rig) and NVIDIA GeForce RTX 4070 Laptop GPU (laptop), Windows; FP-3 (#151) runs 20260926-045943-88f6ba and 20260926-050015-bedc76",
+            "result": "passed: two-surface synthetic sky drawn with per-surface masked pixel changes against an explicit sky-disabled capture, per-surface isolation captures, exact UV-quadrant colours (bottom-left TGA flipped, BGRA DDS swizzled), texture-swap attribution to one predeclared mask, repeatable capture hash; drop-submission, Godot-compiler-rejected shader with partial-failure release, frustum-out camera, fully occluding foreground, missing texture and unqualified shader all fail; partial occluder (depth occlusion) and three live release/re-upload cycles (instances present at each release) pass with zero resources after teardown; nonfinite cameras, unwritable requested captures/masks, hidden attached/ancestor bones and populate on space all fail with named causes; lit sky-exclusion controls: a two-winding depth-writing caster copy with casting on shadows the lit receiver and fails, while the same caster with the flag off and the shipped sky leave it unchanged"
+          },
+          {
+            "kind": "godot_runtime",
+            "test": "tests/presentation/renderer/test_space_meshgloss_sky.py",
+            "backend": "Godot 4.7.2-stable forward_plus, Vulkan, NVIDIA GeForce GTX 970 (rig) and NVIDIA GeForce RTX 4070 Laptop GPU (laptop), Windows; FP-3 (#151) runs 20260926-045943-88f6ba and 20260926-050015-bedc76",
+            "result": "passed on both GPUs (9/9 each), first reported in docs/reports/P1-06-meshgloss-sky-route.md: synthetic MeshGloss surfaces match 8-bit sRGB(2 x Emissive x texel) quadrant means within 6 under the unlit policy, Emissive-only change is attributed to one surface mask, the labelled meshgloss-light-probe control makes Diffuse and Specular measurable, rigid chains draw, nonfinite/missing/.fxo variants block, and sky shadow exclusion holds; synthetic values and the probe light are invented inputs"
+          },
+          {
+            "kind": "corpus_probe",
+            "status": "historical",
+            "recorded_by": "e2a44bc (2026-09-23), before ea31677 baked proper rigid bone chains and before 6e486f5 added the MeshGloss route; the measured values below are kept as recorded, and the stars verdict is superseded by the next entry",
+            "map": "data/art/maps/_space_planet_alderaan_01.ted",
+            "map_sha256": "148c4dbb1a9f2a51b1e8f510f2f2596db0bfd161dbcacebf64b9ce7adb4710de",
+            "profile": "eaw",
+            "result": "space_blocked",
+            "primary_sky": "STARS_LOW",
+            "sky_object_source": "data/xml/spaceprimaryskydomes.xml",
+            "model": "data/art/models/w_stars_low.alo",
+            "model_sha256": "3b1560115953fe3285fd892bf2495f6c00bf1d6b9477c08d22c73abae1f7b688",
+            "surfaces": [
+              {
+                "mesh": "stars",
+                "shader": "MeshGloss.fx",
+                "causes": [
+                  "hierarchy_unsupported",
+                  "unconsumed_parameter",
+                  "shader_not_qualified"
+                ],
+                "detail": "bone 4 'stars' has a non-identity relative transform",
+                "base_texture": "data/art/textures/w_star_bkgnd_light.dds",
+                "texture_sha256": "790a14391df0e27499c46b76c39dd660d780731dd0b5de62131601aad03681ea"
+              },
+              {
+                "mesh": "sun_billboard",
+                "shader": "MeshAdditive.fx",
+                "causes": [
+                  "hierarchy_unsupported",
+                  "unconsumed_parameter",
+                  "shader_not_qualified"
+                ],
+                "detail": "bone 5 'sun_billboard' is a billboard (mode 7)",
+                "base_texture": "data/art/textures/w_stars_sun00.dds",
+                "texture_sha256": "52cac3afcdc2e4736b0d07bd8855797590875dd7630d33c17a4f53371f472f61"
+              }
+            ]
+          },
+          {
+            "kind": "corpus_pin",
+            "status": "current viewer-route classification as pinned by the test; not re-measured for this inventory edit, and a fresh exact-head retail run is pending",
+            "test": "tests/presentation/renderer/test_space_map_mode.py (SpaceGraphical.test_pinned_space_reference_map_passes_or_names_its_blocker, ALDERAAN_BLOCKER; runs only with EAWR_EAW_GAME_ROOT)",
+            "source_run": "read-only authentic run of docs/reports/P1-06-meshgloss-sky-route.md (base d3abb49); the intermediate hierarchy-only outcome is in docs/reports/P1-06-static-sky-hierarchy.md",
+            "map": "data/art/maps/_space_planet_alderaan_01.ted",
+            "profile": "eaw",
+            "result": "space_blocked",
+            "plan_status": "surface_rejected",
+            "material_status": "not_attempted",
+            "model": "data/art/models/w_stars_low.alo",
+            "model_sha256": "3b1560115953fe3285fd892bf2495f6c00bf1d6b9477c08d22c73abae1f7b688",
+            "surfaces": [
+              {
+                "mesh": "stars",
+                "shader": "MeshGloss.fx",
+                "status": "accepted",
+                "causes": [],
+                "route": "eawr-space-sky-meshgloss-v1",
+                "unconsumed_parameters": ["Shininess"],
+                "renderer_asset": 0,
+                "note": "accepted by the viewer route but not uploaded or drawn, because the plan is blocked by its sibling; the diffuse-only sky_scan ledger still records this surface as unconsumed_parameter + shader_not_qualified by design"
+              },
+              {
+                "mesh": "sun_billboard",
+                "shader": "MeshAdditive.fx",
+                "status": "hierarchy_unsupported",
+                "causes": [
+                  "hierarchy_unsupported",
+                  "unconsumed_parameter",
+                  "shader_not_qualified"
+                ],
+                "renderer_asset": 0,
+                "note": "billboard mode 7; the synthetic MeshAdditive t0 route is a labelled control only and admits no billboard"
+              }
+            ]
+          }
+        ],
+        "limitations": [
+          "Synthetic draw proof and self-comparison are not original visual parity; #33 original comparison is not performed.",
+          "The pinned Alderaan primary sky is still space_blocked and nothing is drawn: the viewer's MeshGloss route accepts the stars surface, but the MeshAdditive mode-7 sun billboard remains rejected (hierarchy_unsupported, unconsumed_parameter, shader_not_qualified); no billboard, shipped additive or scrolling semantics are implemented or guessed.",
+          "MeshGloss route acceptance is an exact-arithmetic, declared-policy route under the sky preview render state (not MeshGloss's own depth write and culling); it is not original shader parity, and the shipped unlit policy is not visually neutral for every authentic star surface.",
+          "No corpus camera is frozen; the fixed camera is a synthetic capture input.",
+          "Lighting is not composed in the preview (the MeshGloss route uses the declared unlit policy; the light probe is a labelled control); sky shadow exclusion is measured only by labelled controls with a fixture directional light, not a source-backed space lighting environment, and capital-hull self-shadow remains open.",
+          "Frame times from these runs are not a timing qualification."
+        ]
+      }
+    }
+  },
+  "pass_execution": {
+    "order": ["opaque", "alpha-tested", "transparent", "post"],
+    "godot_material_priorities": {"opaque": -16, "alpha-tested": -8, "transparent": 0, "post": 8},
+    "project_dependency": "Snapshot work is stably submitted by material pass then EntityId; post source declares hint_screen_texture to consume preceding frame work.",
+    "engine_managed": "Godot performs depth ordering and transparent blend sorting within the material classes.",
+    "shadow_extension": "#25 shadow producers attach engine-managed shadow work before opaque and must not reorder this public sequence."
+  },
+  "not_supported": {
+    "legacy_effect_families": "All selectors outside the explicit legacy selector list and the WP-43 file_family_selectors rows above.",
+    "features": ["HLSL ingestion", "GLSL ingestion", "SPIR-V ingestion", "terrain", "particles outside the P1-08 modern_spatial particle adapters", "UI"],
+    "owners": "Other material families and descriptor metadata remain consumer/P1-02 work.",
+    "p1_11_left_fail_closed": [
+      {"program": "MeshAdditive.fx", "cause": "the fixed t1_p0 TextureFactor names Color, which the effect does not declare, so the factor is not derivable from the descriptor"},
+      {"program": "MeshAdditiveOffset.fx", "cause": "the same undeclared Color TextureFactor as MeshAdditive"},
+      {"program": "MeshSolidColor.fx", "cause": "used by editor marker objects on the reference map; whether markers draw in game is unobserved, so no adapter is claimed"},
+      {"program": "MeshShadowVolume.fx", "cause": "stencil shadow-volume geometry; shadows belong to #25"},
+      {"program": "RSkinShadowVolume.fx", "cause": "stencil shadow-volume geometry; shadows belong to #25"}
+    ],
+    "wp43_corrections": [
+      {"program": "MeshAdditive.fx", "correction": "the effect declares Color (float3, initializer (1,1,1)); the P1-02 descriptor omits it because its parameter extraction drops that declaration, so the P1-11 cause is a descriptor gap; the t0 adapter is now a file_family_selectors row"},
+      {"program": "MeshAdditiveOffset.fx", "correction": "same descriptor gap; the t0 adapter is now a file_family_selectors row"},
+      {"program": "MeshSolidColor.fx", "correction": "the adapter is now a file_family_selectors row; the marker-visibility question is a scene-content gate for #32, not a material gate"}
+    ],
+    "wp43_still_closed": [
+      {"program": "alDefault.fx", "cause": "no effect of that name ships in the EaW, FoC or Remake archives or loose files (file-name listing only); the public bundle's Dev/alDefault.fx is a developer sample excluded from the P1-02 corpus; how the original engine draws a surface that names a missing effect is unobserved (gate ALDEFAULT-01)"},
+      {"program": "MeshGlossColorize.fx", "cause": "the transparent pass and the fixed-function sph_t1 are not admitted"},
+      {"program": "Planet.fx", "cause": "space environment route (WP-20); tests/presentation/renderer/test_space_map_mode.py forbids it as a legacy selector"},
+      {"program": "Nebula.fx", "cause": "space environment route (WP-20); tests/presentation/renderer/test_space_map_mode.py forbids it as a legacy selector"},
+      {"program": "TerrainMeshBump.fx", "cause": "not attempted in WP-43: TerrainMesh render phase, tangent-space ps_2_0 sph_t2 pass, a second NormalTexture (MULTITEX-01) and FOW/cloud stages"},
+      {"program": "TerrainMeshGloss.fx", "cause": "not attempted in WP-43: TerrainMesh render phase and FOW/cloud stages of the sph_t1 pass"}
+    ]
+  }
+}

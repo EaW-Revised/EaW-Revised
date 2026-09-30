@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "contract": "docs/behaviour/space-targeting.md",
+  "default_resolution": "recursively overlay case values on defaults; arrays replace",
+  "fixture_semantics": {
+    "normative_outputs": ["expected_events", "expected_final_target", "expected_last_scan_frame", "expected_player_start_draw_count"],
+    "expected_trace": "review narration only; not a required runtime output or ordered diagnostic schema",
+    "player_start_index": "injected result available when the synchronized player-start draw is consumed, not an RNG seed; parent global opportunity suppression or active stealth consumes zero draws",
+    "expected_player_start_draw_count": "normative count across all listed ticks; zero before a scan or when parent suppression returns before the draw, otherwise one per scan attempt",
+    "candidate_stream_keys": "decimal labels for numeric player indices; each array is already in authoritative candidate order",
+    "retained_target_attempt": "injected result of the immediate attempt against the retained object; independent of candidate_defaults.fire_attempt_succeeds",
+    "command_timing": "apply commands whose after_frame equals a completed tick after that tick and before the next tick"
+  },
+  "units": {
+    "position": "source_distance_units_xyz",
+    "distance": "source_distance_units_3d",
+    "frame": "logical_frame",
+    "priority": "lower_numeric_value_is_better"
+  },
+  "defaults": {
+    "weapon": {
+      "content_unit": "TIE_Defender",
+      "content_hardpoint": "HP_TIE_DEFENDER_ION_00",
+      "range": 700,
+      "opportunity_when_idle": true,
+      "opportunity_when_targeting": true,
+      "requires_manual_target": false,
+      "is_turret": false
+    },
+    "service_gates": "admitted",
+    "primary_or_manual_fired": false,
+    "shooter_position": [0, 0, 0],
+    "shooter_in_nebula": false,
+    "shooter_stealth_active": false,
+    "opportunity_fire_disabled": false,
+    "logical_fps": 30,
+    "last_scan_frame": 0,
+    "player_start_index": 1,
+    "players": [
+      {"index": 0, "relation": "owner"},
+      {"index": 1, "relation": "enemy", "can_see_shooter_in_nebula": true}
+    ],
+    "candidate_defaults": {
+      "model_present": true,
+      "valid_target_type": true,
+      "in_limbo": false,
+      "dead": false,
+      "stealth_hidden": false,
+      "shooter_can_target_stealth": false,
+      "marker_object": false,
+      "hero_clash_compatible": true,
+      "in_transport": false,
+      "fogged_to_shooter_owner": false,
+      "projectile_collidable": true,
+      "weapon_category_restricted": false,
+      "opportunity_fire_disabled_on_candidate": false,
+      "aim_point_mode": "fallback",
+      "soft_radius": 0,
+      "can_point": true,
+      "fire_attempt_succeeds": true
+    }
+  },
+  "cases": [
+    {
+      "id": "C-01-priority-beats-distance",
+      "rule_ids": ["R-04", "R-06", "R-07", "R-08", "R-09", "R-12", "R-15"],
+      "initial_state": {
+        "current_frame": 16,
+        "retained_target": null,
+        "candidate_streams": {
+          "1": [
+            {"id": "near-fighter", "category": "Fighter", "priority": 3, "position": [100, 0, 0]},
+            {"id": "far-bomber", "category": "Bomber", "priority": 2, "position": [600, 0, 0]}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [
+        {"frame": 16, "type": "opportunity_target_acquired", "target": "far-bomber"}
+      ],
+      "expected_trace": [
+        {"frame": 16, "type": "scan_started", "player_start_index": 1},
+        {"frame": 16, "type": "fire_attempt", "target": "far-bomber", "result": "success"}
+      ],
+      "expected_final_target": "far-bomber",
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E03", "P013-E04", "P013-E05", "P013-E06", "P013-E09", "P013-E10"]
+    },
+    {
+      "id": "C-02-inclusive-range-boundary",
+      "rule_ids": ["R-07", "R-08", "R-09", "R-11", "R-12", "R-15"],
+      "initial_state": {
+        "current_frame": 16,
+        "retained_target": null,
+        "candidate_streams": {
+          "1": [
+            {"id": "outside-bomber", "category": "Bomber", "priority": 2, "position": [701, 0, 0]},
+            {"id": "boundary-fighter", "category": "Fighter", "priority": 3, "position": [700, 0, 0]}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [
+        {"frame": 16, "type": "opportunity_target_acquired", "target": "boundary-fighter"}
+      ],
+      "expected_trace": [
+        {"frame": 16, "type": "candidate_rejected", "target": "outside-bomber", "reason": "no_acceptable_aim_point"},
+        {"frame": 16, "type": "fire_attempt", "target": "boundary-fighter", "result": "success"}
+      ],
+      "expected_final_target": "boundary-fighter",
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E03", "P013-E04", "P013-E05", "P013-E06", "P013-E08", "P013-E09"]
+    },
+    {
+      "id": "C-03-retained-target-suppresses-switch",
+      "rule_ids": ["R-02", "R-12"],
+      "initial_state": {
+        "current_frame": 60,
+        "retained_target": "retained-fighter",
+        "retained_target_attempt": "success",
+        "candidate_streams": {
+          "1": [
+            {"id": "better-bomber", "category": "Bomber", "priority": 2, "position": [100, 0, 0]}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 60, "action": "service_weapon_once"}
+      ],
+      "expected_events": [],
+      "expected_trace": [
+        {"frame": 60, "type": "fire_attempt", "target": "retained-fighter", "result": "success"},
+        {"frame": 60, "type": "scan_not_performed", "reason": "retained_target_succeeded"}
+      ],
+      "expected_final_target": "retained-fighter",
+      "expected_last_scan_frame": 0,
+      "expected_player_start_draw_count": 0,
+      "evidence_ids": ["P013-E06"]
+    },
+    {
+      "id": "C-04-failed-retained-target-immediate-replacement",
+      "rule_ids": ["R-03", "R-06", "R-09", "R-12"],
+      "initial_state": {
+        "current_frame": 5,
+        "retained_target": "stale-fighter",
+        "retained_target_attempt": "failure",
+        "candidate_streams": {
+          "1": [
+            {"id": "replacement-transport", "category": "Transport", "priority": 1, "position": [400, 0, 0]}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 5, "action": "service_weapon_once"}
+      ],
+      "expected_events": [
+        {"frame": 5, "type": "opportunity_target_acquired", "target": "replacement-transport"}
+      ],
+      "expected_trace": [
+        {"frame": 5, "type": "fire_attempt", "target": "stale-fighter", "result": "failure"},
+        {"frame": 5, "type": "target_cleared", "target": "stale-fighter"},
+        {"frame": 5, "type": "scan_started", "reason": "retained_target_failed"},
+        {"frame": 5, "type": "fire_attempt", "target": "replacement-transport", "result": "success"}
+      ],
+      "expected_final_target": "replacement-transport",
+      "expected_last_scan_frame": 5,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E03", "P013-E04", "P013-E05", "P013-E06", "P013-E09"]
+    },
+    {
+      "id": "C-05-cadence-equality-does-not-scan",
+      "rule_ids": ["R-04", "R-12", "R-14"],
+      "initial_state": {
+        "current_frame": 15,
+        "retained_target": null,
+        "candidate_streams": {
+          "1": [
+            {"id": "waiting-fighter", "category": "Fighter", "priority": 3, "position": [300, 0, 0]}
+          ]
+        }
+      },
+      "commands": [
+        {"after_frame": 15, "action": "advance_to_frame", "frame": 16}
+      ],
+      "ticks": [
+        {"frame": 15, "action": "service_weapon_once"},
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [
+        {"frame": 16, "type": "opportunity_target_acquired", "target": "waiting-fighter"}
+      ],
+      "expected_trace": [
+        {"frame": 15, "type": "scan_not_performed", "reason": "interval_equality"},
+        {"frame": 16, "type": "scan_started", "player_start_index": 1},
+        {"frame": 16, "type": "fire_attempt", "target": "waiting-fighter", "result": "success"}
+      ],
+      "expected_final_target": "waiting-fighter",
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E06"]
+    },
+    {
+      "id": "C-06-empty-stream-advances-scan-frame",
+      "rule_ids": ["R-04", "R-06", "R-14"],
+      "initial_state": {
+        "current_frame": 16,
+        "retained_target": null,
+        "candidate_streams": {
+          "1": []
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [],
+      "expected_trace": [
+        {"frame": 16, "type": "scan_started", "player_start_index": 1},
+        {"frame": 16, "type": "scan_completed", "result": "no_target"}
+      ],
+      "expected_final_target": null,
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E06"]
+    },
+    {
+      "id": "C-07-filtered-candidate-produces-no-target",
+      "rule_ids": ["R-04", "R-08", "R-14"],
+      "initial_state": {
+        "current_frame": 16,
+        "retained_target": null,
+        "candidate_streams": {
+          "1": [
+            {"id": "transported-fighter", "category": "Fighter", "priority": 3, "position": [100, 0, 0], "in_transport": true}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [],
+      "expected_trace": [
+        {"frame": 16, "type": "candidate_rejected", "target": "transported-fighter", "reason": "in_transport"}
+      ],
+      "expected_final_target": null,
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 1,
+      "evidence_ids": ["P013-E02", "P013-E03", "P013-E04", "P013-E06"]
+    },
+    {
+      "id": "C-08-parent-stealth-suppresses-candidates",
+      "rule_ids": ["R-04", "R-05", "R-14"],
+      "initial_state": {
+        "current_frame": 16,
+        "retained_target": null,
+        "shooter_stealth_active": true,
+        "candidate_streams": {
+          "1": [
+            {"id": "otherwise-eligible-fighter", "category": "Fighter", "priority": 3, "position": [100, 0, 0]}
+          ]
+        }
+      },
+      "commands": [],
+      "ticks": [
+        {"frame": 16, "action": "service_weapon_once"}
+      ],
+      "expected_events": [],
+      "expected_trace": [
+        {"frame": 16, "type": "scan_completed", "result": "parent_stealth_active"}
+      ],
+      "expected_final_target": null,
+      "expected_last_scan_frame": 16,
+      "expected_player_start_draw_count": 0,
+      "evidence_ids": ["P013-E02", "P013-E06"]
+    }
+  ]
+}

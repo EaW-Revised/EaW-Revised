@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "ticket": "P1-06 / #27",
+  "status": "listed_not_implemented",
+  "reference_maps": [
+    "data/art/maps/_mp_land_naboo.ted",
+    "data/art/maps/_mp_space_coruscant.ted"
+  ],
+  "selection": {
+    "terrain": "Naboo declares 51 TerrainRenderBumpDual slots and 13 slots without a diffuse name; Coruscant has no terrain grid.",
+    "sky": "Naboo names EVENING_DESERT_SKY and EVENING_BLUE_SKY in separate environments. Coruscant names STARS_HIGH and STAR_BACKDROP_BLUE.",
+    "water": "Naboo's header has family 0 and four river groups; Coruscant has no water records."
+  },
+  "unused_terrain_effect_families": [
+    "SpaceFogOfWar",
+    "TerrainClouds",
+    "TerrainFogOfWar",
+    "TerrainIce",
+    "TerrainLava",
+    "TerrainMeshBump",
+    "TerrainMeshGloss",
+    "TerrainPassability",
+    "TerrainRenderBaked",
+    "TerrainRenderBump",
+    "TerrainWater"
+  ],
+  "unused_sky_effect_families": ["Nebula", "Planet"],
+  "unused_water_plane_families": ["water", "lava", "ice"],
+  "source_inventories": [
+    "plan/inventories/terrain-families.json",
+    "plan/inventories/sky-model-surfaces.json"
+  ]
+}

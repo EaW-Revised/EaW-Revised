@@ -1,0 +1,206 @@
+{
+  "schema": "eawr-camera-bindings",
+  "version": 1,
+  "provenance": "project-authored",
+  "notice": "NON-RETAIL project-authored land map camera bindings for synthetic validation; no original movement claim.",
+  "edge_scroll": true,
+  "pan_speed_scale": 0.5,
+  "click_reset": true,
+  "screen_mouse_units": true,
+  "bindings": [
+    {
+      "id": "land.pan-left.a",
+      "action": "pan_left",
+      "context": "land",
+      "device": "keyboard",
+      "control": "A",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-left.left",
+      "action": "pan_left",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Left",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-right.d",
+      "action": "pan_right",
+      "context": "land",
+      "device": "keyboard",
+      "control": "D",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-right.right",
+      "action": "pan_right",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-forward.w",
+      "action": "pan_forward",
+      "context": "land",
+      "device": "keyboard",
+      "control": "W",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-forward.up",
+      "action": "pan_forward",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Up",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-back.s",
+      "action": "pan_back",
+      "context": "land",
+      "device": "keyboard",
+      "control": "S",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-back.down",
+      "action": "pan_back",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Down",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.zoom.wheel-up",
+      "action": "zoom",
+      "context": "land",
+      "device": "mouse_wheel",
+      "control": "up",
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "land.zoom.wheel-down",
+      "action": "zoom",
+      "context": "land",
+      "device": "mouse_wheel",
+      "control": "down",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "land.zoom.page-up",
+      "action": "zoom",
+      "context": "land",
+      "device": "keyboard",
+      "control": "PageUp",
+      "trigger": "pressed",
+      "scale": -1.0
+    },
+    {
+      "id": "land.zoom.page-down",
+      "action": "zoom",
+      "context": "land",
+      "device": "keyboard",
+      "control": "PageDown",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "land.rotate-grab.middle",
+      "action": "rotate_grab",
+      "context": "land",
+      "device": "mouse_button",
+      "control": "middle",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.translate.motion-x",
+      "action": "translate_x",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "x",
+      "trigger": "delta",
+      "scale": 4.0
+    },
+    {
+      "id": "land.translate.motion-y",
+      "action": "translate_y",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "y",
+      "trigger": "delta",
+      "scale": -4.0
+    },
+    {
+      "id": "land.orbit-grab.ctrl-middle",
+      "action": "rotate_grab",
+      "context": "land",
+      "device": "mouse_button",
+      "control": "middle",
+      "modifiers": ["ctrl"],
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.orbit.ctrl-motion-x",
+      "action": "rotate",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "x",
+      "modifiers": ["ctrl"],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "land.orbit.ctrl-motion-y",
+      "action": "orbit_pitch",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "y",
+      "modifiers": ["ctrl"],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "land.pan.alt-motion-x",
+      "action": "pan_motion_x",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "x",
+      "modifiers": ["alt"],
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan.alt-motion-y",
+      "action": "pan_motion_y",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "y",
+      "modifiers": ["alt"],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "land.reset-view.home",
+      "action": "reset_view",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Home",
+      "trigger": "pressed",
+      "scale": 1.0
+    }
+  ]
+}

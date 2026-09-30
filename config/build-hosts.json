@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "_comment": "Example Windows build-host table for the maintainer offload tooling (which is not in the public source tree). Copy to config/build-hosts.local.json (ignored) and fill in your own hosts, or point EAWR_BUILD_HOSTS at a table. Contributors build locally (docs/build.md) and need none of this.",
+  "windows": [
+    {
+      "name": "BUILD-HOST-1",
+      "aliases": [
+        "build1"
+      ],
+      "address": "build-host-1.example",
+      "user": "builduser",
+      "identity": "~/.ssh/id_example",
+      "base": "",
+      "slots": 1,
+      "defaultJobs": 4,
+      "maxJobs": 8,
+      "note": "Placeholder host."
+    }
+  ]
+}

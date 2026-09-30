@@ -1,0 +1,40 @@
+{
+  "mutations": [
+    {
+      "file": "mutated-length-zero.eawr-replay",
+      "kind": "length",
+      "change": "first command body length at offset 224 changed to zero",
+      "expected": "parser rejects before command decode; no runtime behavior inferred"
+    },
+    {
+      "file": "mutated-version.eawr-replay",
+      "kind": "version",
+      "change": "format_version at offset 8 changed from 1 to 2",
+      "expected": "parser rejects unsupported format version"
+    },
+    {
+      "file": "mutated-order.eawr-replay",
+      "kind": "order",
+      "change": "first two command records swapped; (tick,player,sequence) decreases",
+      "expected": "parser rejects strict command ordering violation"
+    },
+    {
+      "file": "mutated-count.eawr-replay",
+      "kind": "count",
+      "change": "command_count at offset 56 incremented from 20 to 21",
+      "expected": "parser rejects missing command bytes after bounded count validation"
+    },
+    {
+      "file": "mutated-trailing.eawr-replay",
+      "kind": "trailing",
+      "change": "one zero byte appended after the final command",
+      "expected": "parser rejects trailing bytes after the declared command table"
+    },
+    {
+      "file": "mutated-overflow.eawr-replay",
+      "kind": "overflow",
+      "change": "tick-0 player-3 position becomes INT64_MAX and velocity becomes +45 raw",
+      "expected": "structural parse remains valid; checked movement add must fail atomically at tick 0"
+    }
+  ]
+}

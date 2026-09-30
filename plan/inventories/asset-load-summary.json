@@ -1,0 +1,384 @@
+{
+  "schema_version": 2,
+  "loader_contract": "P0-06",
+  "report_schema_version": 2,
+  "ordering": "fixed view order; report rows by logical path, source id, format",
+  "count_semantics": {
+    "materials": "ALO submesh material bindings",
+    "animations": "successfully decoded ALA resources",
+    "bones": "ALO skeleton bones plus ALA bone tracks",
+    "samples": "decoded ALA track samples"
+  },
+  "reference": {
+    "name": "alo-viewer",
+    "revision": "9bb0053919cc5df8377610d4f91b11d956d6c2f4",
+    "license": "MIT"
+  },
+  "raw_remake_historical_expected": {
+    "alo": 4140,
+    "ala": 5603
+  },
+  "common_scene_sha256": "5cd142a24b0b3138296b884e03bb8dba1a143a022c381f8bd7da33f0633bbe84",
+  "views": [
+    {
+      "profile": "eaw",
+      "view": "effective",
+      "report_sha256": "24cb7f99f16c0f5a2c940cf2f1f232668ab57c090cc8da1aebed4a42cb129635",
+      "record_count": 4497,
+      "successful_record_count": 4088,
+      "failed_record_count": 409,
+      "aggregates": {
+        "ala": {
+          "discovered": 1363,
+          "loaded": 1363,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 37319,
+            "materials": 0,
+            "animations": 1363,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 4827952
+          }
+        },
+        "alo": {
+          "discovered": 1383,
+          "loaded": 974,
+          "failed": 409,
+          "notices": 0,
+          "counts": {
+            "meshes": 6475,
+            "bones": 22866,
+            "materials": 6482,
+            "animations": 0,
+            "vertices": 3957002,
+            "indices": 11793075,
+            "mips": 0,
+            "samples": 0
+          }
+        },
+        "dds": {
+          "discovered": 1750,
+          "loaded": 1750,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 14496,
+            "samples": 0
+          }
+        },
+        "tga": {
+          "discovered": 1,
+          "loaded": 1,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 1,
+            "samples": 0
+          }
+        }
+      },
+      "total": {
+        "discovered": 4497,
+        "loaded": 4088,
+        "failed": 409,
+        "notices": 0,
+        "counts": {
+          "meshes": 6475,
+          "bones": 60185,
+          "materials": 6482,
+          "animations": 1363,
+          "vertices": 3957002,
+          "indices": 11793075,
+          "mips": 14497,
+          "samples": 4827952
+        }
+      }
+    },
+    {
+      "profile": "foc",
+      "view": "effective",
+      "report_sha256": "fc84f49d4bdf4f14a227f938e14149ae069fd4375f1b1e1da020318365b5eabb",
+      "record_count": 6579,
+      "successful_record_count": 6001,
+      "failed_record_count": 578,
+      "aggregates": {
+        "ala": {
+          "discovered": 2408,
+          "loaded": 2408,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 66331,
+            "materials": 0,
+            "animations": 2408,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 8273803
+          }
+        },
+        "alo": {
+          "discovered": 1957,
+          "loaded": 1379,
+          "failed": 578,
+          "notices": 0,
+          "counts": {
+            "meshes": 9250,
+            "bones": 42022,
+            "materials": 9294,
+            "animations": 0,
+            "vertices": 5672590,
+            "indices": 16544970,
+            "mips": 0,
+            "samples": 0
+          }
+        },
+        "dds": {
+          "discovered": 2213,
+          "loaded": 2213,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 17854,
+            "samples": 0
+          }
+        },
+        "tga": {
+          "discovered": 1,
+          "loaded": 1,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 1,
+            "samples": 0
+          }
+        }
+      },
+      "total": {
+        "discovered": 6579,
+        "loaded": 6001,
+        "failed": 578,
+        "notices": 0,
+        "counts": {
+          "meshes": 9250,
+          "bones": 108353,
+          "materials": 9294,
+          "animations": 2408,
+          "vertices": 5672590,
+          "indices": 16544970,
+          "mips": 17855,
+          "samples": 8273803
+        }
+      }
+    },
+    {
+      "profile": "remake",
+      "view": "effective",
+      "report_sha256": "8b48653dea2923911898556a76e03cf39367ab92c547386192a1bb73aaaeacf2",
+      "record_count": 19461,
+      "successful_record_count": 17934,
+      "failed_record_count": 1527,
+      "aggregates": {
+        "ala": {
+          "discovered": 7685,
+          "loaded": 7685,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 469644,
+            "materials": 0,
+            "animations": 7685,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 58668910
+          }
+        },
+        "alo": {
+          "discovered": 5853,
+          "loaded": 4348,
+          "failed": 1505,
+          "notices": 0,
+          "counts": {
+            "meshes": 35102,
+            "bones": 115744,
+            "materials": 35648,
+            "animations": 0,
+            "vertices": 57746048,
+            "indices": 157261764,
+            "mips": 0,
+            "samples": 0
+          }
+        },
+        "dds": {
+          "discovered": 5816,
+          "loaded": 5796,
+          "failed": 20,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 42537,
+            "samples": 0
+          }
+        },
+        "tga": {
+          "discovered": 107,
+          "loaded": 105,
+          "failed": 2,
+          "notices": 2,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 105,
+            "samples": 0
+          }
+        }
+      },
+      "total": {
+        "discovered": 19461,
+        "loaded": 17934,
+        "failed": 1527,
+        "notices": 2,
+        "counts": {
+          "meshes": 35102,
+          "bones": 585388,
+          "materials": 35648,
+          "animations": 7685,
+          "vertices": 57746048,
+          "indices": 157261764,
+          "mips": 42642,
+          "samples": 58668910
+        }
+      }
+    },
+    {
+      "profile": "remake",
+      "view": "raw",
+      "report_sha256": "4cf8aa9050c12f1df68821af1e56e2269d52061a4024233f64f611c11f1ecffc",
+      "record_count": 9743,
+      "successful_record_count": 8665,
+      "failed_record_count": 1078,
+      "aggregates": {
+        "ala": {
+          "discovered": 5603,
+          "loaded": 5603,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 413805,
+            "materials": 0,
+            "animations": 5603,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 51224712
+          }
+        },
+        "alo": {
+          "discovered": 4140,
+          "loaded": 3062,
+          "failed": 1078,
+          "notices": 0,
+          "counts": {
+            "meshes": 26678,
+            "bones": 75584,
+            "materials": 27180,
+            "animations": 0,
+            "vertices": 52658536,
+            "indices": 142351197,
+            "mips": 0,
+            "samples": 0
+          }
+        },
+        "dds": {
+          "discovered": 0,
+          "loaded": 0,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 0
+          }
+        },
+        "tga": {
+          "discovered": 0,
+          "loaded": 0,
+          "failed": 0,
+          "notices": 0,
+          "counts": {
+            "meshes": 0,
+            "bones": 0,
+            "materials": 0,
+            "animations": 0,
+            "vertices": 0,
+            "indices": 0,
+            "mips": 0,
+            "samples": 0
+          }
+        }
+      },
+      "total": {
+        "discovered": 9743,
+        "loaded": 8665,
+        "failed": 1078,
+        "notices": 0,
+        "counts": {
+          "meshes": 26678,
+          "bones": 489389,
+          "materials": 27180,
+          "animations": 5603,
+          "vertices": 52658536,
+          "indices": 142351197,
+          "mips": 0,
+          "samples": 51224712
+        }
+      }
+    }
+  ]
+}

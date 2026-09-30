@@ -1,0 +1,31 @@
+# These bytes participate in canonical inventory and tool-source hashes.
+tools/inventory/*.py text eol=lf
+plan/inventories/*.json text eol=lf
+# The tag registry gate compares its JSON with its canonical layout.
+docs/tag-coverage/* text eol=lf
+# Both renderer reports hash the same scene bytes on Windows and Linux.
+prototypes/common/scene.json text eol=lf
+# The fog comparator consumes this fixture as canonical LF-only evidence.
+tests/fog/fixtures/fog-stub-v1.evidence.csv text eol=lf
+# Preserve the documented bytes of vendored upstream files.
+third_party/entt/single_include/entt/entt.hpp text eol=lf
+third_party/entt/LICENSE text eol=lf
+# The P1-12 readiness report records the SHA-256 of the committed plan bytes.
+tests/presentation/acceptance/contracts/p1-12-original-capture-plan-v1.json text eol=lf
+# The identity receipt binds the probe digest to its git blob; keep one byte form.
+tools/validation/p1_capture/Get-EawOriginalCaptureIdentity.ps1 text eol=lf
+# The EaW launch receipt binds the adapter digest to its git blob; keep one byte form.
+tools/validation/p1_capture/Invoke-EawOriginalSession.ps1 text eol=lf
+# The local task probe records its own digest; keep one byte form.
+tools/validation/p1_capture/Test-LocalTaskOwnership.ps1 text eol=lf
+# Trace headers record the SHA-256 of the scenario file bytes.
+tests/fidelity/*.json text eol=lf
+# bash reads a CR as part of each command: the Linux build helper streams tools/offload/*.sh
+# over SSH, and the CI guests run tools/ci/*.sh and the build lock hooks it installs.
+*.sh text eol=lf
+# sim_headless replay-v2 output is compared byte for byte with these oracle files.
+tests/replay/fixtures/tactical-v2.*.csv text eol=lf
+# The combat battle pin (#73) is compared line by line.
+tests/replay/fixtures/tactical-combat.*.csv text eol=lf
+tests/replay/fixtures/tactical-damage.*.csv text eol=lf
+tests/replay/fixtures/tactical-victory.*.csv text eol=lf

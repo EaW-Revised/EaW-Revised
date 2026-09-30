@@ -1,0 +1,77 @@
+{
+  "rows": [
+    {
+      "tag": "SpaceUnit/Max_Speed",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "movement"
+    },
+    {
+      "tag": "GameConstants/MaxRotationsSpace",
+      "status": "applied",
+      "area": "movement"
+    },
+    {
+      "tag": "SpaceUnit/Score_Cost_Credits",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "economy"
+    },
+    {
+      "tag": "Faction/Color",
+      "status": "applied",
+      "area": "presentation"
+    },
+    {
+      "tag": "GameConstants/AI_SpaceAreaThreatScaleFactor",
+      "class": "GameConstants",
+      "status": "applied",
+      "types": [
+        "constants"
+      ],
+      "area": "ai"
+    },
+    {
+      "tag": "SpaceUnit/Behavior",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "movement"
+    },
+    {
+      "tag": "SpaceUnit/Damage_Type",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "combat",
+      "check": {
+        "perturb": "set:Damage_Default"
+      }
+    },
+    {
+      "tag": "SpaceUnit/Tech_Level",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "economy"
+    },
+    {
+      "tag": "SpaceUnit/SpaceBehavior",
+      "status": "applied",
+      "types": [
+        "ship"
+      ],
+      "area": "movement",
+      "check": {
+        "perturb": "drop:REVEAL"
+      }
+    }
+  ]
+}

@@ -1,0 +1,255 @@
+{
+  "format": "eawr-scenario",
+  "format_version": 1,
+  "id": "S-35",
+  "label": "rebel-station-lc-only",
+  "title": "Rebel station (level 1), LC alone (-155): expect only LC to fire",
+  "intent": "Measure which Rebel level-1 station weapon hardpoints fire at one idle, invulnerable target at bearing -155 degrees, without orders (#516 follow-up).",
+  "behaviour": {
+    "note": "docs/behaviour/space-weapon-fire.md",
+    "cases": [
+      "S-35"
+    ],
+    "rules": [
+      "W-07",
+      "W-12"
+    ]
+  },
+  "executable": {
+    "path": "corruption/StarWarsI.exe",
+    "sha256": "0a1bafa49ac608d8e591f4301105cb5a792ac7c5d080b0eac57fbc92dd71a4ed"
+  },
+  "content": [
+    {
+      "archive": "corruption/Data/Maps.meg",
+      "path": "DATA/ART/MAPS/_MP_SPACE_CORUSCANT.TED",
+      "sha256": "91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/FACTIONS.XML",
+      "sha256": "27c880a17e0b642dbfbe40ff0b0bad620d63cb72a6ac06f1ebf4ef7e03998a15"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/GAMECONSTANTS.XML",
+      "sha256": "fb4986e9a9866e2b8ec4f8c44a32050378c8c51bcde7390a5a7446e61f2ca3b1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MULTIPLAYER_STRUCTURE_MARKERS.XML",
+      "sha256": "18de78b0ff7fe1233bd00e7e17c8b88f98dadb86c21af2ad17a38379153947f7"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/MARKERS.XML",
+      "sha256": "74fe3b607d75b65e40ea9c52ade5abbe9fa86ac3b4f05c147b92d0dd72eaa3e1"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/STARBASES.XML",
+      "sha256": "07b602d8810c4c4f6afba3d3ac852482b2182a3501838d180c621f3ee8921578"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/CAMPAIGNS_UNDERWORLD_GC.XML",
+      "sha256": "5d9c49c968061ac8672c13d7cbed10ac24d039a66cd659805bfb72b0039b81ee"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/SPACEUNITSCORVETTES.XML",
+      "sha256": "0d14f23d9ce3070537c05970a22fdfe8690866157c6717570dd97f8f67209949"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFRIGATES.XML",
+      "sha256": "57da2b587e513980ea8dfd29928e76f714ce0b67439aa7f4cbfa4946457aacba"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SPACEUNITSFIGHTERS.XML",
+      "sha256": "28b569b62a88641791447d0f3ad75a0a36edca3e94b0ab53ecfb5f200f0d4958"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/SQUADRONS.XML",
+      "sha256": "e2a1a512efc1abf46e64ce73030b55c78e923886239ef900f868b3c3de48aa78"
+    },
+    {
+      "archive": "corruption/Data/Patch2.meg",
+      "path": "DATA/XML/HARDPOINTS.XML",
+      "sha256": "c059f2701d1a9b304919c1a17b4bf6157f1471b23c4e7b8c1f7526da2fd2f434"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/UNITS_SPACE_EMPIRE_TIE_INTERCEPTOR.XML",
+      "sha256": "35261c0267c9f7490582f7c2a7bcc3ead123c5988b4d1b032556caf2b90b86ca"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/DIFFICULTYADJUSTMENTS.XML",
+      "sha256": "576176423b06476153bc744ac5d527a9335a24824540c20cae482567e2c6fb91"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PLAYERS/BASICEMPIREPLAYER.XML",
+      "sha256": "f4003cfbdb5ca70d54beb1c664f848e8fde2f1ee755e3199980da8eb7892cb82"
+    },
+    {
+      "archive": "corruption/Data/Config.meg",
+      "path": "DATA/XML/AI/PERCEPTUALEQUATIONS/OFFENSIVESPACEEQUATIONS.XML",
+      "sha256": "663083391c6d09b606f3df65a883c436002d3a8d1ffd807af4d9cbb58d9ce03f"
+    }
+  ],
+  "map": {
+    "path": "data/art/maps/_mp_space_coruscant.ted"
+  },
+  "players": [
+    {
+      "label": "empire",
+      "faction": "Empire"
+    },
+    {
+      "label": "rebel",
+      "faction": "Rebel"
+    }
+  ],
+  "staging": {
+    "fog": "revealed",
+    "ai": "suspended"
+  },
+  "units": [
+    {
+      "label": "shooter",
+      "type": "Skirmish_Rebel_Star_Base_1",
+      "owner": "rebel",
+      "position": [
+        6500,
+        -2075,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": []
+    },
+    {
+      "label": "target",
+      "type": "Nebulon_B_Frigate",
+      "owner": "empire",
+      "position": [
+        5866,
+        -2371,
+        0
+      ],
+      "facing_degrees": 0,
+      "spawn": "start",
+      "staging": [
+        "hold_fire",
+        "invulnerable"
+      ]
+    }
+  ],
+  "hardpoints": [
+    {
+      "label": "shooter/hp_rebel_station_one_ccm",
+      "unit": "shooter",
+      "hardpoint": "HP_Rebel_Station_One_CCM",
+      "range": 2200,
+      "priority_set": "None",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance; STARBASES.XML authors no Targeting_Priority_Set for the station (unauthored)"
+    },
+    {
+      "label": "shooter/hp_rebel_station_one_lc",
+      "unit": "shooter",
+      "hardpoint": "HP_Rebel_Station_One_LC",
+      "range": 2200,
+      "priority_set": "None",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance; STARBASES.XML authors no Targeting_Priority_Set for the station (unauthored)"
+    },
+    {
+      "label": "shooter/hp_rebel_station_one_tbl",
+      "unit": "shooter",
+      "hardpoint": "HP_Rebel_Station_One_TBL",
+      "range": 2200,
+      "priority_set": "None",
+      "source": "FoC HARDPOINTS.XML Fire_Range_Distance; STARBASES.XML authors no Targeting_Priority_Set for the station (unauthored)"
+    }
+  ],
+  "events": [],
+  "duration_ticks": 1200,
+  "tolerances": {
+    "alive": 0,
+    "hull": 0,
+    "shield": 1024,
+    "pos.x": 8192,
+    "pos.y": 8192,
+    "pos.z": 8192,
+    "fwd.x": 25,
+    "fwd.y": 25,
+    "fwd.z": 25,
+    "shots": "ignore",
+    "target": 0
+  },
+  "expect": [],
+  "notes": [
+    "FoC debug build, Coruscant quick load, seed 12345, tick 0 at frame 345, 30 logical ticks/s; fog revealed to both players and player AI suspended.",
+    "The Rebel level-1 station (Skirmish_Rebel_Star_Base_1) is spawned at (6500,-2075,0) facing +X (bearing 0), an open-space point verified, by directly decoding the map's own placement records, to be more than 2900 units from every map-placed prop -- clear of any 2200-range hardpoint's reach (#516 follow-up). One invulnerable, hold_fire Nebulon-B frigate (owner empire, hostile to the rebel shooter) is spawned 700 units out at bearing -155 degrees (positive to port) from the station's facing (docs/behaviour/space-weapon-fire.md M2 arc table).",
+    "Inside only the laser cannon HP_Rebel_Station_One_LC's arc, past where the concussion missile HP_Rebel_Station_One_CCM and the turbolaser HP_Rebel_Station_One_TBL reach.",
+    "No order and no hold_position on the station or the target; an idle unit keeps its heading (A-05). A single target avoids the multi-candidate opportunity-scan tie (R-08/R-09: every candidate ties at priority 1.0 without an authored Targeting_Priority_Set, so the scan stops at the first acceptable one, which need not be the intended bearing) that a shared multi-target scenario would confound.",
+    "Record-only: which hardpoints fire, not when; shot timing follows retail random recharge."
+  ],
+  "record_only": true,
+  "fire_windows": [
+    {
+      "hardpoints": [
+        "shooter/hp_rebel_station_one_ccm",
+        "shooter/hp_rebel_station_one_tbl"
+      ],
+      "from_tick": 0,
+      "to_tick": 1199,
+      "min_shots": 0,
+      "max_shots": 0,
+      "text": "bearing -155: outside reach, does not fire"
+    },
+    {
+      "hardpoints": [
+        "shooter/hp_rebel_station_one_lc"
+      ],
+      "from_tick": 0,
+      "to_tick": 299,
+      "min_shots": 7,
+      "max_shots": 21,
+      "text": "bearing -155: hp_rebel_station_one_lc fires, bucket 0"
+    },
+    {
+      "hardpoints": [
+        "shooter/hp_rebel_station_one_lc"
+      ],
+      "from_tick": 300,
+      "to_tick": 599,
+      "min_shots": 8,
+      "max_shots": 24,
+      "text": "bearing -155: hp_rebel_station_one_lc fires, bucket 1"
+    },
+    {
+      "hardpoints": [
+        "shooter/hp_rebel_station_one_lc"
+      ],
+      "from_tick": 600,
+      "to_tick": 899,
+      "min_shots": 6,
+      "max_shots": 18,
+      "text": "bearing -155: hp_rebel_station_one_lc fires, bucket 2"
+    },
+    {
+      "hardpoints": [
+        "shooter/hp_rebel_station_one_lc"
+      ],
+      "from_tick": 900,
+      "to_tick": 1199,
+      "min_shots": 6,
+      "max_shots": 18,
+      "text": "bearing -155: hp_rebel_station_one_lc fires, bucket 3"
+    }
+  ]
+}

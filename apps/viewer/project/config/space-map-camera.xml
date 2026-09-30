@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored synthetic space fixture policy. These limits are not TED-derived, not retail and not #26 source bounds. -->
+<map_camera schema="eawr-space-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/eawr_space_synthetic.ted"
+  map_sha256="35377e070c521b37edd679fd1a092f9b77028914531eff1bcbe330dc1ff87202">
+  <bounds min_x="-400" max_x="400" min_y="0" max_y="800"
+    source_id="synthetic-space-target-rectangle-v1" authority="project-authored"/>
+  <initial target_x="160" target_y="400" target_height="60" zoom="0.5" yaw_degrees="0"/>
+  <bindings path="space-map-camera-bindings.json"/>
+  <constant_overrides schema="eawr-map-camera-overrides" version="1"
+    source_id="space-camera-owner-deviations" authority="project-authored">
+    <override tag="Distance_Min" value="100"/>
+    <override tag="Tactical_Min_Scroll_Speed" value="823.529412"/>
+    <override tag="Pitch_Min" value="-60"/>
+    <override tag="Tactical_Overview_Clicks" value="5"/>
+  </constant_overrides>
+</map_camera>

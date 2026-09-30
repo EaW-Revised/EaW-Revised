@@ -1,0 +1,294 @@
+{
+  "contract": "docs/behaviour/space-visibility.md",
+  "players": [
+    {
+      "player_id": 1,
+      "team_id": 0,
+      "faction_id": 4097,
+      "flags": 1
+    },
+    {
+      "player_id": 2,
+      "team_id": 1,
+      "faction_id": 4098,
+      "flags": 1
+    },
+    {
+      "player_id": 3,
+      "team_id": 3,
+      "faction_id": 4099,
+      "flags": 0
+    }
+  ],
+  "mask_bits": {
+    "1": 0,
+    "2": 1,
+    "3": 2
+  },
+  "seed": "0x5eed000000000068",
+  "content_identity": "c709d8b355dc2770cd7e69af5507966a8185df88ef46ede7a44781962ad1c7e6",
+  "sensors": [
+    {
+      "type_id": 102,
+      "foc_type": "Nebulon_B_Frigate",
+      "Space_FOW_Reveal_Range": "1200",
+      "reveal_range_raw": 20132659200
+    },
+    {
+      "type_id": 104,
+      "foc_type": "X-Wing",
+      "Space_FOW_Reveal_Range": "500",
+      "reveal_range_raw": 8388608000
+    },
+    {
+      "type_id": 203,
+      "foc_type": "TIE_Fighter",
+      "Space_FOW_Reveal_Range": "500",
+      "reveal_range_raw": 8388608000
+    },
+    {
+      "type_id": 301,
+      "foc_type": "Orbital_Resource_Container",
+      "Space_FOW_Reveal_Range": "100",
+      "reveal_range_raw": 1677721600
+    }
+  ],
+  "units_without_sensor": [
+    299
+  ],
+  "fog_layout": {
+    "origin_x_raw": -68719476736,
+    "origin_y_raw": -68719476736,
+    "cell_x_raw": 4294967296,
+    "cell_y_raw": 4294967296,
+    "width": 32,
+    "height": 32
+  },
+  "fog_revision": 1,
+  "frames": [
+    {
+      "frame": 0,
+      "label": "approaching, 2000 from the frigate",
+      "replay": "tactical-visibility-frame-0.eawr-replay",
+      "replay_sha256": "e03a1a0bbabec8565f1a5b23f6463a237c990532686c70144f7fd463b65f9a40",
+      "fighter_position_raw": [
+        33554432000,
+        0,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 1125899906842624000000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": false,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 2,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 12,
+        "3": 0
+      }
+    },
+    {
+      "frame": 1,
+      "label": "one raw unit beyond the frigate's 1200",
+      "replay": "tactical-visibility-frame-1.eawr-replay",
+      "replay_sha256": "a0dd4c8e80a3144dcf629fd3a75a9cbd74a9dcd198ea2bb5b0b3bace4ba16b26",
+      "fighter_position_raw": [
+        20132659201,
+        0,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 405323966503609958401,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": false,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 2,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 14,
+        "3": 0
+      }
+    },
+    {
+      "frame": 2,
+      "label": "exactly 1200: seen, the boundary is inclusive",
+      "replay": "tactical-visibility-frame-2.eawr-replay",
+      "replay_sha256": "c89260e45685f684fa0335433aa09c1f9ef43e9a4e831f2c2de36558e2671a78",
+      "fighter_position_raw": [
+        20132659200,
+        0,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 405323966463344640000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": true,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 3,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 14,
+        "3": 0
+      }
+    },
+    {
+      "frame": 3,
+      "label": "exactly 500: the fighter's own 500 reveals the frigate",
+      "replay": "tactical-visibility-frame-3.eawr-replay",
+      "replay_sha256": "a5bba0ae1e1e684c6b4012a91f8c391b0b07c3618957bf54d75a932cce0e383a",
+      "fighter_position_raw": [
+        8388608000,
+        0,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 70368744177664000000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": true,
+      "empire_sees_frigate": true,
+      "visible_to_masks": {
+        "1": 3,
+        "2": 1,
+        "5": 3,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 12,
+        "3": 0
+      }
+    },
+    {
+      "frame": 4,
+      "label": "1100 in the plane and 700 above; 3D distance 1304 but Z is ignored",
+      "replay": "tactical-visibility-frame-4.eawr-replay",
+      "replay_sha256": "26f4db4d54249102add783edded84bc529eabc2a0bca480a1de2ea65c0fa8319",
+      "fighter_position_raw": [
+        18454937600,
+        0,
+        11744051200
+      ],
+      "fighter_planar_distance_squared_raw": 340584721819893760000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": true,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 3,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 14,
+        "3": 0
+      }
+    },
+    {
+      "frame": 5,
+      "label": "diagonal (720, 960): exactly 1200",
+      "replay": "tactical-visibility-frame-5.eawr-replay",
+      "replay_sha256": "b73fa86898da74c1d029100af41746c9c356fa867bfcf0b0e0f172036605a5bd",
+      "fighter_position_raw": [
+        12079595520,
+        16106127360,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 405323966463344640000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": true,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 3,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 13,
+        "3": 0
+      }
+    },
+    {
+      "frame": 6,
+      "label": "diagonal one raw unit beyond 1200: hidden again",
+      "replay": "tactical-visibility-frame-6.eawr-replay",
+      "replay_sha256": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
+      "fighter_position_raw": [
+        12079595520,
+        16106127361,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 405323966495556894721,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": false,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 2,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 13,
+        "3": 0
+      }
+    },
+    {
+      "frame": 7,
+      "label": "retreating, 1513 from the frigate",
+      "replay": "tactical-visibility-frame-7.eawr-replay",
+      "replay_sha256": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
+      "fighter_position_raw": [
+        25165824000,
+        -3355443200,
+        0
+      ],
+      "fighter_planar_distance_squared_raw": 644577696667402240000,
+      "frigate_range_squared_raw": 405323966463344640000,
+      "fighter_range_squared_raw": 70368744177664000000,
+      "rebel_sees_fighter": false,
+      "empire_sees_frigate": false,
+      "visible_to_masks": {
+        "1": 1,
+        "2": 1,
+        "5": 2,
+        "6": 3,
+        "9": 4
+      },
+      "fog_lit_cells": {
+        "0": 80,
+        "1": 13,
+        "3": 0
+      }
+    }
+  ]
+}

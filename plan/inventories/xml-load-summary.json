@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "evaluator_version": 2,
+  "scanner_revision": "5c1ace0be767abf4f46fb31e9a9aa4563dfdef71",
+  "scanner_binary_sha256": "0ab26c7f1bcc3aee0409f0ee208a6d26f57b0958ecc73eaaa36498948ebd488f",
+  "schema_revision": "3e1b825a124fbc13b2293665f34a36dd4d4be80f",
+  "lsp_revision": "4461416d401b0f665bc1fe82aad60b90bd707fa9",
+  "inventory_manifest_id": "d16ae925c62fc1ae19e214e196f4f254ae95b6dd8e489bc8297ccae8a47d4bd2",
+  "full_pass": false,
+  "full_pass_scope": "project-wide P0 catalog acceptance; all three profile_p0_pass values must be true",
+  "registry_contract": {
+    "roots": {
+      "data/xml/gameobjectfiles.xml": "Game_Object_Files",
+      "data/xml/hardpointdatafiles.xml": "Hard_Point_Files",
+      "data/xml/factionfiles.xml": "Faction_Files",
+      "data/xml/campaignfiles.xml": "Campaign_Files",
+      "data/xml/sfxeventfiles.xml": "SFXEvent_Files"
+    },
+    "abilities": "registered nested definitions in ordered GameObject includes",
+    "registry_file_sha256": {
+      "eaw": {
+        "game_objects": "ad78629b6a2c5e0dfd9a414ce6f943030be8523d4ef467c3740d84e8fcad2e39",
+        "hardpoints": "d98c7890052f6cca4c804397ec8f6c994cb51ee90c4dba7768ea73e5719ab4ef",
+        "factions": "0e468c86e282fca0541f55ca942565fb711bfe3715e6db728439416273dcf4ee",
+        "campaigns": "a8b1df28ee5ee5b82fb7170a3310266fe84f71fb66e1b81af4e6357807be6a5c",
+        "sfx": "9ae31576e46b9c0e5fc7bdfdcead6131ad5e7897a151bcc2d602f7798331fe8d"
+      },
+      "foc": {
+        "game_objects": "13dbe663ad6ea55b345fc0890d2043de22fedecc8742122706236e02b45fe307",
+        "hardpoints": "eb8f2bf4b8f2f091c63b94275f1144701a3b4699d58d1853e5d55af43c26a31e",
+        "factions": "f4303479d725bed4d1b6809878592218692e0c2e2c4f0a2d35119a400f5ea4ae",
+        "campaigns": "84037a8345a96742c42846e068413055b61c3684211e6722ca37f75bf1a35d39",
+        "sfx": "06bef3cb96bd69005ab23d87cca03cb98eff8ecb722ea5bcc7cb59bf4cb80e96"
+      },
+      "remake": {
+        "game_objects": "7fa07d7fc09ce20ff2c9e22db201eeda5bdc2231f837a7a9d34d7cfc88290613",
+        "hardpoints": "2f91bbdc34178d3a1bd0e7acb461ef65403d0d1b994f903fbdb0147c5a5b0927",
+        "factions": "42598a7ee2d569c45dadc010ae3fecb9d925b3bc79ead1edbb0306e1acf468bb",
+        "campaigns": "3824152907488895973ca2dbacde1a3b60ece3d2c56dea25c3db944cd0f6b9a5",
+        "sfx": "9682973be1ac39423d2a41443fce3615effc15dd2abc68f2523ebae57351c7d4"
+      }
+    }
+  },
+  "profiles": [
+    {
+      "profile": "eaw",
+      "profile_p0_pass": false,
+      "report_sha256": "a35bcca80620f68c4b7587f061d1de38a08b254ffd52cc6919bb0b2cf8b9cb7e",
+      "input_receipt_identity_sha256": "a800beaef9ce7f264025801515d733fe6cc5a9c721e6fc0ea1f22fd6287e3480",
+      "physical_xml_records": 375,
+      "registry_includes": 92,
+      "definitions": 4519,
+      "categories": {
+        "abilities": { "raw": 345, "winners": 280 },
+        "campaigns": { "raw": 32, "winners": 32 },
+        "factions": { "raw": 12, "winners": 12 },
+        "game_objects": { "raw": 1887, "winners": 1886 },
+        "hardpoints": { "raw": 194, "winners": 194 },
+        "sfx": { "raw": 2049, "winners": 2049 }
+      },
+      "diagnostics": { "malformed": 10, "missing_registry_include": 12, "duplicate_id": 38, "unknown": 14677, "deprecated": 2 },
+      "unresolved": 0
+    },
+    {
+      "profile": "foc",
+      "profile_p0_pass": true,
+      "report_sha256": "31b277681609e83cfe16a7bca5fe9aaa6f4955e2e092748a7a74f22c3f95c8c4",
+      "input_receipt_identity_sha256": "9bedebf394aac54d943e04fe02819ef684c5352d12d3406be50dfd3154931334",
+      "physical_xml_records": 1036,
+      "registry_includes": 155,
+      "definitions": 7515,
+      "categories": {
+        "abilities": { "raw": 660, "winners": 501 },
+        "campaigns": { "raw": 33, "winners": 33 },
+        "factions": { "raw": 8, "winners": 8 },
+        "game_objects": { "raw": 3345, "winners": 3320 },
+        "hardpoints": { "raw": 363, "winners": 363 },
+        "sfx": { "raw": 3106, "winners": 3106 }
+      },
+      "diagnostics": { "malformed": 3, "missing_registry_include": 0, "duplicate_id": 123, "unknown": 25262, "deprecated": 3 },
+      "unresolved": 0
+    },
+    {
+      "profile": "remake",
+      "profile_p0_pass": true,
+      "report_sha256": "a32a2091be310ada0546b599eff0a57038ff2dc941d7813a77bb0272db9b4c53",
+      "input_receipt_identity_sha256": "0f0f1f16213fff2caacc5da82ffdb87f685fd3baf7773151dd2f5c5d8db9854e",
+      "physical_xml_records": 2473,
+      "registry_includes": 862,
+      "definitions": 24059,
+      "categories": {
+        "abilities": { "raw": 2071, "winners": 954 },
+        "campaigns": { "raw": 23, "winners": 23 },
+        "factions": { "raw": 30, "winners": 30 },
+        "game_objects": { "raw": 10031, "winners": 9998 },
+        "hardpoints": { "raw": 7016, "winners": 6998 },
+        "sfx": { "raw": 4888, "winners": 4888 }
+      },
+      "diagnostics": { "malformed": 8, "missing_registry_include": 0, "duplicate_id": 340, "unknown": 77666, "deprecated": 3 },
+      "unresolved": 1
+    }
+  ],
+  "required_failures": {
+    "eaw_missing_registry_includes": [
+      "data/xml/cin_groundinfantry.xml",
+      "data/xml/cin_groundprops.xml",
+      "data/xml/cin_groundturrets.xml",
+      "data/xml/cin_groundvehicles.xml",
+      "data/xml/cin_hardpoints.xml",
+      "data/xml/cin_projectiles.xml",
+      "data/xml/cin_spaceprops.xml",
+      "data/xml/cin_spaceunitscapital.xml",
+      "data/xml/cin_spaceunitscorvettes.xml",
+      "data/xml/cin_spaceunitsfighters.xml",
+      "data/xml/cin_spaceunitsfrigates.xml",
+      "data/xml/cin_transportunits.xml"
+    ],
+    "eaw_missing_registry_evidence": {
+      "gameobject_registry_sha256": "ad78629b6a2c5e0dfd9a414ce6f943030be8523d4ef467c3740d84e8fcad2e39",
+      "hardpoint_registry_sha256": "d98c7890052f6cca4c804397ec8f6c994cb51ee90c4dba7768ea73e5719ab4ef",
+      "declaration_shape": "unconditional direct File elements under the required registry roots",
+      "schema_marks_optional": false,
+      "matches_in_all_raw_eaw_xml_sources": 0
+    },
+    "remake_variant_cycles": [
+      {
+        "logical_path": "data/xml/units/space/units_space_neutral_freighters.xml",
+        "line": 389,
+        "chain": ["Freighter_Acclamator_E", "Freighter_Acclamator_E"],
+        "input_sha256": "3ac674bb3f5820ec9632d5d016d093c0dab2a86c6dfb81f96cc531a31fc3db07",
+        "pinned_lsp_result": { "cyclic": true, "cycle_object_id": "Freighter_Acclamator_E", "chain": ["Freighter_Acclamator_E"] }
+      }
+    ]
+  },
+  "compatibility_repairs": [
+    {
+      "rule": "bounded UTF-8 numeric-leading document-root retry",
+      "logical_path": "data/xml/units/space/units_hero_empire_181st_fighter_wing.xml",
+      "input_sha256": "505082046b1af360370f2bc234827c107abadb664e7b880dcbe8f1fd0aff3a54",
+      "authored_root": "181st",
+      "pinned_lsp_parse": { "root_seen": "uniqueunit", "parse_errors": 1 },
+      "active_registry_file": true,
+      "parsed": true
+    },
+    {
+      "rule": "bounded UTF-8 numeric-leading document-root retry",
+      "logical_path": "data/xml/units/space/units_hero_minors_csa_tagge.xml",
+      "input_sha256": "00b8cbc967e134e5f29d207f6632f9d142a5b2d6d112d29cab82f55c5c9d34df",
+      "authored_root": "80s_Visor_Man",
+      "pinned_lsp_parse": { "root_seen": "uniqueunit", "parse_errors": 1 },
+      "active_registry_file": true,
+      "parsed": true
+    }
+  ],
+  "malformed_physical_xml": {
+    "eaw": [
+      { "logical_path": "data/xml/ai/goalfunctions/basiclandgoalset.xml", "line": 158 },
+      { "logical_path": "data/xml/ai/goalfunctions/basicoffensivegalacticset.xml", "line": 13 },
+      { "logical_path": "data/xml/ai/goalfunctions/systemfunctions.xml", "line": 18 },
+      { "logical_path": "data/xml/ai/goals/offensivegalacticgoals.xml", "line": 149 },
+      { "logical_path": "data/xml/ai/goals/offensivespacegoals.xml", "line": 74 },
+      { "logical_path": "data/xml/ai/templates/basicempiretemplates.xml", "line": 110 },
+      { "logical_path": "data/xml/ai/templates/basicgenerictemplates.xml", "line": 175 },
+      { "logical_path": "data/xml/ai/templates/nativelifetemplates.xml", "line": 32 },
+      { "logical_path": "data/xml/guidialogs.xml", "line": 3181 },
+      { "logical_path": "data/xml/surfacefx.xml", "line": 227 }
+    ],
+    "foc": [
+      { "logical_path": "data/xml/ai/templates/basicempiretemplates.xml", "line": 107 },
+      { "logical_path": "data/xml/ai/templates/basicgenerictemplates.xml", "line": 201 },
+      { "logical_path": "data/xml/ai/templates/nativelifetemplates.xml", "line": 32 }
+    ],
+    "remake": [
+      { "logical_path": "data/xml/buildings/ground/skirmish/empire/command_ship.xml", "line": 61 },
+      { "logical_path": "data/xml/buildings/ground/skirmish/rebel/command_ship.xml", "line": 59 },
+      { "logical_path": "data/xml/buildings/ground/skirmish_rework/empire/command_ship.xml", "line": 61 },
+      { "logical_path": "data/xml/buildings/ground/skirmish_rework/rebel/command_ship.xml", "line": 59 },
+      { "logical_path": "data/xml/units/ground/template_bonuses.xml", "line": 1 },
+      { "logical_path": "data/xml/units/ground/template_formations.xml", "line": 1 },
+      { "logical_path": "data/xml/units/space/units_space_empire_galaxy_gun.xml", "line": 225 },
+      { "logical_path": "data/xml/units/space/units_space_first_order_supremacy.xml", "line": 74 }
+    ]
+  },
+  "lsp_reference_comparison": {
+    "profile": "remake",
+    "selection_count": 20,
+    "mismatch_count": 0,
+    "private_eawr_export_sha256": "6bac12dc0c10852fd45b079f2ec6a04fadded01fa245eed4e88ba96a92b0c0d6",
+    "private_lsp_export_sha256": "fcc9482266e6cc9f2cfb3a1542c5b595adbf7aa3606b6350c028a48db77b9c38",
+    "selection": [
+      { "object_id": "Cin_X-WingProp", "chain_depth": 2, "input_sha256": ["88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7", "a24ead7ee753c061a4840ac3f2c7c21bb8b3399b7fe153d3f854635ae3e57904"] },
+      { "object_id": "Cin_destroyed_Empire_Wall", "chain_depth": 3, "input_sha256": ["88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7", "a24ead7ee753c061a4840ac3f2c7c21bb8b3399b7fe153d3f854635ae3e57904"] },
+      { "object_id": "Cin_DeathStar_Hangar", "chain_depth": 4, "input_sha256": ["88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7", "a24ead7ee753c061a4840ac3f2c7c21bb8b3399b7fe153d3f854635ae3e57904"] },
+      { "object_id": "Cin_Vader_Shot_6-9", "chain_depth": 4, "input_sha256": ["88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7", "a24ead7ee753c061a4840ac3f2c7c21bb8b3399b7fe153d3f854635ae3e57904"] },
+      { "object_id": "Cin_Emperor_Shot_6-9", "chain_depth": 4, "input_sha256": ["88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7", "a24ead7ee753c061a4840ac3f2c7c21bb8b3399b7fe153d3f854635ae3e57904"] },
+      { "object_id": "FIN_At-AT", "chain_depth": 2, "input_sha256": ["1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4", "88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7"] },
+      { "object_id": "FIN_At-AT_Death", "chain_depth": 3, "input_sha256": ["1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4", "88cd462e6eb3abb169a6c2c04fbfee65ae3cb8ed8fc51fe01b3438183cb0f5a7"] },
+      { "object_id": "CIN_Gallofree_IntroOpen", "chain_depth": 2, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "CIN_Gallofree_IntroOpen_01", "chain_depth": 3, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "CIN_Gallofree_IntroOpen_02", "chain_depth": 3, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "Y-Wing_Intro_Ground", "chain_depth": 2, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "CIN_MPTL_Intro", "chain_depth": 2, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "CIN_AT-AT_Vehicles", "chain_depth": 2, "input_sha256": ["1cb95986945362b50acf256ea930684610942ef8c47ed0bb24ec0aaf97accc3c", "1fee0dfd83ac1239b4997e588645bd9b09c008b5f3e5548732ee990857e09bb4"] },
+      { "object_id": "Proj_Ground_Proton_Torpedo_Fast", "chain_depth": 2, "input_sha256": ["1b5afa76df45ad63a2bf47e19ebf776722176971754b988830ded738811b46ae", "dae24c8072547337e5aae982c99b10db621eb5832f58131db16e241f06ac08ef"] },
+      { "object_id": "CIN_Corvette_fast", "chain_depth": 6, "input_sha256": ["9d08a195a90be2e34c9ac0fe06e83343c90e594b28b8d1c6a653bceac4e6803e", "a5e2169888045907bc64f0786176cc91ee4e0ac460e64db7bfb814e000c65ab3", "d5000e89e5cd7a4b61b6e9b09cdbd801f2d57f61b4288cc60d26fd53e8e7544a"] },
+      { "object_id": "FIN_Officer", "chain_depth": 3, "input_sha256": ["c17b899cb56fcaece211034cccf78d5a8a8dfb7794895aee27076ab4a62d6b43"] },
+      { "object_id": "Death_Star_Dish_Close", "chain_depth": 3, "input_sha256": ["c17b899cb56fcaece211034cccf78d5a8a8dfb7794895aee27076ab4a62d6b43"] },
+      { "object_id": "X_Wing_DStar_Xplode_02", "chain_depth": 3, "input_sha256": ["c17b899cb56fcaece211034cccf78d5a8a8dfb7794895aee27076ab4a62d6b43"] },
+      { "object_id": "CIN_Star_Destroyer3X", "chain_depth": 8, "input_sha256": ["77932d6139fd5616233cf476e78676adc1e755b96e3dd9eeda25fbdbec037b2f", "9d08a195a90be2e34c9ac0fe06e83343c90e594b28b8d1c6a653bceac4e6803e", "f902874a2ffe089b52a976c24f3a73eeb507b3fa66c97bd781efb1dec0a0792e"] },
+      { "object_id": "Cin_Nebulon_B_Warp", "chain_depth": 6, "input_sha256": ["147e2deb6959d40130303f9909021d39923722cfbd2eeab1d5a006abd5254c5a", "9d08a195a90be2e34c9ac0fe06e83343c90e594b28b8d1c6a653bceac4e6803e", "da9cafc6cfc380c6392b21fd6e850abdb6179de40a107b648d7936479ac8b9c7"] }
+    ]
+  },
+  "schema_compatibility_risk": "The pinned LSP revision's source-only regression test describes a future 100 owner/tag merge policy and Death_Clone replacement, but the common pinned external schema supplies only Death_Clone merge and no owner/tag mapping. Actual resolver comparison uses the common schema and matches; no private overlay was invented."
+}

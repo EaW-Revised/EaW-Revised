@@ -1,0 +1,4 @@
+/LICENSE.md -text
+/src/pugiconfig.hpp -text
+/src/pugixml.cpp -text
+/src/pugixml.hpp -text

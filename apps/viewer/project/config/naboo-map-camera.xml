@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored camera policy for the FoC M1 land reference map (#30), not retail camera data.
+     Bounds: the map's TED source volume pair 0 (400..4580), read here as the playable area.
+     Pose: map centre at zoom 1 (Land_Mode Distance_Default equals Distance_Max); the target
+     height follows the terrain because Land_Mode sets Location_Follows_Terrain. -->
+<map_camera schema="eawr-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/_mp_land_naboo.ted"
+  map_sha256="c2d8eadb44e17eb259fa169ef58733e42ca49119398fe4569c37fdb8d9662d70">
+  <bounds min_x="400" max_x="4580" min_y="400" max_y="4580"
+    source_id="naboo-source-volume-0" authority="project-authored"/>
+  <initial target_x="2480" target_y="2480" target_height="0" zoom="1" yaw_degrees="0"/>
+  <bindings path="map-camera-bindings.json"/>
+</map_camera>

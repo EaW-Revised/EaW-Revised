@@ -1,0 +1,36 @@
+Art
+Audio
+Config.meg
+Maps.meg
+Patch.meg
+Patch2.meg
+RemakeDisabled.meg
+RemakeMaps.meg
+Resources
+Scripts
+Shaders.meg
+Text
+UnitNames
+Xml
+megafiles.xml
+--- counts ---
+   8683 wav
+   5603 ala
+   4955 dds
+   4140 alo
+   1311 xml
+    464 png
+    436 lua
+    253 mp3
+    107 tga
+     87 txt
+     62 fxo
+     15 jpg
+      7 meg
+      6 ted
+      2 psd
+      2 bat
+      1 tmp
+      1 rc
+      1 rar
+      1 mtd

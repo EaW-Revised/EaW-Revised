@@ -1,0 +1,35 @@
+{
+  "glslang": {
+    "archive": "glslang-16.5.0-windows-x86_64-release.zip",
+    "archive_sha256": "06b71298b750268c127f2ee7ae0ef7525e2068120c6c8a3a08b2f58ca6f325ce",
+    "download_url": "https://github.com/KhronosGroup/glslang/releases/download/16.5.0/glslang-16.5.0-windows-x86_64-release.zip",
+    "executable": "bin/glslang.exe",
+    "executable_sha256": {
+      "windows-x86_64": "e207976041258c1ccfb32902c2a3d543542c1a463c84bd2dd6ba0dca78ea3578"
+    },
+    "flags": [
+      "-D",
+      "-V",
+      "--target-env",
+      "vulkan1.1",
+      "--hlsl-dx9-compatible",
+      "--auto-map-bindings",
+      "--auto-map-locations"
+    ],
+    "version": "16.5.0"
+  },
+  "schema_version": 1,
+  "spirv_tools": {
+    "executable": "bin/spirv-val.exe",
+    "executable_sha256": {
+      "windows-x86_64": "8143196eac13d6eacab83113052da6028fed32c0d2d9b46490dcc9804342b827"
+    },
+    "flags": [
+      "--target-env",
+      "vulkan1.1"
+    ],
+    "source_commit": "fbe4f3ad913c44fe8700545f8ffe35d1382b7093",
+    "spirv_headers_commit": "04f10f650d514df88b76d25e83db360142c7b174",
+    "version": "v2026.1"
+  }
+}

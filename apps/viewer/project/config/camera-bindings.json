@@ -1,0 +1,430 @@
+{
+  "schema": "eawr-camera-bindings",
+  "version": 2,
+  "provenance": "project-authored",
+  "notice": "NON-RETAIL project-authored development bindings and free-camera settings for the EmpireAtWar-Revised viewer (issue #30). These are not the original Empire at War defaults; retail bindings, input cadence, map bounds and any free-flight speed or look sensitivity are unestablished and must not be inferred from this file.",
+  "edge_scroll": true,
+  "free_camera": {
+    "move_speed": 600.0,
+    "vertical_speed": 400.0,
+    "look_degrees_per_unit": 0.2,
+    "pitch_min_degrees": -85.0,
+    "pitch_max_degrees": 85.0
+  },
+  "bindings": [
+    {
+      "id": "land.pan-left.a",
+      "action": "pan_left",
+      "context": "land",
+      "device": "keyboard",
+      "control": "A",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-left.left",
+      "action": "pan_left",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Left",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-right.d",
+      "action": "pan_right",
+      "context": "land",
+      "device": "keyboard",
+      "control": "D",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-right.right",
+      "action": "pan_right",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-forward.w",
+      "action": "pan_forward",
+      "context": "land",
+      "device": "keyboard",
+      "control": "W",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-forward.up",
+      "action": "pan_forward",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Up",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-back.s",
+      "action": "pan_back",
+      "context": "land",
+      "device": "keyboard",
+      "control": "S",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.pan-back.down",
+      "action": "pan_back",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Down",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.zoom.wheel-up",
+      "action": "zoom",
+      "context": "land",
+      "device": "mouse_wheel",
+      "control": "up",
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "land.zoom.wheel-down",
+      "action": "zoom",
+      "context": "land",
+      "device": "mouse_wheel",
+      "control": "down",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "land.zoom.page-up",
+      "action": "zoom",
+      "context": "land",
+      "device": "keyboard",
+      "control": "PageUp",
+      "trigger": "pressed",
+      "scale": -1.0
+    },
+    {
+      "id": "land.zoom.page-down",
+      "action": "zoom",
+      "context": "land",
+      "device": "keyboard",
+      "control": "PageDown",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "land.rotate-grab.middle",
+      "action": "rotate_grab",
+      "context": "land",
+      "device": "mouse_button",
+      "control": "middle",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "land.rotate.motion-x",
+      "action": "rotate",
+      "context": "land",
+      "device": "mouse_motion",
+      "control": "x",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "land.reset-view.home",
+      "action": "reset_view",
+      "context": "land",
+      "device": "keyboard",
+      "control": "Home",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-left.a",
+      "action": "pan_left",
+      "context": "space",
+      "device": "keyboard",
+      "control": "A",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-left.left",
+      "action": "pan_left",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Left",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-right.d",
+      "action": "pan_right",
+      "context": "space",
+      "device": "keyboard",
+      "control": "D",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-right.right",
+      "action": "pan_right",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-forward.w",
+      "action": "pan_forward",
+      "context": "space",
+      "device": "keyboard",
+      "control": "W",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-forward.up",
+      "action": "pan_forward",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Up",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-back.s",
+      "action": "pan_back",
+      "context": "space",
+      "device": "keyboard",
+      "control": "S",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-back.down",
+      "action": "pan_back",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Down",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.zoom.wheel-up",
+      "action": "zoom",
+      "context": "space",
+      "device": "mouse_wheel",
+      "control": "up",
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "space.zoom.wheel-down",
+      "action": "zoom",
+      "context": "space",
+      "device": "mouse_wheel",
+      "control": "down",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "space.zoom.page-up",
+      "action": "zoom",
+      "context": "space",
+      "device": "keyboard",
+      "control": "PageUp",
+      "trigger": "pressed",
+      "scale": -1.0
+    },
+    {
+      "id": "space.zoom.page-down",
+      "action": "zoom",
+      "context": "space",
+      "device": "keyboard",
+      "control": "PageDown",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "space.rotate-grab.middle",
+      "action": "rotate_grab",
+      "context": "space",
+      "device": "mouse_button",
+      "control": "middle",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.rotate.motion-x",
+      "action": "rotate",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "x",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "space.reset-view.home",
+      "action": "reset_view",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Home",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "land.free-toggle.f",
+      "action": "free_toggle",
+      "context": "land",
+      "device": "keyboard",
+      "control": "F",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "space.free-toggle.f",
+      "action": "free_toggle",
+      "context": "space",
+      "device": "keyboard",
+      "control": "F",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "free.free-toggle.f",
+      "action": "free_toggle",
+      "context": "free",
+      "device": "keyboard",
+      "control": "F",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-left.a",
+      "action": "free_move_left",
+      "context": "free",
+      "device": "keyboard",
+      "control": "A",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-left.left",
+      "action": "free_move_left",
+      "context": "free",
+      "device": "keyboard",
+      "control": "Left",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-right.d",
+      "action": "free_move_right",
+      "context": "free",
+      "device": "keyboard",
+      "control": "D",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-right.right",
+      "action": "free_move_right",
+      "context": "free",
+      "device": "keyboard",
+      "control": "Right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-forward.w",
+      "action": "free_move_forward",
+      "context": "free",
+      "device": "keyboard",
+      "control": "W",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-forward.up",
+      "action": "free_move_forward",
+      "context": "free",
+      "device": "keyboard",
+      "control": "Up",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-back.s",
+      "action": "free_move_back",
+      "context": "free",
+      "device": "keyboard",
+      "control": "S",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.move-back.down",
+      "action": "free_move_back",
+      "context": "free",
+      "device": "keyboard",
+      "control": "Down",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.rise.e",
+      "action": "free_rise",
+      "context": "free",
+      "device": "keyboard",
+      "control": "E",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.descend.q",
+      "action": "free_descend",
+      "context": "free",
+      "device": "keyboard",
+      "control": "Q",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.look-grab.right",
+      "action": "free_look_grab",
+      "context": "free",
+      "device": "mouse_button",
+      "control": "right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "free.look-yaw.motion-x",
+      "action": "free_look_yaw",
+      "context": "free",
+      "device": "mouse_motion",
+      "control": "x",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "free.look-pitch.motion-y",
+      "action": "free_look_pitch",
+      "context": "free",
+      "device": "mouse_motion",
+      "control": "y",
+      "trigger": "delta",
+      "scale": 1.0
+    }
+  ]
+}

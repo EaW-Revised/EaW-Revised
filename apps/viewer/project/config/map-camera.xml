@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored synthetic fixture policy. These limits are not TED-derived or retail. -->
+<map_camera schema="eawr-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/eawr_scene_synthetic.ted"
+  map_sha256="3ae3c3379a1b52af246f9f397db7c724937ccc6f848c3eb11637d5149c1ae9bd">
+  <bounds min_x="0" max_x="640" min_y="0" max_y="480"
+    source_id="synthetic-scene-target-rectangle-v1" authority="project-authored"/>
+  <initial target_x="320" target_y="240" target_height="0" zoom="0.5" yaw_degrees="0"/>
+  <bindings path="map-camera-bindings.json"/>
+</map_camera>

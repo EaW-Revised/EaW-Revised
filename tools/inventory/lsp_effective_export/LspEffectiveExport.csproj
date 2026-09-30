@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Independent P0-05 export of pinned pg-starwarsgame-lsp "Show Effective Object" results.
+    LspRoot must be a clean checkout of AlamoEngine-Tools/pg-starwarsgame-lsp at
+    4461416d401b0f665bc1fe82aad60b90bd707fa9 (MIT). The server project itself cannot be built
+    from that revision alone (it references unpinned sibling ModVerify/PetroglyphTools trees), so
+    the server files needed for aet/getEffectiveObject, configuration and .pgproj resolution are
+    compiled here verbatim by link; every service they consume comes from the pinned Core, Xml
+    and Schema projects.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <LspRoot Condition="'$(LspRoot)' == ''">$(MSBuildThisFileDirectory)../../../reference/pg-starwarsgame-lsp</LspRoot>
+    <LspServer>$(LspRoot)/PG.StarWarsGame.LSP.Server</LspServer>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(LspRoot)/PG.StarWarsGame.LSP.Core/PG.StarWarsGame.LSP.Core.csproj" />
+    <ProjectReference Include="$(LspRoot)/PG.StarWarsGame.LSP.Schema/PG.StarWarsGame.LSP.Schema.csproj" />
+    <ProjectReference Include="$(LspRoot)/PG.StarWarsGame.LSP.Xml/PG.StarWarsGame.LSP.Xml.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Versions match the pinned Directory.Packages.props. -->
+    <PackageReference Include="AlamoEngineTools.Modinfo" Version="8.0.6" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+    <PackageReference Include="OmniSharp.Extensions.LanguageServer" Version="0.19.9" />
+    <PackageReference Include="System.IO.Abstractions" Version="22.2.0" />
+  </ItemGroup>
+  <ItemGroup Label="Pinned server sources compiled verbatim">
+    <Compile Include="$(LspServer)/Variants/GetEffectiveObjectHandler.cs" Link="Pinned/Variants/GetEffectiveObjectHandler.cs" />
+    <Compile Include="$(LspServer)/Variants/GetEffectiveObjectParams.cs" Link="Pinned/Variants/GetEffectiveObjectParams.cs" />
+    <Compile Include="$(LspServer)/Variants/GetEffectiveObjectResult.cs" Link="Pinned/Variants/GetEffectiveObjectResult.cs" />
+    <Compile Include="$(LspServer)/LspConfigurationProvider.cs" Link="Pinned/LspConfigurationProvider.cs" />
+    <Compile Include="$(LspServer)/Project/IModProjectDetector.cs" Link="Pinned/Project/IModProjectDetector.cs" />
+    <Compile Include="$(LspServer)/Project/ModProjectDetector.cs" Link="Pinned/Project/ModProjectDetector.cs" />
+    <Compile Include="$(LspServer)/Project/ModProjectLoader.cs" Link="Pinned/Project/ModProjectLoader.cs" />
+    <Compile Include="$(LspServer)/Project/ModProjectLoadException.cs" Link="Pinned/Project/ModProjectLoadException.cs" />
+    <Compile Include="$(LspServer)/Project/ModProjectResolver.cs" Link="Pinned/Project/ModProjectResolver.cs" />
+    <Compile Include="$(LspServer)/Project/PgprojMigrations.cs" Link="Pinned/Project/PgprojMigrations.cs" />
+    <Compile Include="$(LspServer)/Project/ProjectDependencyGraph.cs" Link="Pinned/Project/ProjectDependencyGraph.cs" />
+  </ItemGroup>
+</Project>

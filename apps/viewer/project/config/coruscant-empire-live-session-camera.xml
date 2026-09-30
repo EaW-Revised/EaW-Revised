@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored camera policy for the #499 Empire-side live session test on the M2 skirmish
+     map, not retail camera data. Bounds as coruscant-space-map-camera.xml. Pose: the Empire
+     (local player 2) fleet's spawn, Team_01_Spawn_Point_Marker record 57 at source (4706, -4393, 0)
+     as the skirmish start places it (the headless m2 skirmish), at the same distance 1200 (of
+     100..1900, zoom 0.611111) and Yaw_Default (0) as coruscant-live-session-camera.xml, its Rebel
+     counterpart. -->
+<map_camera schema="eawr-space-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/_mp_space_coruscant.ted"
+  map_sha256="91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286">
+  <bounds min_x="-6100" max_x="6100" min_y="-6100" max_y="6100"
+    source_id="coruscant-source-volume-1" authority="project-authored"/>
+  <initial target_x="4706" target_y="-4393" target_height="0" zoom="0.611111" yaw_degrees="0"/>
+  <bindings path="space-live-camera-bindings.json"/>
+  <constant_overrides schema="eawr-map-camera-overrides" version="1"
+    source_id="space-camera-owner-deviations" authority="project-authored">
+    <override tag="Distance_Min" value="100"/>
+    <override tag="Tactical_Min_Scroll_Speed" value="823.529412"/>
+    <override tag="Pitch_Min" value="-60"/>
+    <override tag="Tactical_Overview_Clicks" value="5"/>
+  </constant_overrides>
+</map_camera>

@@ -1,0 +1,2065 @@
+{
+  "schema_version": 1,
+  "ticket": "P1-06 / #27",
+  "status": "first_slice_terrain_and_skydome",
+  "generator": "asset_validate --profile <eaw|foc|remake> --game-root <GAME_ROOT> [--mod-root <REMAKE_DATA>] --only-format ted --report <OUT>/map-<profile>-effective.json, then assemble the map_families ledger of each report with the P1-02 descriptor bundle.",
+  "selection_rule": "A terrain material slot that declares one diffuse texture selects TerrainRenderBump technique nobump; a slot that declares two selects TerrainRenderBumpDual technique bump, whose DiffuseTexture0/DiffuseTexture1/BlendTexture samplers are exactly that pair. A present-but-empty texture name is not a declaration. Skydome fields name XML objects, so they resolve against the catalog and then against that object's own model chain.",
+  "route_note": "The renderer's legacy_effect route allowlist carries no TERRAIN, WATER or SKYDOME selector and fails closed. Exercised families are drawn through clean-room modern_spatial adapters authored for this slice, and every row records the descriptor-bundle selector it corresponds to rather than implying that selector was bound on the legacy route.",
+  "provenance": "Logical VFS paths and counts only; no install roots, no retail bytes, no captures.",
+  "profiles": [
+    {
+      "profile": "eaw",
+      "view": "effective",
+      "maps": 176,
+      "maps_with_terrain": 85,
+      "space_maps": 91,
+      "maps_with_water_record": 85,
+      "maps_with_sky_reference": 176,
+      "undeclared_terrain_slots": {
+        "maps_using": 16,
+        "declared_slots": 2247,
+        "note": "A terrain slot whose diffuse texture mini is absent or empty. Its cells are still built and drawn, with a flat placeholder, and are reported here rather than dropped."
+      },
+      "terrain_families": [
+        {
+          "name": "SpaceFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t1"
+          ],
+          "translated_techniques": [
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainClouds",
+          "family": "TERRAIN",
+          "pipeline": "terrain_overlay",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_overlay drawn above the surface. The TED cloud texture field is retained and counted, but the overlay geometry and its scroll parameters are not derived here."
+        },
+        {
+          "name": "TerrainFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainIce",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainLava",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainMeshBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t2",
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1",
+            "sph_t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A TerrainMesh-phase effect for map decoration meshes, not for the heightfield surface. Map decoration meshes are placements, which #30 owns."
+        },
+        {
+          "name": "TerrainMeshGloss",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Same TerrainMesh phase and same owner as TerrainMeshBump."
+        },
+        {
+          "name": "TerrainPassability",
+          "family": "TERRAIN",
+          "pipeline": "debug_visualization",
+          "runtime_techniques": [],
+          "translated_techniques": [],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A debug visualization. Passability bytes are retained losslessly and deliberately not interpreted before Phase 3 pathfinding."
+        },
+        {
+          "name": "TerrainRenderBaked",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Takes a single diffuse sampler exactly like TerrainRenderBump/nobump, so the retained TED material fields cannot tell the two apart. The slice binds the same diffuse either way; telling them apart matters only for normal and blend behaviour, which is not implemented."
+        },
+        {
+          "name": "TerrainRenderBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "translated_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 9,
+          "declared_slots_selecting": 27,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares one diffuse texture and no normal map; drawn by the map mode's clean-room modern_spatial terrain adapter."
+        },
+        {
+          "name": "TerrainRenderBumpDual",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump"
+          ],
+          "translated_techniques": [
+            "bump"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 85,
+          "declared_slots_selecting": 3166,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares two diffuse textures, which is what this effect's DiffuseTexture0/DiffuseTexture1/BlendTexture samplers take; drawn with the primary diffuse only, because layer blending needs blend-map semantics this slice does not have."
+        },
+        {
+          "name": "TerrainWater",
+          "family": "WATER",
+          "pipeline": "terrain_water",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t2"
+          ],
+          "untranslated_techniques": [
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Technique t1 is the untranslated assembly fallback, and the retained water mini-records do not establish which technique a map selects. Binding a plane to t0 because it compiles would be substituting a technique the evidence does not choose."
+        }
+      ],
+      "sky_families": [
+        {
+          "name": "Nebula",
+          "family": "NEBULA",
+          "pipeline": "nebula",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Space-map nebulae are classified in this slice and not rendered; the map mode refuses a space map with an explicit no-terrain diagnostic."
+        },
+        {
+          "name": "Planet",
+          "family": "PLANET",
+          "pipeline": "planet",
+          "runtime_techniques": [
+            "sph_t3",
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Galactic-layer planet rendering, outside a land or space battle map."
+        },
+        {
+          "name": "Skydome",
+          "family": "SKYDOME",
+          "pipeline": "skydome",
+          "runtime_techniques": [
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 176,
+          "disposition": "exercised",
+          "cause": "Every map skydome field that resolves to a catalog object with a model in the VFS is loaded through the existing ALO path and drawn by the map mode's clean-room modern_spatial sky adapter."
+        }
+      ],
+      "skydome_objects": [
+        {
+          "name": "DAY_BLUE_HORIZON_SKY",
+          "maps": 5
+        },
+        {
+          "name": "DAY_BLUE_SKY",
+          "maps": 24
+        },
+        {
+          "name": "DAY_DESERT_SKY",
+          "maps": 5
+        },
+        {
+          "name": "DAY_MURK_SKY",
+          "maps": 16
+        },
+        {
+          "name": "DAY_SNOW",
+          "maps": 2
+        },
+        {
+          "name": "DAY_STORM_SKY",
+          "maps": 30
+        },
+        {
+          "name": "EVENING_BLUE_HORIZON_SKY",
+          "maps": 2
+        },
+        {
+          "name": "EVENING_BLUE_SKY",
+          "maps": 12
+        },
+        {
+          "name": "EVENING_DESERT_HORIZON_SKY",
+          "maps": 2
+        },
+        {
+          "name": "EVENING_DESERT_SKY",
+          "maps": 22
+        },
+        {
+          "name": "NIGHT_STARS",
+          "maps": 1
+        },
+        {
+          "name": "PLANET_RINGS00",
+          "maps": 2
+        },
+        {
+          "name": "PLANET_RINGS_LARGER00",
+          "maps": 1
+        },
+        {
+          "name": "SMOG",
+          "maps": 6
+        },
+        {
+          "name": "STARS_CINEMATIC",
+          "maps": 1
+        },
+        {
+          "name": "STARS_HIGH",
+          "maps": 12
+        },
+        {
+          "name": "STARS_LOW",
+          "maps": 26
+        },
+        {
+          "name": "STARS_MEDIUM",
+          "maps": 52
+        },
+        {
+          "name": "STAR_BACKDROP_BLUE",
+          "maps": 9
+        },
+        {
+          "name": "STAR_BACKDROP_BLUE_STEEL",
+          "maps": 3
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN",
+          "maps": 19
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN_ORANGE",
+          "maps": 13
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN_ORANGE_2",
+          "maps": 19
+        },
+        {
+          "name": "STAR_BACKDROP_ORANGE",
+          "maps": 1
+        },
+        {
+          "name": "STAR_BACKDROP_ORANGE_2",
+          "maps": 2
+        },
+        {
+          "name": "STAR_BACKDROP_PURPLE",
+          "maps": 1
+        },
+        {
+          "name": "STAR_BACKDROP_PURPLE_2",
+          "maps": 9
+        },
+        {
+          "name": "STAR_BACKDROP_RED",
+          "maps": 3
+        },
+        {
+          "name": "STAR_BACKDROP_RED_VIVID",
+          "maps": 11
+        },
+        {
+          "name": "THIN_ATMOSPHERE",
+          "maps": 4
+        },
+        {
+          "name": "VOLCANIC_ORANGE",
+          "maps": 3
+        }
+      ],
+      "skydome_models": [
+        {
+          "name": "W_sky_rings00.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_sky_rings01.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_skyorange_horizon_evening.alo",
+          "maps": 9
+        },
+        {
+          "name": "w_sky00.alo",
+          "maps": 24
+        },
+        {
+          "name": "w_sky00_evening.alo",
+          "maps": 12
+        },
+        {
+          "name": "w_sky_desert00.alo",
+          "maps": 5
+        },
+        {
+          "name": "w_sky_desert00_evening.alo",
+          "maps": 22
+        },
+        {
+          "name": "w_sky_murk00.alo",
+          "maps": 16
+        },
+        {
+          "name": "w_sky_nightclear00.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_sky_smog00.alo",
+          "maps": 6
+        },
+        {
+          "name": "w_sky_storm00.alo",
+          "maps": 30
+        },
+        {
+          "name": "w_sky_thin_atmos00.alo",
+          "maps": 4
+        },
+        {
+          "name": "w_sky_volcanic00.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_skysnow00.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_stars_cine.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_stars_high.alo",
+          "maps": 12
+        },
+        {
+          "name": "w_stars_low.alo",
+          "maps": 26
+        },
+        {
+          "name": "w_stars_medium.alo",
+          "maps": 52
+        },
+        {
+          "name": "w_stars_nebula_blue.alo",
+          "maps": 9
+        },
+        {
+          "name": "w_stars_nebula_green.alo",
+          "maps": 19
+        },
+        {
+          "name": "w_stars_nebula_green_orange.alo",
+          "maps": 13
+        },
+        {
+          "name": "w_stars_nebula_green_orange02.alo",
+          "maps": 19
+        },
+        {
+          "name": "w_stars_nebula_orange.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_stars_nebula_orange02.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_stars_nebula_purple.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_stars_nebula_purple02.alo",
+          "maps": 9
+        },
+        {
+          "name": "w_stars_nebula_red.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_stars_nebula_red_vivid.alo",
+          "maps": 11
+        },
+        {
+          "name": "w_stars_nebula_steel_blue.alo",
+          "maps": 3
+        }
+      ]
+    },
+    {
+      "profile": "foc",
+      "view": "effective",
+      "maps": 269,
+      "maps_with_terrain": 135,
+      "space_maps": 134,
+      "maps_with_water_record": 135,
+      "maps_with_sky_reference": 269,
+      "undeclared_terrain_slots": {
+        "maps_using": 40,
+        "declared_slots": 3368,
+        "note": "A terrain slot whose diffuse texture mini is absent or empty. Its cells are still built and drawn, with a flat placeholder, and are reported here rather than dropped."
+      },
+      "terrain_families": [
+        {
+          "name": "SpaceFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t1"
+          ],
+          "translated_techniques": [
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainClouds",
+          "family": "TERRAIN",
+          "pipeline": "terrain_overlay",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_overlay drawn above the surface. The TED cloud texture field is retained and counted, but the overlay geometry and its scroll parameters are not derived here."
+        },
+        {
+          "name": "TerrainFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainIce",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainLava",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainMeshBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t2",
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1",
+            "sph_t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A TerrainMesh-phase effect for map decoration meshes, not for the heightfield surface. Map decoration meshes are placements, which #30 owns."
+        },
+        {
+          "name": "TerrainMeshGloss",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Same TerrainMesh phase and same owner as TerrainMeshBump."
+        },
+        {
+          "name": "TerrainPassability",
+          "family": "TERRAIN",
+          "pipeline": "debug_visualization",
+          "runtime_techniques": [],
+          "translated_techniques": [],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A debug visualization. Passability bytes are retained losslessly and deliberately not interpreted before Phase 3 pathfinding."
+        },
+        {
+          "name": "TerrainRenderBaked",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Takes a single diffuse sampler exactly like TerrainRenderBump/nobump, so the retained TED material fields cannot tell the two apart. The slice binds the same diffuse either way; telling them apart matters only for normal and blend behaviour, which is not implemented."
+        },
+        {
+          "name": "TerrainRenderBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "translated_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 28,
+          "declared_slots_selecting": 142,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares one diffuse texture and no normal map; drawn by the map mode's clean-room modern_spatial terrain adapter."
+        },
+        {
+          "name": "TerrainRenderBumpDual",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump"
+          ],
+          "translated_techniques": [
+            "bump"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 135,
+          "declared_slots_selecting": 5130,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares two diffuse textures, which is what this effect's DiffuseTexture0/DiffuseTexture1/BlendTexture samplers take; drawn with the primary diffuse only, because layer blending needs blend-map semantics this slice does not have."
+        },
+        {
+          "name": "TerrainWater",
+          "family": "WATER",
+          "pipeline": "terrain_water",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t2"
+          ],
+          "untranslated_techniques": [
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Technique t1 is the untranslated assembly fallback, and the retained water mini-records do not establish which technique a map selects. Binding a plane to t0 because it compiles would be substituting a technique the evidence does not choose."
+        }
+      ],
+      "sky_families": [
+        {
+          "name": "Nebula",
+          "family": "NEBULA",
+          "pipeline": "nebula",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Space-map nebulae are classified in this slice and not rendered; the map mode refuses a space map with an explicit no-terrain diagnostic."
+        },
+        {
+          "name": "Planet",
+          "family": "PLANET",
+          "pipeline": "planet",
+          "runtime_techniques": [
+            "sph_t3",
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Galactic-layer planet rendering, outside a land or space battle map."
+        },
+        {
+          "name": "Skydome",
+          "family": "SKYDOME",
+          "pipeline": "skydome",
+          "runtime_techniques": [
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 269,
+          "disposition": "exercised",
+          "cause": "Every map skydome field that resolves to a catalog object with a model in the VFS is loaded through the existing ALO path and drawn by the map mode's clean-room modern_spatial sky adapter."
+        }
+      ],
+      "skydome_objects": [
+        {
+          "name": "BESPIN_CLOUDS",
+          "maps": 3
+        },
+        {
+          "name": "DAY_BLUE_HORIZON_SKY",
+          "maps": 6
+        },
+        {
+          "name": "DAY_BLUE_SKY",
+          "maps": 26
+        },
+        {
+          "name": "DAY_DESERT_HORIZON_SKY",
+          "maps": 4
+        },
+        {
+          "name": "DAY_DESERT_SKY",
+          "maps": 7
+        },
+        {
+          "name": "DAY_MURK_SKY",
+          "maps": 32
+        },
+        {
+          "name": "DAY_MURK_SKY_HUGE",
+          "maps": 2
+        },
+        {
+          "name": "DAY_SNOW",
+          "maps": 2
+        },
+        {
+          "name": "DAY_STORM_SKY",
+          "maps": 41
+        },
+        {
+          "name": "EVENING_BLUE_HORIZON_SKY",
+          "maps": 3
+        },
+        {
+          "name": "EVENING_BLUE_SKY",
+          "maps": 12
+        },
+        {
+          "name": "EVENING_DESERT_HORIZON_SKY",
+          "maps": 2
+        },
+        {
+          "name": "EVENING_DESERT_SKY",
+          "maps": 29
+        },
+        {
+          "name": "GIRDER_SKY_INTERIOR",
+          "maps": 2
+        },
+        {
+          "name": "KAMINO_SKYDOME",
+          "maps": 6
+        },
+        {
+          "name": "NIGHT_STARS",
+          "maps": 2
+        },
+        {
+          "name": "NIGHT_STARS_NOFLARE",
+          "maps": 1
+        },
+        {
+          "name": "PLANET_RINGS00",
+          "maps": 2
+        },
+        {
+          "name": "PLANET_RINGS_LARGER00",
+          "maps": 1
+        },
+        {
+          "name": "SKY_BESPIN_00",
+          "maps": 2
+        },
+        {
+          "name": "SMOG",
+          "maps": 11
+        },
+        {
+          "name": "STARS_CINEMATIC",
+          "maps": 3
+        },
+        {
+          "name": "STARS_HIGH",
+          "maps": 15
+        },
+        {
+          "name": "STARS_LOW",
+          "maps": 40
+        },
+        {
+          "name": "STARS_MAW",
+          "maps": 2
+        },
+        {
+          "name": "STARS_MEDIUM",
+          "maps": 72
+        },
+        {
+          "name": "STAR_BACKDROP_BLUE",
+          "maps": 12
+        },
+        {
+          "name": "STAR_BACKDROP_BLUE_STEEL",
+          "maps": 6
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN",
+          "maps": 30
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN_ORANGE",
+          "maps": 16
+        },
+        {
+          "name": "STAR_BACKDROP_GREEN_ORANGE_2",
+          "maps": 24
+        },
+        {
+          "name": "STAR_BACKDROP_ORANGE",
+          "maps": 1
+        },
+        {
+          "name": "STAR_BACKDROP_ORANGE_2",
+          "maps": 7
+        },
+        {
+          "name": "STAR_BACKDROP_PURPLE",
+          "maps": 4
+        },
+        {
+          "name": "STAR_BACKDROP_PURPLE_2",
+          "maps": 10
+        },
+        {
+          "name": "STAR_BACKDROP_RED",
+          "maps": 3
+        },
+        {
+          "name": "STAR_BACKDROP_RED_LIGHT",
+          "maps": 6
+        },
+        {
+          "name": "STAR_BACKDROP_RED_VIVID",
+          "maps": 14
+        },
+        {
+          "name": "THIN_ATMOSPHERE",
+          "maps": 5
+        },
+        {
+          "name": "URBAN_TRAFFIC00",
+          "maps": 1
+        },
+        {
+          "name": "UTAPAU_SKYDOME",
+          "maps": 3
+        },
+        {
+          "name": "VOLCANIC_ORANGE",
+          "maps": 4
+        }
+      ],
+      "skydome_models": [
+        {
+          "name": "W_sky_rings00.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_sky_rings01.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_sky_urban_traffic00.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_skyorange_horizon_evening.alo",
+          "maps": 15
+        },
+        {
+          "name": "w_sky00.alo",
+          "maps": 26
+        },
+        {
+          "name": "w_sky00_evening.alo",
+          "maps": 12
+        },
+        {
+          "name": "w_sky_bespin.alo",
+          "maps": 5
+        },
+        {
+          "name": "w_sky_desert00.alo",
+          "maps": 7
+        },
+        {
+          "name": "w_sky_desert00_evening.alo",
+          "maps": 29
+        },
+        {
+          "name": "w_sky_interior2.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_kamino.alo",
+          "maps": 6
+        },
+        {
+          "name": "w_sky_murk00.alo",
+          "maps": 32
+        },
+        {
+          "name": "w_sky_murk00_huge.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_nightclear00.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_nightclear00_noflare.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_sky_smog00.alo",
+          "maps": 11
+        },
+        {
+          "name": "w_sky_storm00.alo",
+          "maps": 41
+        },
+        {
+          "name": "w_sky_thin_atmos00.alo",
+          "maps": 5
+        },
+        {
+          "name": "w_sky_utapau.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_sky_volcanic00.alo",
+          "maps": 4
+        },
+        {
+          "name": "w_skysnow00.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_stars_cine.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_stars_high.alo",
+          "maps": 15
+        },
+        {
+          "name": "w_stars_low.alo",
+          "maps": 40
+        },
+        {
+          "name": "w_stars_maw.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_stars_medium.alo",
+          "maps": 72
+        },
+        {
+          "name": "w_stars_nebula_blue.alo",
+          "maps": 12
+        },
+        {
+          "name": "w_stars_nebula_green.alo",
+          "maps": 28
+        },
+        {
+          "name": "w_stars_nebula_green_orange.alo",
+          "maps": 16
+        },
+        {
+          "name": "w_stars_nebula_green_orange02.alo",
+          "maps": 24
+        },
+        {
+          "name": "w_stars_nebula_orange.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_stars_nebula_orange02.alo",
+          "maps": 7
+        },
+        {
+          "name": "w_stars_nebula_purple.alo",
+          "maps": 4
+        },
+        {
+          "name": "w_stars_nebula_purple02.alo",
+          "maps": 10
+        },
+        {
+          "name": "w_stars_nebula_red.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_stars_nebula_red_light.alo",
+          "maps": 6
+        },
+        {
+          "name": "w_stars_nebula_red_vivid.alo",
+          "maps": 14
+        },
+        {
+          "name": "w_stars_nebula_steel_blue.alo",
+          "maps": 6
+        }
+      ]
+    },
+    {
+      "profile": "remake",
+      "view": "effective",
+      "maps": 375,
+      "maps_with_terrain": 176,
+      "space_maps": 199,
+      "maps_with_water_record": 176,
+      "maps_with_sky_reference": 349,
+      "undeclared_terrain_slots": {
+        "maps_using": 44,
+        "declared_slots": 5390,
+        "note": "A terrain slot whose diffuse texture mini is absent or empty. Its cells are still built and drawn, with a flat placeholder, and are reported here rather than dropped."
+      },
+      "terrain_families": [
+        {
+          "name": "SpaceFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t1"
+          ],
+          "translated_techniques": [
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainClouds",
+          "family": "TERRAIN",
+          "pipeline": "terrain_overlay",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_overlay drawn above the surface. The TED cloud texture field is retained and counted, but the overlay geometry and its scroll parameters are not derived here."
+        },
+        {
+          "name": "TerrainFogOfWar",
+          "family": "TERRAIN",
+          "pipeline": "fog_of_war",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Fog of war is #28's visibility texture path, not this slice."
+        },
+        {
+          "name": "TerrainIce",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainLava",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A terrain_surface variant selected by authored terrain state this loader does not yet decode; no corpus map's retained fields select it."
+        },
+        {
+          "name": "TerrainMeshBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t2",
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1",
+            "sph_t2"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A TerrainMesh-phase effect for map decoration meshes, not for the heightfield surface. Map decoration meshes are placements, which #30 owns."
+        },
+        {
+          "name": "TerrainMeshGloss",
+          "family": "TERRAIN",
+          "pipeline": "terrain_mesh",
+          "runtime_techniques": [
+            "sph_t1",
+            "sph_t0"
+          ],
+          "translated_techniques": [
+            "sph_t0",
+            "sph_t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Same TerrainMesh phase and same owner as TerrainMeshBump."
+        },
+        {
+          "name": "TerrainPassability",
+          "family": "TERRAIN",
+          "pipeline": "debug_visualization",
+          "runtime_techniques": [],
+          "translated_techniques": [],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "A debug visualization. Passability bytes are retained losslessly and deliberately not interpreted before Phase 3 pathfinding."
+        },
+        {
+          "name": "TerrainRenderBaked",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t1"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Takes a single diffuse sampler exactly like TerrainRenderBump/nobump, so the retained TED material fields cannot tell the two apart. The slice binds the same diffuse either way; telling them apart matters only for normal and blend behaviour, which is not implemented."
+        },
+        {
+          "name": "TerrainRenderBump",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "translated_techniques": [
+            "bump",
+            "nobump",
+            "t3"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 35,
+          "declared_slots_selecting": 161,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares one diffuse texture and no normal map; drawn by the map mode's clean-room modern_spatial terrain adapter."
+        },
+        {
+          "name": "TerrainRenderBumpDual",
+          "family": "TERRAIN",
+          "pipeline": "terrain_surface",
+          "runtime_techniques": [
+            "bump"
+          ],
+          "translated_techniques": [
+            "bump"
+          ],
+          "untranslated_techniques": [],
+          "maps_selecting": 176,
+          "declared_slots_selecting": 5713,
+          "disposition": "exercised",
+          "cause": "Selected by every map slot that declares two diffuse textures, which is what this effect's DiffuseTexture0/DiffuseTexture1/BlendTexture samplers take; drawn with the primary diffuse only, because layer blending needs blend-map semantics this slice does not have."
+        },
+        {
+          "name": "TerrainWater",
+          "family": "WATER",
+          "pipeline": "terrain_water",
+          "runtime_techniques": [
+            "t0",
+            "t1",
+            "t2"
+          ],
+          "translated_techniques": [
+            "t0",
+            "t2"
+          ],
+          "untranslated_techniques": [
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "declared_slots_selecting": 0,
+          "disposition": "noted",
+          "cause": "Technique t1 is the untranslated assembly fallback, and the retained water mini-records do not establish which technique a map selects. Binding a plane to t0 because it compiles would be substituting a technique the evidence does not choose."
+        }
+      ],
+      "sky_families": [
+        {
+          "name": "Nebula",
+          "family": "NEBULA",
+          "pipeline": "nebula",
+          "runtime_techniques": [
+            "t0",
+            "t1"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Space-map nebulae are classified in this slice and not rendered; the map mode refuses a space map with an explicit no-terrain diagnostic."
+        },
+        {
+          "name": "Planet",
+          "family": "PLANET",
+          "pipeline": "planet",
+          "runtime_techniques": [
+            "sph_t3",
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 0,
+          "disposition": "noted",
+          "cause": "Galactic-layer planet rendering, outside a land or space battle map."
+        },
+        {
+          "name": "Skydome",
+          "family": "SKYDOME",
+          "pipeline": "skydome",
+          "runtime_techniques": [
+            "sph_t2",
+            "t0"
+          ],
+          "maps_selecting": 349,
+          "disposition": "exercised",
+          "cause": "Every map skydome field that resolves to a catalog object with a model in the VFS is loaded through the existing ALO path and drawn by the map mode's clean-room modern_spatial sky adapter."
+        }
+      ],
+      "skydome_objects": [
+        {
+          "name": "AAA_BESPIN",
+          "maps": 1
+        },
+        {
+          "name": "AAA_DAY_SKIES_3",
+          "maps": 5
+        },
+        {
+          "name": "AAA_NEW_10",
+          "maps": 3
+        },
+        {
+          "name": "AAA_NEW_11",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_12",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_13",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_14",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_2",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_3",
+          "maps": 5
+        },
+        {
+          "name": "AAA_NEW_7",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_8",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_LQ_1",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_LQ_10",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_LQ_12",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_LQ_13",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_LQ_2",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_LQ_3",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_LQ_5",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_LQ_6",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_LQ_9",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_SPACE_BESPIN",
+          "maps": 1
+        },
+        {
+          "name": "AAA_NEW_SPACE_GALAXY",
+          "maps": 2
+        },
+        {
+          "name": "AAA_NEW_SPACE_STARS_BRIGHT",
+          "maps": 1
+        },
+        {
+          "name": "AAA_SKIES_1",
+          "maps": 2
+        },
+        {
+          "name": "AAA_SKIES_DAY_SUNSET_GOLDEN",
+          "maps": 3
+        },
+        {
+          "name": "AAA_STARS",
+          "maps": 34
+        },
+        {
+          "name": "AAA_STARS_BRIGHT",
+          "maps": 10
+        },
+        {
+          "name": "AAA_STARS_DENSE",
+          "maps": 29
+        },
+        {
+          "name": "AAA_STARS_DENSE_BRIGHT",
+          "maps": 7
+        },
+        {
+          "name": "AAA_STARS_GALAXY_1",
+          "maps": 9
+        },
+        {
+          "name": "AAA_STARS_NEBULA_1",
+          "maps": 3
+        },
+        {
+          "name": "AAA_STARS_NEBULA_101",
+          "maps": 3
+        },
+        {
+          "name": "AAA_STARS_NEBULA_103",
+          "maps": 2
+        },
+        {
+          "name": "AAA_STARS_NEBULA_103_HC_LB",
+          "maps": 1
+        },
+        {
+          "name": "AAA_STARS_NEBULA_2",
+          "maps": 5
+        },
+        {
+          "name": "AAA_STARS_NEBULA_3",
+          "maps": 4
+        },
+        {
+          "name": "AAA_STARS_NEBULA_4",
+          "maps": 2
+        },
+        {
+          "name": "AAA_STARS_NEBULA_5",
+          "maps": 2
+        },
+        {
+          "name": "AAA_STARS_NEBULA_6",
+          "maps": 1
+        },
+        {
+          "name": "AAA_STARS_NEBULA_7",
+          "maps": 2
+        },
+        {
+          "name": "AAA_STARS_RING_1",
+          "maps": 1
+        },
+        {
+          "name": "BESPIN_CLOUDS",
+          "maps": 2
+        },
+        {
+          "name": "DAY_BLUE_HORIZON_SKY",
+          "maps": 6
+        },
+        {
+          "name": "DAY_BLUE_SKY",
+          "maps": 25
+        },
+        {
+          "name": "DAY_DESERT_HORIZON_SKY",
+          "maps": 3
+        },
+        {
+          "name": "DAY_DESERT_SKY",
+          "maps": 6
+        },
+        {
+          "name": "DAY_MURK_SKY",
+          "maps": 27
+        },
+        {
+          "name": "DAY_MURK_SKY_HUGE",
+          "maps": 2
+        },
+        {
+          "name": "DAY_SNOW",
+          "maps": 1
+        },
+        {
+          "name": "DAY_STORM_SKY",
+          "maps": 31
+        },
+        {
+          "name": "EVENING_BLUE_HORIZON_SKY",
+          "maps": 3
+        },
+        {
+          "name": "EVENING_BLUE_SKY",
+          "maps": 10
+        },
+        {
+          "name": "EVENING_DESERT_HORIZON_SKY",
+          "maps": 2
+        },
+        {
+          "name": "EVENING_DESERT_SKY",
+          "maps": 21
+        },
+        {
+          "name": "GIRDER_SKY_INTERIOR",
+          "maps": 2
+        },
+        {
+          "name": "KAMINO_SKYDOME",
+          "maps": 4
+        },
+        {
+          "name": "NEBULAE_CLOUD_1_BRIGHT",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_1_DARK",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_1_DARK_SATURATION",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_2_BRIGHT",
+          "maps": 3
+        },
+        {
+          "name": "NEBULAE_CLOUD_2_BRIGHT_SATURATED",
+          "maps": 4
+        },
+        {
+          "name": "NEBULAE_CLOUD_3_BRIGHT",
+          "maps": 1
+        },
+        {
+          "name": "NEBULAE_CLOUD_3_BRIGHT_SATURATED",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_3_DARK",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_3_DARK_SATURATION",
+          "maps": 2
+        },
+        {
+          "name": "NEBULAE_CLOUD_4_DARK",
+          "maps": 3
+        },
+        {
+          "name": "NEBULAE_CLOUD_5_BRIGHT",
+          "maps": 9
+        },
+        {
+          "name": "NEBULAE_CLOUD_5_DARK",
+          "maps": 7
+        },
+        {
+          "name": "NEBULAE_CLOUD_5_DARK_SATURATION",
+          "maps": 12
+        },
+        {
+          "name": "NEBULAE_CLOUD_6_BRIGHT",
+          "maps": 3
+        },
+        {
+          "name": "NEBULAE_CLOUD_6_BRIGHT_SATURATED",
+          "maps": 1
+        },
+        {
+          "name": "NEBULAE_CLOUD_7_BRIGHT",
+          "maps": 1
+        },
+        {
+          "name": "NEBULAE_CLOUD_7_DARK",
+          "maps": 2
+        },
+        {
+          "name": "NIGHT_STARS",
+          "maps": 2
+        },
+        {
+          "name": "NIGHT_STARS_NOFLARE",
+          "maps": 1
+        },
+        {
+          "name": "PLANET_RINGS00",
+          "maps": 1
+        },
+        {
+          "name": "PLANET_RINGS_LARGER00",
+          "maps": 1
+        },
+        {
+          "name": "SMOG",
+          "maps": 10
+        },
+        {
+          "name": "STARS_CINEMATIC",
+          "maps": 3
+        },
+        {
+          "name": "STARS_HIGH",
+          "maps": 6
+        },
+        {
+          "name": "STARS_LOW",
+          "maps": 22
+        },
+        {
+          "name": "STARS_MEDIUM",
+          "maps": 45
+        },
+        {
+          "name": "THIN_ATMOSPHERE",
+          "maps": 3
+        },
+        {
+          "name": "URBAN_TRAFFIC00",
+          "maps": 2
+        },
+        {
+          "name": "UTAPAU_SKYDOME",
+          "maps": 2
+        },
+        {
+          "name": "VOLCANIC_ORANGE",
+          "maps": 3
+        }
+      ],
+      "skydome_models": [
+        {
+          "name": "W_Skydome_Ground_Bespin.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_10.alo",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Ground_New_11.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_12.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_13.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_14.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_2.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_3.alo",
+          "maps": 5
+        },
+        {
+          "name": "W_Skydome_Ground_New_7.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_8.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_1.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_10.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_12.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_13.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_2.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_3.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_5.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_6.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_New_LQ_9.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Ground_Skies_1_Lower.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Ground_Skies_3_Flat.alo",
+          "maps": 5
+        },
+        {
+          "name": "W_Skydome_Ground_Sunset_Lower_Golden.ALO",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_SanF_1.ALO",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_SanF_3.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_SanF_3_HC_LB.ALO",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_1_Bright.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_1_Dark.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_1_Dark_Saturation.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_2_Bright.ALO",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_2_Bright_Saturation.ALO",
+          "maps": 4
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_3_Bright.ALO",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_3_Bright_Saturation.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_3_Dark.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_3_Dark_Saturation.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_4_Dark.ALO",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_5_Bright.ALO",
+          "maps": 9
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_5_Dark.ALO",
+          "maps": 7
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_5_Dark_Saturation.ALO",
+          "maps": 12
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_6_Bright.ALO",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_6_Bright_Saturation.ALO",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_7_Bright.ALO",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_Secondary_7_Dark.ALO",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_1.alo",
+          "maps": 3
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_2.alo",
+          "maps": 5
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_3.alo",
+          "maps": 4
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_4.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_5.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_6.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Nebula_TimB_7.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_Skydome_Space_Skies_Bespin_2.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Stars_Rings_SanF_1.ALO",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars.alo",
+          "maps": 110
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Bright.ALO",
+          "maps": 10
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Bright.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Dense.ALO",
+          "maps": 29
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Dense_Bright.ALO",
+          "maps": 7
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Galaxy_1.ALO",
+          "maps": 9
+        },
+        {
+          "name": "W_Skydome_Space_Tile_Stars_Galaxy_1.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_sky_rings00.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_sky_rings01.alo",
+          "maps": 1
+        },
+        {
+          "name": "W_sky_urban_traffic00.alo",
+          "maps": 2
+        },
+        {
+          "name": "W_skyorange_horizon_evening.alo",
+          "maps": 14
+        },
+        {
+          "name": "w_sky00.alo",
+          "maps": 25
+        },
+        {
+          "name": "w_sky00_evening.alo",
+          "maps": 10
+        },
+        {
+          "name": "w_sky_bespin.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_desert00.alo",
+          "maps": 6
+        },
+        {
+          "name": "w_sky_desert00_evening.alo",
+          "maps": 21
+        },
+        {
+          "name": "w_sky_interior2.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_kamino.alo",
+          "maps": 4
+        },
+        {
+          "name": "w_sky_murk00.alo",
+          "maps": 27
+        },
+        {
+          "name": "w_sky_murk00_huge.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_nightclear00.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_nightclear00_noflare.alo",
+          "maps": 1
+        },
+        {
+          "name": "w_sky_smog00.alo",
+          "maps": 10
+        },
+        {
+          "name": "w_sky_storm00.alo",
+          "maps": 31
+        },
+        {
+          "name": "w_sky_thin_atmos00.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_sky_utapau.alo",
+          "maps": 2
+        },
+        {
+          "name": "w_sky_volcanic00.alo",
+          "maps": 3
+        },
+        {
+          "name": "w_skysnow00.alo",
+          "maps": 1
+        }
+      ]
+    }
+  ]
+}

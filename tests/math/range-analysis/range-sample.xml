@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RangeAnalysisFixture>
+  <Galactic_Position>-12.5, 0, 42.25</Galactic_Position>
+  <Tactical_Position>1e3 2e3 -3e3</Tactical_Position>
+  <Max_Speed>7.5</Max_Speed>
+  <Turn_Rate>-0.125</Turn_Rate>
+  <Recharge_Time>0.03125</Recharge_Time>
+  <Lifetime>600</Lifetime>
+  <Damage>0.000244140625</Damage>
+  <Damage_Per_Second>8192</Damage_Per_Second>
+  <Damage_Type>1, ENERGY</Damage_Type>
+  <Damage_Multiplier>1.5</Damage_Multiplier>
+  <Armor_Factor>-2</Armor_Factor>
+  <Unrelated_Number>999999999999</Unrelated_Number>
+</RangeAnalysisFixture>

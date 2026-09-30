@@ -1,0 +1,179 @@
+{
+  "schema": "eawr-camera-bindings",
+  "version": 1,
+  "provenance": "project-authored",
+  "notice": "NON-RETAIL project-authored space camera bindings for the #80/#82 live battle. As space-map-camera-bindings.json, without WASD: in the battle FoC's keys give orders (S stop, A attack mode), so the arrows and edge scroll pan. No original movement, speed, zoom or binding claim.",
+  "edge_scroll": true,
+  "click_reset": true,
+  "screen_mouse_units": true,
+  "bindings": [
+    {
+      "id": "space.pan-left.left",
+      "action": "pan_left",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Left",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-right.right",
+      "action": "pan_right",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Right",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-forward.up",
+      "action": "pan_forward",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Up",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan-back.down",
+      "action": "pan_back",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Down",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.zoom.wheel-up",
+      "action": "zoom",
+      "context": "space",
+      "device": "mouse_wheel",
+      "control": "up",
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "space.zoom.wheel-down",
+      "action": "zoom",
+      "context": "space",
+      "device": "mouse_wheel",
+      "control": "down",
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "space.zoom.page-up",
+      "action": "zoom",
+      "context": "space",
+      "device": "keyboard",
+      "control": "PageUp",
+      "trigger": "pressed",
+      "scale": -1.0
+    },
+    {
+      "id": "space.zoom.page-down",
+      "action": "zoom",
+      "context": "space",
+      "device": "keyboard",
+      "control": "PageDown",
+      "trigger": "pressed",
+      "scale": 1.0
+    },
+    {
+      "id": "space.rotate-grab.middle",
+      "action": "rotate_grab",
+      "context": "space",
+      "device": "mouse_button",
+      "control": "middle",
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.translate.motion-x",
+      "action": "translate_x",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "x",
+      "trigger": "delta",
+      "scale": 4.0
+    },
+    {
+      "id": "space.translate.motion-y",
+      "action": "translate_y",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "y",
+      "trigger": "delta",
+      "scale": -4.0
+    },
+    {
+      "id": "space.orbit-grab.ctrl-middle",
+      "action": "rotate_grab",
+      "context": "space",
+      "device": "mouse_button",
+      "control": "middle",
+      "modifiers": [
+        "ctrl"
+      ],
+      "trigger": "held",
+      "scale": 1.0
+    },
+    {
+      "id": "space.orbit.ctrl-motion-x",
+      "action": "rotate",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "x",
+      "modifiers": [
+        "ctrl"
+      ],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "space.orbit.ctrl-motion-y",
+      "action": "orbit_pitch",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "y",
+      "modifiers": [
+        "ctrl"
+      ],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "space.pan.alt-motion-x",
+      "action": "pan_motion_x",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "x",
+      "modifiers": [
+        "alt"
+      ],
+      "trigger": "delta",
+      "scale": 1.0
+    },
+    {
+      "id": "space.pan.alt-motion-y",
+      "action": "pan_motion_y",
+      "context": "space",
+      "device": "mouse_motion",
+      "control": "y",
+      "modifiers": [
+        "alt"
+      ],
+      "trigger": "delta",
+      "scale": -1.0
+    },
+    {
+      "id": "space.reset-view.home",
+      "action": "reset_view",
+      "context": "space",
+      "device": "keyboard",
+      "control": "Home",
+      "trigger": "pressed",
+      "scale": 1.0
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+; Isolated synthetic fog-stub-v1 adapter probe; not the viewer project.
+config_version=5
+
+[application]
+config/name="EAWR Fog Probe"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=320
+window/size/viewport_height=160
+
+[rendering]
+renderer/rendering_method="forward_plus"
+rendering_device/driver.windows="vulkan"

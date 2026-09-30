@@ -1,0 +1,9 @@
+# #376: the line of tools/validation/p1_capture/lua_number_probe.lua (LF SHA-256
+# 381da5285c054e4d1ce4c11ff173fa56201effccf34b41c2340d1f42cce7b0da) as the retail
+# game computed it, read off the rig's advisor text: Steam FoC corruption/StarWarsG.exe
+# (SHA-256 07daeeaec9d1e751383b1db3f5847b6c66f68785440a6c52c87b85f723d018a4), skirmish
+# Naboo land, fog off, capture session <rig>-20260927T093759Z-462add,
+# 2026-09-27. The game showed it in five parts ("LNP k/5"), joined here at spaces; its
+# own string comparison gave the verdict "LNP1 OK" (every case equal to the numeric
+# profile's text). lua_numeric_tests foc-probe pins the soft-float VM to this line.
+LNP1 OK n=26 A=2 B=4 C=1.2345678901234e+14 D=0.3 E=1e+15 F=-0 G=9007199254740992 H=0.33333333333333331 I=0,2,-2 J=0.2,1.12 K=0.10000000000000000555 L=inf,-inf,-nan(ind) M=-2147483648,-2,2147483647 N=1,-1,1.5,-1 O=16 P=ERR Q=4.9406564584125e-324 R=1.234568e+04,1e-05 S=1.2345678901235e+17 T=9.007199254741e+15 U=2.67,1.000 V=11,0.99999999999999989 W=5.1873775176396206 X=1e+100,-1e-07 Y=0.3,9.9999999999999992e+22 Z=ff,001.2

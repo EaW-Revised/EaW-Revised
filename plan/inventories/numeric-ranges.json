@@ -1,0 +1,1262 @@
+{
+  "headroom": {
+    "interpretation": "Products are magnitude screens, not asserted runtime operation pairs. Accumulation headroom remains open until the listed counts are bounded.",
+    "screening_products": [
+      {
+        "expression": "max_ted_axis_extent^2",
+        "meaning": "single coordinate-square screening bound",
+        "value": "1296000000"
+      },
+      {
+        "expression": "2 * max_ted_axis_extent^2",
+        "meaning": "conservative 2D dot/squared-distance intermediate screening bound",
+        "value": "2592000000"
+      },
+      {
+        "expression": "3 * max_ted_axis_extent^2",
+        "meaning": "conservative 3D dot-product intermediate screening bound",
+        "value": "3888000000"
+      },
+      {
+        "expression": "max_abs_damage * max_abs_multiplier",
+        "meaning": "cross-tag screening bound; compatibility of the two extrema is not established",
+        "value": "400000000"
+      },
+      {
+        "expression": "max_abs_speed * max_abs_duration",
+        "meaning": "cross-tag screening bound; source time units and compatibility are not established",
+        "value": "2999999999999997000"
+      }
+    ],
+    "unresolved_accumulation_bounds": [
+      "maximum simultaneous contributors to accumulated damage/economy totals",
+      "maximum simulation lifetime or tick count",
+      "fixed simulation tick rate and per-tag time-unit conversions",
+      "maximum path length, waypoint count, and repeated transform composition count",
+      "whether coordinates are centred, corner-origin, or may legally exceed declared TED extents"
+    ]
+  },
+  "method": {
+    "ted": "MEG v1 index parsing and loose-file enumeration plus bounded root-TLV width/height decoding",
+    "xml_categories": {
+      "coordinate": [
+        "(?:^|_)(?:POSITION|COORDINATE|COORDINATES)(?:_|$)",
+        "(?:^|_)LOCATION$",
+        "(?:^|_)(?:X|Y|Z)_COORDINATE(?:_|$)",
+        "(?:^|_)BOUNDING_(?:BOX|SPHERE)(?:_|$)"
+      ],
+      "damage": [
+        "(?:^|_)DAMAGE(?:_|$)"
+      ],
+      "duration": [
+        "(?:^|_)(?:DURATION|DELAY|INTERVAL|LIFETIME|COOLDOWN)(?:_|$)",
+        "(?:^|_)(?:TIME|PERIOD)(?:_|$)",
+        "(?:^|_)(?:RECHARGE|RELOAD|BUILD)_TIME(?:_|$)"
+      ],
+      "multiplier": [
+        "(?:^|_)MULTIPLIER(?:_|$)",
+        "(?:^|_)FACTOR(?:_|$)"
+      ],
+      "speed": [
+        "(?:^|_)(?:SPEED|VELOCITY)(?:_|$)",
+        "(?:^|_)(?:ACCELERATION|DECELERATION)(?:_|$)",
+        "(?:^|_)TURN_RATE(?:_|$)"
+      ]
+    },
+    "xml_category_exclusions": {
+      "coordinate": [
+        "LOCATION_FOLLOWS"
+      ],
+      "damage": [
+        "PERCENT",
+        "MULTIPLIER",
+        "FACTOR",
+        "MODIFIER",
+        "_FRAME",
+        "_TYPE",
+        "_RANGE",
+        "_RATE",
+        "PER_SECOND",
+        "_BONUS",
+        "_TIME",
+        "_DELAY",
+        "_INTERVAL",
+        "_RADIUS",
+        "_ARC",
+        "_QUADRATIC",
+        "THRESHOLD",
+        "_MOD",
+        "ALTERNATE",
+        "MAX_SECS"
+      ],
+      "duration": [
+        "MULTIPLIER",
+        "PERCENT"
+      ],
+      "multiplier": [],
+      "speed": [
+        "PERCENT",
+        "MULTIPLIER",
+        "FACTOR",
+        "_MOD",
+        "SCROLL_SPEED"
+      ]
+    },
+    "xml_numbers": "exact decimal parsing of wholly numeric leaf text; no binary float or locale conversion"
+  },
+  "schema_version": 2,
+  "ted": {
+    "archives": [
+      {
+        "extent_record_count": 154,
+        "label": "remake/Data/RemakeMaps.meg",
+        "relative_path": "remake/Data/RemakeMaps.meg",
+        "sha256": "1347fcdcf3d6c6303535cd1ed226603b36dc700551ac5906e67af30fa1087c3f",
+        "size_bytes": 306370197,
+        "ted_entry_count": 154
+      },
+      {
+        "extent_record_count": 48,
+        "label": "remake/Data/Maps.meg",
+        "relative_path": "remake/Data/Maps.meg",
+        "sha256": "2cd71c41d83d565523f8cdef75c0dcd2be5950f0e2036362cc24d3342903b9fc",
+        "size_bytes": 15094442,
+        "ted_entry_count": 48
+      }
+    ],
+    "extent_record_count": 208,
+    "loose_corpora": [
+      {
+        "extent_record_count": 6,
+        "file_count": 6,
+        "files": [
+          {
+            "height": "17500",
+            "height_property_offset": 97,
+            "root_payload_size": 98,
+            "size_bytes": 379035,
+            "source": "remake/Data(loose)/Art/Maps/MenuSpaceHapes.ted",
+            "source_sha256": "8d514a10541d0cf91078decc1deec0a2ed69b884867fc7119e0d0b5edf2db525",
+            "width": "17500",
+            "width_property_offset": 91
+          },
+          {
+            "height": "10000",
+            "height_property_offset": 109,
+            "root_payload_size": 110,
+            "size_bytes": 299931,
+            "source": "remake/Data(loose)/Art/Maps/MenuSpaceSunsetMountains.ted",
+            "source_sha256": "209d2c4242cb3576881ac3bff13e8aee7c60baff9096c58f17866f42e08a77f4",
+            "width": "10000",
+            "width_property_offset": 103
+          },
+          {
+            "height": "17000",
+            "height_property_offset": 77,
+            "root_payload_size": 78,
+            "size_bytes": 423210,
+            "source": "remake/Data(loose)/Art/Maps/MenuSpaceVulcanicPlanet.ted",
+            "source_sha256": "93d825ba65f5a003ab48ab2710ee8bdef172d4c222792499d16696b129adf66e",
+            "width": "17000",
+            "width_property_offset": 71
+          },
+          {
+            "height": "11180",
+            "height_property_offset": 77,
+            "root_payload_size": 78,
+            "size_bytes": 15733385,
+            "source": "remake/Data(loose)/Art/Models/_land_GC_urban_c.ted",
+            "source_sha256": "c83c889320b2b207afd94ae364bcdb9064934f0f7c3bdfd078891efde7ed5bd8",
+            "width": "11180",
+            "width_property_offset": 71
+          },
+          {
+            "height": "10000",
+            "height_property_offset": 109,
+            "root_payload_size": 110,
+            "size_bytes": 303607,
+            "source": "remake/Data(loose)/Art/Models/MenuSpaceSunsetMountains.ted",
+            "source_sha256": "8c68855045681d553babc8cab882ae51bceafce4d169657d366b074553413321",
+            "width": "10000",
+            "width_property_offset": 103
+          },
+          {
+            "height": "25000",
+            "height_property_offset": 125,
+            "root_payload_size": 126,
+            "size_bytes": 351426,
+            "source": "remake/Data(loose)/Art/Models/SPACE_PLANET_BLACKHOLE.ted",
+            "source_sha256": "a228b1bc694e0ab446dad29d9f070472f929bfc3bad9cdfe15b66d5cf39149cb",
+            "width": "25000",
+            "width_property_offset": 119
+          }
+        ],
+        "label": "remake/Data(loose)",
+        "manifest_definition": "SHA-256 over sorted relative-path NUL file-sha256 LF records",
+        "manifest_sha256": "807ce67edad97f684829b585f9389f4d3f037f1863ad28e747cae012f834d835"
+      }
+    ],
+    "maximum_declared_axis_extent": {
+      "archive_sha256": "1347fcdcf3d6c6303535cd1ed226603b36dc700551ac5906e67af30fa1087c3f",
+      "axis": "width",
+      "entry_offset": 305303243,
+      "entry_size": 336128,
+      "height": "36000",
+      "height_property_offset": 77,
+      "root_payload_size": 78,
+      "source": "remake/Data/RemakeMaps.meg!/DATA/ART/MAPS/_SPACE_PLANET_STARFORGE_01.TED",
+      "value": "36000",
+      "width": "36000",
+      "width_property_offset": 71
+    },
+    "missing_extent_records": [],
+    "record_scope": "one adjacent property pair among direct children of root id 0; root payload must end exactly within the first 4096 bytes",
+    "record_signature": "bounded root TLV properties 10 04 <little-endian binary32 width>, then 11 04 <little-endian binary32 height>",
+    "structural_observations": {
+      "extent_pair_at_root_payload_minus_7_and_minus_1_count": 208,
+      "property_offset_pair_counts": [
+        {
+          "count": 60,
+          "height_property_offset": 77,
+          "width_property_offset": 71
+        },
+        {
+          "count": 2,
+          "height_property_offset": 81,
+          "width_property_offset": 75
+        },
+        {
+          "count": 8,
+          "height_property_offset": 83,
+          "width_property_offset": 77
+        },
+        {
+          "count": 1,
+          "height_property_offset": 85,
+          "width_property_offset": 79
+        },
+        {
+          "count": 5,
+          "height_property_offset": 87,
+          "width_property_offset": 81
+        },
+        {
+          "count": 4,
+          "height_property_offset": 89,
+          "width_property_offset": 83
+        },
+        {
+          "count": 3,
+          "height_property_offset": 91,
+          "width_property_offset": 85
+        },
+        {
+          "count": 4,
+          "height_property_offset": 93,
+          "width_property_offset": 87
+        },
+        {
+          "count": 1,
+          "height_property_offset": 97,
+          "width_property_offset": 91
+        },
+        {
+          "count": 1,
+          "height_property_offset": 99,
+          "width_property_offset": 93
+        },
+        {
+          "count": 2,
+          "height_property_offset": 105,
+          "width_property_offset": 99
+        },
+        {
+          "count": 2,
+          "height_property_offset": 107,
+          "width_property_offset": 101
+        },
+        {
+          "count": 4,
+          "height_property_offset": 109,
+          "width_property_offset": 103
+        },
+        {
+          "count": 2,
+          "height_property_offset": 111,
+          "width_property_offset": 105
+        },
+        {
+          "count": 2,
+          "height_property_offset": 115,
+          "width_property_offset": 109
+        },
+        {
+          "count": 2,
+          "height_property_offset": 117,
+          "width_property_offset": 111
+        },
+        {
+          "count": 1,
+          "height_property_offset": 119,
+          "width_property_offset": 113
+        },
+        {
+          "count": 1,
+          "height_property_offset": 121,
+          "width_property_offset": 115
+        },
+        {
+          "count": 5,
+          "height_property_offset": 123,
+          "width_property_offset": 117
+        },
+        {
+          "count": 11,
+          "height_property_offset": 125,
+          "width_property_offset": 119
+        },
+        {
+          "count": 1,
+          "height_property_offset": 127,
+          "width_property_offset": 121
+        },
+        {
+          "count": 3,
+          "height_property_offset": 129,
+          "width_property_offset": 123
+        },
+        {
+          "count": 1,
+          "height_property_offset": 131,
+          "width_property_offset": 125
+        },
+        {
+          "count": 3,
+          "height_property_offset": 133,
+          "width_property_offset": 127
+        },
+        {
+          "count": 1,
+          "height_property_offset": 135,
+          "width_property_offset": 129
+        },
+        {
+          "count": 6,
+          "height_property_offset": 137,
+          "width_property_offset": 131
+        },
+        {
+          "count": 7,
+          "height_property_offset": 139,
+          "width_property_offset": 133
+        },
+        {
+          "count": 8,
+          "height_property_offset": 141,
+          "width_property_offset": 135
+        },
+        {
+          "count": 6,
+          "height_property_offset": 143,
+          "width_property_offset": 137
+        },
+        {
+          "count": 5,
+          "height_property_offset": 145,
+          "width_property_offset": 139
+        },
+        {
+          "count": 1,
+          "height_property_offset": 147,
+          "width_property_offset": 141
+        },
+        {
+          "count": 4,
+          "height_property_offset": 149,
+          "width_property_offset": 143
+        },
+        {
+          "count": 1,
+          "height_property_offset": 151,
+          "width_property_offset": 145
+        },
+        {
+          "count": 2,
+          "height_property_offset": 153,
+          "width_property_offset": 147
+        },
+        {
+          "count": 1,
+          "height_property_offset": 155,
+          "width_property_offset": 149
+        },
+        {
+          "count": 28,
+          "height_property_offset": 157,
+          "width_property_offset": 151
+        },
+        {
+          "count": 1,
+          "height_property_offset": 159,
+          "width_property_offset": 153
+        },
+        {
+          "count": 1,
+          "height_property_offset": 161,
+          "width_property_offset": 155
+        },
+        {
+          "count": 1,
+          "height_property_offset": 163,
+          "width_property_offset": 157
+        },
+        {
+          "count": 1,
+          "height_property_offset": 165,
+          "width_property_offset": 159
+        },
+        {
+          "count": 1,
+          "height_property_offset": 167,
+          "width_property_offset": 161
+        },
+        {
+          "count": 1,
+          "height_property_offset": 169,
+          "width_property_offset": 163
+        },
+        {
+          "count": 1,
+          "height_property_offset": 177,
+          "width_property_offset": 171
+        },
+        {
+          "count": 1,
+          "height_property_offset": 205,
+          "width_property_offset": 199
+        },
+        {
+          "count": 1,
+          "height_property_offset": 221,
+          "width_property_offset": 215
+        }
+      ],
+      "root_payload_size_counts": [
+        {
+          "bytes": 78,
+          "count": 60
+        },
+        {
+          "bytes": 82,
+          "count": 2
+        },
+        {
+          "bytes": 84,
+          "count": 8
+        },
+        {
+          "bytes": 86,
+          "count": 1
+        },
+        {
+          "bytes": 88,
+          "count": 5
+        },
+        {
+          "bytes": 90,
+          "count": 4
+        },
+        {
+          "bytes": 92,
+          "count": 3
+        },
+        {
+          "bytes": 94,
+          "count": 4
+        },
+        {
+          "bytes": 98,
+          "count": 1
+        },
+        {
+          "bytes": 100,
+          "count": 1
+        },
+        {
+          "bytes": 106,
+          "count": 2
+        },
+        {
+          "bytes": 108,
+          "count": 2
+        },
+        {
+          "bytes": 110,
+          "count": 4
+        },
+        {
+          "bytes": 112,
+          "count": 2
+        },
+        {
+          "bytes": 116,
+          "count": 2
+        },
+        {
+          "bytes": 118,
+          "count": 2
+        },
+        {
+          "bytes": 120,
+          "count": 1
+        },
+        {
+          "bytes": 122,
+          "count": 1
+        },
+        {
+          "bytes": 124,
+          "count": 5
+        },
+        {
+          "bytes": 126,
+          "count": 11
+        },
+        {
+          "bytes": 128,
+          "count": 1
+        },
+        {
+          "bytes": 130,
+          "count": 3
+        },
+        {
+          "bytes": 132,
+          "count": 1
+        },
+        {
+          "bytes": 134,
+          "count": 3
+        },
+        {
+          "bytes": 136,
+          "count": 1
+        },
+        {
+          "bytes": 138,
+          "count": 6
+        },
+        {
+          "bytes": 140,
+          "count": 7
+        },
+        {
+          "bytes": 142,
+          "count": 8
+        },
+        {
+          "bytes": 144,
+          "count": 6
+        },
+        {
+          "bytes": 146,
+          "count": 5
+        },
+        {
+          "bytes": 148,
+          "count": 1
+        },
+        {
+          "bytes": 150,
+          "count": 4
+        },
+        {
+          "bytes": 152,
+          "count": 1
+        },
+        {
+          "bytes": 154,
+          "count": 2
+        },
+        {
+          "bytes": 156,
+          "count": 1
+        },
+        {
+          "bytes": 158,
+          "count": 28
+        },
+        {
+          "bytes": 160,
+          "count": 1
+        },
+        {
+          "bytes": 162,
+          "count": 1
+        },
+        {
+          "bytes": 164,
+          "count": 1
+        },
+        {
+          "bytes": 166,
+          "count": 1
+        },
+        {
+          "bytes": 168,
+          "count": 1
+        },
+        {
+          "bytes": 170,
+          "count": 1
+        },
+        {
+          "bytes": 178,
+          "count": 1
+        },
+        {
+          "bytes": 206,
+          "count": 1
+        },
+        {
+          "bytes": 222,
+          "count": 1
+        }
+      ]
+    },
+    "ted_entry_count": 208,
+    "units": "TED declared tactical-map source units; origin and real-world conversion are not established"
+  },
+  "xml": {
+    "categories": {
+      "coordinate": {
+        "component_count": 2673,
+        "matched_tags": [
+          "CAMERA_Z_POSITION",
+          "GALACTIC_POSITION",
+          "STARTING_GALACTIC_CAMERA_POSITION",
+          "TARGET_POSITION_Z_OFFSET"
+        ],
+        "maximum": {
+          "arity": 3,
+          "component": 1,
+          "source": "remake/Data/Xml/Planets_savepoint.xml",
+          "source_sha256": "72504a70ea7cd019d87fffbe631c32d4c1b6dc9233f88b39f6b381b50a49ac62",
+          "tag": "GALACTIC_POSITION[178]",
+          "value": "608"
+        },
+        "maximum_magnitude": {
+          "arity": 3,
+          "component": 1,
+          "source": "remake/Data/Xml/Planets_savepoint.xml",
+          "source_sha256": "72504a70ea7cd019d87fffbe631c32d4c1b6dc9233f88b39f6b381b50a49ac62",
+          "tag": "GALACTIC_POSITION[178]",
+          "value": "608"
+        },
+        "minimum": {
+          "arity": 3,
+          "component": 1,
+          "source": "remake/Data/Xml/Planets_WW.xml",
+          "source_sha256": "822d312e0372668e54fdcb8156049a739f6c4b310b82258b453a4bb81e0526e6",
+          "tag": "GALACTIC_POSITION[28]",
+          "value": "-530"
+        },
+        "smallest_nonzero_magnitude": {
+          "arity": 3,
+          "component": 1,
+          "source": "remake/Data/Xml/Planets_Legacy.XML",
+          "source_sha256": "c34fed251c4d06b2e787d850b5d6026f13a41d6e065024475fc53b6cfccc885b",
+          "source_value": "-1",
+          "tag": "GALACTIC_POSITION[20]",
+          "value": "1"
+        },
+        "units": "XML source coordinate units; tag semantics and axis conventions vary"
+      },
+      "damage": {
+        "component_count": 1100,
+        "matched_tags": [
+          "ASTEROID_FIELD_DAMAGE",
+          "BERSERKER_DAMAGE",
+          "DAMAGE",
+          "DAMAGE_ABSORB_AMOUNT",
+          "DAMAGE_AMOUNT",
+          "DAMAGE_GROUND",
+          "DEPLETED_SHIELD_DAMAGE_INCREMENT",
+          "FRIENDLY_DAMAGE_AMOUNT",
+          "MAX_DAMAGE_PER_VICTIM",
+          "PROJECTILE_BLAST_AREA_DAMAGE",
+          "PROJECTILE_DAMAGE",
+          "TERRAIN_DAMAGE"
+        ],
+        "maximum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/PROJECTILES.XML",
+          "source_sha256": "4514777f4cfa04beb78e784f097e8a5b6ca982f9fb72057a10cf684c508c04f7",
+          "tag": "PROJECTILE_BLAST_AREA_DAMAGE[2]",
+          "value": "200000"
+        },
+        "maximum_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/PROJECTILES.XML",
+          "source_sha256": "4514777f4cfa04beb78e784f097e8a5b6ca982f9fb72057a10cf684c508c04f7",
+          "tag": "PROJECTILE_BLAST_AREA_DAMAGE[2]",
+          "value": "200000"
+        },
+        "minimum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Buildings/_Default_Base.xml",
+          "source_sha256": "1f8f2235ca796a0607dec6a53770699c4f0b67ccc131c9f0b4be249d1455ac29",
+          "tag": "DAMAGE[1]",
+          "value": "0"
+        },
+        "smallest_nonzero_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Ground_Vanilla/Heroes/Luke_Skywalker.xml",
+          "source_sha256": "5a6460ab6803c8090c6143d2e857b862ab2d75cef7990830ccbade85ad66cd6b",
+          "tag": "DAMAGE_ABSORB_AMOUNT[1]",
+          "value": "0.8"
+        },
+        "units": "XML source damage/hit-point units"
+      },
+      "duration": {
+        "component_count": 12601,
+        "matched_tags": [
+          "ABILITY_COOLDOWN_TIME_IN_SECS",
+          "ACTIVATION_TIME_IN_SECONDS",
+          "ACTIVATION_TRACKING_DURATION",
+          "ADVISOR_HINT_DURATION",
+          "ADVISOR_HINT_INTERVAL",
+          "ANIM_FRAME_DELAY",
+          "AUTO_DESTRUCT_FADE_TIME",
+          "AUTO_DESTRUCT_TIME",
+          "BASE_INTERVAL_IN_SECS",
+          "BASE_SHIELD_DELAY_TIME",
+          "BEACON_LIFETIME_IN_SECS",
+          "BERSERKER_DURATION_IN_SECS",
+          "BLINK_DURATION",
+          "BOLT_CREATION_INTERVAL_MAX",
+          "BOLT_CREATION_INTERVAL_MIN",
+          "BOMBARDMENT_INITIAL_DELAY",
+          "BOMBARDMENT_SALVO_DELAY",
+          "BOMBARDMENT_SHOT_DELAY",
+          "BUILD_LIMIT_LIFETIME_FOR_ALL_ALLIES",
+          "BUILD_LIMIT_LIFETIME_PER_PLAYER",
+          "BUILD_TIME_DELAY_TOLERANCE",
+          "BUILD_TIME_SECONDS",
+          "CABLE_FADEOUT_TIME",
+          "CAPTURE_POINT_TRANSITION_TIME_SECONDS",
+          "CASH_POINT_TRANSITION_TIME_SECONDS",
+          "CHARGING_TIME_IN_SECONDS",
+          "CONFUSE_TIME_IN_SECS",
+          "CONFUSE_TRAVEL_TIME_IN_SECS",
+          "CONTROL_POINT_DOMINATION_VICTORY_TIME_IN_SECS",
+          "CONVERTED_TO_ENEMY_DIE_TIME_SECONDS",
+          "CORRUPTION_REMOVAL_TIME_IN_SECS",
+          "CREATION_DELAY_IN_SECONDS",
+          "DAMAGE_APPLICATION_TIME_IN_SECS",
+          "DAMAGE_DELAY_IN_SECS",
+          "DAMAGE_INTERVAL_IN_SECS",
+          "DAMAGE_SWEEP_TIME_IN_SECS",
+          "DEATH_FADE_TIME",
+          "DEATH_PERSISTENCE_DURATION",
+          "DEBRIS_MAX_LIFETIME_SECONDS",
+          "DEBRIS_MIN_LIFETIME_SECONDS",
+          "DEFAULT_HERO_RESPAWN_TIME",
+          "DEFENSE_DURATION_IN_SECS",
+          "DELAY_BETWEEN_LAND_BASE_ATTACK_ANNOUNCEMENT_SECONDS",
+          "DELAY_BETWEEN_SPACE_BASE_ATTACK_ANNOUNCEMENT_SECONDS",
+          "DEMO_ATTRACT_MAP_CYCLE_DELAY_SECONDS",
+          "DEPLETED_SHIELD_DISABLE_TIME",
+          "DETONATION_TIME_IN_SECS",
+          "DISTANCE_SMOOTH_TIME",
+          "DROP_PHASE_DURATION",
+          "DURATION",
+          "DURATION_IN_SECONDS",
+          "DURATION_IN_SECS",
+          "DURATION_OF_INFECTION",
+          "DYNAMIC_TRANSFORM_DELAY_SECONDS",
+          "EARTHQUAKE_TRANSITION_TIME",
+          "EASE_OUT_DURATION",
+          "ELEVATED_VULNERABILITY_DURATION",
+          "ENCYCLOPEDIA_DELAY",
+          "ENCYCLOPEDIA_MIN_DISPLAY_TIME",
+          "EVALUATION_INTERVAL_IN_SECS",
+          "EVENT_DURATION",
+          "FADEOUT_TIME",
+          "FADEOUT_TIME_MAX",
+          "FADEOUT_TIME_MIN",
+          "FIRE_DELAY",
+          "FIRE_PULSE_DELAY_SECONDS",
+          "FIRE_TIME_IN_SECS",
+          "FISCAL_CYCLE_TIME_IN_SECS",
+          "FLEET_MAINTENANCE_UPDATE_DELAY_SECONDS",
+          "FORCE_ABILITY_DISABLE_TIME",
+          "FORCE_SIGHT_DURATION_IN_SECS",
+          "FOV_SMOOTH_TIME",
+          "GALACTIC_AI_GOAL_CYCLE_SLEEP_DURATION",
+          "GARRISON_REINFORCEMENT_DELAY_SECONDS",
+          "GMC_BATTLE_FADE_TIME",
+          "GMC_BATTLE_ZOOM_TIME",
+          "GUI_FLASH_DURATION",
+          "GUI_PLANET_FADE_DURATION",
+          "GUI_RAPID_FLASH_DURATION",
+          "HEAL_INTERVAL_IN_SECS",
+          "HOLSTER_MINIMUM_DRAWN_TIME_IN_SECS",
+          "HOLSTER_TRANSITION_TIME_IN_SECS",
+          "ION_STORM_SHIELD_DISABLE_TIME",
+          "LAND_AI_GOAL_CYCLE_SLEEP_DURATION",
+          "LAND_AUTO_RESOLVE_DELAY_SECONDS",
+          "LONG_ENCYCLOPEDIA_DELAY",
+          "MANUAL_HARDPOINT_FIRING_COOLDOWN_SECS",
+          "MAX_BOMBARD_INTERVAL_SECONDS",
+          "MAX_BOMBING_RUN_INTERVAL_SECONDS",
+          "MAX_MOVE_FRAME_DELAY",
+          "MAX_RESPAWN_TIME",
+          "MAX_RESPAWN_TIME_PER_TECH_LEVEL",
+          "MINIMUM_TACTICAL_OVERRUN_TIME_IN_SECS",
+          "MINIMUM_TIME_BEFORE_PAD_CAN_BUILD_AGAIN",
+          "MIN_BOMBARD_INTERVAL_SECONDS",
+          "MIN_BOMBING_RUN_INTERVAL_SECONDS",
+          "MIN_RESPAWN_TIME",
+          "MIN_RESPAWN_TIME_PER_TECH_LEVEL",
+          "NEBULA_ABILITY_DISABLE_TIME",
+          "OVERRIDE_DEATH_PERSISTENCE_DURATION",
+          "OWNER_LIGHT_EFFECT_DURATION",
+          "OWNER_RESPAWN_TIME_IN_SECS",
+          "PARALYZE_PHASE_DURATION",
+          "PARTICLE_LIFETIME_FRAMES",
+          "PLANET_REVEAL_DELAY_TIME",
+          "POLITICAL_CONTROL_CHANGE_TIME_SECONDS",
+          "PROJECTILE_APPEARANCE_DELAY_FRAMES",
+          "PROJECTILE_CAUSE_INVULNERABILITY_DURATION_FRAMES",
+          "PROJECTILE_COMBAT_MOD_DURATION",
+          "PROJECTILE_DAMAGE_DELAY_SECS",
+          "PROJECTILE_DISABLE_ENGINES_DURATION",
+          "PROJECTILE_FIRE_PULSE_DELAY_SECONDS",
+          "PROJECTILE_INSTANT_HEAL_DURATION_FRAMES",
+          "PROJECTILE_ION_STUN_DURATION",
+          "PROJECTILE_MAX_LIFETIME",
+          "PROJECTILE_STUN_DURATION_FRAMES",
+          "PROJECTILE_WEAKEN_ENEMY_DURATION_SECONDS",
+          "PULL_PHASE_DURATION",
+          "RECHARGE_TIME_IN_SECONDS",
+          "RECHARGE_TIME_IN_SECS",
+          "SCALE_DURATION",
+          "SENSOR_JAMMING_TIME",
+          "SFXEVENT_AMBIENT_MOVING_MAX_DELAY_SECONDS",
+          "SFXEVENT_AMBIENT_MOVING_MIN_DELAY_SECONDS",
+          "SIPHON_DURATION_IN_CYCLES",
+          "SKIRMISH_REINFORCEMENT_DELAY_FRAMES",
+          "SPACE_AI_GOAL_CYCLE_SLEEP_DURATION",
+          "SPACE_AUTO_RESOLVE_DELAY_SECONDS",
+          "SPACE_ELEVATED_VULNERABILITY_DURATION",
+          "SPAWNED_INDIGENOUS_UNITS_DELAY_SECONDS",
+          "SPAWNED_SQUADRON_DELAY_SECONDS",
+          "SPRAY_TIME_IN_SECS",
+          "STEALTH_TRANSITION_TIME",
+          "STUN_TIME_IN_SECS",
+          "STUN_TRAVEL_TIME_IN_SECS",
+          "TACTICAL_BUILD_TIME_SECONDS",
+          "TACTICAL_OVERVIEW_CLICK_TIME",
+          "TACTICAL_RESPAWN_TIME_IN_SECS",
+          "TARGETING_STICKINESS_TIME_THRESHOLD",
+          "TARGET_LIGHT_EFFECT_DURATION",
+          "TARGET_RESPAWN_TIME_IN_SECS",
+          "TELEKINESIS_TRANSITION_TIME",
+          "TELEKINESIS_WOBBLE_CYCLE_TIME",
+          "TELEKINESIS_WOBBLE_FADE_TIME",
+          "TERRAIN_DAMAGE_DELAY",
+          "TIME_LIMIT",
+          "TOOLTIP_DELAY",
+          "TRACKING_DURATION",
+          "TRAVEL_TIME_IN_SECS",
+          "TSW_ATTACK_ANIM_DURATION_SECONDS",
+          "TSW_EXPLOSION_DEBRIS_CREATION_FRAME_DELAY"
+        ],
+        "maximum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Units/Space/Units_Hero_Minors_Sith_Nihilus.XML",
+          "source_sha256": "07864ee519a1e31648f1721ba750e7048dcbd1e86a3fe02c59bc7cf0439b1414",
+          "tag": "DEFENSE_DURATION_IN_SECS[1]",
+          "value": "999999999999999"
+        },
+        "maximum_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Units/Space/Units_Hero_Minors_Sith_Nihilus.XML",
+          "source_sha256": "07864ee519a1e31648f1721ba750e7048dcbd1e86a3fe02c59bc7cf0439b1414",
+          "tag": "DEFENSE_DURATION_IN_SECS[1]",
+          "value": "999999999999999"
+        },
+        "minimum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/AI/Goals/Remake_ConquestMapGoals.xml",
+          "source_sha256": "cb2e96b7a7f026151daba8aaea1a51dfc616b591f33ae64291404a0b2cc6c3a8",
+          "tag": "TIME_LIMIT[13]",
+          "value": "-1"
+        },
+        "smallest_nonzero_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/LIGHTNINGEFFECTTYPES.XML",
+          "source_sha256": "b3b35c7c047c882437959c808ce05201d182136e4288a186cc0ed1836179110e",
+          "tag": "BOLT_CREATION_INTERVAL_MIN[7]",
+          "value": "0.0005"
+        },
+        "units": "XML source time units; individual tags may use seconds, frames, or ticks"
+      },
+      "multiplier": {
+        "component_count": 7905,
+        "matched_tags": [
+          "ADDITIONAL_MULTIPLIER_ON_MINING_COLONIES",
+          "AUTO_RESOLVE_TACTICAL_MULTIPLIER",
+          "BLOCKADE_RUN_ATTRITION_FACTOR",
+          "BRIBE_COST_MULTIPLIER",
+          "CAPTURE_POINT_TIME_MULTIPLIER",
+          "CORRUPTION_REMOVAL_COST_MULTIPLIER",
+          "COST_MULTIPLIER_BY_PLANET_TECH_AVAILABILITY",
+          "CREDITS_ACCUMULATION_FACTOR",
+          "CREDITS_ACCUMULATION_FACTOR_EMPIRE",
+          "CREDITS_ACCUMULATION_FACTOR_REBEL",
+          "CREDIT_GAIN_FACTOR",
+          "CREDIT_MULTIPLIER",
+          "DAMAGE_MULTIPLIER",
+          "DENSE_FOW_REVEAL_RANGE_MULTIPLIER",
+          "DEPLOYED_MAX_ATTACK_DISTANCE_MULTIPLIER",
+          "ELEVATED_VULNERABILITY_FACTOR",
+          "EVIL_FLEET_MAINTENANCE_COST_FACTOR",
+          "EVIL_STARSHIP_MAINTENANCE_COST_FACTOR",
+          "EXPLOSION_JITTER_FACTOR",
+          "FIRST_HERO_DAMAGE_MULTIPLIER",
+          "FONT_STRETCH_FACTOR",
+          "FOW_REVEAL_RANGE_MULTIPLIER",
+          "FULL_SALVO_WEAPON_DELAY_MULTIPLIER",
+          "GALACTIC_AI_CONTRAST_MULTIPLIER",
+          "GALACTIC_BUILD_TIME_MULTIPLIER",
+          "GALACTIC_RIGHT_BUTTON_SCROLL_SPEED_FACTOR",
+          "GARRISONED_MAX_ATTACK_DISTANCE_MULTIPLIER",
+          "GOOD_FLEET_MAINTENANCE_COST_FACTOR",
+          "GOOD_STARSHIP_MAINTENANCE_COST_FACTOR",
+          "HEALTH_MULTIPLIER",
+          "HS_SPEED_FACTOR",
+          "HYPERSPACE_SPEED_FACTOR",
+          "HYPERSPACE_SPEED_FACTOR_EMPIRE",
+          "HYPERSPACE_SPEED_FACTOR_REBEL",
+          "INCOME_MULTIPLIER",
+          "INTERVAL_MULTIPLIER",
+          "LAND_ABILITY_TARGETING_RANGE_OVERLAY_SCALE_FACTOR",
+          "LAND_AI_CONTRAST_MULTIPLIER",
+          "LAND_AREA_EFFECT_RANGE_OVERLAY_SCALE_FACTOR",
+          "LAND_BUILD_TIME_MULTIPLIER",
+          "LAND_RETREAT_ATTRITION_FACTOR",
+          "LAND_RETREAT_PURSUE_MAX_SPEED_MOD_FACTOR",
+          "LAND_RETREAT_UNITS_DAMAGED_MOD_FACTOR",
+          "LASER_BEAM_Z_SCALE_FACTOR",
+          "LASER_KITE_Z_SCALE_FACTOR",
+          "NEUTRALIZATION_COST_MULTIPLIER",
+          "OBJECT_MAX_HEALTH_MULTIPLIER_LAND",
+          "OBJECT_MAX_HEALTH_MULTIPLIER_SPACE",
+          "OBJECT_MAX_SPEED_MULTIPLIER_GALACTIC",
+          "OBJECT_MAX_SPEED_MULTIPLIER_LAND",
+          "OBJECT_MAX_SPEED_MULTIPLIER_SPACE",
+          "POWER_TO_WEAPONS_MODE_WEAPON_DELAY_MULTIPLIER",
+          "PRODUCTION_SPEED_FACTOR",
+          "REINFORCEMENT_DEPLOY_TIME_MULTIPLIER",
+          "REINFORCEMENT_TIME_MULTIPLIER",
+          "SABOTAGE_COST_INCREASE_FACTOR",
+          "SCALE_FACTOR",
+          "SCROLL_ACCELERATION_FACTOR",
+          "SCROLL_DECELERATION_FACTOR",
+          "SECOND_HERO_DAMAGE_MULTIPLIER",
+          "SHIELD_MULTIPLIER",
+          "SPACE_AI_CONTRAST_MULTIPLIER",
+          "SPACE_BUILD_TIME_MULTIPLIER",
+          "SPACE_ELEVATED_VULNERABILITY_FACTOR",
+          "SPACE_RETREAT_ATTRITION_FACTOR",
+          "SPACE_RETREAT_PURSUE_MAX_SPEED_MOD_FACTOR",
+          "SPACE_RETREAT_UNITS_DAMAGED_MOD_FACTOR",
+          "STEALTH_DURATION_MULTIPLIER",
+          "STRETCH_FACTOR",
+          "TACTICAL_BUILD_TIME_MULTIPLIER",
+          "UNCOMMON_PRICE_MULTIPLIER",
+          "UNDER_CONSTRUCTION_DAMAGE_MULTIPLIER"
+        ],
+        "maximum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/CIN_SPACEPROPS.XML",
+          "source_sha256": "c17b899cb56fcaece211034cccf78d5a8a8dfb7794895aee27076ab4a62d6b43",
+          "tag": "SCALE_FACTOR[3]",
+          "value": "2000"
+        },
+        "maximum_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/CIN_SPACEPROPS.XML",
+          "source_sha256": "c17b899cb56fcaece211034cccf78d5a8a8dfb7794895aee27076ab4a62d6b43",
+          "tag": "SCALE_FACTOR[3]",
+          "value": "2000"
+        },
+        "minimum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Gameconstants.xml",
+          "source_sha256": "3738be2c0f08315f8357d88dcb9ba0a4c7c4110371fe01f29d77ff4cea7349a1",
+          "tag": "SPACE_ELEVATED_VULNERABILITY_FACTOR[1]",
+          "value": "-3"
+        },
+        "smallest_nonzero_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/AITESTGAMECONSTANTS.XML",
+          "source_sha256": "6e02ff8abde22f7fe62f37fb11817be83dbec8f0228dd0514f861c3cb4c75306",
+          "tag": "CREDITS_ACCUMULATION_FACTOR_REBEL[1]",
+          "value": "0.0003"
+        },
+        "units": "dimensionless when the matched tag is semantically a multiplier"
+      },
+      "speed": {
+        "component_count": 4329,
+        "matched_tags": [
+          "ALTERNATE_MAX_SPEED",
+          "BERSERKER_SPEED",
+          "CINEMATIC_ANIM_SPEED",
+          "CROUCH_ANIMATION_SPEED",
+          "DEPLOYED_WALK_ANIM_SPEED",
+          "DEPLOYED_WALK_SPEED",
+          "EARTHQUAKE_SHAKE_SPEED",
+          "FLEEING_INFANTRY_SPEED_BONUS",
+          "GALACTIC_ZOOM_ACCELERATION",
+          "GUI_CYCLE_SPEED",
+          "GUI_VELOCITY",
+          "HYPERSPACE_SPEED",
+          "MAX_GALACTIC_ZOOM_SPEED",
+          "MAX_SPEED",
+          "MIN_GALACTIC_ZOOM_SPEED",
+          "MIN_SPEED",
+          "MIN_SPEED_FRACTION_FOR_TURN",
+          "MOVEMENT_ANIMATION_SPEED",
+          "MOVE_SPEED",
+          "OVERRIDE_ACCELERATION",
+          "OVERRIDE_DECELERATION",
+          "PROJECTILE_ACCELERATION_PER_FRAME",
+          "ROTATION_ANIMATION_SPEED",
+          "SALIENCY_SPEED",
+          "TURRET_ROTATE_SPEED",
+          "WALK_ANIMATION_SPEED"
+        ],
+        "maximum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Gameconstants.xml",
+          "source_sha256": "3738be2c0f08315f8357d88dcb9ba0a4c7c4110371fe01f29d77ff4cea7349a1",
+          "tag": "MAX_GALACTIC_ZOOM_SPEED[1]",
+          "value": "3000"
+        },
+        "maximum_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Gameconstants.xml",
+          "source_sha256": "3738be2c0f08315f8357d88dcb9ba0a4c7c4110371fe01f29d77ff4cea7349a1",
+          "tag": "MAX_GALACTIC_ZOOM_SPEED[1]",
+          "value": "3000"
+        },
+        "minimum": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/Heroclash.xml",
+          "source_sha256": "0cf71d5c3ed75b43b2efc34d2726368694c3daa2d675bceadc5d43b6199dddec",
+          "tag": "MOVE_SPEED[2]",
+          "value": "-1"
+        },
+        "smallest_nonzero_magnitude": {
+          "arity": 1,
+          "component": 0,
+          "source": "remake/Data/Xml/GameModes/Endless/_Default_Base.xml",
+          "source_sha256": "5cf5168e372b1ecb61768107882d42ad18b0c188499d76ef8c95c7be93087893",
+          "tag": "MAX_SPEED[2]",
+          "value": "0.01"
+        },
+        "units": "XML source units per engine-defined time unit; conversion is not established"
+      }
+    },
+    "corpora": [
+      {
+        "fallback_file_count": 17,
+        "file_count": 1309,
+        "label": "remake/Data/Xml",
+        "manifest_definition": "SHA-256 over sorted relative-path NUL file-sha256 LF records",
+        "manifest_sha256": "c2137a347169ae2f69f3531f6507b852203635ae38ea4716ff47b304ea51ca9d",
+        "processed_file_count": 1309,
+        "xml_document_count": 1292
+      }
+    ],
+    "fallback_files": [
+      {
+        "complete_simple_elements_scanned": 0,
+        "source": "remake/Data/Xml/AI/PerceptualEquations/Remake_Land_Common.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 31,
+        "source": "remake/Data/Xml/Buildings/Ground/Skirmish/Empire/Command_Ship.xml",
+        "xml_error": "no element found: line 61, column 19"
+      },
+      {
+        "complete_simple_elements_scanned": 30,
+        "source": "remake/Data/Xml/Buildings/Ground/Skirmish/Rebel/Command_Ship.xml",
+        "xml_error": "no element found: line 59, column 19"
+      },
+      {
+        "complete_simple_elements_scanned": 31,
+        "source": "remake/Data/Xml/Buildings/Ground/Skirmish_Rework/Empire/Command_Ship.xml",
+        "xml_error": "no element found: line 61, column 19"
+      },
+      {
+        "complete_simple_elements_scanned": 30,
+        "source": "remake/Data/Xml/Buildings/Ground/Skirmish_Rework/Rebel/Command_Ship.xml",
+        "xml_error": "no element found: line 59, column 19"
+      },
+      {
+        "complete_simple_elements_scanned": 902,
+        "source": "remake/Data/Xml/GameModes/Attrition/Planets.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 420,
+        "source": "remake/Data/Xml/Ground_Vanilla/Units_Hero_Field_Commanders.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 45,
+        "source": "remake/Data/Xml/Units/Ground/Template_bonuses.xml",
+        "xml_error": "syntax error: line 3, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 12,
+        "source": "remake/Data/Xml/Units/Ground/Template_formations.xml",
+        "xml_error": "syntax error: line 3, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 727,
+        "source": "remake/Data/Xml/Units/Space/Units_Hero_Empire_181st_Fighter_Wing.XML",
+        "xml_error": "not well-formed (invalid token): line 2, column 1"
+      },
+      {
+        "complete_simple_elements_scanned": 855,
+        "source": "remake/Data/Xml/Units/Space/Units_Hero_Empire_181st_Fighter_Wing_BU.xml",
+        "xml_error": "not well-formed (invalid token): line 2, column 1"
+      },
+      {
+        "complete_simple_elements_scanned": 29,
+        "source": "remake/Data/Xml/Units/Space/Units_Hero_Minors_CSA_Tagge.XML",
+        "xml_error": "not well-formed (invalid token): line 2, column 1"
+      },
+      {
+        "complete_simple_elements_scanned": 152,
+        "source": "remake/Data/Xml/Units/Space/Units_Space_Empire_Galaxy_Gun.xml",
+        "xml_error": "mismatched tag: line 225, column 3"
+      },
+      {
+        "complete_simple_elements_scanned": 105,
+        "source": "remake/Data/Xml/Units/Space/Units_Space_First_Order_Supremacy.xml",
+        "xml_error": "mismatched tag: line 74, column 60"
+      },
+      {
+        "complete_simple_elements_scanned": 39,
+        "source": "remake/Data/Xml/Upgrades/Skirmish/Space/Empire/Mines_Defense.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 39,
+        "source": "remake/Data/Xml/Upgrades/Skirmish/Space/Underworld/Mines_Defense.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      },
+      {
+        "complete_simple_elements_scanned": 1753,
+        "source": "remake/Data/Xml/Upgrades/Vanilla.xml",
+        "xml_error": "XML or text declaration not at start of entity: line 2, column 0"
+      }
+    ],
+    "notable_values": {
+      "defense_duration_in_secs_distribution": [
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "value": "20"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "value": "28"
+        },
+        {
+          "component_count": 17,
+          "source_file_count": 9,
+          "value": "30"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "value": "60"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "value": "999999999999999"
+        }
+      ],
+      "negative_duration_components_by_tag": [
+        {
+          "component_count": 130,
+          "source_file_count": 90,
+          "tag": "BUILD_LIMIT_LIFETIME_FOR_ALL_ALLIES",
+          "value": "-1"
+        },
+        {
+          "component_count": 94,
+          "source_file_count": 82,
+          "tag": "BUILD_LIMIT_LIFETIME_PER_PLAYER",
+          "value": "-1"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "tag": "DEATH_PERSISTENCE_DURATION",
+          "value": "-1"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "tag": "DEFAULT_HERO_RESPAWN_TIME",
+          "value": "-1"
+        },
+        {
+          "component_count": 51,
+          "source_file_count": 33,
+          "tag": "DURATION_IN_SECS",
+          "value": "-1"
+        },
+        {
+          "component_count": 4,
+          "source_file_count": 1,
+          "tag": "TACTICAL_RESPAWN_TIME_IN_SECS",
+          "value": "-1"
+        },
+        {
+          "component_count": 1,
+          "source_file_count": 1,
+          "tag": "TIME_LIMIT",
+          "value": "-1"
+        }
+      ]
+    },
+    "unreadable_files": []
+  }
+}

@@ -1,0 +1,5 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource path="res://eawr_hull_asset_shadow_probe.gdextension" type="GDExtension" id="1"]
+
+[node name="EawrHullAssetShadowProbe" type="EawrHullAssetShadowProbe"]

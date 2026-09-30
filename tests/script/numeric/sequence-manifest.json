@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "generator": "tools/generate_lua_numeric_vectors.py",
+  "reference": "x86-64 hardware binary64 (numpy/CPython), CPython correctly rounded parse/format; every NaN result is the canonical NaN 0xfff8000000000000",
+  "numeric_abi": {
+    "name": "eawr-lua-binary64-soft",
+    "version": 1
+  },
+  "rng": "SplitMix64, uint64 wrapping",
+  "formats": [
+    "%.14g",
+    "%.17g",
+    "%.3f",
+    "%.12e",
+    "%g",
+    "%.0f",
+    "%#.3g",
+    "%+.5e",
+    "%.20f",
+    "%.1f",
+    "shortest"
+  ],
+  "sequences": {
+    "arithmetic": {
+      "seed_hex": "5eed0246a0000001",
+      "count": 1000000,
+      "sha256": "6c501bfcec76582d7757587697475d74123658c393a8c1d255b9ff620e183586"
+    },
+    "compare": {
+      "seed_hex": "5eed0246a0000002",
+      "count": 250000,
+      "sha256": "8c8d00c0f3653102cac3e8a5b1160df46a2ff52b3f8dc75f0f5cd41e554d6d31"
+    },
+    "integer": {
+      "seed_hex": "5eed0246a0000003",
+      "count": 250000,
+      "sha256": "0352b22ae50a5273283ca4a6ce7a3316ca330d81075bf7da93e5d103c02f36bd"
+    },
+    "q24": {
+      "seed_hex": "5eed0246a0000004",
+      "count": 250000,
+      "sha256": "82a90a3d3302b029e4779fe5ec7e312ada01b8364633fe1a2e3e7dd17d6292b7"
+    },
+    "parse": {
+      "seed_hex": "5eed0246a0000005",
+      "count": 200000,
+      "sha256": "8ca8e92a7bc108476f99b734eb5607eedf83c4415f084c7b9824f8b2e3044625"
+    },
+    "format": {
+      "seed_hex": "5eed0246a0000006",
+      "count": 50000,
+      "sha256": "ecaef54b6d6cb9e7e3622f1d3d15a1b504c92a63f16e0173ea10b69e13a0fed2"
+    }
+  }
+}

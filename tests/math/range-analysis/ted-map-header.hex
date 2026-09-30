@@ -1,0 +1,7 @@
+# Original minimal fixture for a bounded TED root and its direct child properties.
+# root id=0, root payload size=21; unrelated fields bracket extent fields.
+00 00 00 00 15 00 00 00
+01 04 00 00 00 00
+10 04 00 00 0c 46
+11 04 00 00 96 45
+12 01 00

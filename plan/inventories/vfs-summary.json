@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "generated_on": "2026-09-21",
+  "implementation": {
+    "meg_format_encountered": "MEG-v1",
+    "alo_viewer_revision": "9bb0053919cc5df8377610d4f91b11d956d6c2f4",
+    "pg_starwarsgame_lsp_revision": "4461416d401b0f665bc1fe82aad60b90bd707fa9",
+    "full_reports": "ignored out/vfs/{eaw,foc,remake}.json"
+  },
+  "precedence": {
+    "layers_high_to_low": [
+      "MODPATH arguments in command-line order (leaf first)",
+      "expansion",
+      "base"
+    ],
+    "within_layer": "loose, then active archives from highest to lowest",
+    "active_archive_construction_low_to_high": [
+      "MegaFiles.xml entries in document order",
+      "exact localized/non-localized SFX conventions",
+      "Patch.meg",
+      "Patch2.meg",
+      "64Patch.meg"
+    ],
+    "discovery_policy": "all discovered MEGs are probed separately; discovery does not activate them"
+  },
+  "profiles": [
+    {
+      "profile": "eaw",
+      "layers": ["base"],
+      "discovered_megs": 15,
+      "active_megs": 15,
+      "meg_entries": 14861,
+      "probe_failures": 0,
+      "raw_records": 14911,
+      "effective_records": 14597,
+      "shadowed_records": 314,
+      "raw_xml_by_layer": {"base": 375},
+      "loose_xml_by_layer": {"base": 1},
+      "effective_xml": 367
+    },
+    {
+      "profile": "foc",
+      "layers": ["expansion", "base"],
+      "discovered_megs": 29,
+      "active_megs": 29,
+      "meg_entries": 24648,
+      "probe_failures": 0,
+      "raw_records": 24703,
+      "effective_records": 22303,
+      "shadowed_records": 2400,
+      "raw_xml_by_layer": {"base": 375, "expansion": 661},
+      "loose_xml_by_layer": {"base": 1, "expansion": 1},
+      "effective_xml": 639
+    },
+    {
+      "profile": "remake",
+      "layers": ["mod", "expansion", "base"],
+      "discovered_megs": 36,
+      "active_megs": 36,
+      "meg_entries": 25641,
+      "probe_failures": 0,
+      "raw_records": 51829,
+      "effective_records": 46254,
+      "shadowed_records": 5575,
+      "raw_xml_by_layer": {"base": 375, "expansion": 661, "mod": 1437},
+      "loose_xml_by_layer": {"base": 1, "expansion": 1, "mod": 1311},
+      "effective_xml": 1740,
+      "historical_loose_remake_xml": 1311,
+      "historical_drift": 0,
+      "raw_mod_xml_explanation": "1311 loose XML plus 126 archived XML records"
+    }
+  ],
+  "active_archives_in_remake_profile_low_to_high": {
+    "mod": [
+      "Data/Config.meg",
+      "Data/Shaders.meg",
+      "Data/Maps.meg",
+      "Data/RemakeMaps.meg",
+      "Data/RemakeDisabled.meg",
+      "Data/Patch.meg",
+      "Data/Patch2.meg"
+    ],
+    "expansion": [
+      "Data/Config.meg",
+      "Data/Shaders.meg",
+      "Data/Maps.meg",
+      "Data/Movies.meg",
+      "Data/Models.meg",
+      "Data/EnglishSpeech.meg",
+      "Data/Textures.meg",
+      "Data/Music.meg",
+      "Data/Audio/SFX/SFX2D_English.meg",
+      "Data/Audio/SFX/SFX2D_Non_Localized.meg",
+      "Data/Audio/SFX/SFX3D_Non_Localized.meg",
+      "Data/Patch.meg",
+      "Data/Patch2.meg",
+      "Data/64Patch.meg"
+    ],
+    "base": [
+      "Data/Models.meg",
+      "Data/EnglishSpeech.meg",
+      "Data/Music.meg",
+      "Data/Config.meg",
+      "Data/Shaders.meg",
+      "Data/Movies.meg",
+      "Data/Cinematics.meg",
+      "Data/Textures.meg",
+      "Data/Maps.meg",
+      "Data/Audio/SFX/SFX2D_English.meg",
+      "Data/Audio/SFX/SFX2D_Non_Localized.meg",
+      "Data/Audio/SFX/SFX3D_Non_Localized.meg",
+      "Data/Patch.meg",
+      "Data/Patch2.meg",
+      "Data/64Patch.meg"
+    ]
+  },
+  "selected_independent_byte_comparisons": [
+    {
+      "source": "base:Data/Config.meg!/DATA/XML/GAMECONSTANTS.XML",
+      "runtime_size": 214886,
+      "alo_viewer_size": 214886,
+      "independent_size": 214886,
+      "runtime_first4_hex": "3c3f786d",
+      "alo_viewer_first4_hex": "3c3f786d",
+      "independent_first4_hex": "3c3f786d"
+    },
+    {
+      "source": "expansion:Data/Patch2.meg!/DATA/XML/HARDPOINTS_UNDERWORLD.XML",
+      "runtime_size": 255294,
+      "alo_viewer_size": 255294,
+      "independent_size": 255294,
+      "runtime_first4_hex": "3c3f786d",
+      "alo_viewer_first4_hex": "3c3f786d",
+      "independent_first4_hex": "3c3f786d"
+    },
+    {
+      "source": "mod:Data/Config.meg!/DATA/XML/AI/PLAYERS/PLAYER_NONE.XML",
+      "runtime_size": 905,
+      "alo_viewer_size": 905,
+      "independent_size": 905,
+      "runtime_first4_hex": "3c3f786d",
+      "alo_viewer_first4_hex": "3c3f786d",
+      "independent_first4_hex": "3c3f786d"
+    }
+  ]
+}

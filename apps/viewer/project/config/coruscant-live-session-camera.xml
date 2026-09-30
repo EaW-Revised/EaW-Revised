@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored camera policy for the #80 live session on the M2 skirmish map, not retail camera data.
+     Bounds as coruscant-space-map-camera.xml. Pose: the Rebel (local player 1) fleet as the
+     skirmish start places it in free space around Team_00_Spawn_Point_Marker record 52 at source
+     (-5057, 4700, 0) (#597, space-movement PL-01, PL-03: the search starts at the marker's yaw less 45
+     degrees, so the capital ship stands about 680 units south of it and the target sits near the
+     ships' middle), at distance 1200 (of 100..1900, zoom 0.611111), the space map camera's default, and Yaw_Default (0).
+     Project deviation (owner, #337/#348): FoC opens at Space_Mode Distance_Default 1000; both
+     project space cameras start a bit further out at 1200 (this one was 600 before #348).
+     Project deviation (owner, #390): both space cameras zoom in to 100 instead of Space_Mode's
+     Distance_Min 200, and tilt down to Pitch_Min -60 instead of -10, with the same overrides as
+     coruscant-space-map-camera.xml.
+     Project deviation (owner, #413): five outward wheel clicks at Distance_Max enter each
+     overview stage instead of Space_Mode's ten. -->
+<map_camera schema="eawr-space-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/_mp_space_coruscant.ted"
+  map_sha256="91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286">
+  <bounds min_x="-6100" max_x="6100" min_y="-6100" max_y="6100"
+    source_id="coruscant-source-volume-1" authority="project-authored"/>
+  <initial target_x="-4850" target_y="4400" target_height="0" zoom="0.611111" yaw_degrees="0"/>
+  <bindings path="space-live-camera-bindings.json"/>
+  <constant_overrides schema="eawr-map-camera-overrides" version="1"
+    source_id="space-camera-owner-deviations" authority="project-authored">
+    <override tag="Distance_Min" value="100"/>
+    <override tag="Tactical_Min_Scroll_Speed" value="823.529412"/>
+    <override tag="Pitch_Min" value="-60"/>
+    <override tag="Tactical_Overview_Clicks" value="5"/>
+  </constant_overrides>
+</map_camera>
