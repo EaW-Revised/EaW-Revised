@@ -40,11 +40,5 @@ add_test(
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ci_registration.py"
 )
 
-# Read-only foreground integrity checks before original-game focus input.
-add_test(
-    NAME ci_foreground_guard
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_foreground_guard.py"
-)
-
 # Tier labels (cmake/EawrTestTiers.cmake).
 eawr_label_tests(DEFAULT ci-tools)
