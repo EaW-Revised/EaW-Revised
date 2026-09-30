@@ -13,7 +13,7 @@
 - **Objects:** the players, each player's build queues and pool, the stations (M2: the level-1
   `Skirmish_Rebel_Star_Base_1` and `Skirmish_Empire_Star_Base_1`, SK-20), their income streams,
   the upgrade objects a station builds, and the units that arrive.
-- **Existing rules checked:** [space-purchasing](../space-purchasing.md), rules PU-01 to PU-69.
+- **Existing rules checked:** space-purchasing, rules PU-01 to PU-69.
   That note arrives with PR EAWR-556/#574 (EAWR-530); this walk compares against those PRs' code, which
   is not on the integration branch yet. The "Existing" column says **same**, **differs (how)**
   or **missing there**. The "Ours" column names the code in those PRs and says **does**,

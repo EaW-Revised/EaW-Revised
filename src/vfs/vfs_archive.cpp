@@ -86,7 +86,7 @@ core::Result<ParsedMeg> parse_meg(
         return core::Result<ParsedMeg>::failure(error(
             diagnostic_codes::archive_limit, "MEG table count exceeds the parser safety limit", std::nullopt, source_id));
     }
-    if (entry_count > (archive_size - std::min(archive_size, meg_header_size)) / meg_entry_size) {
+    if (entry_count > (archive_size - std::min<std::uintmax_t>(archive_size, meg_header_size)) / meg_entry_size) {
         return core::Result<ParsedMeg>::failure(error(
             diagnostic_codes::truncated_archive, "MEG entry table cannot fit in the archive", std::nullopt, source_id));
     }

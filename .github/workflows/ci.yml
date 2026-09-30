@@ -80,8 +80,9 @@ jobs:
           - { name: linux-x64-gcc, preset: linux-x64-gcc, os: ubuntu-latest, experimental: false }
           - { name: linux-x64-clang, preset: linux-x64-clang, os: ubuntu-latest, experimental: false }
           - { name: linux-arm64-gcc, preset: linux-arm64-gcc, os: ubuntu-24.04-arm, experimental: false }
-          - { name: windows-msvc, preset: windows-msvc, os: windows-latest, experimental: false }
-          - { name: windows-clang, preset: windows-clang, os: windows-latest, experimental: false }
+          # The Windows presets require the VS 2022 toolchain on this image.
+          - { name: windows-msvc, preset: windows-msvc, os: windows-2022, experimental: false }
+          - { name: windows-clang, preset: windows-clang, os: windows-2022, experimental: false }
           # No macOS preset or platform layer exists yet; this job reports how far a plain build gets.
           - { name: macos-clang (experimental), preset: "", os: macos-latest, experimental: true }
     steps:
@@ -149,7 +150,7 @@ jobs:
       matrix:
         include:
           - { platform: linux-x64, os: ubuntu-latest }
-          - { platform: windows-x64, os: windows-latest }
+          - { platform: windows-x64, os: windows-2022 }
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

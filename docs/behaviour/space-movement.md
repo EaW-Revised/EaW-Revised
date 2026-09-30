@@ -280,7 +280,7 @@ tolerances stay at the conversion bound.
 - **U-05** Banking (BK-01 to BK-05) rests on the debug build, the owner's report that the
   corvette and the Nebulon-B sway in turns, and rig stills (rig recording, 2026-09-27, EAWR-351): 28
   fog-off stills of a staged corvette and Nebulon-B, each ordered 90 degrees to its left from
-  rest ([capture](../foc-original-capture.md), `-StagingProbe bank`; each still is labelled with
+  rest (capture, `-StagingProbe bank`; each still is labelled with
   the seconds since the order and the heading change so far). The corvette banks while it turns.
   The still 3.2 s into a left turn (heading +37 degrees) shows its right flank and underside
   where the same heading at rest shows its deck. So its left side is down in a left turn, as
@@ -394,6 +394,13 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   ship, and the reverse (recording S-14: the left corvette flies the no-search path exactly
   and passes 78 units from the held Nebulon-B's centre), but every ship avoids stations and
   pads.
+- **AV-21** (debug build, research R850-01 to R850-03; data) A type starts with no moving
+  or stationary space layer. The object's layer lookup retains those defaults unless the
+  type authors a layer; the separate multiple-locomotor exception can select the corvette
+  layer. FoC fighter types author neither layer nor that exception, so their absent
+  `Space_Layer` means no collision layer, not an implicit ship layer. The remake preserves
+  that default by excluding craft from ship motion profiles and tracked footprints. This
+  is default behaviour, not evidence that FoC's parser ignores an authored `Space_Layer`.
 - **AV-02** (research E71-12) Each tracked ship carries a prediction: its position for every
   frame from now to the end of its planned path (a ship at rest: its position, held). When a
   ship gets a new path, a turn in place or a stop, its prediction is rebuilt and its layer is

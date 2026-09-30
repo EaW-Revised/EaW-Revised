@@ -188,7 +188,9 @@
 - **WWP-48** (debug build, EWW-09) The shot's travel limit is the type's `Targeting_Max_Attack_Distance`
   times one plus the fire range modifiers; its damage is the type's own `Projectile_Damage` when
   positive, else the projectile's; its damage type is the type's `Damage_Type` unless that is the
-  default, else the projectile's.
+  default, else the projectile's. This is the unit's own `Projectile_Types` weapon only:
+  the unit tag does not replace the damage type of its hardpoint weapons (DG-12). The M2
+  ships do not author the unit tag; their hardpoints supply their own damage types.
 - **WWP-49** (debug build, EWW-09) A squadron's team container as target stands for its craft
   nearest the muzzle (or nearest the shooter's own squadron centre when the shooter flies in one);
   that craft is fired at with no aimed hardpoint (space-fighters FO-04). A target hardpoint that is

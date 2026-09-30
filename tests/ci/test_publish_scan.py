@@ -92,6 +92,21 @@ class PublishScanTests(unittest.TestCase):
                 write(root, "README.md", f"# About\nRuns {term.upper()} data.\n")
                 self.assertEqual(len(publish_scan.readme_scan(root, CONFIG)), 1)
 
+    def test_reviewed_lua_artwork_is_byte_exact_and_still_checked_for_retail(self):
+        for name, digest in CONFIG["assets"]["image_allowlist"].items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                data = (ROOT / name).read_bytes()
+                self.assertEqual(publish_scan.hashlib.sha256(data).hexdigest(), digest)
+                self.assertIn("Lua 5.0.2", CONFIG["assets"]["image_allowlist_origins"][name])
+                image = write(root, name, data)
+                self.assertEqual(publish_scan.asset_scan(root, CONFIG, [image]), [])
+                self.assertIn(f"{name}: byte-identical to a retail file",
+                              publish_scan.asset_scan(root, CONFIG, [image], {digest}))
+                image.write_bytes(data + b"changed")
+                self.assertIn("image not on the reviewed allowlist",
+                              publish_scan.asset_scan(root, CONFIG, [image])[0])
+
     def test_gitleaks_pins_every_platform(self):
         assets = CONFIG["gitleaks"]["assets"]
         self.assertEqual(set(assets), {"windows_x64", "linux_x64", "linux_arm64", "darwin_x64", "darwin_arm64"})

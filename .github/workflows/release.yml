@@ -33,7 +33,7 @@ jobs:
       matrix:
         include:
           - { platform: linux-x64, os: ubuntu-latest, preset: linux-x64-gcc }
-          - { platform: windows-x64, os: windows-latest, preset: windows-msvc }
+          - { platform: windows-x64, os: windows-2022, preset: windows-msvc }
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

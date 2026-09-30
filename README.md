@@ -1,7 +1,7 @@
 # EaW Revised
 
 [![CI](https://github.com/EaW-Revised/EaW-Revised/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/EaW-Revised/EaW-Revised/actions/workflows/ci.yml?query=branch%3Amain)
-[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL-3.0-or-later-blue.svg)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg?logo=cplusplus)](docs/build.md)
 [![Godot 4.7.2](https://img.shields.io/badge/Godot-4.7.2-478CBF.svg?logo=godotengine&logoColor=white)](apps/viewer/README.md)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20the%20project-FF5E5B.svg?logo=ko-fi&logoColor=white)](https://ko-fi.com/mister_fordo)

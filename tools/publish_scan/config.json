@@ -82,7 +82,7 @@
     "image_allowlist": {
       "third_party/lua/doc/logo.gif": "9c3a3208ef05e12110f9b7b491cef676e650e4ebf3d36c4414268666bcc95d8a",
       "third_party/lua/etc/lua.ico": "7a4ecc09ce82d90535591c6d98c1882527803747338b8c698422e56ec45169ee",
-      "third_party/lua/etc/lua.xpm": "f66f6bf46cfcede08d06dee7a970469c5ad13face51f218d08281fbfb9915fd7"
+      "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": [
       "tests/replay/fixtures/*.eawr-replay",
@@ -91,7 +91,12 @@
       "tests/fog/fixtures/*.eawr-fog",
       "tests/fog/fixtures/mutations/*.eawr-fog",
       "third_party/"
-    ]
+    ],
+    "image_allowlist_origins": {
+      "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
+      "third_party/lua/etc/lua.ico": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
+      "third_party/lua/etc/lua.xpm": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT)."
+    }
   },
   "readme": {
     "forbidden": [

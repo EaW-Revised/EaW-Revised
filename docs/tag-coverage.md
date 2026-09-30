@@ -53,11 +53,14 @@ an unrecorded trace (see below).
 
 ### What each status rests on
 
-- **`foc-ignores`** is a whole-image scan of the debug build for the tag name (`Invoke-GhidraQuery.ps1 -Query tag-tables`,
+- **`foc-ignores`** normally rests on a whole-image scan of the debug build for the tag name (`Invoke-GhidraQuery.ps1 -Query tag-tables`,
   the `DB-NOTAG` evidence): the name is in no tag table row, string or format template. about 250 pairs (`python tools/inventory/tag_registry.py render` prints the count; mostly typos and stale
   authoring: `Autoresolve_Health`, `Facing_Adjust`, `Sensor_Range`). The scan does not assign tables to classes, so
   "FoC reads this tag for this class" means "the debug build knows the name and the data authors it on this class". A
-  per-class refinement (which behaviour tables an object type pulls in) is not done.
+  per-class refinement (which behaviour tables an object type pulls in) is not done by that scan.
+  Reviewed exceptions cite a behaviour rule: DG-24 for craft `Fire_Inaccuracy_Distance`, and AB-15 for
+  squadron-authored `Mod_Multiplier` (non-team commands use the craft's data). These tags may be known to the
+  parser while their values on that class do not drive the relevant behaviour.
 - **`land-or-galactic`, `presentation-later`** by class or tag-name family, with a scope reason (ground classes, planets,
   campaigns and story, cinematics, graphics settings, menus). These are scope decisions (M2 is the space skirmish), not
   claims about FoC.
@@ -72,6 +75,14 @@ an unrecorded trace (see below).
 The scan is a text scan. Rows it produced are `basis: auto`; they are the rows the perturbation check
 (`out/specs/tag-applied-check.md`, tools/soak) proves or refutes mechanically. Hand decisions the scan cannot make are in
 the `OVERRIDES` table of `tag_registry_build.py`.
+
+The EAWR-842 reassessment of #850-#853 distinguishes an unchanged battle hash from a missing application. Reviewed
+rows cite `CHECK-842` and retain `applied` when the consumer exists but the 9000-tick M2 scenario does not prove
+its effect. A missing baseline XML node means not authored, not a failed read. `SpaceUnit/Damage_Type` applies
+to an object's own weapon (WWP-48), not its ship hardpoints; `SpaceUnit/Space_Layer` lists authored ship layers,
+while craft preserve the debug build's default of no layer (AV-21). Neither default creates a missing mechanic.
+`SpaceUnit/Victory_Relevant` is deferred with EAWR-650 for other victory conditions: the M2 default uses only stations
+(VT-01 to VT-03). The station row remains applied even though the perturbation run did not change its result.
 
 ## The gate
 

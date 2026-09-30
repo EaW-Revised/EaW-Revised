@@ -142,7 +142,7 @@ beyond that is exact fast paths (integer-valued operands), not option A.
 
 On 2026-09-27 the retail Steam FoC `StarWarsG.exe` ran the probe
 `tools/validation/p1_capture/lua_number_probe.lua` in a Naboo land skirmish on the rig (fog
-off, `Invoke-FocMapCapture.ps1 -LuaNumberProbe`, [capture notes](foc-original-capture.md)).
+off, `Invoke-FocMapCapture.ps1 -LuaNumberProbe`, maintainer capture notes).
 The probe evaluates 26 fixed cases in GameScoring's Lua state, compares each result with this
 profile's text using the game's own string comparison, and shows one line with the verdict;
 the game showed `LNP1 OK n=26`: every case matched. The line, read off the screenshots, is

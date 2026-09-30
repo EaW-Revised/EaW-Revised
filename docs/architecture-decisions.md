@@ -4,7 +4,7 @@
 
 Use C++20 and CMake for the engine-independent simulation, VFS, loaders and Lua
 host. Target Windows x64, Linux x64 and Linux ARM64; qualify MSVC/Clang on Windows
-and GCC/Clang on Linux. See [build](build.md) and [CI policy](ci-budget-policy.md).
+and GCC/Clang on Linux. See [build](build.md) and the maintainer CI policy.
 
 ADR-011 selects Godot 4.7.2 with pinned godot-cpp 10.0.0 bindings through a C++
 GDExtension and RenderingServer resource ownership. A bootstrap node is allowed;

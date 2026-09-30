@@ -40,12 +40,12 @@ The S fight at seed 601 lasts about 4200 ticks (140 s): the fighters are gone by
   every phase's mean, p99 and worst cost per tick against the 33.3 ms tick budget, the serial
   remainder, the live unit, craft and projectile counts, and fails when two worker counts
   disagree on a tick's state hash. On the build hosts:
-  `windows_build.py --host laptop --melee-bench-out <dir>` ([worker offload](../worker-offload.md#benchmarks-and-profiles)).
+  `windows_build.py --host laptop --melee-bench-out <dir>` (maintainer worker offload).
 - Viewer: `--eawr-live-session melee --eawr-live-melee s|m|l` plays the same fight (the viewer
   builds it with the same code); `--eawr-perf-trace <csv>` writes one row per frame.
 - Retail: `Invoke-FocMapCapture.ps1 -MapId coruscant-space -StagingProbe melee -NoFog
   -DebugBuild -DebugCommands FPS` stages size S from the capture mod's scoring script and shows
-  the debug build's FPS readout in the stills ([original capture](../foc-original-capture.md)).
+  the debug build's FPS readout in the stills (original capture).
 - CTest `path_bench_melee_workers`: size S, the first 600 ticks, hash-identical at 1, 2, 4 and 8
   workers (skipped without the game data).
 - Viewer profile: `path_bench --profile-attach <pid of the viewer> --profile-seconds <n>` samples the
