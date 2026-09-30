@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import pathlib
 import shutil
 import sys
@@ -62,7 +63,7 @@ class PublishScanTests(unittest.TestCase):
                                               {"private-dir": r"/srv/private"}, ["hostx"])
             self.assertEqual(sorted(hit.split(": ")[1] for hit in hits), ["private-dir", "private-name"])
 
-    def test_cleanroom_hits_use_the_trees_checker(self):
+    def test_checker_applies_cleanroom_rules(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = tree(temporary)
             write(root, "src/a.cpp", "// see Gizmo" + "Class:" + ":Get_X and the icon i_button-m_" + "big_tank.tga\n")
@@ -76,7 +77,8 @@ class PublishScanTests(unittest.TestCase):
             write(root, "art/ship.alo", "x")
             write(root, "img.png", b"\x89PNG\r\n\x1a\n")
             write(root, "blob.bin", b"\x00\x01")
-            write(root, "tests/replay/fixtures/a.eawr-replay", b"\x00\x02")
+            fixture = next(iter(CONFIG["assets"]["binary_allowlist"]))
+            write(root, fixture, (ROOT / fixture).read_bytes())
             write(root, "tests/shaders/fixtures/Synthetic.fx", "float4 main() : COLOR { return 1; }\n")
             hits = publish_scan.asset_scan(root, CONFIG, publish_scan.tree_files(root))
             self.assertEqual(sorted(hit.split(":")[0] for hit in hits), ["art/ship.alo", "blob.bin", "img.png"])
@@ -106,6 +108,64 @@ class PublishScanTests(unittest.TestCase):
                 image.write_bytes(data + b"changed")
                 self.assertIn("image not on the reviewed allowlist",
                               publish_scan.asset_scan(root, CONFIG, [image])[0])
+
+    def test_generated_files_are_scanned_and_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            names = ["pkg/__pycache__/notes.txt", "pkg/cache.pyc", "out/generated.txt", "pkg/result.obj"]
+            for name in names:
+                write(root, name, "runs on HostX")
+            results = publish_scan.scan(root, CONFIG, extra_terms=["hostx"])
+            self.assertEqual(len(results["security"]), len(names))
+            self.assertEqual(len(results["assets"]), len(names))
+
+    def test_paths_are_checked_even_for_binary_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            write(root, "docs/HostX-notes.bin", b"\x00")
+            write(root, "docs/box." + "lan/readme.md", "safe")
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root), extra_terms=["hostx"])
+            self.assertEqual(sorted(hit.split(": ")[1] for hit in hits), ["lan-host", "private-name"])
+
+    def test_third_party_has_no_blanket_exemptions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            for name, data in [("blob.bin", b"\x00"), ("bad.txt", b"\xff"), ("program.exe", b"MZ\x00")]:
+                write(root, "third_party/new/" + name, data)
+            write(root, "third_party/new/api.hpp", "Gizmo" + "Class")
+            results = publish_scan.scan(root, CONFIG)
+            self.assertEqual(len(results["cleanroom"]), 1)
+            self.assertEqual(len(results["assets"]), 4)  # executable is also generated
+
+    def test_binary_fixtures_are_hash_pinned(self):
+        name, digest = next(iter(CONFIG["assets"]["binary_allowlist"].items()))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            fixture = write(root, name, (ROOT / name).read_bytes())
+            self.assertEqual(publish_scan.asset_scan(root, CONFIG, [fixture]), [])
+            fixture.write_bytes(fixture.read_bytes() + b"\x00changed")
+            self.assertIn("binary file not on the allowlist", publish_scan.asset_scan(root, CONFIG, [fixture])[0])
+
+    def test_allow_rules_cannot_mask_other_patterns_or_private_rules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = tree(temporary)
+            name = "third_party/lua/doc/manual.html"
+            write(root, name, "/home/" + "roberto HostX box." + "lan")
+            hits = publish_scan.security_scan(root, CONFIG, publish_scan.tree_files(root),
+                                              {"private-extra": "HostX"}, ["hostx"])
+            self.assertEqual(sorted(hit.split(": ")[1] for hit in hits),
+                             ["lan-host", "private-extra", "private-name"])
+
+    def test_upstream_non_utf8_sample_has_an_exact_pin(self):
+        name = "third_party/lua/test/life.lua"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            data = (ROOT / name).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            sample = write(root, name, data)
+            self.assertIn("Lua 5.0.2", CONFIG["assets"]["binary_allowlist_origins"][name])
+            self.assertEqual(publish_scan.asset_scan(root, CONFIG, [sample]), [])
+            sample.write_bytes(sample.read_bytes() + b"changed")
+            self.assertIn("binary file not on the allowlist", publish_scan.asset_scan(root, CONFIG, [sample])[0])
 
     def test_gitleaks_pins_every_platform(self):
         assets = CONFIG["gitleaks"]["assets"]

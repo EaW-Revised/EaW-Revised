@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
@@ -42,17 +43,21 @@ struct Options {
     std::size_t repeat = 3;
     std::uint64_t seed = 0x5eed;
     std::vector<std::size_t> workers;
+    bool dispatch_cost = false;
 };
 
 void print_help(std::ostream& output) {
     output << "Usage: sim_bench [--units <n>] [--ticks <n>] [--warmup <n>] [--repeat <n>] [--seed <n>]\n"
-              "                 [--workers <n|hardware>[,<n|hardware>...]]\n"
+              "                 [--workers <n|hardware>[,<n|hardware>...]] [--dispatch-cost 1]\n"
               "\n"
               "Generates a synthetic space battle of <n> units (default 1200) from the seed, steps it\n"
               "<warmup> + <ticks> ticks (default 30 + 300) with each worker count (default 1, 2, 4, 8 and\n"
               "the hardware thread count), <repeat> times each (default 3), and prints ticks/s and the\n"
               "time per tick of each partitioned phase and of the serial remainder. Exits 1 when two\n"
-              "worker counts disagree on any tick's state hash.\n";
+              "worker counts disagree on any tick's state hash.\n"
+              "\n"
+              "--dispatch-cost 1 measures the pool instead (#637): the median and p99 time of a phase\n"
+              "whose partitions do nothing, on the pool and on the calling thread, per worker count.\n";
 }
 
 template <typename T>
@@ -118,6 +123,9 @@ template <typename T>
             const auto seed = parse_number<std::uint64_t>(value);
             valid = seed.has_value();
             options.seed = seed.value_or(0);
+        } else if (argument == "--dispatch-cost") {
+            valid = value == "0" || value == "1";
+            options.dispatch_cost = value == "1";
         } else if (argument == "--workers") {
             auto workers = parse_workers(value);
             valid = workers.has_value();
@@ -460,6 +468,41 @@ struct SerialProbe {
     return text.str();
 }
 
+// The pool's own cost per phase (#637): wake every thread for 64 empty partitions and wait for
+// them, against the same phase on the calling thread. ThreadWorkerAdapter::inline_budget comes
+// from these numbers.
+int dispatch_cost(const Options& options) {
+    constexpr std::size_t phases = 20'000;
+    const auto percentile = [](std::vector<double>& values, const double share) {
+        std::sort(values.begin(), values.end());
+        return values[std::min(values.size() - 1, static_cast<std::size_t>(share * static_cast<double>(values.size())))];
+    };
+    std::cout << "sim_bench --dispatch-cost: " << phases << " phases of " << eawr::sim::tick_partition_count
+              << " empty partitions, microseconds per phase\n"
+              << "workers  pool median  pool p99  inline median\n";
+    for (const auto workers : options.workers) {
+        std::vector<double> pooled;
+        std::vector<double> inlined;
+        pooled.reserve(phases);
+        inlined.reserve(phases);
+        const eawr::platform::ThreadWorkerAdapter pool(workers, eawr::platform::ThreadWorkerAdapter::Dispatch::always_pool);
+        const eawr::sim::InlineExecutor inline_executor;
+        std::atomic<std::size_t> touched{0};
+        const std::function<void(std::size_t)> job = [&touched](const std::size_t) { touched.fetch_add(1, std::memory_order_relaxed); };
+        for (std::size_t phase = 0; phase < phases; ++phase) {
+            auto began = Clock::now();
+            if (!pool.execute(eawr::sim::tick_partition_count, job)) return 1;
+            pooled.push_back(std::chrono::duration<double, std::micro>(Clock::now() - began).count());
+            began = Clock::now();
+            if (!inline_executor.execute(eawr::sim::tick_partition_count, job)) return 1;
+            inlined.push_back(std::chrono::duration<double, std::micro>(Clock::now() - began).count());
+        }
+        std::cout << std::setw(7) << workers << std::fixed << std::setprecision(1) << std::setw(13) << percentile(pooled, 0.5)
+                  << std::setw(10) << percentile(pooled, 0.99) << std::setw(15) << percentile(inlined, 0.5) << '\n';
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
@@ -472,6 +515,7 @@ int main(const int argc, const char* const argv[]) {
         print_help(std::cerr);
         return 2;
     }
+    if (options->dispatch_cost) return dispatch_cost(*options);
     const auto battle = generate(*options);
     std::cout << "sim_bench: synthetic space battle, " << options->units << " units, " << player_count
               << " players in 2 teams, " << options->ticks << " timed ticks after " << options->warmup

@@ -152,6 +152,25 @@ throws fails the step with `EAWR-SIM-0109` naming the lowest partition that thre
 step commits nothing. `sim_headless --workers` takes 1 to 256 or `hardware`
 (`ThreadWorkerAdapter::hardware_worker_count()`).
 
+Waking the parked threads costs more than a small phase's work (EAWR-637): an empty 64-partition
+phase took a median 3 us on the pool at 2 and 4 workers, 23 us at 8 and 43 us at 20
+(`sim_bench --dispatch-cost 1` on a 20-thread host), against under 1 us on the calling thread;
+in the EAWR-601 melee at 28 workers the small phases cost 0.1 to 0.2 ms each. So a pool made with
+`Dispatch::by_cost`, which the live session uses, keeps a named phase whose last run's work was
+under `inline_budget(workers)` (3 us per worker) on the stepping thread, in partition order.
+When such a phase runs past the budget (a burst: the first projectiles, a round of path
+searches), the pool takes the partitions not started yet; a phase that was bigger than the
+budget goes to the pool at once. The phase's work is the time its partitions took, added up
+over the threads that ran them. Work timed on the pool includes the threads' contention (SMT
+siblings, memory, a loaded host), so a phase under four budgets tries the stepping thread again
+every 16th run. The timer is checked after each indivisible partition, so the try can cost
+the budget plus the last partition's work; the budget supplies no hard wall-clock bound.
+This changes only which thread runs a partition, never a
+result. `Dispatch::always_pool`, the default, wakes the pool for every phase of more than one
+partition; the determinism tests and `sim_headless` use it, so they keep exercising the
+threads. `tactical_contract_tests` also runs its golden replay with `by_cost` and the hashing
+thread at every worker count.
+
 ### Phase map
 
 `TacticalSession::step`, in order:
@@ -185,7 +204,7 @@ step commits nothing. `sim_headless --workers` takes 1 to 256 or `hardware`
 | `fog-cells`: service, release, mark | partitioned | By bands of grid rows, every player's grid; each band applies the changes in ascending revealer ID. |
 | `visibility` | partitioned | Per unit, a query against the immutable sensor field, and per spinning craft its pose and the same query (EAWR-447). The largest phase today. |
 | Commit | serial | The ordered commit alone writes storage (ADR-009). |
-| State hash | serial | SHA-256 is one sequential chain over the frozen canonical encoding. |
+| State hash | serial, or on the hashing thread | SHA-256 is one sequential chain over the frozen canonical encoding. With a state hasher (EAWR-637) the stepping thread only encodes the state; the digest is computed on the hasher's thread while the next tick runs. |
 | Snapshot | serial | Moves the staged instances and events. |
 
 `World::step` (replay v1) runs its commands serially, `movement` partitioned, and its commit
@@ -228,6 +247,57 @@ sim_bench [--units 1200] [--ticks 300] [--warmup 30] [--repeat 3] [--seed n] [--
 The partitioned phases scale with the cores. The serial remainder does not: at 1500 units
 the state hash is about half of it (the SHA-256 alone), and staging and committing storage is
 most of the rest. It bounds the speed-up.
+
+### The state hash off the stepping thread (EAWR-637)
+
+`TacticalSession::set_state_hasher` takes the SHA-256 off the stepping thread. `step()` still
+encodes the completed tick's canonical state (the next tick changes it), then hands the bytes to
+the hasher and returns; `TacticalTick::state_hash` resolves to the digest, and `state_sha256`
+stays empty. `platform::ThreadStateHasher` is one thread that hashes in submission order, lets
+at most four jobs wait in the default queue plus one active job (a faster stepping thread
+then waits for queue space). A plain tick submits one job; a scripted tick submits two,
+the world hash and its combined derivation. The hasher finishes every job
+before it is destroyed. The digest is the one the synchronous path computes, so determinism
+checks, replays and pins see the same value at the same tick.
+
+One paired run of the EAWR-601 melee per size and worker count (`path_bench --melee`, seed 601,
+4500 ticks), 2026-09-30, on the Linux build container with 12 exposed CPUs. Both builds used
+the GCC Release preset. *Before* is integration `34970c73`, with always-pool dispatch and
+synchronous hashing; *after* is its merge with this change (`3e7eb60d`), with `by_cost`, a
+threaded state hasher and digest retrieval after stepping. Tick timing includes canonical
+encoding and queue backpressure. Every run has the same tick hashes across both builds and
+workers 1, 2, 4 and 8.
+
+The shared build lock was held, but host load was elevated and varied between modes:
+1-minute load at S starts was 28.10 before / 18.16 after; M was 19.44 / 17.10.
+The host was not exclusively idle. **Direction confirmed, absolute numbers pending a quiet
+rerun.** The original 2026-09-29 samples may include interference during the owner's
+identified 23:10–23:35 window; their exclusive-host condition, absolute times and hardware
+worker-count claims are unconfirmed. This table replaces those samples with the reviewer's
+paired observations; private receipts identify the execution host and measured load.
+
+| Size | Workers | Mean ms before / after | p99 ms before / after | Serial ms before / after | Ticks over 33.3 ms before / after |
+|---|---:|---|---|---|---|
+| S | 1 | 10.134 / 9.470 | 47.861 / 46.747 | 1.808 / 0.835 | 145 / 145 |
+| S | 2 | 8.143 / 7.023 | 37.707 / 33.858 | 1.889 / 0.829 | 84 / 50 |
+| S | 4 | 6.368 / 5.895 | 23.857 / 24.562 | 2.025 / 1.205 | 0 / 10 |
+| S | 8 | 6.588 / 5.172 | 23.970 / 19.931 | 3.214 / 1.634 | 0 / 0 |
+| M | 1 | 20.591 / 20.161 | 151.165 / 149.378 | 2.307 / 1.495 | 916 / 909 |
+| M | 2 | 14.779 / 13.878 | 113.325 / 109.442 | 2.241 / 1.411 | 801 / 695 |
+| M | 4 | 11.702 / 11.423 | 79.665 / 74.935 | 2.458 / 1.638 | 526 / 663 |
+| M | 8 | 10.383 / 8.667 | 56.673 / 56.447 | 3.565 / 1.960 | 489 / 408 |
+
+These observations show lower means at every measured worker count: at 8 workers, S improves
+21.5% and M 16.5%. S at 4 workers has a slightly worse p99 and more ticks over budget despite
+its lower mean. These contention-sensitive results do not establish a quiet-host baseline or
+the original 28-worker speed-up. M and L remain projectile-bound (EAWR-636).
+
+Who hashes where:
+
+| Consumer | Hash |
+|---|---|
+| Live session (the viewer's game), world alone or scripted (EAWR-79) | On the hashing thread; `tick_hashes()` resolves them when a report asks. A scripted tick's combined hash (the world's with the scripts') is derived on the same thread right after the world's (`ScriptedTacticalSession::set_state_hasher`); the scripts' own hash is still taken on the stepping thread at the tick barrier. |
+| `sim_headless`, replays and pins, `headless_tick_hashes`, the tests | On the stepping thread (the default): each writes or compares every tick's hash at once. |
 
 ### Path searches (EAWR-503)
 

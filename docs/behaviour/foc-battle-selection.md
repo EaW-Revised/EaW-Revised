@@ -223,7 +223,8 @@ behaviour, with FoC's values:
 | `CommandBarComponent` `i_main_skirmish` `Model_Name`, `Type` | `i_tactical_controls.alo`, `Shell` | The shell V-5b hides; the hide picks the component by its fixed role, not by a tag |
 | `CommandBarComponent` `i_main_reinforce`, `pause_shell` | shells | Hidden by V-5b as above |
 
-**The remake's live battle, element by element** (what it draws today; none of it hides yet):
+**The remake's live battle, element by element** (EAWR-848 implements the column; the model is
+`presentation::ui::overview_ui`, the viewer applies it once per frame after the camera took the level):
 
 | Element (viewer) | FoC at x1 and x2 | Rule |
 |---|---|---|
@@ -244,7 +245,18 @@ behaviour, with FoC's values:
 | Win/lose message, end panel | unverified (not on the shell, no reader of the overview state; not seen in a capture); stays | V-5e |
 | F3 performance overlay | project dev tool with no FoC counterpart; stays | project |
 | Control-group numbers (not drawn by the remake yet) | hides | V-5d |
-| Space distance fog | off | V-5f |
+| Space distance fog | off (the remake draws none in space: the legacy adapters disable it, so there is nothing to switch) | V-5f |
+| Reinforcement shell | hides when open (the remake has no reinforcement shell yet) | V-5b |
+
+**The fade in the remake (V-5g).** On the frame the camera takes a new level, before that frame
+draws, the viewer copies the image the viewport last drew (still the old level, world and HUD) on the
+GPU and lays it over the whole view on this and the next eight drawn frames at 0.9, 0.8 ... 0.1; the
+tenth frame is clean. The copy never leaves the GPU, so a level change adds no readback stall. The
+system pointer is not in the image (it is not drawn by the game). Without a RenderingDevice backend
+(the Compatibility fallback) no image is kept. Project choices, both on the list below: the first faded
+frame already shows the new level (the debug-build delay of two camera updates is read as "the change
+lands on the frame after the request"), and a level change during a running fade restarts it with a
+new held image.
 
 ## Cases
 
@@ -279,6 +291,10 @@ behaviour, with FoC's values:
 - V-5g: the two-update delay between the request and the level change counts camera updates
   (the camera's per-render service), not drawn fade frames; how the two line up at other frame
   rates was not measured.
+  The remake shows the new level on the first faded frame (0.9), not on the second.
+- V-5g: the remake restarts the fade on a level change during a running fade (unverified, see above).
+- V-5b: the order buttons and the credits and population readouts are not drawn by the remake yet;
+  when they arrive they belong on the shell that hides.
 - Why the hover popup is gone in the overview (V-5e1) was not read: the stills show it, the code
   path was not traced.
 - Retail disagrees with V-3's exit distance (EAWR-857): in the EAWR-848 stills, one click in from x2 and

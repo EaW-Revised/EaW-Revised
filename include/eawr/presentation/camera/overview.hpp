@@ -16,8 +16,8 @@
 // back. The overview key (Insert) cycles overview, map overview and back. FoC sets the camera's own
 // yaw to 0 on entering the map overview, so its pan follows the drawn view; the yaw stays 0 back in
 // the overview and the saved tactical yaw returns when the overview is left. No rotation or tilt
-// input applies while an overview level is on. The retail fade between the levels is not
-// reproduced. Presentation only, like the rest of the camera module.
+// input applies while an overview level is on. The fade between the levels and what the battle UI
+// hides are presentation::ui::overview_ui (#848, V-5a to V-5g). Presentation only, like the rest of the camera module.
 // The project space map and live-battle configs override the FoC ten-click count to five (#413).
 namespace eawr::presentation::camera {
 

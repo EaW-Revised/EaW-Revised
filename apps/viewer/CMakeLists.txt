@@ -198,6 +198,7 @@ add_library(eawr_viewer_core STATIC
     "${EAWR_ROOT}/src/sim/fog.cpp"
     "${EAWR_ROOT}/src/sim/replay.cpp"
     "${EAWR_ROOT}/src/sim/snapshot.cpp"
+    "${EAWR_ROOT}/src/sim/state_hash.cpp"
     "${EAWR_ROOT}/src/sim/world.cpp"
     "${EAWR_ROOT}/src/sim/math/fixed.cpp"
     "${EAWR_ROOT}/src/sim/math/geometry.cpp"
@@ -293,6 +294,7 @@ add_library(eawr_viewer SHARED
     src/battle_audio.cpp
     src/battle_input.cpp
     src/world_ui_view.cpp
+    src/overview_fade_view.cpp
     src/battle_effects.cpp
     src/unit_emitters.cpp
     src/perf_trace.cpp

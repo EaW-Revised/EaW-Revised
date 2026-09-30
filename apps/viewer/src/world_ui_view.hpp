@@ -53,6 +53,9 @@ public:
         std::array<float, 2> viewport{};
         std::function<std::optional<std::array<float, 2>>(const ui::Vec3f&)> project;
         const LiveSessionView* live{};
+        // #848 V-5d: false while either overview level is on: no unit bracket (health and shield
+        // bars) draws. Circles, squadron icons and reticles do not read it (V-5e).
+        bool brackets{true};
     };
     // Poses the circles and draws the rest into `canvas_item` (already cleared by the caller).
     void draw(const Frame& frame, godot::RID canvas_item);
@@ -65,6 +68,17 @@ public:
     [[nodiscard]] std::vector<ui::BattleUnit> icon_units() const;
     // The report's "world_ui" member, followed by ",\n".
     void write_report(std::ostream& output) const;
+    // What the last drawn frame drew (#848's per-level samples).
+    struct Drawn final {
+        std::size_t circles{};
+        std::size_t health_bars{};
+        std::size_t shield_bars{};
+        std::size_t icons{};
+        std::size_t reticles{};
+    };
+    [[nodiscard]] Drawn drawn() const {
+        return {circles_drawn_, health_bars_, shield_bars_, icons_.size(), reticles_drawn_};
+    }
 
 private:
     struct HardpointUi final {

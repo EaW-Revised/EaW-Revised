@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -191,8 +192,10 @@ struct Run {
 
 // The local player (1) gives UI-07 orders on some ticks; they are taken at the
 // tick boundary, as the live session's command source does.
-Run run_battle(const eawr::sim::PartitionExecutor& executor) {
+Run run_battle(const eawr::sim::PartitionExecutor& executor, std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr) {
     auth::ScriptedTacticalSession battle = make_battle();
+    const bool hashed_off_thread = hasher != nullptr;
+    battle.set_state_hasher(std::move(hasher));
     ui::CommandScheduler local(1);
     Run run;
     std::vector<auth::ScriptCommand> previous_service;
@@ -230,8 +233,13 @@ Run run_battle(const eawr::sim::PartitionExecutor& executor) {
         previous_service = result.scripts.commands;
         run.script_commands += result.scripts.commands.size();
         expect(result.scripts.diagnostics.empty(), "script diagnostics");
-        run.hashes.push_back(result.state_sha256);
-        run.world_hashes.push_back(result.world.state_sha256);
+        // #637: off the stepping thread the hashes are only in state_hash; on it, in both.
+        expect(hashed_off_thread ? result.state_sha256.empty() && result.world.state_sha256.empty()
+                                 : result.state_hash.get() == result.state_sha256
+                                     && result.world.state_hash.get() == result.world.state_sha256,
+            "the tick's hashes are where the hashing mode puts them");
+        run.hashes.push_back(result.state_hash.get());
+        run.world_hashes.push_back(result.world.state_hash.get());
     }
     expect(battle.pending_script_commands() == previous_service.size(), "the last service waits for the next tick");
     run.replay = battle.record();
@@ -387,6 +395,12 @@ void run_workers() {
         const Run run = run_battle(executor);
         expect(run.hashes == reference.hashes, std::to_string(workers) + " workers: combined hashes");
         expect(run.replay == reference.replay, std::to_string(workers) + " workers: recorded replay");
+        // #637: the live game's dispatch and hashing thread give the same hashes.
+        const eawr::platform::ThreadWorkerAdapter by_cost(workers, eawr::platform::ThreadWorkerAdapter::Dispatch::by_cost);
+        const Run live = run_battle(by_cost, std::make_shared<eawr::platform::ThreadStateHasher>());
+        expect(live.hashes == reference.hashes && live.world_hashes == reference.world_hashes,
+            std::to_string(workers) + " workers, by cost, hashed off thread: combined and world hashes");
+        expect(live.replay == reference.replay, std::to_string(workers) + " workers, by cost: recorded replay");
     }
 }
 

@@ -11,6 +11,7 @@
 #include "live_session_view.hpp"
 #include "shutdown_trace.hpp"
 #include "live_fog_view.hpp"
+#include "overview_fade_view.hpp"
 #include "battle_audio.hpp"
 #include "perf_trace.hpp"
 #include "unit_emitters.hpp"
@@ -529,6 +530,16 @@ struct MapMode::State final {
     // #455: hands the live battle to the HUD's minimap (what the local player sees, the fog
     // revealers of the local team, the camera's outline). Called right after each live frame.
     void sync_minimap();
+    std::uint64_t minimap_syncs{};
+    // #848 (docs/behaviour/foc-battle-selection.md V-5a to V-5g): the battle UI in the overview
+    // levels x1 and x2. Once per live frame, after the camera took this frame's level and before
+    // the battle input draws: hides what the level hides and starts the fade on a level change.
+    void sync_overview_ui();
+    std::string overview_level;
+    presentation::ui::OverviewUi overview_ui;
+    std::unique_ptr<OverviewFadeView> overview_fade;
+    // The report's "overview_ui" object.
+    [[nodiscard]] std::string overview_report_json() const;
     // MM-09: the reference plane's height, the mean Z of the lobby players' units at the first frame.
     std::optional<double> minimap_height;
     std::map<sim::tactical::TypeId, std::string> minimap_type_names;

@@ -872,10 +872,9 @@ void BattleInput::cancel() noexcept {
 void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population, SpaceEnvironment& space) {
     refresh(live, population, space);
     refresh_cards(live);
-    if (overview_sample_pending_) {
-        overview_samples_.push_back({*overview_sample_pending_, space.live_camera_overview()});
-        overview_sample_pending_.reset();
-    }
+    // #848: the frame after a wheel or overview key gesture is sampled once it has drawn (below).
+    const std::optional<std::uint64_t> overview_sample = overview_sample_pending_;
+    overview_sample_pending_.reset();
     // The frame after a scripted middle gesture: its events reached the camera, which stepped.
     if (camera_sample_pending_ && frame_) {
         camera_samples_.push_back({*camera_sample_pending_ + " after", *frame_});
@@ -918,6 +917,10 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
     }
     update_hover();
     draw();
+    if (overview_sample) {
+        overview_samples_.push_back({*overview_sample, space.live_camera_overview(), world_ui_->drawn(),
+                                     overview_probe_ ? overview_probe_() : std::string("null")});
+    }
 }
 
 void BattleInput::follow(const LiveSessionView& live, SpaceEnvironment& space) {
@@ -999,6 +1002,7 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
             modifiers(**event);
             engine->parse_input_event(event);
         }
+        if (code == KEY_INSERT) overview_sample_pending_ = scripted.tick;
         ++scripted_fired_;
         return;
     }
@@ -1170,6 +1174,7 @@ void BattleInput::draw() {
         view.viewport = viewport_;
         view.project = [this](const ui::Vec3f& source) { return project(source); };
         view.live = live_;
+        view.brackets = overview_ui_.unit_brackets;
         world_ui_->draw(view, canvas_item_);
     }
     // FoC's drag box (SelectBoxBorderColor / SelectBoxFillColor): once the drag passes the select
@@ -1247,7 +1252,10 @@ void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& spa
     for (std::size_t index = 0; index < overview_samples_.size(); ++index) {
         const OverviewSample& sample = overview_samples_[index];
         output << (index ? ", " : "") << "{\"tick\": " << sample.tick
-               << ", \"level\": " << json(sample.level) << '}';
+               << ", \"level\": " << json(sample.level) << ", \"circles\": " << sample.drawn.circles
+               << ", \"health_bars\": " << sample.drawn.health_bars << ", \"shield_bars\": " << sample.drawn.shield_bars
+               << ", \"icons\": " << sample.drawn.icons << ", \"reticles\": " << sample.drawn.reticles
+               << ", \"hud\": " << sample.hud << '}';
     }
     output << "], \"log\": [";
     for (std::size_t index = 0; index < log_.size(); ++index) output << (index ? ", " : "") << json(log_[index]);

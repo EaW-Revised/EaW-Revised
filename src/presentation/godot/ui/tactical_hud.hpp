@@ -217,6 +217,13 @@ public:
     void set_time_view(const TimeView& view);
     // #453: the local player's result (true: victory) once decided, and whether the battle ended.
     void set_battle(std::optional<bool> won, bool ended);
+    // #848 (docs/behaviour/foc-battle-selection.md V-5b): while either overview level is on, the
+    // tactical shell with everything on it and, while paused, the pause banner hide; the win/lose
+    // message and the end panel stay (V-5e).
+    void set_overview(bool on);
+    // Whether the shell and the pause banner draw this frame.
+    [[nodiscard]] bool shell_shown() const;
+    [[nodiscard]] bool pause_banner_shown() const;
     // A control's centre in viewport pixels while it is shown: pause, fast_forward, resume, quit.
     [[nodiscard]] std::optional<std::array<float, 2>> control_point(const std::string& name) const;
     // The "hud" object of a viewer report: what was drawn, from where, and the

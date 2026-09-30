@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <fstream>
@@ -511,6 +512,134 @@ void test_actual_thread_adapter() {
     }
 }
 
+// #637: Dispatch::by_cost keeps small named phases on the calling thread, hands a phase that
+// outgrows the budget to the pool part way, and still runs every partition exactly once.
+void test_dispatch_by_cost() {
+    namespace platform = eawr::platform;
+    using Adapter = platform::ThreadWorkerAdapter;
+    const auto caller = std::this_thread::get_id();
+
+    // Small phases: after the first, they stay on the calling thread in partition order. The
+    // budget is a time, so a descheduled caller may hand a few to the pool; most stay inline.
+    {
+        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        int off_caller = 0;
+        bool ordered = true;
+        for (int phase = 0; phase < 100; ++phase) {
+            // One slot per partition, so the partitions never contend with each other.
+            std::array<std::thread::id, 64> ran_on{};
+            std::array<std::uint32_t, 64> sequence{};
+            std::atomic<std::uint32_t> next{0};
+            const auto result = adapter.execute_phase("small", 64, [&](const std::size_t partition) {
+                ran_on[partition] = std::this_thread::get_id();
+                sequence[partition] = next.fetch_add(1, std::memory_order_relaxed);
+            });
+            expect(static_cast<bool>(result) && next.load() == 64, "a small phase runs all 64 partitions");
+            off_caller += static_cast<int>(std::count_if(ran_on.begin(), ran_on.end(), [&](const auto id) { return id != caller; }));
+            const auto counts = adapter.phase_counts();
+            if (counts.escalated_phases == 0 && counts.pool_phases == 0) {
+                ordered = ordered && std::is_sorted(sequence.begin(), sequence.end());
+            }
+        }
+        const auto counts = adapter.phase_counts();
+        expect(counts.inline_phases + counts.escalated_phases + counts.pool_phases == 100,
+            "every named phase is counted once");
+        expect(counts.inline_phases >= 50, "small phases stay on the calling thread (" + std::to_string(counts.inline_phases)
+                + " of 100 inline)");
+        expect(ordered, "an inline phase runs its partitions in partition order");
+        expect(counts.pool_phases > 0 || counts.escalated_phases > 0 || off_caller == 0,
+            "only a pool phase runs partitions on other threads");
+    }
+
+    // A small phase that turns big hands its remaining partitions to the pool once the budget is
+    // spent; the next run of that phase goes to the pool at once.
+    {
+        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        expect(static_cast<bool>(adapter.execute_phase("burst", 64, [](const std::size_t) {})), "the burst phase starts small");
+        std::vector<std::atomic<int>> runs(64);
+        std::mutex mutex;
+        std::set<std::thread::id> threads;
+        const auto slow = [&](const std::size_t partition) {
+            runs[partition].fetch_add(1);
+            {
+                const std::lock_guard lock(mutex);
+                threads.insert(std::this_thread::get_id());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        };
+        const auto before = adapter.phase_counts();
+        expect(static_cast<bool>(adapter.execute_phase("burst", 64, slow)), "the grown phase runs");
+        const auto grown = adapter.phase_counts();
+        expect(grown.escalated_phases == before.escalated_phases + 1, "a grown phase moves to the pool part way");
+        expect(std::all_of(runs.begin(), runs.end(), [](const auto& count) { return count.load() == 1; }),
+            "a phase handed to the pool part way runs each partition once");
+        expect(threads.size() > 1, "the pool helps a grown phase");
+        for (auto& count : runs) count.store(0);
+        expect(static_cast<bool>(adapter.execute_phase("burst", 64, slow)), "the big phase runs again");
+        const auto big = adapter.phase_counts();
+        expect(big.pool_phases == grown.pool_phases + 1, "a phase that was big goes to the pool at once");
+        expect(std::all_of(runs.begin(), runs.end(), [](const auto& count) { return count.load() == 1; }),
+            "a pool phase runs each partition once");
+    }
+
+    // Failures and nesting behave as on the pool: the lowest throwing partition, inline or not.
+    {
+        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        for (int phase = 0; phase < 3; ++phase) {
+            std::atomic<int> completed{0};
+            const auto thrown = adapter.execute_phase("throws", 64, [&](const std::size_t partition) {
+                if (partition == 17 || partition == 40) throw std::runtime_error("boom " + std::to_string(partition));
+                if (phase == 2) std::this_thread::sleep_for(std::chrono::microseconds(200));
+                completed.fetch_add(1);
+            });
+            expect(!thrown && thrown.error().message == "partition 17 threw: boom 17" && completed.load() == 62,
+                "a by-cost phase reports the lowest partition that threw and runs the others");
+        }
+        std::atomic<int> inner{0};
+        const auto nested = adapter.execute_phase("outer", 8, [&](const std::size_t) {
+            static_cast<void>(adapter.execute_phase("inner", 8, [&](const std::size_t) { inner.fetch_add(1); }));
+        });
+        expect(static_cast<bool>(nested) && inner.load() == 64, "a by-cost phase nests inline");
+        std::atomic<int> unnamed{0};
+        const auto before = adapter.phase_counts();
+        expect(static_cast<bool>(adapter.execute(64, [&](const std::size_t) { unnamed.fetch_add(1); })) && unnamed.load() == 64,
+            "an unnamed phase runs on the pool");
+        const auto after = adapter.phase_counts();
+        expect(after.inline_phases == before.inline_phases && after.pool_phases == before.pool_phases
+                && after.escalated_phases == before.escalated_phases,
+            "unnamed phases are not counted");
+    }
+
+    expect(Adapter::inline_budget(1) < Adapter::inline_budget(4) && Adapter::inline_budget(4) < Adapter::inline_budget(28),
+        "the inline budget grows with the threads a phase wakes");
+}
+
+// #637: the state hasher returns sha256_hex of the bytes, in any number and order of waits,
+// and resolves every hash it took before it is destroyed.
+void test_state_hasher() {
+    std::vector<std::vector<std::uint8_t>> inputs;
+    for (std::size_t size : {0U, 1U, 55U, 64U, 1000U, 100'000U}) {
+        std::vector<std::uint8_t> bytes(size);
+        for (std::size_t index = 0; index < size; ++index) bytes[index] = static_cast<std::uint8_t>(index * 31 + size);
+        inputs.push_back(std::move(bytes));
+    }
+    std::vector<eawr::sim::StateHash> hashes;
+    {
+        eawr::platform::ThreadStateHasher hasher(1);
+        for (int round = 0; round < 20; ++round) {
+            for (const auto& bytes : inputs) hashes.push_back(hasher.hash(bytes));
+        }
+        expect(hashes[3].get() == eawr::sim::sha256_hex(inputs[3]), "a pending hash resolves to sha256_hex");
+    }
+    bool equal = true;
+    for (std::size_t index = 0; index < hashes.size(); ++index) {
+        equal = equal && hashes[index].get() == eawr::sim::sha256_hex(inputs[index % inputs.size()]);
+    }
+    expect(equal, "every hash the hasher took resolves, also after it is gone");
+    expect(eawr::sim::StateHash().get().empty() && eawr::sim::StateHash("ab").get() == "ab",
+        "an empty hash is empty and a ready one is its value");
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
@@ -525,6 +654,8 @@ int main(const int argc, const char* const argv[]) {
     test_atomicity_and_snapshots(argv[1]);
     test_command_errors_and_id_rules(argv[1]);
     test_actual_thread_adapter();
+    test_dispatch_by_cost();
+    test_state_hasher();
     if (failures != 0) {
         std::cerr << failures << " replay contract test(s) failed\n";
         return 1;

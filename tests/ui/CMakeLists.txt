@@ -61,6 +61,13 @@ target_compile_features(ui_time_controls_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_time_controls_tests)
 add_test(NAME ui_time_controls_contracts COMMAND ui_time_controls_tests)
 
+# #848: the battle UI in the tactical overview levels (what hides, the level-change fade).
+add_executable(ui_overview_ui_tests overview_ui_tests.cpp)
+target_link_libraries(ui_overview_ui_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_overview_ui_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_overview_ui_tests)
+add_test(NAME ui_overview_ui_contracts COMMAND ui_overview_ui_tests)
+
 # #558: the performance overlay's model (frame times, tick costs, the rolling window, graph columns).
 add_executable(ui_perf_stats_tests perf_stats_tests.cpp)
 target_link_libraries(ui_perf_stats_tests PRIVATE eawr::ui_model)

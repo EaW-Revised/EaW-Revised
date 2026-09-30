@@ -14,28 +14,41 @@
       {
         "path": "third_party/lua/doc/manual.html",
         "regex": "/home/roberto",
-        "reason": "upstream Lua manual example path"
+        "reason": "upstream Lua manual example path",
+        "patterns": [
+          "home-path"
+        ]
       },
       {
         "path": "tests/assets/test_mtd_inventory.py",
         "regex": "PRIVATE|/home/private",
-        "reason": "a made-up private path the test proves is never echoed"
+        "reason": "a made-up private path the test proves is never echoed",
+        "patterns": [
+          "home-path",
+          "user-path"
+        ]
       },
       {
         "path": "tests/scene/test_scene_inventory.py",
         "regex": "PrivateUser",
-        "reason": "a made-up private path the test proves is never echoed"
+        "reason": "a made-up private path the test proves is never echoed",
+        "patterns": [
+          "user-path"
+        ]
       },
       {
         "path": "tools/publish_scan/config.json",
         "regex": "\"regex\": ",
-        "reason": "this file's own allow rules quote the made-up paths they allow"
+        "reason": "this file's own allow rules quote the made-up paths they allow",
+        "patterns": [
+          "home-path",
+          "user-path"
+        ]
       }
     ]
   },
   "cleanroom": {
     "skip": [
-      "third_party/",
       "tools/cleanroom_check.py"
     ]
   },
@@ -84,18 +97,92 @@
       "third_party/lua/etc/lua.ico": "7a4ecc09ce82d90535591c6d98c1882527803747338b8c698422e56ec45169ee",
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
-    "binary_allowlist": [
-      "tests/replay/fixtures/*.eawr-replay",
-      "tests/fidelity/fixtures/*.eawr-replay",
-      "tests/skirmish/fixtures/*.eawr-replay",
-      "tests/fog/fixtures/*.eawr-fog",
-      "tests/fog/fixtures/mutations/*.eawr-fog",
-      "third_party/"
-    ],
+    "binary_allowlist": {
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "f6710e0876f6141d64927c589667b6ba5a4db27122863dd7f3a5082337768946",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "3d935da57e5e19dd74788dd6f1a3580316470feeb835b4fc46ba20698b825ea5",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "9f411e4b2af222ff0d381a02e38c87148bd3a5bf5f23933c92b0c8ded02b1443",
+      "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
+      "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
+      "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
+      "tests/fog/fixtures/mutations/bad-magic.eawr-fog": "afcd222dcbab3b3a1eedfa327b6d941e5f3333944e9efea05fcbcc7446cf8f56",
+      "tests/fog/fixtures/mutations/duplicate-tick-team.eawr-fog": "949780320cd5976665ea731c344d98b48e4d163cd5c42b08b9c1b620d5f72583",
+      "tests/fog/fixtures/mutations/event-count-exceeds-bytes.eawr-fog": "154740fefa792b378be8575ee6e1eebbcc7e41d07277a72f97b067bbd4c15ce1",
+      "tests/fog/fixtures/mutations/event-count-limit.eawr-fog": "a16f10983e01484a76f58b340780209fab329a6a1197f2a9c215ddccb7ac89b8",
+      "tests/fog/fixtures/mutations/event-count-zero.eawr-fog": "5beb277dff761686ad6917b29bb71c33631d261ef96faafe7eb188100a50693a",
+      "tests/fog/fixtures/mutations/final-tick-limit.eawr-fog": "fad7d407508447cbdeb0d793ff245885c69b1816a443c3e3d433c45c0190f1a0",
+      "tests/fog/fixtures/mutations/final-tick-mismatch.eawr-fog": "7687d36ded695b6e7d73df424f40fd811d6b8878c25b0a3e1f1391da529a95c5",
+      "tests/fog/fixtures/mutations/first-revision-not-one.eawr-fog": "b5024ef53d91ef422a773f7049c23d351f7fd586d48b2961da2bc6e0b682c900",
+      "tests/fog/fixtures/mutations/grid-bad-magic.eawr-fog": "6f2988c65751382fdd695f7d83950552accc9a690355d326eaa45f95a4f7d2f1",
+      "tests/fog/fixtures/mutations/grid-byte-count-mismatch.eawr-fog": "9fa57845f1fae371758aefbbb55fc8af3ffb4c8b535fe69d80a8c674e6917635",
+      "tests/fog/fixtures/mutations/grid-cell-negative.eawr-fog": "2e7cfc2ea1aeeec3e9ba941a7782ddd35e0da448718bab55d43a8e08bc3d725b",
+      "tests/fog/fixtures/mutations/grid-cell-zero.eawr-fog": "7412fbe55e70d94137317e62201308c85bc5ee66f8f41b9b4ef5d27e92ec8801",
+      "tests/fog/fixtures/mutations/grid-encoding-zero.eawr-fog": "4b5a51058aced60c413543af221d4a83f91e7984dde8e1429af8914c3f9632ba",
+      "tests/fog/fixtures/mutations/grid-extent-product-overflow.eawr-fog": "e35d5b3e3a2f9a1df8d8eade240bb13e70af0afae97bbcb08378bad0afd85e53",
+      "tests/fog/fixtures/mutations/grid-length-mismatch.eawr-fog": "dcdf18826dbc8b41fcfc1bc842b43444275d86f09026a515513cf6641b9dde3d",
+      "tests/fog/fixtures/mutations/grid-origin-overflow.eawr-fog": "7c703cb84eeaba9fca9199c14cdefc8350a46cf8c6fc1a412beba0f1ae30470e",
+      "tests/fog/fixtures/mutations/grid-revision-zero.eawr-fog": "d83c3ef7b3a24cea34bede29b665b062851622540c0b126e48145158b7d8b56c",
+      "tests/fog/fixtures/mutations/grid-schema-version.eawr-fog": "579e801461f526d49d996bb19c39e0e39a680ef6d93832ede50253bd065bc34b",
+      "tests/fog/fixtures/mutations/grid-width-limit.eawr-fog": "cf9187b69c25ad50396e2c0b2ccf0f11721ea78db0bf90e66d621552e2aa5de2",
+      "tests/fog/fixtures/mutations/grid-width-zero.eawr-fog": "a76d9be1bc2c5439ea2b8b8466f9998e56c979ef903c5af431c585b3bf791bf7",
+      "tests/fog/fixtures/mutations/no-tick-zero.eawr-fog": "1283bdb6be716e778eea6b7ca74da356592d8ceb3cb6194be7ae6f78bdaf6b8e",
+      "tests/fog/fixtures/mutations/replay-sha-mismatch.eawr-fog": "210638630e32edb9500805b35f37915d4fbf3701279ffca3bcbb90aecfa4f9f4",
+      "tests/fog/fixtures/mutations/revision-decrease.eawr-fog": "b2026dee7ee2747c6983db619d032422a2bc56c186406f920c7fa3c3c0f992a5",
+      "tests/fog/fixtures/mutations/same-revision-different-cells.eawr-fog": "96048d49184aba6e684adbe02824dc5b88597af42263757e6e7666d5966fa71f",
+      "tests/fog/fixtures/mutations/same-revision-different-origin.eawr-fog": "c0d7301d59f5afa90e8f588a3540062e0275146a69bbf233000fcb992535001f",
+      "tests/fog/fixtures/mutations/sidecar-version.eawr-fog": "d6e32610533fea61044039b955d44c4309535f679b3545622aab545350d1d2e5",
+      "tests/fog/fixtures/mutations/team-missing-at-tick-zero.eawr-fog": "fee71540406481b64e09a9bf3689f0fe7a7a91dce88fe4cc365bb7434318f0e6",
+      "tests/fog/fixtures/mutations/team-order.eawr-fog": "481168fd226c50fb6fb35c2fcb7ee1091e86024f1bcad1114a1120aca6e4380d",
+      "tests/fog/fixtures/mutations/tick-beyond-final.eawr-fog": "53dbda58e014517f921e24765c372f3e21990c411bdb6c1c36326da96f20934a",
+      "tests/fog/fixtures/mutations/tick-order.eawr-fog": "7ab413c4c8227571834ed77e98a03cea6a10fe09730f7627caf82e2990e6ecd8",
+      "tests/fog/fixtures/mutations/too-many-teams.eawr-fog": "259f7c23ff1112392b698bf4b70167fcdf0fc90d113c3d78ca034d4175f7e966",
+      "tests/fog/fixtures/mutations/trailing-byte.eawr-fog": "9f4cbc435307a12c0adce70d62b0eb96c6a9f61c86ff8331d86454c075c9b9b7",
+      "tests/fog/fixtures/mutations/truncated-cells.eawr-fog": "bea218c24f17194a4a147888625b0976471deb45a428fc936fff14ecb4683152",
+      "tests/fog/fixtures/mutations/truncated-header.eawr-fog": "e51462abd137fb01f2447e1bdcf6e26eef8e0d155157deb0074389bf208ea58a",
+      "tests/replay/fixtures/mutated-count.eawr-replay": "54701bba43c0cf4eb339bd7fdf62f907ce075237f71519a2eec5d452361f46f1",
+      "tests/replay/fixtures/mutated-length-zero.eawr-replay": "e5c0b79bfe2e36782e0d756a479b5900db6a5690e41dbd4b52ccca4e67f7ba50",
+      "tests/replay/fixtures/mutated-order.eawr-replay": "3db71a83eac4a8e956bb2a2037c4beb813aaede2f4fc8642f7a4ebf5598453b4",
+      "tests/replay/fixtures/mutated-overflow.eawr-replay": "2fffae87684f816e6513d35da784bbc8bda5295b890d0194fa212615297833ee",
+      "tests/replay/fixtures/mutated-trailing.eawr-replay": "2b3564aca6736d4122543e609662a24c683ce98c76b32739dfc957fb08adfe8a",
+      "tests/replay/fixtures/mutated-version.eawr-replay": "520b700df650d37eb3d2127c35d709ec55ee7e62b6b6c08631c6ef1e10198811",
+      "tests/replay/fixtures/original-v1.eawr-replay": "fcf7f050a4ae8be540def3e4609fc7ff68a21e4ed4fce59e46c1fc62e59a4f90",
+      "tests/replay/fixtures/tactical-durability.eawr-replay": "2270ed3ef7d06312b75760da2ca400f69afba543cb78f3764ff1abf974374135",
+      "tests/replay/fixtures/tactical-motion-blocked.eawr-replay": "a687ddeb4fc18007eacd191d86be197a39c931c92d2b3ac473bf33eb61f8ea1c",
+      "tests/replay/fixtures/tactical-motion-clipped.eawr-replay": "cdf5f96bcde2088a60a909a93ac7c86951dfeec4661a7d746cbba49004120e98",
+      "tests/replay/fixtures/tactical-motion.eawr-replay": "eaa1df4f100250345b2ffd809755d6f25286aedcc0ce08089d241f6ee18e03dd",
+      "tests/replay/fixtures/tactical-v2-mutated-count.eawr-replay": "14a26c067c6477b8ad9505e924ae6f3172c099476d1f6bb28cd1da5ee386fb47",
+      "tests/replay/fixtures/tactical-v2-mutated-issuer.eawr-replay": "17030cf87f5d43c9674630dbdc640ac1925163f88152f6e54949ca8c398e3f70",
+      "tests/replay/fixtures/tactical-v2-mutated-length.eawr-replay": "5e5b9ccef63edd2a49fba9b2bb2a975b2073d96c946f0deb60f09698835c4d7f",
+      "tests/replay/fixtures/tactical-v2-mutated-order.eawr-replay": "7567bf3777f6865e329adffff7616a68d8a00a80f1356ab7279ba81403709ebb",
+      "tests/replay/fixtures/tactical-v2-mutated-owner.eawr-replay": "49661d5850d10262d1764503d94a0040d657cef87f9a66740a458d1f41cac194",
+      "tests/replay/fixtures/tactical-v2-mutated-player-flags.eawr-replay": "f3df434fa06ffd50041a6ee276497477a14e9ded9bc2d244eb8ddb3a542e0a67",
+      "tests/replay/fixtures/tactical-v2-mutated-rotation.eawr-replay": "33b01be69285fb40d25d6f2962435533323d37d35b8677c9e0afe2f287743c46",
+      "tests/replay/fixtures/tactical-v2-mutated-rules.eawr-replay": "796cffd9ffc644a59544711314ca6fa87da305198960e7357139e95d35c8ebda",
+      "tests/replay/fixtures/tactical-v2-mutated-tick-rate.eawr-replay": "0c4d80a19d5dc4a434d5835f0bd568aaac8841c03d4262cbdbcf8a2e364e2476",
+      "tests/replay/fixtures/tactical-v2-mutated-trailing.eawr-replay": "ba8949252846a90f1ccbf4e35a6e0bc0975173486afe9e34db73189e3bb865c5",
+      "tests/replay/fixtures/tactical-v2-mutated-unit-order.eawr-replay": "59b23ec4209477349097c182eaac93f7f78c1f08e048295816650fe392211b1b",
+      "tests/replay/fixtures/tactical-v2.eawr-replay": "eca2fa370c29f9b44b610ca285ac4d94034c0a238caee1700dfc81eb4b749ffa",
+      "tests/replay/fixtures/tactical-visibility-frame-0.eawr-replay": "e03a1a0bbabec8565f1a5b23f6463a237c990532686c70144f7fd463b65f9a40",
+      "tests/replay/fixtures/tactical-visibility-frame-1.eawr-replay": "a0dd4c8e80a3144dcf629fd3a75a9cbd74a9dcd198ea2bb5b0b3bace4ba16b26",
+      "tests/replay/fixtures/tactical-visibility-frame-2.eawr-replay": "c89260e45685f684fa0335433aa09c1f9ef43e9a4e831f2c2de36558e2671a78",
+      "tests/replay/fixtures/tactical-visibility-frame-3.eawr-replay": "a5bba0ae1e1e684c6b4012a91f8c391b0b07c3618957bf54d75a932cce0e383a",
+      "tests/replay/fixtures/tactical-visibility-frame-4.eawr-replay": "26f4db4d54249102add783edded84bc529eabc2a0bca480a1de2ea65c0fa8319",
+      "tests/replay/fixtures/tactical-visibility-frame-5.eawr-replay": "b73fa86898da74c1d029100af41746c9c356fa867bfcf0b0e0f172036605a5bd",
+      "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
+      "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
+      "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "c997bdd7bd7608816a83b29e8b9fefa5c88dfa1150240c7acc5a196d24e5fa77",
+      "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2"
+    },
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
       "third_party/lua/etc/lua.ico": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",
       "third_party/lua/etc/lua.xpm": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT)."
+    },
+    "binary_allowlist_origins": {
+      "third_party/lua/test/life.lua": "Upstream Lua 5.0.2 Life sample with non-UTF-8 display glyphs, normalized to LF; reviewed by exact SHA-256, from the distribution identified in third_party/lua/COPYRIGHT."
+    },
+    "text_encodings": {
+      "third_party/lua/test/life.lua": "latin-1"
     }
   },
   "readme": {
@@ -127,5 +214,41 @@
         "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
       }
     }
+  },
+  "generated": {
+    "directories": [
+      "__pycache__",
+      ".pytest_cache",
+      ".mypy_cache",
+      ".ruff_cache",
+      ".godot",
+      ".vs",
+      ".vscode",
+      "node_modules",
+      "out",
+      "build"
+    ],
+    "suffixes": [
+      ".pyc",
+      ".pyo",
+      ".obj",
+      ".o",
+      ".exe",
+      ".dll",
+      ".so",
+      ".dylib",
+      ".pdb",
+      ".a",
+      ".lib",
+      ".class",
+      ".tmp",
+      ".swp",
+      ".pyd"
+    ],
+    "names": [
+      ".DS_Store",
+      "Thumbs.db",
+      "*.local.json"
+    ]
   }
 }

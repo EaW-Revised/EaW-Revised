@@ -1252,6 +1252,7 @@ bool MapMode::ready(Node3D& host) {
             .write_hud_report = [&state](std::ostream& output) {
                 if (state.hud) output << "  \"hud\": " << state.hud->report_json() << ",\n";
                 output << "  \"perf_overlay\": " << state.perf_report_json() << ",\n";
+                if (state.live_session) output << "  \"overview_ui\": " << state.overview_report_json() << ",\n";
             },
         });
         if (!state.build_hud(host, map.context_name)) return give_up(state.failure);
@@ -2145,6 +2146,8 @@ std::optional<int> MapMode::process(const double delta) {
             state.perf_trace->frame(frame);
         }
         // #82: selection and orders see the frame the view just drew.
+        // #848: the overview level the camera just took decides what the battle UI draws this frame.
+        if (!finished) state.sync_overview_ui();
         if (!finished && state.battle && state.live_session && state.space_population) {
             state.battle->frame(*state.live_session, *state.space_population, *state.space);
             if (state.hud) state.hud->set_unit_cards(state.battle->card_layout(), state.battle->card_units());

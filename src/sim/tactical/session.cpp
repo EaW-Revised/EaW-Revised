@@ -2168,6 +2168,7 @@ public:
     std::map<PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
     std::vector<PlayerCommand> executed;
     std::shared_ptr<const TacticalSnapshot> current_snapshot;
+    std::shared_ptr<StateHasher> hasher; // #637: null hashes on the stepping thread
 };
 
 TacticalSession::TacticalSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -4594,7 +4595,14 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     }
     impl_->pending.erase(impl_->pending.begin(), due_end);
     ++impl_->completed_tick;
-    auto hash = state_sha256();
+    std::string hash;
+    StateHash state_hash;
+    if (impl_->hasher) {
+        state_hash = impl_->hasher->hash(impl_->canonical_bytes());
+    } else {
+        hash = state_sha256();
+        state_hash = StateHash(hash);
+    }
     // #424: the squadrons' targets for the world UI (presentation only, not hashed).
     std::vector<SquadronTarget> squadron_targets;
     for (const auto& [container, mind] : impl_->minds) {
@@ -4613,8 +4621,11 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         std::move(diagnostics),
         projectile_candidates,
         projectile_exact_tests,
+        std::move(state_hash),
     });
 }
+
+void TacticalSession::set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept { impl_->hasher = std::move(hasher); }
 
 std::uint64_t TacticalSession::completed_tick() const noexcept { return impl_->completed_tick; }
 EntityId TacticalSession::next_entity_id() const noexcept { return impl_->next_id; }

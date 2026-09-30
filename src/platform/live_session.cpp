@@ -102,6 +102,10 @@ public:
         : session_(std::move(session)), scripted_(std::move(scripted)), options_(options),
           event_log_({std::max(options.event_history, std::max<std::size_t>(options.history, 2)), options.event_bytes}) {
         options_.history = std::max<std::size_t>(options_.history, 2);
+        // #637: each tick's state hash is computed off the simulation thread.
+        auto hasher = std::make_shared<ThreadStateHasher>();
+        if (session_) session_->set_state_hasher(std::move(hasher));
+        else scripted_->set_state_hasher(std::move(hasher));
         options_.event_history = std::max(options_.event_history, options_.history);
         const auto zero = world().snapshot();
         history_.push_front(zero);
@@ -239,7 +243,10 @@ public:
 
     std::vector<std::string> tick_hashes() const {
         const std::lock_guard lock(session_mutex_);
-        return hashes_;
+        std::vector<std::string> hashes;
+        hashes.reserve(hashes_.size());
+        for (const auto& hash : hashes_) hashes.push_back(hash.get());
+        return hashes;
     }
 
     tactical::TacticalReplay record() const {
@@ -308,7 +315,7 @@ private:
 
     // Worker 0 of the pool. Only it touches session_ while running.
     void loop() {
-        const ThreadWorkerAdapter executor(options_.workers);
+        const ThreadWorkerAdapter executor(options_.workers, ThreadWorkerAdapter::Dispatch::by_cost);
         auto clock_start = Clock::now();
         std::uint64_t clock_tick = world().completed_tick();
         Clock::duration interval{};
@@ -441,7 +448,7 @@ private:
             const auto started = Clock::now();
             auto stepped = scripted_ ? step_scripted(executor, script_refusals) : session_->step(executor);
             const auto stepped_at = Clock::now();
-            if (stepped && !scripted_) hashes_.push_back(stepped.value().state_sha256);
+            if (stepped && !scripted_) hashes_.push_back(std::move(stepped.value().state_hash));
             if (stepped) fog = capture_fog();
             const auto finished = Clock::now();
             step_ms = std::chrono::duration<double, std::milli>(stepped_at - started).count();
@@ -484,7 +491,7 @@ private:
         auto stepped = scripted_->step(executor, input);
         if (!stepped) return core::Result<tactical::TacticalTick>::failure(stepped.error());
         auto& result = stepped.value();
-        hashes_.push_back(result.world.state_sha256);
+        hashes_.push_back(result.world.state_hash);
         refusals = std::move(result.refused_input);
         for (const auto& routed : result.script_input) {
             if (!routed.submitted) {
@@ -517,7 +524,7 @@ private:
     Options options_;
     // Guards session_ and hashes_ against record() and tick_hashes() from other threads.
     mutable std::mutex session_mutex_;
-    std::vector<std::string> hashes_;
+    std::vector<sim::StateHash> hashes_; // resolved by tick_hashes()
     // Per issuer: one past the last sequence the session accepted, from either path.
     std::map<tactical::PlayerId, std::uint64_t> sequences_;
     // Simulation thread only: taken orders waiting for their tick, in arrival order.

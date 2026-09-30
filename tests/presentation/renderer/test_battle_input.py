@@ -439,13 +439,67 @@ class BattleInputGraphical(unittest.TestCase):
                     self.assertEqual(result["map_camera"]["config_sha256"],
                                      hashlib.sha256(camera.read_bytes()).hexdigest())
                     self.assertEqual(result["battle_input"]["scripted_fired"], 10)
-                    self.assertEqual(result["battle_input"]["overview_samples"],
+                    self.assertEqual([{"tick": sample["tick"], "level": sample["level"]}
+                                      for sample in result["battle_input"]["overview_samples"]],
                                      [{"tick": tick, "level": level} for tick, _, level in stages])
                     self.assertEqual(result["battle_input"]["overview"], "map")
                     overview = result["map_camera"]["overview_clicks"]
                     self.assertEqual((overview["value"], overview["replaced_value"]), (5, 10))
                     self.assertEqual(overview["override"]["source_id"], "space-camera-owner-deviations")
                     self.assertEqual(overview["replaced"]["definition"], "Space_Mode")
+
+    def test_overview_levels_hide_the_battle_ui(self):
+        # #848 (foc-battle-selection.md V-5a to V-5g), HUD on: a box selects the spawn stack, then the
+        # overview key enters x1, x2 and returns, once running and once paused. Each sample is the
+        # first frame drawn at the new level. x1 and x2 hide the tactical shell, the pause banner and
+        # the unit brackets and stop the minimap; the selection circles and squadron icons stay; every
+        # level change lays the last old frame over the next nine drawn frames from 0.9 down.
+        width, height = VIEWPORT
+        box = ((0.05 * width, 0.05 * height), (0.95 * width, 0.95 * height))
+        gestures = [f"f10:box:{screen(box[0])}/{screen(box[1])}",
+                    "f20:key:Insert", "f40:key:Insert", "f60:key:Insert",
+                    "f70:click:hud=pause",
+                    "f80:key:Insert", "f100:key:Insert", "f120:key:Insert",
+                    "f130:click:hud=resume"]
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-overview-ui-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._run(directory, "overview_ui",
+                                     tuple(part for gesture in gestures for part in ("--eawr-live-input", gesture)))
+            self.assertEqual(code, 0, result.get("failure"))
+            battle = result["battle_input"]
+            self.assertEqual(battle["scripted_fired"], len(gestures), battle["log"])
+            samples = battle["overview_samples"]
+            self.assertEqual([sample["level"] for sample in samples],
+                             ["overview", "map", "off", "overview", "map", "off"], samples)
+            for index, sample in enumerate(samples):
+                on = sample["level"] != "off"
+                paused = index >= 3
+                with self.subTest(sample=index, level=sample["level"], paused=paused):
+                    hud = sample["hud"]
+                    self.assertEqual(hud["shell"], not on)                      # V-5b
+                    self.assertEqual(hud["pause_banner"], paused and not on)    # V-5b
+                    self.assertEqual(sample["health_bars"] == 0, on)            # V-5d
+                    self.assertEqual(sample["shield_bars"] if on else 0, 0)     # V-5d
+                    self.assertGreater(sample["circles"], 0)                    # V-5e
+                    self.assertGreater(sample["icons"], 0)                      # V-5e
+                    self.assertAlmostEqual(hud["fade_opacity"], 0.9, places=5)  # V-5g
+            # V-5c: no minimap update while x1 or x2 is on; they resume back at the tactical camera.
+            syncs = [sample["hud"]["minimap_syncs"] for sample in samples]
+            self.assertEqual(syncs[0], syncs[1])
+            self.assertEqual(syncs[1], syncs[2])
+            self.assertGreater(syncs[3], syncs[2])
+            self.assertEqual(syncs[3], syncs[4])
+            overview = result["overview_ui"]
+            self.assertEqual(overview["level"], "off")
+            self.assertEqual(overview["distance_fog"], "not drawn")  # V-5f: nothing to turn off
+            fade = overview["fade"]
+            self.assertEqual(fade["frames_per_fade"], 9)
+            self.assertEqual(fade["requests"], 6)
+            self.assertEqual(fade["drawn_frames"], 6 * 9)
+            self.assertEqual(fade["held_images"], 6, fade)
+            self.assertEqual(fade["capture"], "gpu copy")
+            self.assertTrue(result["hud"]["shell_shown"])
+            self.assertFalse(result["hud"]["overview"])
 
     def test_middle_button_law_on_the_battle_camera(self):
         # The FoC middle-button law (#328) through the battle's whole input path, as a hand makes

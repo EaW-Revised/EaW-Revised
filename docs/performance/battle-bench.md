@@ -36,7 +36,10 @@ The S fight at seed 601 lasts about 4200 ticks (140 s): the fighters are gone by
 ## How to run it
 
 - Sim: `path_bench --melee s|m|l [--seed n] [--ticks 4500] [--workers 1,2,4,8,hardware]
-  [--csv prefix] [--replay-out file] [--list 1] [--profile on]` (needs the game data). It prints
+  [--csv prefix] [--replay-out file] [--list 1] [--execution live|legacy] [--profile on]`
+  (needs the game data). The default `live` mode uses by-cost partition dispatch and a
+  threaded state hasher, resolving completed digests after the timed stepping loop.
+  `legacy` uses always-pool dispatch and synchronous hashing for comparisons. It prints
   every phase's mean, p99 and worst cost per tick against the 33.3 ms tick budget, the serial
   remainder, the live unit, craft and projectile counts, and fails when two worker counts
   disagree on a tick's state hash. On the build hosts:

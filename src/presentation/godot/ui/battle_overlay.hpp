@@ -80,6 +80,7 @@ public:
     // BE-02: the local player's result (true: victory); nullopt hides the message.
     void show_message(std::optional<bool> won);
     void show_paused(bool paused);
+    [[nodiscard]] bool paused_shown() const { return paused_; }
     // BEP-03: the end panel for the result; nullopt hides it.
     void show_end(std::optional<bool> won);
     void _notification(int what);

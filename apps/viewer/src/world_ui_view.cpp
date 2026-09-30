@@ -658,7 +658,13 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
     const float ui_scale = frame.viewport[1] > 0.0F
         ? std::min(frame.viewport[1] / 768.0F, frame.viewport[0] / 1024.0F * (frame.viewport[0] / frame.viewport[1] >= 4.0F / 3.0F ? 1.0e9F : 1.0F))
         : 1.0F;
-    draw_bars(frame, canvas_item, ui_scale);
+    if (frame.brackets) {
+        draw_bars(frame, canvas_item, ui_scale);
+    } else {
+        health_bars_ = 0;
+        shield_bars_ = 0;
+        bar_rows_.clear();
+    }
     draw_reticles(frame, canvas_item);
     draw_icons(frame, canvas_item, ui_scale);
 }

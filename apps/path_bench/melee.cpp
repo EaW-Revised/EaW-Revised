@@ -8,7 +8,7 @@
 //
 //   path_bench --melee s|m|l [--seed 601] [--ticks 4500] [--workers 1,2,4,8,hardware]
 //              [--game-root <dir>] [--csv <prefix>] [--replay-out <file>] [--timing on|off] [--list 1]
-//              [--profile on [--profile-interval <us>]]
+//              [--execution live|legacy] [--profile on [--profile-interval <us>]]
 //
 // Prints each worker count's cost per tick of every named phase and of the serial remainder
 // (mean, p99, worst over the fight) against the 30 Hz tick budget, and the live unit, craft and
@@ -43,6 +43,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -73,6 +74,7 @@ struct Options {
     bool timing = true;
     bool list = false;
     bool profile = false;
+    bool live_execution = true;
     unsigned profile_interval_us = 1000;
 };
 
@@ -141,6 +143,9 @@ template <typename T>
             options.csv = std::string(value);
         } else if (argument == "--replay-out") {
             options.replay_out = std::string(value);
+        } else if (argument == "--execution") {
+            if (value != "live" && value != "legacy") return std::nullopt;
+            options.live_execution = value == "live";
         } else if (argument == "--profile") {
             if (value != "on" && value != "off") return std::nullopt;
             options.profile = value == "on";
@@ -249,7 +254,8 @@ struct Run {
 };
 
 [[nodiscard]] std::optional<Run> run(
-    const Content& content, const tactical::TacticalReplay& replay, const std::size_t workers, Sampler* sampler) {
+    const Content& content, const tactical::TacticalReplay& replay, const std::size_t workers,
+    const bool live_execution, Sampler* sampler) {
     const auto victory = skirmish::victory_rules(replay.setup, content.tables, skirmish::human_slots(skirmish::m2_fixture()));
     auto created = tactical::TacticalSession::from_replay(replay, content.content.sensors, content.content.durability,
         content.content.motion, content.content.fog, content.content.combat, victory, content.content.abilities);
@@ -258,7 +264,12 @@ struct Run {
         return std::nullopt;
     }
     auto session = std::move(created).value();
-    const eawr::platform::ThreadWorkerAdapter pool(workers);
+    if (live_execution) session.set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
+    std::vector<eawr::sim::StateHash> pending;
+    pending.reserve(replay.final_tick_count);
+    const eawr::platform::ThreadWorkerAdapter pool(workers, live_execution
+        ? eawr::platform::ThreadWorkerAdapter::Dispatch::by_cost
+        : eawr::platform::ThreadWorkerAdapter::Dispatch::always_pool);
     TimingExecutor executor(pool);
     executor.profiling = sampler != nullptr;
     if (sampler != nullptr) sampler->start();
@@ -273,7 +284,7 @@ struct Run {
             std::cerr << "path_bench --melee: step " << tick + 1 << ": " << eawr::core::format_diagnostic(stepped.error()) << '\n';
             return std::nullopt;
         }
-        out.hashes.push_back(std::move(stepped.value().state_sha256));
+        pending.push_back(std::move(stepped.value().state_hash));
         TickRecord record;
         record.ms = std::chrono::duration<double, std::milli>(elapsed).count();
         record.phases = executor.tick;
@@ -286,6 +297,9 @@ struct Run {
         out.ticks.push_back(std::move(record));
     }
     if (sampler != nullptr) sampler->stop();
+    // Resolve completed hashes outside the timed stepping loop, as live reports do.
+    out.hashes.reserve(pending.size());
+    for (const auto& hash : pending) out.hashes.push_back(hash.get());
     std::map<tactical::TypeId, std::string> names;
     for (const auto& type : content.tables.units) names.emplace(skirmish::type_id(type.id), type.id);
     for (const auto& unit : session.units()) {
@@ -454,7 +468,7 @@ int melee_main(const int argc, const char* const argv[]) {
     if (!options) {
         std::cerr << "usage: path_bench --melee s|m|l [--seed <n>] [--ticks <n>] [--workers <n|hardware>[,...]]\n"
                      "                  [--game-root <dir>] [--csv <prefix>] [--replay-out <file>] [--timing on|off]\n"
-                     "                  [--list 1] [--profile on [--profile-interval <us>]]\n";
+                     "                  [--list 1] [--execution live|legacy] [--profile on [--profile-interval <us>]]\n";
         return 2;
     }
     if (!options->game_root) {
@@ -473,7 +487,8 @@ int melee_main(const int argc, const char* const argv[]) {
     std::cout << "melee " << options->size << ", seed " << options->seed << ": " << melee.value().ships << " ships and "
               << melee.value().squadrons << " squadrons (" << melee.value().craft << " craft), "
               << replay->setup.units.size() << " units in all, " << options->ticks
-              << " ticks; hardware threads " << eawr::platform::ThreadWorkerAdapter::hardware_worker_count() << '\n';
+              << " ticks; hardware threads " << eawr::platform::ThreadWorkerAdapter::hardware_worker_count()
+              << "; execution " << (options->live_execution ? "live" : "legacy") << '\n';
     if (options->replay_out) {
         auto bytes = tactical::write_replay(*replay);
         if (!bytes) {
@@ -493,7 +508,7 @@ int melee_main(const int argc, const char* const argv[]) {
     for (const auto workers : options->workers) {
         std::optional<Sampler> sampler;
         if (options->profile) sampler.emplace(options->profile_interval_us);
-        const auto result = run(*content, *replay, workers, sampler ? &*sampler : nullptr);
+        const auto result = run(*content, *replay, workers, options->live_execution, sampler ? &*sampler : nullptr);
         if (!result) return 1;
         if (sampler) std::cout << "  (profiled: the sampling perturbs these tick times)\n";
         report(*result, workers, options->timing);

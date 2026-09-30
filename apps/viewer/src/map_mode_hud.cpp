@@ -11,6 +11,7 @@
 
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/viewport.hpp>
 
 #include "eawr/skirmish/start.hpp"
 
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <optional>
 #include <span>
+#include <sstream>
 
 namespace eawr::presentation::godot_backend {
 
@@ -291,8 +293,64 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     return true;
 }
 
+void MapMode::State::sync_overview_ui() {
+    if (!live_session || !space) return;
+    const std::string level = space->live_camera_overview();
+    const auto is_level = [](const std::string& value) { return value == "off" || value == "overview" || value == "map"; };
+    const bool on = level == "overview" || level == "map";
+    const bool first = overview_level.empty();
+    if (level != overview_level) {
+        // V-5g: every level change, by the wheel or the overview key, fades from the last old frame.
+        if (is_level(overview_level) && is_level(level) && perf_host != nullptr && perf_host->get_viewport() != nullptr) {
+            if (!overview_fade) overview_fade = std::make_unique<OverviewFadeView>(*perf_host);
+            overview_fade->request(*perf_host->get_viewport());
+        }
+        overview_level = level;
+    }
+    // V-5a: x1 and x2 hide the same set.
+    overview_ui = presentation::ui::overview_ui(on);
+    if (hud) hud->set_overview(!overview_ui.tactical_shell);
+    if (battle) {
+        battle->set_overview_ui(overview_ui);
+        if (first) battle->set_overview_probe([this] {
+            std::ostringstream output;
+            output << "{\"shell\": ";
+            if (hud) output << (hud->shell_shown() ? "true" : "false");
+            else output << "null";
+            output << ", \"pause_banner\": ";
+            if (hud) output << (hud->pause_banner_shown() ? "true" : "false");
+            else output << "null";
+            output << ", \"minimap_syncs\": " << minimap_syncs << ", \"fade_opacity\": ";
+            if (overview_fade && overview_fade->opacity()) output << *overview_fade->opacity();
+            else output << "null";
+            output << "}";
+            return output.str();
+        });
+    }
+    if (overview_fade) overview_fade->frame();
+}
+
+std::string MapMode::State::overview_report_json() const {
+    std::ostringstream output;
+    output << "{\"level\": \"" << overview_level << "\", \"tactical_shell\": " << (overview_ui.tactical_shell ? "true" : "false")
+           << ", \"pause_banner\": " << (overview_ui.pause_banner ? "true" : "false")
+           << ", \"radar_contents\": " << (overview_ui.radar_contents ? "true" : "false")
+           << ", \"unit_brackets\": " << (overview_ui.unit_brackets ? "true" : "false")
+           << ", \"world_markers\": " << (overview_ui.world_markers ? "true" : "false")
+           // V-5f: the remake draws no scene distance fog in space (the legacy adapters disable it),
+           // so the overview's fog switch has nothing to turn off.
+           << ", \"distance_fog\": \"not drawn\", \"minimap_syncs\": " << minimap_syncs << ", \"fade\": ";
+    if (overview_fade) output << overview_fade->report_json();
+    else output << "null";
+    output << "}";
+    return output.str();
+}
+
 void MapMode::State::sync_minimap() {
     if (!hud || !live_session || !battle || !space || hud->minimap() == nullptr) return;
+    // V-5c: the radar's contents stop updating while either overview level is on.
+    if (!overview_ui.radar_contents) return;
+    ++minimap_syncs;
     const auto bounds = space->live_camera_bounds();
     const auto& latest = live_session->battle_frame().latest;
     if (!bounds || !latest) return;

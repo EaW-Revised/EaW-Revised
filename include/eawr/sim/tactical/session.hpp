@@ -2,6 +2,7 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/damage.hpp"
@@ -27,6 +28,8 @@ namespace eawr::sim::tactical {
 
 struct TacticalTick {
     std::uint64_t completed_tick{};
+    // The completed tick's state hash; empty when the session hashes off the stepping thread
+    // (set_state_hasher), and then `state_hash` has it.
     std::string state_sha256;
     std::shared_ptr<const TacticalSnapshot> snapshot;
     // Warnings for commands whose unit orders were rejected at execution.
@@ -36,6 +39,8 @@ struct TacticalTick {
     // that reached the exact collision tests.
     std::uint64_t projectile_candidates{};
     std::uint64_t projectile_exact_tests{};
+    // The same hash either way (#637): ready, or pending on the session's state hasher.
+    sim::StateHash state_hash;
 };
 
 // Deterministic home of one tactical session. Commands are queued by submit() in
@@ -84,6 +89,11 @@ public:
     // Fails without changing the session at completed tick max_ticks, so record() always
     // stays within the replay tick limit.
     [[nodiscard]] core::Result<TacticalTick> step(const PartitionExecutor& executor);
+    // #637: with a hasher, step() encodes the completed tick's canonical state and leaves its
+    // SHA-256 to the hasher, off the stepping thread; TacticalTick::state_hash then resolves to
+    // the digest the synchronous path returns in state_sha256. Null (the default) hashes on the
+    // stepping thread. The hasher is not state: it never changes a hash or a replay.
+    void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
 
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] EntityId next_entity_id() const noexcept;

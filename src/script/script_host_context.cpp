@@ -3,6 +3,7 @@
 #include "script_host_internal.hpp"
 
 #include <limits>
+#include <sstream>
 #include <utility>
 
 namespace eawr::script {

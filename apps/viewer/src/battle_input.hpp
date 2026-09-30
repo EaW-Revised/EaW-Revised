@@ -7,6 +7,7 @@
 
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
+#include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
@@ -112,6 +113,11 @@ public:
     void set_minimap_point(std::function<std::optional<std::array<float, 2>>(double, double)> point) {
         minimap_point_ = std::move(point);
     }
+    // #848 (docs/behaviour/foc-battle-selection.md V-5d, V-5e): what the overview state lets the
+    // world layer draw; set each frame before frame(). `probe` gives the HUD's state as a JSON object
+    // for the report's overview samples, taken the frame after each wheel or overview key gesture.
+    void set_overview_ui(const ui::OverviewUi& value) { overview_ui_ = value; }
+    void set_overview_probe(std::function<std::string()> probe) { overview_probe_ = std::move(probe); }
 
 private:
     struct Drag final {
@@ -241,7 +247,12 @@ private:
     struct OverviewSample final {
         std::uint64_t tick{};
         std::string level;
+        // #848: what the frame after the gesture drew: the world UI's counts and the probe's HUD state.
+        WorldUiView::Drawn drawn;
+        std::string hud;
     };
+    ui::OverviewUi overview_ui_;
+    std::function<std::string()> overview_probe_;
     std::vector<OverviewSample> overview_samples_;
     std::optional<std::uint64_t> overview_sample_pending_;
 };

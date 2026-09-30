@@ -57,8 +57,11 @@ struct ScriptedTick {
     std::vector<RoutedCommand> script_input;
     // This tick's service; its commands are the next tick's script input.
     ServiceReport scripts;
-    // authoritative_state_sha256 of the completed tick: world and script state.
+    // authoritative_state_sha256 of the completed tick: world and script state. Empty with a
+    // state hasher (set_state_hasher); then `state_hash` has it.
     std::string state_sha256;
+    // The same hash either way (#637): ready, or pending on the state hasher.
+    sim::StateHash state_hash;
 };
 
 // The engine side of the scripts (#79): what the original engine does to its
@@ -98,6 +101,9 @@ public:
     [[nodiscard]] core::Result<void> register_verb(std::string_view verb, CommandTranslator translator);
     // Before the first step; without one every instance is pumped every tick.
     [[nodiscard]] core::Result<void> set_engine(std::shared_ptr<ScriptEngine> engine);
+    // #637: hashes the world (TacticalSession::set_state_hasher) and derives the tick's combined
+    // hash on `hasher`, off the stepping thread. Null (the default) hashes on it.
+    void set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept;
 
     // One tick. Submits `player_input` with the keys it carries (UI-07
     // CommandScheduler::take; a refused command is reported and dropped),

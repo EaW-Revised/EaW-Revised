@@ -6,7 +6,7 @@ Runs over a source tree (default: the repository root) and fails on any hit of:
 - security: private IPv4 addresses, user-profile and home paths, binary addresses in the
   original game's image range, decompiler auto-names, SSH key file names, `.lan` host names;
 - clean-room: engine-style names (tools/cleanroom_check.py's pattern and allowlist) in every file
-  but vendored `third_party/`;
+  with hash-pinned exceptions for reviewed upstream files;
 - assets: game asset file types, images that are not on the reviewed allowlist (by SHA-256), and
   binary files that are not on the allowlist;
 - readme: names the README must not carry;
@@ -52,15 +52,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_text(path: Path) -> str | None:
-    """The file as UTF-8 text, or None for a binary or non-UTF-8 file."""
+def read_text(path: Path, encoding: str = "utf-8") -> str | None:
+    """Decode text with UTF-8 or an explicitly reviewed encoding; return None for other files."""
     if path.stat().st_size > TEXT_LIMIT:
         return None
     data = path.read_bytes()
     if b"\0" in data[:8192]:
         return None
     try:
-        return data.decode("utf-8")
+        return data.decode(encoding)
     except UnicodeDecodeError:
         return None
 
@@ -74,7 +74,7 @@ def tree_files(root: Path) -> list[Path]:
     if (root / ".git").exists():
         out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout
         return [root / name for name in out.decode("utf-8").split("\0") if name and (root / name).is_file()]
-    return sorted(path for path in root.rglob("*") if path.is_file() and "__pycache__" not in path.parts)
+    return sorted(path for path in root.rglob("*") if path.is_file() and ".git" not in path.relative_to(root).parts)
 
 
 def rel(path: Path, root: Path) -> str:
@@ -91,19 +91,19 @@ def security_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
     patterns = [(name, re.compile(regex)) for name, regex in {**scan["regex"], **(extra_regex or {})}.items()]
     terms = sorted(set(extra_terms), key=len, reverse=True)
     term_pattern = re.compile("|".join(re.escape(t) for t in terms), re.I) if terms else None
-    allowed = [(item["path"], re.compile(item["regex"])) for item in scan["allow"]]
+    allowed = [(item["path"], re.compile(item["regex"]), item["patterns"]) for item in scan["allow"]]
     hits = []
     for path in files:
         relpath = rel(path, root)
-        text = read_text(path)
-        if text is None:
-            continue
-        for number, line in enumerate(text.splitlines(), 1):
+        text = read_text(path, config["assets"].get("text_encodings", {}).get(relpath, "utf-8"))
+        lines = [(0, relpath)] + list(enumerate(text.splitlines(), 1)) if text is not None else [(0, relpath)]
+        for number, line in lines:
             found = [(name, m.group(0)) for name, rx in patterns for m in rx.finditer(line)]
             if term_pattern is not None:
                 found += [("private-name", m.group(0)) for m in term_pattern.finditer(line)]
             for name, value in found:
-                if any(matches(relpath, p) and rx.search(line) for p, rx in allowed):
+                if number and name not in (extra_regex or {}) and name != "private-name" and any(
+                        name in names and matches(relpath, p) and rx.search(line) for p, rx, names in allowed):
                     continue
                 hits.append(f"{relpath}:{number}: {name}: {value}")
     return hits
@@ -132,12 +132,20 @@ def cleanroom_scan(root: Path, config: dict[str, Any], files: Iterable[Path]) ->
         relpath = rel(path, root)
         if any(matches(relpath, p) for p in skip):
             continue
-        text = read_text(path)
+        text = read_text(path, config["assets"].get("text_encodings", {}).get(relpath, "utf-8"))
         if text is None:
             continue
-        for number, line in enumerate(text.splitlines(), 1):
+        for number, line in [(0, relpath)] + list(enumerate(text.splitlines(), 1)):
             hits.extend(f"{relpath}:{number}: {token}" for token, _, _ in checker.line_tokens(line, allowed))
     return hits
+
+
+def generated_file(relpath: str, config: dict[str, Any]) -> bool:
+    rules = config["generated"]
+    path = Path(relpath)
+    return (any(part in rules["directories"] for part in path.parts[:-1])
+            or path.suffix.lower() in rules["suffixes"]
+            or any(fnmatch.fnmatchcase(path.name, pattern) for pattern in rules["names"]))
 
 
 def asset_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
@@ -149,16 +157,18 @@ def asset_scan(root: Path, config: dict[str, Any], files: Iterable[Path],
     for path in files:
         relpath = rel(path, root)
         suffix = path.suffix.lower()
+        if generated_file(relpath, config):
+            hits.append(f"{relpath}: generated file must not be published")
         if suffix in banned and not any(matches(relpath, p) for p in scan["retail_suffix_allow"]):
             hits.append(f"{relpath}: game asset type {suffix}")
             continue
-        digest = sha256_file(path) if (retail_hashes is not None or suffix in images) else ""
+        digest = sha256_file(path)
         if retail_hashes is not None and digest in retail_hashes:
             hits.append(f"{relpath}: byte-identical to a retail file")
         if suffix in images:
             if scan["image_allowlist"].get(relpath) != digest:
                 hits.append(f"{relpath}: image not on the reviewed allowlist (sha256 {digest})")
-        elif read_text(path) is None and not any(matches(relpath, p) for p in scan["binary_allowlist"]):
+        elif read_text(path) is None and scan["binary_allowlist"].get(relpath) != digest:
             hits.append(f"{relpath}: binary file not on the allowlist")
     return hits
 

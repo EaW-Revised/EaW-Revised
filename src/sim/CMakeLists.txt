@@ -11,6 +11,7 @@ add_library(
         fog_sidecar.cpp
         replay.cpp
         snapshot.cpp
+        state_hash.cpp
         tactical/abilities.cpp
         tactical/collection.cpp
         tactical/collision.cpp

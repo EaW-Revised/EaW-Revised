@@ -300,6 +300,8 @@ struct TacticalHud::State final {
     TacticalHud::TimeHandlers time_handlers;
     TacticalHud::TimeView time_view;
     bool time_view_set{};
+    // #848 V-5b: an overview level is on.
+    bool overview{};
     model::BattleMessageLooks message_looks;
     std::vector<std::string> time_textures; // "button state: texture (origin)"
     // #425: the unit cards, and what they look up: object types (Icon_Name, Text_ID), the text DB
@@ -772,8 +774,21 @@ void TacticalHud::set_time_view(const TimeView& view) {
         const float tint = view.fast_forward_enabled ? 1.0F : 128.0F / 255.0F;
         state.fast_forward_button->set_self_modulate(Color(tint, tint, tint, 1.0F));
     }
-    if (state.overlay != nullptr) state.overlay->show_paused(view.paused);
+    if (state.overlay != nullptr) state.overlay->show_paused(view.paused && !state.overview);
 }
+
+void TacticalHud::set_overview(const bool on) {
+    State& state = *state_;
+    if (state.overview == on) return;
+    state.overview = on;
+    // V-5b: the hit mask carries the shell and everything placed on it; hidden, it takes no input.
+    if (state.mask != nullptr) state.mask->set_visible(!on);
+    if (state.overlay != nullptr) state.overlay->show_paused(state.time_view.paused && !on);
+}
+
+bool TacticalHud::shell_shown() const { return state_->mask != nullptr && state_->mask->is_visible(); }
+
+bool TacticalHud::pause_banner_shown() const { return state_->overlay != nullptr && state_->overlay->paused_shown(); }
 
 void TacticalHud::set_battle(const std::optional<bool> won, const bool ended) {
     if (state_->overlay == nullptr) return;
@@ -949,6 +964,8 @@ std::string TacticalHud::report_json() const {
     }
     output << "}";
     if (state.overlay != nullptr) output << ", \"battle_overlay\": " << state.overlay->report_json();
+    output << ", \"overview\": " << (state.overview ? "true" : "false")
+           << ", \"shell_shown\": " << (shell_shown() ? "true" : "false");
     output << ", \"options_presses\": " << options_presses() << ", \"diagnostics\": [";
     for (std::size_t index = 0; index < state.diagnostics.size(); ++index) {
         output << (index == 0 ? "" : ", ") << json(core::format_diagnostic(state.diagnostics[index]));

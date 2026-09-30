@@ -11,6 +11,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -151,8 +152,11 @@ void record_initial(RunOutput& output, const tactical::TacticalSession& session)
     output.snapshots.push_back(std::to_string(session.completed_tick()) + "," + session.snapshot()->sha256());
 }
 
-void record_tick(RunOutput& output, const tactical::TacticalTick& tick) {
-    output.hashes.push_back(std::to_string(tick.completed_tick) + "," + tick.state_sha256);
+void record_tick(RunOutput& output, const tactical::TacticalTick& tick, const bool hashed_off_thread) {
+    // #637: off the stepping thread the tick's hash is only in state_hash; on it, in both.
+    expect(hashed_off_thread ? tick.state_sha256.empty() : tick.state_hash.get() == tick.state_sha256,
+        "the tick's hash is where the hashing mode puts it");
+    output.hashes.push_back(std::to_string(tick.completed_tick) + "," + tick.state_hash.get());
     output.snapshots.push_back(std::to_string(tick.completed_tick) + "," + tick.snapshot->sha256());
     for (const auto& event : tick.snapshot->events()) {
         output.events.push_back(event_row(event));
@@ -165,7 +169,8 @@ void record_tick(RunOutput& output, const tactical::TacticalTick& tick) {
 [[nodiscard]] RunOutput run_replay(
     const tactical::TacticalReplay& replay,
     const eawr::sim::PartitionExecutor& executor,
-    const bool scramble) {
+    const bool scramble,
+    std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr) {
     RunOutput output;
     auto created = tactical::TacticalSession::from_replay(replay);
     expect(static_cast<bool>(created), "fixture session is created from replay");
@@ -173,6 +178,8 @@ void record_tick(RunOutput& output, const tactical::TacticalTick& tick) {
         return output;
     }
     auto session = std::move(created).value();
+    const bool hashed_off_thread = hasher != nullptr;
+    session.set_state_hasher(std::move(hasher));
     record_initial(output, session);
     while (session.completed_tick() < replay.final_tick_count) {
         if (scramble) {
@@ -183,7 +190,7 @@ void record_tick(RunOutput& output, const tactical::TacticalTick& tick) {
         if (!tick) {
             break;
         }
-        record_tick(output, tick.value());
+        record_tick(output, tick.value(), hashed_off_thread);
     }
     return output;
 }
@@ -269,6 +276,12 @@ void test_golden_across_workers(const std::string& fixtures, const Golden& golde
             "hash, events and snapshots match with " + std::to_string(workers) + " workers");
         expect(run_replay(replay, executor, true) == reference,
             "storage scrambling keeps every output with " + std::to_string(workers) + " workers");
+    }
+    // #637: the live game's dispatch and its hashing thread change no output either.
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers, eawr::platform::ThreadWorkerAdapter::Dispatch::by_cost);
+        expect(run_replay(replay, executor, false, std::make_shared<eawr::platform::ThreadStateHasher>()) == reference,
+            "by-cost dispatch and off-thread hashes match with " + std::to_string(workers) + " workers");
     }
     const eawr::platform::ThreadWorkerAdapter three(3);
     expect(run_replay(replay, three, false) == reference, "an odd worker count matches the reference");
@@ -358,7 +371,7 @@ void test_live_submission_and_recording(const std::string& fixtures, const Golde
             return;
         }
         expect(through_next == session.record(), "the replay through the next tick equals the record after it");
-        record_tick(output, tick.value());
+        record_tick(output, tick.value(), false);
     }
     expect(output.hashes == golden.hashes,
         "live just-in-time submission reproduces the replay state hashes (pending commands are not state)");
