@@ -4,6 +4,7 @@
 #include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/camera/free_camera.hpp"
+#include "eawr/skirmish/start.hpp"
 
 #include <array>
 #include <cstddef>
@@ -53,6 +54,11 @@ struct MapCameraConfig final {
 [[nodiscard]] core::Result<MapCameraConfig> parse_map_camera_config(
     std::string_view xml, std::string_view map_path, std::string_view map_sha256,
     presentation::camera::Mode mode = presentation::camera::Mode::land);
+
+// #908 SC-02: project live-camera policy, centred on the fleet placed around
+// the local spawn by PL-01/PL-03 and bounded by the declared map extents.
+[[nodiscard]] core::Result<MapCameraConfig> skirmish_camera_config(
+    const assets::Map& map, const skirmish::SkirmishStart& start, sim::tactical::PlayerId local_player);
 
 // Applies the config's constant overrides over the XML layer (see
 // camera::apply_map_overrides for precedence and rejection rules). Without an

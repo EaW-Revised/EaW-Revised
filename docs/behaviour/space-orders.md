@@ -16,7 +16,7 @@
   No original-game recording of these orders exists yet (OR-U4).
 - Out of scope: squadron craft, which have no space layer and divert on their own (OR-13; a
   squadron's attack-move and guard are [space fighters](space-fighters.md) FO-05 and FO-06); waypoint queues (Alt), the compass facing
-  of a right drag, abilities and hardpoint-targeted attacks.
+  of a right drag and abilities. Attacks on one hardpoint are OR-20 to OR-27 (EAWR-531).
 
 ## How FoC does it
 
@@ -31,7 +31,7 @@ guard differ from a move only for craft.
 
 ## Interface
 
-- Inputs: attack (replay opcode 3), attack-move (opcode 6) and guard (opcode 7) commands of the
+- Inputs: attack (replay opcode 3, or opcode 12 on one hardpoint), attack-move (opcode 6) and guard (opcode 7) commands of the
   unit's owner ([replay-format.md](../replay-format.md#commands)); an attack-move or guard names a
   point and, when nonzero, a unit. The unit's `Targeting_Max_Attack_Distance` (last authored value,
   from the combat table), its motion profile and limits, the target's position, facing, current
@@ -152,6 +152,55 @@ guard differ from a move only for craft.
   only offers units outside the selection. A named unit that is not live rejects every listed unit
   with `target_not_live`. The guard ends as OR-08 says when the guarded unit dies.
 
+### Attacking one hardpoint (EAWR-531)
+
+Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays private.
+
+- **OR-20** (research HO-01, HO-02, HO-11, HO-12, HO-13) An attack order carries the target unit and,
+  optionally, one hardpoint of it; without one it is an attack on the unit. FoC records the hardpoint by
+  its name's checksum (zero for none) and finds it on the target when the order runs; the remake names
+  it by its index in the target type's HardPoints list, as damage and shots do. The player gives it by
+  right-clicking a hardpoint reticle ([world UI](foc-battle-world-ui.md) WU-30, WU-41): the reticle under
+  the pointer replaces the picked object, and the order's target is the reticle's unit. An armed attack
+  mode and Ctrl (OR-01) give the same order over a reticle. The reticle is only shown for enemy and own
+  units; only a hostile unit's hardpoint is attacked (a click on an own unit's reticle is a plain click
+  on that unit). Only the reticle names a hardpoint (debug build: the click's hardpoint comes from the
+  reticle test alone; the pick under the pointer yields units, walk 8 WSU-10, WSU-11), so a click on the
+  hull or on a hardpoint's own mesh is an attack on the unit. On the left double click a reticle under
+  the cursor stands for its ship too (walk 8 WSU-18). The ordered hardpoint's shots take the aimed
+  route of [space damage](space-damage.md) DG-39: they damage that hardpoint whatever mesh they meet
+  (C-13).
+- **OR-21** (project) The order names a hardpoint of the target type's list that is targetable and still
+  stands; otherwise every listed unit is rejected with `hardpoint_invalid` (FoC's input only offers
+  standing reticles). A target that is not live, or is not hostile, rejects as before (OR-17 rules).
+- **OR-22** (research HO-02, HO-03, HO-10) Every ordered unit takes the hardpoint with its target: its
+  hardpoint weapons and its object weapon aim at it. A squadron takes the order through its team, and
+  its craft each aim their weapon at the hardpoint (space-fighters FO-01, FO-03). Capital ships and
+  squadrons therefore treat the order alike.
+- **OR-23** (research HO-04, HO-06) The hardpoint lasts while the order's target is the unit's
+  player-ordered target and the hardpoint stands. When the hardpoint is destroyed a weapon that had it
+  forgets it, and the unit goes on attacking the unit; when the target changes, dies or another order
+  replaces the attack, the hardpoint goes with it.
+- **OR-24** (research HO-04, HO-05) With no ordered hardpoint (or after it dies) the unit picks the
+  target's hardpoint as for any attack on the unit. FoC picks the standing hardpoint whose type has the
+  attacker's lowest priority, the nearest on a tie, and the nearest one for an attacker with no
+  priorities; the remake takes the nearest live targetable hardpoint from the shooter (W-rules,
+  OR-U7).
+- **OR-25** (research HO-07, HO-08, HO-09, HO-18) A weapon ordered at a hardpoint aims at that
+  hardpoint's position and nowhere else: it fires only when the planar range reaches it and the shot's
+  led point is inside its firing arc. A hardpoint no weapon can bear on is not fired at, and FoC
+  substitutes no other point; the weapon's opportunity fire is the same as for an attack on the unit
+  (its `Allow_Opportunity_Fire_When_Targeting`). The turn toward the target (A-04) and the approach
+  checks of OR-04 to OR-06 measure to the ordered hardpoint while it stands.
+- **OR-26** (research HO-13, HO-14, HO-15) After the order the ordered reticle flashes with its
+  tracked art for 60 render services, half size for the first three, then toggling every third. The
+  cursor is the attack cursor as for any hostile unit; FoC has no hardpoint cursor (the repair cursor
+  is for the player's own damaged hardpoints only). FoC also speaks a hardpoint-type line and flashes
+  the target; the project speaks the usual attack line (OR-U8).
+- **OR-27** (research HO-17) FoC's plan scripts can order a hardpoint type (`Attack_Target`'s hardpoint
+  argument); its only plan that does is `systematicdisable`, whose category keeps it off. The remake's
+  AI issues no hardpoint attacks (OR-U9).
+
 ## Project choices
 
 | Rule | Choice |
@@ -160,6 +209,7 @@ guard differ from a move only for craft.
 | OP-02 | Each unit is mapped and checked on its own, from its own position; FoC maps a coordinator's ships of one layer together, spreading them on an arc around the target from their centroid (OR-U2). Ships of one order that share a slot are separated by the destination search (AV-19). |
 | OP-03 | The checks of OR-06 run in the partitioned `orders` phase: each approaching unit reads the moved units with this tick's targets and writes only its own slot. The new paths plan serially in ascending unit ID after the attack turns and before the tick's commands, because each plan submits a prediction the next one plans against (AV-15). Results are identical for any worker count. |
 | OP-04 | The `APPR` state block holds each unit's last mapping frame only after a mapping planned an approach, so replays whose attack orders never close on a target keep their hashes. |
+| OP-05 | An attack on a hardpoint is replay opcode 12 (an attack, the target and the hardpoint index; [replay-format.md](../replay-format.md#commands)); an attack on the unit stays opcode 3. The ordered hardpoint enters the order's reserved word, the unit's combat record and a squadron's `SQST` record only when set (index plus one), so every session without a hardpoint order hashes as before. |
 
 ## Cases
 
@@ -180,6 +230,19 @@ guard differ from a move only for craft.
   away, are each mapped once: their checks find the ends of their paths in range, so they fly the
   paths planned from the order to their slots without re-planning, and their headings swing no
   more than those paths' own detours do (no swing every check).
+- **C-08** (OR-20, OR-25) A shooter ordered to attack the hardpoint abeam on a target with three
+  standing hardpoints fires every shot at that hardpoint, though the one amidships is nearer.
+- **C-09** (OR-23, OR-24) When the ordered hardpoint of C-08 is destroyed the shooter keeps its attack
+  on the unit and its shots go to the nearest standing hardpoint.
+- **C-10** (OR-25) A hardpoint outside every weapon's firing arc is not fired at, and the shooter fires
+  at no other hardpoint of that target.
+- **C-11** (OR-21) An attack naming a hardpoint the target's type lacks, or one already destroyed, is
+  rejected with `hardpoint_invalid`.
+- **C-12** (OR-22) A squadron ordered to attack a frigate's hardpoint has each craft's shots go to it,
+  and to the nearest standing one when it is destroyed.
+- **C-13** (OR-20, OR-25; DG-39) A shooter ordered onto the farther of a corvette's two hardpoints,
+  with the hull's mesh in front of both, damages that hardpoint until it is destroyed; the hull and the
+  nearer hardpoint (which an attack on the unit hits) take nothing meanwhile.
 
 ## Unknowns
 
@@ -201,4 +264,25 @@ guard differ from a move only for craft.
   identity re-pin, as `SpacePathfindFrameDelayDelta` (FM-U8), so the pinned content identity and
   the M2 start stay unchanged. The GameConstants audit (EAWR-626) takes all three in one re-pin (EAWR-663).
 - **OR-U5** FoC aims the approach at its best target hardpoint (G-W3) and adds the target's soft
-  radius; the remake measures to the nearest live hardpoint with no radius, as A-07.
+  radius; the remake measures to the nearest live hardpoint with no radius, as A-07 (or to the ordered
+  hardpoint, OR-25).
+- **OR-U7** FoC re-picks a hardpoint by the attacker's priorities per hardpoint type (OR-24); the
+  remake has no such table and takes the nearest. For a unit on its default priority set this is
+  FoC's rule (debug build: a type the set does not list ranks last, so all standing hardpoints tie and
+  the nearest wins; data: no default set lists hardpoint types). Open only for sets swapped in at run
+  time (the AI's hit-and-run; attack-move if the engine applies its set: unverified).
+- **OR-U8** FoC's acknowledgement for a hardpoint attack is a per-hardpoint-type speech line, and it
+  flashes the target unit; neither is modelled.
+- **OR-U9** The AI's `Attack_Target` hardpoint argument is not bound (no shipped plan runs it).
+- **OR-U10** Whether the reticle is also clickable while the pointer is over the icon of a squadron
+  whose craft overlap it, and what a left click on a reticle selects, rest on WU-41's project choice.
+  The left double click tests the reticle before the icon as the single click does (WSU-18 names the
+  reticle, not its order against the icon's WSU-38): unverified.
+- **OR-U11** FoC also passes the reticle's hardpoint to a targeted ability clicked on it (EAWR-561, space
+  abilities AB-61); the remake's ability click aims at the unit (no hardpoint) for now.
+- **OR-U12** Resolved by collision-mesh picking (EAWR-841, WSU-10 to WSU-12): a reticle-free click
+  tests the hull and attached hardpoint meshes and picks their owning unit (OR-20), with the same
+  pick for selection, double click, right-click targeting, hover and ability aim. A click inside
+  the box but off those meshes misses unless the override sphere covers it; types without mesh
+  geometry retain WSU-11's box fallback. Remaining picking limits are listed in
+  [battle selection](foc-battle-selection.md).

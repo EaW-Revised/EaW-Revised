@@ -392,6 +392,8 @@ std::vector<GodotRenderer::SubmissionEvidence> GodotRenderer::submission_evidenc
 
 std::size_t GodotRenderer::instance_count() const noexcept { return impl_->instance_count(); }
 
+GodotRenderer::SubmitWork GodotRenderer::submit_work() const noexcept { return impl_->submit_work(); }
+
 void GodotRenderer::clear_skin_pose(const sim::EntityId entity_id) {
     impl_->clear_skin_pose(entity_id);
 }

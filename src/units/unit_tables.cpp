@@ -402,8 +402,56 @@ private:
                     if (iequals(attribute.name, "Name")) name = attribute.value;
                 }
                 unit.inactive_abilities.push_back(node.name + (name.empty() ? "" : " " + name));
+                // #530: a skirmish station's income stream and its bonus (PU-02 to PU-04).
+                const auto child_text = [&node](const std::string_view tag) -> std::string {
+                    for (const auto& child : node.children) {
+                        if (iequals(child.name, tag)) return trim(child.raw_text);
+                    }
+                    return {};
+                };
+                if (iequals(node.name, "Income_Stream_Ability")) {
+                    IncomeStream stream;
+                    stream.name = name;
+                    stream.base_value = number(child_text("Base_Income_Value"));
+                    stream.interval_seconds = number(child_text("Base_Interval_In_Secs"));
+                    stream.split_with_allies = boolean(child_text("Split_Income_With_Allies")).value_or(false);
+                    stream.full_amount_to_everyone = boolean(child_text("Full_Amount_To_Everyone")).value_or(false);
+                    if (!stream.base_value || !stream.interval_seconds) {
+                        report_.missing(unit.id, "Income_Stream_Ability", name, "no Base_Income_Value or Base_Interval_In_Secs");
+                    }
+                    unit.production.income.push_back(std::move(stream));
+                } else if (iequals(node.name, "Income_Stream_Mod_Ability")) {
+                    IncomeBonus bonus;
+                    bonus.name = name;
+                    bonus.additive = number(child_text("Income_Additive_Value"));
+                    bonus.multiplier = number(child_text("Income_Multiplier"));
+                    bonus.target_source = child_text("Target_Stream_Source");
+                    unit.production.income_bonuses.push_back(std::move(bonus));
+                }
             }
         }
+    }
+
+    // #530 (docs/behaviour/space-purchasing.md PU-10 to PU-21, PU-31): what a station builds for
+    // each faction, and what a type costs, takes and counts in a skirmish.
+    void load_production(Object& object, UnitType& unit) {
+        auto& production = unit.production;
+        const auto list = tokens(object.text("Tactical_Buildable_Objects_Multiplayer"));
+        for (const auto& token : list) {
+            const auto* definition = input_.catalog->find(token);
+            if (definition != nullptr && iequals(definition->type_name, "Faction")) {
+                production.buildable.push_back(BuildGroup{definition->id, {}});
+            } else if (production.buildable.empty()) {
+                report_.missing(unit.id, "Tactical_Buildable_Objects_Multiplayer", token, "type before any faction");
+            } else {
+                production.buildable.back().types.push_back(token);
+            }
+        }
+        production.build_cost_multiplayer = object.fixed("Tactical_Build_Cost_Multiplayer", report_, false);
+        production.build_time_seconds = object.fixed("Tactical_Build_Time_Seconds", report_, false);
+        production.production_queue = object.text("Tactical_Production_Queue");
+        production.population_value = count(object, "Population_Value", false);
+        production.reinforcement_prevention_radius = object.fixed("Reinforcement_Prevention_Radius", report_, false);
     }
 
     void load_body(Object& object, UnitType& unit) {
@@ -617,6 +665,7 @@ private:
         if (unit.kind == UnitKind::squadron) load_squadron(*object, unit);
         else load_body(*object, unit);
         load_abilities(*object, unit);
+        load_production(*object, unit);
         unit.lua_script = object->text("Lua_Script");
         object->note_duplicates(report_);
         tables_.units.push_back(std::move(unit));

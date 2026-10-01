@@ -7,6 +7,7 @@
 #include "eawr/scene/space_population.hpp"
 #include "skirmish_internal.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <span>
 #include <string>
@@ -130,6 +131,62 @@ std::optional<std::pair<std::uint32_t, std::uint32_t>> declared_extent_bits(
     return std::pair{*first, *second};
 }
 
+core::Result<Fixture> fixture_from_options(
+    const FixtureOptions& options, const vfs::Vfs& filesystem, const data::Catalog& catalog) {
+    using Result = core::Result<Fixture>;
+    Fixture fixture = m2_fixture();
+    if (options.map) {
+        fixture.map = *options.map;
+        std::transform(fixture.map.begin(), fixture.map.end(), fixture.map.begin(), [](const char c) {
+            if (c == '\\') return '/';
+            return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        });
+    }
+    if (options.slots) fixture.slots = *options.slots;
+    if (options.seed) fixture.seed = *options.seed;
+    if (!fixture.map.starts_with("data/art/maps/_mp_space_") || !fixture.map.ends_with(".ted")
+        || fixture.map.find('/', 14) != std::string::npos || fixture.map.find("..") != std::string::npos) {
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish map must be a logical data/art/maps/_mp_space_*.ted path"));
+    }
+    if (fixture.slots.size() != 2) {
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "space skirmish currently requires exactly two players; more than two players are not supported"));
+    }
+    for (const auto& slot : fixture.slots) {
+        if (slot.slot == 0 || slot.slot > sim::tactical::max_players || slot.team >= sim::tactical::max_players) {
+            return Result::failure(detail::error(diagnostic_codes::fixture, "skirmish slot or team is out of range"));
+        }
+        const auto* faction = faction_definition(catalog, slot.faction);
+        if (!faction) return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish faction is not defined: " + slot.faction));
+        bool playable = false;
+        for (const auto& child : faction->root.children) {
+            if (detail::iequals(child.name, "Is_Playable")) {
+                data::tag_trace::used(child);
+                playable = detail::retail_flag(child.raw_text, playable);
+            }
+        }
+        if (!playable) return Result::failure(detail::error(diagnostic_codes::fixture,
+            "skirmish slot faction must be playable: " + slot.faction));
+    }
+    auto record = filesystem.stat(fixture.map);
+    if (!record) return Result::failure(record.error());
+    auto bytes = filesystem.open(fixture.map);
+    if (!bytes) return Result::failure(bytes.error());
+    auto map = assets::load_map(bytes.value(), assets::source_from(record.value()), assets::object_type_catalog(catalog));
+    if (!map) return Result::failure(map.error());
+    if (map.value().kind != assets::MapKind::space) return Result::failure(detail::error(diagnostic_codes::fixture,
+        "skirmish map must be a space map"));
+    const auto hash = core::sha256_hex(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(bytes.value().data()), bytes.value().size()));
+    if (fixture.map == m2_fixture().map && hash != m2_fixture().map_sha256) {
+        return Result::failure(detail::error(diagnostic_codes::fixture, "pinned M2 map SHA-256 differs"));
+    }
+    fixture.map_sha256 = hash;
+    return Result::success(std::move(fixture));
+}
+
 core::Result<StartInputs> read_start_inputs(
     const Fixture& fixture,
     const vfs::Vfs& filesystem,
@@ -167,6 +224,13 @@ core::Result<StartInputs> read_start_inputs(
             faction.playable = flag("Is_Playable");
             faction.multiplayer_player = flag("Create_Player_In_Multiplayer_Games");
             faction.neutral = flag("Is_Neutral");
+            for (const auto& child : definition->root.children) {
+                if (!detail::iequals(child.name, "Space_Tactical_Unit_Cap")) continue;
+                const auto value = detail::number(child.raw_text);
+                if (value && value->raw() >= 0 && value->raw() % sim::math::Fixed::scale == 0) {
+                    faction.space_unit_cap = static_cast<std::uint32_t>(value->raw() / sim::math::Fixed::scale);
+                }
+            }
         }
         inputs.factions.push_back(std::move(faction));
     }

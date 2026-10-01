@@ -230,6 +230,31 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.attack_move_response_range);
     out.fixed(unit.formation_error_tolerance);
     out.fixed(unit.out_of_combat_defense);
+    // #530: production and income (v5).
+    const auto& production = unit.production;
+    out.each(production.buildable, [&](const BuildGroup& group) {
+        out.text(group.faction);
+        out.texts(group.types);
+    });
+    out.fixed(production.build_cost_multiplayer);
+    out.fixed(production.build_time_seconds);
+    out.text(production.production_queue);
+    out.flag(production.population_value.has_value());
+    out.u32(production.population_value.value_or(0));
+    out.fixed(production.reinforcement_prevention_radius);
+    out.each(production.income, [&](const IncomeStream& stream) {
+        out.text(stream.name);
+        out.fixed(stream.base_value);
+        out.fixed(stream.interval_seconds);
+        out.flag(stream.split_with_allies);
+        out.flag(stream.full_amount_to_everyone);
+    });
+    out.each(production.income_bonuses, [&](const IncomeBonus& bonus) {
+        out.text(bonus.name);
+        out.fixed(bonus.additive);
+        out.fixed(bonus.multiplier);
+        out.text(bonus.target_source);
+    });
     out.fixed(unit.follow_distance);
 }
 
@@ -237,7 +262,7 @@ void encode(Encoder& out, const UnitType& unit) {
 
 std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
     Encoder out;
-    out.text("eawr-unit-tables-v4");
+    out.text("eawr-unit-tables-v5");
     out.each(tables.units, [&](const UnitType& unit) { encode(out, unit); });
     out.each(tables.obstacles, [&](const ObstacleType& obstacle) {
         out.text(obstacle.id);

@@ -327,6 +327,9 @@ struct WeaponState {
 struct CombatState {
     EntityId attack_target{};         // ship-level target, zero for none
     bool direct{};                    // set by a player attack order
+    // #531 (space-orders OR-20 to OR-25): the hardpoint of `attack_target` a player attack order
+    // named, else no_hardpoint. Cleared when the order ends, the target changes or it is destroyed.
+    std::uint32_t attack_hardpoint{no_hardpoint};
     std::uint64_t next_scan_frame{};  // the ship-level scan waits until this frame
     std::vector<WeaponState> weapons; // CombatProfile::weapons order
     friend bool operator==(const CombatState&, const CombatState&) = default;

@@ -100,6 +100,89 @@ squadrons within weapon range and set on each other, with no station or map obje
 `path_bench --melee` does (`skirmish::build_melee`), `--eawr-live-melee s|m|l` (default `s`) and
 `--eawr-live-melee-seed <n>` (default 601) choosing it, and then runs it as a replay session.
 
+`--eawr-live-session skirmish` (EAWR-908)
+plays any FoC `_mp_space_*.ted` with exactly two players, including maps authored
+for larger lobbies. More than two **players** are refused; map capacity is not a
+restriction. With no options, the map, lobby, SK-22 fleets and seed are M2's
+unchanged defaults; `m2` remains the pinned fixture mode.
+
+```powershell
+& "<Godot console executable>" --resolution 1280x720 --path apps/viewer/project -- `
+  --eawr-game-root "<game root>" --eawr-live-session skirmish --eawr-populate `
+  --eawr-skirmish-map data/art/maps/_mp_space_bespin.ted `
+  --eawr-camera-interactive --eawr-environment map --eawr-lighting sh --eawr-shadows on
+```
+
+- `--eawr-skirmish-map <logical path>` selects the map (also accepted as `--eawr-map`).
+- `--eawr-skirmish-players <a>,<b>` selects two increasing player slot IDs, default `1,2`.
+  Put it before per-slot flags when changing IDs; a third player is refused.
+- `--eawr-skirmish-slot <slot>:<faction>:<team>:<human|ai>` changes a player's lobby
+  choices, e.g. `1:Empire:0:human` and `2:Rebel:1:ai`. Factions must be playable;
+  teams must have enough spawn/station markers. Player IDs select lobby colours;
+  team IDs select `Team_NN` markers by the existing SK-03/SK-11 rules.
+- `--eawr-skirmish-fleet <slot>:<unit>,<unit>,...` replaces that slot's SK-22 fleet;
+  `1:none` removes the extra fleet. Faction changes keep the slot's fleet unless
+  this flag changes it. Defaults are slot 1 `Y-Wing_Squadron,Corellian_Corvette,
+  Nebulon_B_Frigate,Calamari_Cruiser` and slot 2 `Tartan_Patrol_Cruiser,
+  Acclamator_Assault_Ship`. The data-driven free starting forces and pre-built
+  stations still follow the selected faction.
+  Selected fleet and faction types outside M2 load through the existing unit
+  loader, including their craft, hangar, hardpoint and projectile dependencies;
+  a type with unsupported or missing data is reported by the normal loaders.
+- `--eawr-skirmish-seed <uint64>` sets the deterministic seed, default `67`.
+  These flags require `--eawr-live-session skirmish`; `--eawr-live-ai off` disables
+  AI controllers for a staging run. The first human is the local player unless
+  `--eawr-live-player <slot>` selects another player.
+
+Without `--eawr-map-camera-config`, a live start derives target bounds from the
+map's declared extents and frames the centre of the local fleet placed around
+its spawn (PL-01/PL-03), at distance 1200 and XML `Yaw_Default`, using the existing
+owner camera overrides. Empty fleets frame the spawn. Explicit camera XML,
+including `config/coruscant-live-session-camera.xml`, retains precedence; a
+fixed capture camera still overrides the frame. Missing extents/spawn markers
+produce a clear refusal. [SC-01/SC-02](../../docs/behaviour/skirmish-map-choice.md)
+describe the project policy.
+
+The effective FoC map placements and their XML definitions give this census.
+**Native 1v1 maps:** Bespin, Endor, Geonosis, Kessel and Polus (two declared
+players and two spawn markers). All 24 maps below contain asteroid fields;
+there is no hazard-free map in this stock list. The three plain smoke maps are
+Bespin, Kessel and Polus: asteroid fields but no nebulas, ion storms or mines.
+Asteroid field models draw, but field collision/damage is not simulated.
+Nebulas and ion storms are classified but neither drawn nor simulated; shield,
+weapon and movement effects are absent. No placed mine type was found in these
+maps; mine behaviour remains unsupported. Mineral extractor pads are not mines.
+Some maps also use unsupported environment materials: Bespin has no primary
+stars and its secondary skydome is currently reported as undrawn, so its battle
+opens against the viewport background. Map selection does not add shader routes.
+
+| Map (`data/art/maps/_mp_space_<name>.ted`) | Spawn markers | Unsupported hazards present |
+| --- | ---: | --- |
+| alderaan | 6 | asteroid fields, ion storms (nebula volumes) |
+| bespin | 2 | asteroid fields |
+| bothawui | 6 | asteroid fields, nebulas |
+| coruscant | 6 | asteroid fields, nebulas, ion storms (nebula volumes) |
+| dagobah | 6 | asteroid fields, nebulas, ion storms (nebula volumes) |
+| dathomir | 4 | asteroid fields |
+| endor | 2 | asteroid fields, ion storms (nebula volumes) |
+| felucia | 9 | asteroid fields, nebulas |
+| geonosis | 2 | asteroid fields, nebulas |
+| hoth | 8 | asteroid fields, nebulas |
+| hypori | 6 | asteroid fields |
+| kamino | 9 | asteroid fields |
+| kashyyyk | 10 | asteroid fields, nebulas, ion storms (nebula volumes) |
+| kessel | 2 | asteroid fields |
+| kuat | 6 | asteroid fields |
+| naboo | 6 | asteroid fields, ion storms (nebula volumes) |
+| polus | 2 | asteroid fields |
+| ryloth | 6 | asteroid fields |
+| saleucami | 24 | asteroid fields |
+| shola | 6 | asteroid fields |
+| tatooine | 6 | asteroid fields, nebulas |
+| themaw | 6 | asteroid fields |
+| utapau | 6 | asteroid fields |
+| yavin | 8 | asteroid fields |
+
 `--eawr-live-session m2` (EAWR-80 part A) runs the authoritative tactical session of the M2
 skirmish (`plan/phase-2/m2-skirmish.md`) on `_mp_space_coruscant.ted` with `--eawr-populate`.
 The session steps on its own simulation thread with the EAWR-276 worker pool
@@ -120,13 +203,13 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
 - `--eawr-live-deploy-overlay on|off` (default `off`, EAWR-563): draws the fog plane as FoC's red deployment overlay
   (space-fog-presentation.md FW-22, FW-23) instead of the white fog: fogged cells and the map's border in
   `SpaceReinforceFOWColor` on the reinforcement tile. `live_fog.deploy_overlay` records it. FoC shows it only in the
-  reinforcement pane; M2 has none, so it is a switch for looking at it and the hook for later deployment zones
+  reinforcement pane; M2 enables it while the pane or a reinforcement drag is active. The switch also exposes it
   (`FogField::set_deployment_overlay`'s blocked-point function).
 - Unit fog fade (EAWR-535, FW-16 to FW-21, always on except with `--eawr-live-reveal on`): the report's
   `live_session.fading_units`, `fading` (every drawn unit's opacity now) and `fading_log` (one row a tick a unit is
   below full opacity) read it.
-- `--eawr-live-ai on|off` (default `on`): the FoC AI of `m2`. A `replay` session never runs it;
-  the recorded AI commands replay as they are. Passing it with a session kind other than `m2`
+- `--eawr-live-ai on|off` (default `on`): the FoC AI of `m2` and `skirmish`. A `replay` session never runs it;
+  the recorded AI commands replay as they are. Passing it with a session kind other than `m2` or `skirmish`
   has no effect: it prints a warning and the report's `live_session.ai_flag_ignored` is `true`.
 - `--eawr-live-reveal on|off` (default `off`, a viewer debug aid): draws every unit and effect
   (engine and damage emitters, breakoff props) regardless of the local player's fog, so the
@@ -169,6 +252,11 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   whose ship the player did not see (`not_seen`) or whose tick had left the snapshot history
   (`unknown`, EAWR-401), and the fires and explosions that ended before a frame reached them
   (`effects_skipped`).
+- `--eawr-live-purchase-slots <N>` (1 to 64, default 10; EAWR-530 test hook): the model slots composed per
+  buyable unit type. A slot whose unit is gone goes to the next unit of its type (the report's
+  `slots_released`), so a small N shows the reuse without buying past ten squadrons. An
+  `--eawr-live-late-orders on` lets an `--eawr-live-order` name a unit the start does not hold (a
+  bought one, with an ID above every start unit's); it is given as the local player.
 - `--eawr-live-death-anim <TYPE>`, `--eawr-live-death-persistence <seconds>`: test hooks that
   give every death clone this `Specific_Death_Anim_Type` or `Death_Persistence_Duration`.
 - `--eawr-live-follow <unit>` (EAWR-447, eye-check clips): every frame the tactical camera looks at
@@ -178,6 +266,10 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   ticks of its `started` and `ended` events), `drawn_max`, the most spinning craft one frame
   placed, and `ships_max`, the most of those with a model (launched craft have none yet) (EAWR-447,
   docs/behaviour/space-fighter-deaths.md).
+- The report's `live_session.ion_shots` (EAWR-862) lists each squadron whose `ION_CANNON_SHOT` the
+  frames saw on (`switched_on`, `first_on`, `last_on`, `on`) and each unit they saw ion-stunned
+  (`first`, `max_frames`); `battle_effects.ability_shots_fired` and `ability_shot_frames_drawn`
+  count the ion bolts by the projectile type drawn (docs/behaviour/battle-presentation.md BP-66).
 - `--eawr-live-capture-ticks a,b,...` also captures the frames that show those ticks, as
   `<capture stem>_tNNNN.png`; each must be a multiple of the step, which a frame shows exactly.
   `--eawr-live-ticks n` keeps the run going until tick n.
@@ -216,6 +308,10 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   `%APPDATA%/Godot/app_userdata/EAWR Viewer/logs/`), always, without `--eawr-live-replay-out`. The
   error panel and `live_session.failure_replay` name the file; `sim_headless --replay <file>
   --game-root <install>` replays it into the same failure.
+- `--eawr-live-particle-workers n` (EAWR-638; default a quarter of the hardware threads, 1 to 4, the
+  main thread included): the pool the battle's particle systems (unit emitters, battle effects,
+  breakoff props) step and build their streams on; 1 runs them on the main thread alone. The
+  streams are the same with any count.
 - `--eawr-live-workers n` (default hardware threads minus two), `--eawr-live-hashes <csv>`,
   `--eawr-live-replay-out <file>`: the pool size, the per-tick state hashes and the recorded
   replay. At the end a driven run replays its recording headless and reports
@@ -237,7 +333,12 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   what it did and `world_ui` what the frame drew. Run pointer gestures on a GPU host: a window
   manager that resizes the local window (FancyZones) moves the injected window-space events off
   the pinned capture viewport.
-  `<tick>:<click|hover>:hud=<pause|fast_forward|resume|quit>` aims at a HUD control (EAWR-459, EAWR-453);
+  `<tick>:<click|hover|press|release>:hud=<pause|fast_forward|resume|quit>` aims at a HUD control (EAWR-459, EAWR-453),
+  as do the production panel's `b_reinforcement`, `r_close`, pane slots `r_RRCC` and queue slots
+  `tqueueNN` (EAWR-530). To deploy a completed purchase, open reinforcements, hold the left button on
+  its reserve slot, drag the green/red model preview to a clear revealed point, and release. Red
+  releases keep the unit in reserve; victory closes the pane and cancels placement (WR-07, WR-13..15).
+  Script a drag with `510:press:hud=r_0000`, `515:hover:@x,y,0`, `520:release:@x,y,0`;
   the pointer reaches it one frame before the click. `f<frame>` in place of `<tick>` fires on
   that frame after the warm-up, since a paused battle shows one tick on many frames.
 - `--eawr-live-capture-frames a,b,...`: captures by frame after the warm-up, as
@@ -246,7 +347,12 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   drawn frame of the live session: the frame's wall-clock ms, the engine's process ms (the viewer's own frame work), the root viewport's measured render CPU
   and GPU ms, draw calls, objects and primitives (the renderer's numbers are the previous frame's), and
   the presented tick, the units the local player sees, the projectiles in flight and the particles of
-  the battle effects and unit emitters. Timers and counters only; the hashes do not change.
+  the battle effects and unit emitters, `particle_ms`, the main thread's ms in the frame's unit
+  emitters, battle effects and breakoff props, and `ticks` and `tick_ms`, the simulation ticks
+  completed since the previous row and their summed cost (EAWR-638), and `submit_ms` and `pieces`, the main
+  thread's ms in the space view's snapshot builds and renderer submit and the pieces submitted, and `sent`, the transforms of those that reached the engine (EAWR-888: only
+  the pieces that moved).
+  Timers and counters only; the hashes do not change.
 - `--eawr-live-speed 0..4` (default 2): the tactical speed setting, 10, 20, 30, 45 or 60 ticks
   a second ([time controls](../../docs/behaviour/tactical-time-controls.md) TM-01).
 

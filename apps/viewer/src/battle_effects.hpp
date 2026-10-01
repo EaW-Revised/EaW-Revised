@@ -108,9 +108,17 @@ public:
     // so effects keep battle time in a paced capture. False (failure() set) when the particle
     // backend failed.
     // `snapshot_at` finds the projectile a hit ended (BP-64).
+    // #862 (space-abilities AB-66): finds the projectiles the ticks in `reached` launched as a
+    // weapon's ability shot, so they pose, draw and hit with that shot's look. Idempotent per
+    // tick: the live session calls it before the model projectiles pose, frame() again.
+    void note_ability_shots(std::span<const platform::LiveTickEvents> reached,
+                            const sim::tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at);
     [[nodiscard]] bool frame(std::span<const platform::LiveTickEvents> reached,
         const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest, double alpha,
         const UnitLookup& units, const FixedCamera& camera, double presented_tick, const SnapshotAt& snapshot_at);
+    // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
+    // this object's frames.
+    void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "battle_effects" member, followed by ",\n".
@@ -135,6 +143,9 @@ private:
     };
     struct TypeLooks final {
         std::map<std::uint32_t, ProjectileLook> weapons; // by weapon slot key (HardPoints index or object_weapon)
+        // #862 (space-abilities AB-66): the weapon's ability shot, the squadron's
+        // ION_CANNON_SHOT override projectile, by weapon slot key.
+        std::map<std::uint32_t, ProjectileLook> ability_weapons;
         std::string death_explosion;                     // Death_Explosions
         std::string spin_explosion;                      // Spin_Away_On_Death_Explosion (#447)
         std::vector<std::string> hardpoint_explosions;   // Death_Explosion_Particles, HardPoints order
@@ -189,6 +200,9 @@ private:
     [[nodiscard]] bool advance_until(std::uint64_t target);
     // One 30 Hz sample of one effect; `gone` when it was released.
     [[nodiscard]] bool step_effect(LiveEffect& effect, bool& gone);
+    // What follows an effect's advance: its age, its detach at the end of its lifetime and its
+    // release once drained; `gone` when it was released.
+    void after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone);
     [[nodiscard]] Batch* batch(Render render);
     // The look of a projectile's weapon: its shooter's type (remembered while it flies, the
     // shooter may have died) and weapon slot. Null when unknown.
@@ -204,6 +218,9 @@ private:
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
     std::unique_ptr<particles::EffectRegistry> registry_;
+    // #638: the handles of one batched advance or present and their statistics, reused.
+    std::vector<particles::EffectHandle> batch_handles_;
+    std::vector<particles::EffectFrameStats> batch_stats_;
     std::map<sim::tactical::TypeId, TypeLooks> types_;
     std::map<std::string, ParticleType> particle_types_;
     std::vector<LiveEffect> effects_;
@@ -213,6 +230,14 @@ private:
     std::map<sim::EntityId, sim::tactical::TypeId> entity_types_;
     // The shooter type of each projectile in flight (its shooter may die before it lands).
     std::map<std::uint64_t, sim::tactical::TypeId> projectile_shooters_;
+    // #862 (AB-66): the projectiles in flight that a weapon fired as its ability shot, found by
+    // the weapon_fired events that say so; they draw and hit with the ability shot's look.
+    // Kept with the tick they launched and forgotten ability_projectile_memory ticks later.
+    std::map<std::uint64_t, std::uint64_t> ability_projectiles_;
+    std::optional<std::uint64_t> ability_noted_through_;  // the last tick note_ability_shots read
+    // Ability shots fired (weapon_fired events) and drawn (kite or beam frames), by projectile type.
+    std::map<std::string, std::uint64_t> ability_shots_fired_;
+    std::map<std::string, std::uint64_t> ability_shots_drawn_;
     // #456 BP-62: one slot pool per model projectile type, its placed ships, and which pool and
     // slot each of those ships is; the projectiles drawn as models this frame.
     struct ModelPool final {

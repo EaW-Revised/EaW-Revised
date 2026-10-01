@@ -421,6 +421,102 @@ void test_flash() {
 }
 
 // Worker counts, storage order and replay round trips reproduce every hash and digest.
+// Grid-copy budget: snapshots and unchanged ticks share rows, while a one-cell flash
+// copies one value row, independently of the number or ordering of workers.
+void test_row_copy_budget() {
+    auto rules = coruscant();
+    rules.cells_wide = 512;
+    rules.cells_tall = 512;
+    const std::vector<tactical::Player> players{{rebel, 0, 1, tactical::player_flag_commandable},
+        {empire, 1, 2, tactical::player_flag_commandable}};
+    for (const auto workers : std::vector<std::size_t>{1, 2, 4, 8,
+             eawr::platform::ThreadWorkerAdapter::hardware_worker_count()}) {
+        tactical::FogCells cells(rules, players);
+        const auto initial = cells.value_rows(0);
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(cells.advance(11, true, {}, executor)), "empty grid service succeeds");
+        expect(cells.copied_grid_bytes() == 0 && cells.value_rows(0) == initial,
+            "servicing empty grids copies no cell bytes");
+        auto staged = cells;
+        expect(staged.value_rows(0) == initial, "staging a grid copies no cell bytes");
+        const std::vector<tactical::FogFlash> flashes{{rebel, at(0, 0)}};
+        expect(static_cast<bool>(staged.advance(0, false, {}, executor, flashes)), "one-cell flash succeeds");
+        expect(staged.copied_grid_bytes() == rules.cells_wide, "one flash copies exactly one value row, no holds");
+        const auto flashed = staged.value_rows(0);
+        std::size_t changed_rows = 0;
+        for (std::size_t row = 0; row < initial.size(); ++row) changed_rows += initial[row] != flashed[row] ? 1U : 0U;
+        expect(changed_rows == 1 && cells.value_rows(0) == initial && !cells.revealed(0, at(0, 0)),
+            "only the flashed row changes, leaving the committed grid intact");
+        expect(staged.value_rows(1) == cells.value_rows(1), "the other player's grid shares every row");
+        expect(static_cast<bool>(staged.advance(1, false, {}, executor)), "unchanged tick succeeds");
+        expect(staged.copied_grid_bytes() == 0 && staged.value_rows(0) == flashed,
+            "retained snapshots and unchanged ticks copy no cell bytes");
+        expect(static_cast<bool>(staged.advance(11, true, {}, executor)), "flash regrows on the player's service");
+        expect(staged.copied_grid_bytes() == rules.cells_wide, "regrowth copies only the nonzero row");
+        expect((*flashed[65])[65] == 255 && (*staged.value_rows(0)[65])[65] == 238,
+            "regrowth leaves the earlier published row immutable");
+    }
+}
+
+class FailAfterPhase final : public eawr::sim::PartitionExecutor {
+public:
+    explicit FailAfterPhase(const std::string_view phase) : phase_(phase) {}
+    [[nodiscard]] std::size_t worker_count() const noexcept override { return 1; }
+    [[nodiscard]] eawr::core::Result<void> execute(const std::size_t count,
+        const std::function<void(std::size_t)>& partition) const override {
+        return inline_.execute(count, partition);
+    }
+    [[nodiscard]] eawr::core::Result<void> execute_phase(const std::string_view phase, const std::size_t count,
+        const std::function<void(std::size_t)>& partition) const override {
+        auto result = inline_.execute(count, partition);
+        if (!result || phase != phase_) return result;
+        eawr::core::Diagnostic error;
+        error.code = std::string(tactical::diagnostic_codes::worker_failure);
+        error.message = "injected failure after fog staging";
+        return eawr::core::Result<void>::failure(std::move(error));
+    }
+private:
+    std::string_view phase_;
+    eawr::sim::InlineExecutor inline_;
+};
+
+void test_staged_fog_failure() {
+    const eawr::sim::InlineExecutor executor;
+    for (const auto phase : {"fog-cells", "visibility"}) {
+        auto session = s91_session(coruscant());
+        auto reference = s91_session(coruscant());
+        bool injected = false;
+        for (int tick = 0; tick < 400; ++tick) {
+            const auto expected = reference.step(executor);
+            expect(static_cast<bool>(expected), "reference tick succeeds");
+            if (reference.fog_cells()->copied_grid_bytes() == 0) {
+                expect(static_cast<bool>(session.step(executor)), "pre-failure tick succeeds");
+                continue;
+            }
+            // Locate an actual grid edit, including the squadron's deferred release.
+            const auto completed = session.completed_tick();
+            const auto hash = session.state_sha256();
+            const auto snapshot = session.snapshot();
+            const auto rows = session.fog_cells()->value_rows(0);
+            expect(!session.step(FailAfterPhase(phase)), "late phase failure is propagated");
+            expect(session.completed_tick() == completed && session.state_sha256() == hash && session.snapshot() == snapshot
+                && session.fog_cells()->value_rows(0) == rows, "a failed tick commits no fog rows, anchors or snapshot");
+            const auto retried = session.step(executor);
+            expect(retried && expected && retried.value().state_sha256 == expected.value().state_sha256,
+                "retry commits exactly the reference's edited fog state");
+            for (int later = 0; later < 250; ++later) {
+                const auto actual = session.step(executor);
+                const auto next = reference.step(executor);
+                expect(actual && next && actual.value().state_sha256 == next.value().state_sha256,
+                    "retry preserves later fog hold counts, regrowth, visibility and hashes");
+            }
+            injected = true;
+            break;
+        }
+        expect(injected, "failure injection exercised a tick that stages changed rows");
+    }
+}
+
 void test_determinism() {
     for (const auto& fog : {std::optional<tactical::FogRules>{}, std::optional(coruscant())}) {
         const auto label = std::string(fog ? "cells" : "exact");
@@ -462,6 +558,8 @@ int main() {
     test_cell_circle();
     test_quantisation();
     test_phase_map();
+    test_row_copy_budget();
+    test_staged_fog_failure();
     test_flash();
     test_determinism();
     if (failures != 0) {

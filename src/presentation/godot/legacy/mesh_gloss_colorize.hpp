@@ -43,6 +43,8 @@ uniform mat4 eawr_sph_r;
 uniform mat4 eawr_sph_g;
 uniform mat4 eawr_sph_b;
 uniform vec4 eawr_light_scale = vec4(1.0);
+// WR-14/37: per-object preview tint and arrival fade share the light-scale input.
+instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
 uniform vec3 eawr_eye_position = vec3(0.0, 420.0, 1050.0);
 uniform vec3 eawr_light_direction = vec3(0.0, 1.0, 0.0);
 uniform vec3 eawr_light_specular = vec3(2.0, 1.88, 1.72);
@@ -75,7 +77,7 @@ void vertex() {
     vec3 half_direction = normalize(eye_direction + eawr_light_direction);
     float specular_factor = pow(max(dot(normal_world, half_direction), 0.0), 16.0);
     eawr_vertex_diffuse = vec4(
-        eawr_diffuse * irradiance * eawr_light_scale.rgb + eawr_emissive,
+        eawr_diffuse * irradiance * eawr_light_scale.rgb * eawr_unit_light_scale + eawr_emissive,
         eawr_light_scale.a);
     eawr_vertex_specular = eawr_specular * (specular_factor * eawr_light_specular);
 }

@@ -250,6 +250,45 @@ struct ObstacleType final {
     bool operator==(const ObstacleType&) const = default;
 };
 
+// #530 (docs/behaviour/space-purchasing.md): a skirmish station's `Income_Stream_Ability`
+// (PU-02, PU-03) and `Income_Stream_Mod_Ability` (PU-04) sub-objects, by Name.
+struct IncomeStream final {
+    std::string name;
+    std::optional<Fixed> base_value;       // Base_Income_Value
+    std::optional<Fixed> interval_seconds; // Base_Interval_In_Secs
+    bool split_with_allies{};              // Split_Income_With_Allies
+    bool full_amount_to_everyone{};        // Full_Amount_To_Everyone
+    bool operator==(const IncomeStream&) const = default;
+};
+
+struct IncomeBonus final {
+    std::string name;
+    std::optional<Fixed> additive;   // Income_Additive_Value
+    std::optional<Fixed> multiplier; // Income_Multiplier
+    std::string target_source;       // Target_Stream_Source
+    bool operator==(const IncomeBonus&) const = default;
+};
+
+// One faction's group of Tactical_Buildable_Objects_Multiplayer (PU-10), in authored order.
+struct BuildGroup final {
+    std::string faction;
+    std::vector<std::string> types;
+    bool operator==(const BuildGroup&) const = default;
+};
+
+// What a type builds and costs in a skirmish (#530, PU-10 to PU-21, PU-31).
+struct Production final {
+    std::vector<BuildGroup> buildable;                   // Tactical_Buildable_Objects_Multiplayer
+    std::optional<Fixed> build_cost_multiplayer;         // Tactical_Build_Cost_Multiplayer
+    std::optional<Fixed> build_time_seconds;             // Tactical_Build_Time_Seconds
+    std::string production_queue;                        // Tactical_Production_Queue
+    std::optional<std::uint32_t> population_value;       // Population_Value
+    std::optional<Fixed> reinforcement_prevention_radius; // Reinforcement_Prevention_Radius
+    std::vector<IncomeStream> income;
+    std::vector<IncomeBonus> income_bonuses;
+    bool operator==(const Production&) const = default;
+};
+
 struct UnitType final {
     std::string id;
     UnitKind kind{UnitKind::ship};
@@ -308,7 +347,8 @@ struct UnitType final {
     std::optional<Weapon> weapon;      // object weapon (Projectile_Types)
     std::vector<BonePoint> target_bones;
     std::vector<Ability> abilities;
-    // `Abilities` sub-objects (station income and radar), off in M2 (SK-31):
+    // `Abilities` sub-objects (station income and radar) as authored; since #530 the income is
+    // modelled through `production`, the radar stays off (SK-31):
     // element name and Name attribute.
     std::vector<std::string> inactive_abilities;
     SpaceFootprint footprint; // #71
@@ -331,6 +371,7 @@ struct UnitType final {
     std::optional<Fixed> spin_away_time;
     // #409: Out_Of_Combat_Defense_Adjustment, a craft's defense while idle or approaching (DG-26).
     std::optional<Fixed> out_of_combat_defense;
+    Production production; // #530
     // #457: Minimum_Follow_Distance, how close a chasing craft closes before it slows (FD-05).
     std::optional<Fixed> follow_distance;
     bool operator==(const UnitType&) const = default;

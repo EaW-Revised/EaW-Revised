@@ -328,7 +328,7 @@ bool UiGalleryMode::State::load() {
     if (font_mount) font_filesystem.emplace(std::move(font_mount.value()));
     const vfs::Vfs unmounted;
     fonts = std::make_unique<FontProvider>(
-        model::load_font_cache(font_filesystem ? *font_filesystem : unmounted, directory.generic_string()));
+        model::load_font_cache(font_filesystem ? *font_filesystem : unmounted, ViewerPath::utf8(directory)));
 
     const model::LayoutRules rules = options.rules == "retail" ? model::LayoutRules::retail
                                                                 : model::LayoutRules::aspect_correct;
@@ -577,7 +577,7 @@ void UiGalleryMode::State::build_hud_page(Node3D& parent) {
                                .loose_logical_prefix = std::string(model::font_cache_prefix), .active_archives = {}};
     auto font_mount = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
     const vfs::Vfs unmounted;
-    hud_options.font_cache = model::load_font_cache(font_mount ? font_mount.value() : unmounted, directory.generic_string());
+    hud_options.font_cache = model::load_font_cache(font_mount ? font_mount.value() : unmounted, ViewerPath::utf8(directory));
     hud_options.font_cache_source = font_cache_source;
     // The planet: the map's root field 0x09 and its Planet object (hud_shell.hpp).
     // The HUD keeps reading the objects (the unit cards' Icon_Name and Text_ID), so they live in the state.

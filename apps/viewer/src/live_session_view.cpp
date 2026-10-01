@@ -1,10 +1,12 @@
 #include "live_session_view.hpp"
 
 #include "shutdown_trace.hpp"
+#include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -26,6 +28,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -89,12 +92,18 @@ constexpr std::size_t fading_log_limit = 8192;
 
 // The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
 [[nodiscard]] std::optional<units::UnitTables> load_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-                                                           std::string& failure) {
+                                                           std::string& failure,
+                                                           const std::set<std::string>& additional_types = {}) {
     scene::VfsAssetCache cache(filesystem);
     units::LoadInput input;
     input.catalog = &catalog;
     input.filesystem = &filesystem;
     input.model = cache.access().model;
+    if (!additional_types.empty()) {
+        for (const auto type : units::pinned_m2_types()) input.types.emplace_back(type);
+        input.types.insert(input.types.end(), additional_types.begin(), additional_types.end());
+        for (const auto type : units::pinned_m2_obstacles()) input.obstacles.emplace_back(type);
+    }
     auto tables = units::load_unit_tables(input);
     if (!tables) {
         failure = "live session unit tables: " + core::format_diagnostic(tables.error());
@@ -343,13 +352,20 @@ constexpr std::array<std::size_t, 8> reported_clip_types{
         input.drag = {*dx, *dy};
         return input;
     }
-    // #459 and #453: a HUD control by name.
+    // #459 and #453: a HUD control by name. #530 adds the production panel's controls: the
+    // reinforcements button, the pane's close button and slots r_RRCC, and the queue slots tqueueNN.
     if (target.rfind("hud=", 0) == 0) {
         input.hud = target.substr(4);
-        if (input.kind != "click" && input.kind != "hover") return std::nullopt;
-        if (input.hud != "pause" && input.hud != "fast_forward" && input.hud != "resume" && input.hud != "quit") {
-            return std::nullopt;
-        }
+        if (input.kind != "click" && input.kind != "hover" && input.kind != "press" && input.kind != "release") return std::nullopt;
+        const auto digits = [](std::string_view text) {
+            return !text.empty() && std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        const std::string_view hud = input.hud;
+        const bool time = hud == "pause" || hud == "fast_forward" || hud == "resume" || hud == "quit";
+        const bool production = hud == "b_reinforcement" || hud == "r_close" ||
+                                (hud.size() == 6 && hud.substr(0, 2) == "r_" && digits(hud.substr(2))) ||
+                                (hud.size() == 8 && hud.substr(0, 6) == "tqueue" && digits(hud.substr(6)));
+        if (!time && !production) return std::nullopt;
         if (input.shift || input.ctrl || input.alt) return std::nullopt;
         return input;
     }
@@ -369,7 +385,8 @@ constexpr std::array<std::size_t, 8> reported_clip_types{
         input.card = static_cast<std::size_t>(*slot);
         return input;
     }
-    if (input.kind != "click" && input.kind != "dclick" && input.kind != "rclick" && input.kind != "hover") {
+    if (input.kind != "click" && input.kind != "dclick" && input.kind != "rclick" && input.kind != "hover"
+        && input.kind != "press" && input.kind != "release") {
         return std::nullopt;
     }
     if (target.rfind("icon=", 0) == 0 && (input.kind == "hover" || input.kind == "click" || input.kind == "dclick" || input.kind == "rclick")) {
@@ -377,6 +394,18 @@ constexpr std::array<std::size_t, 8> reported_clip_types{
         if (!unit || *unit == 0) return std::nullopt;
         input.unit = *unit;
         input.icon = true;
+        return input;
+    }
+    if (target.rfind("reticle=", 0) == 0) {
+        // reticle=<unit>:<hardpoint>
+        const auto colon = target.find(':', 8);
+        if (colon == std::string::npos) return std::nullopt;
+        const auto unit = parse_u64(std::string_view(target).substr(8, colon - 8));
+        const std::string_view which = std::string_view(target).substr(colon + 1);
+        const auto hardpoint = which == "first" ? std::optional<std::uint64_t>(0xffffffffU) : parse_u64(which);
+        if (!unit || *unit == 0 || !hardpoint || (*hardpoint >= 255 && *hardpoint != 0xffffffffU)) return std::nullopt;
+        input.unit = *unit;
+        input.reticle = static_cast<std::uint32_t>(*hardpoint);
         return input;
     }
     if (target.rfind("unit=", 0) == 0) {
@@ -407,7 +436,7 @@ constexpr std::array<std::size_t, 8> reported_clip_types{
 bool LiveSessionView::parse_argument(const std::string_view name, const std::optional<std::string>& value,
                                      Options& options, bool& value_used, std::string& error) {
     value_used = false;
-    if (name.substr(0, 12) != "--eawr-live-") return false;
+    if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-")) return false;
     if (!value) {
         error = "missing value for " + std::string(name);
         return true;
@@ -415,12 +444,70 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
     value_used = true;
     const std::string& text = *value;
     if (name == "--eawr-live-session") {
-        if (text != "m2" && text != "replay" && text != "melee") {
-            error = "--eawr-live-session expects m2 (the plan/phase-2 skirmish fixture), replay or melee";
+        if (text != "m2" && text != "skirmish" && text != "replay" && text != "melee") {
+            error = "--eawr-live-session expects m2, skirmish, replay or melee";
         }
         options.fixture = text;
+    } else if (name == "--eawr-skirmish-map") {
+        options.skirmish.map = lower_path(text);
+    } else if (name == "--eawr-skirmish-seed") {
+        const auto seed = parse_u64(text);
+        if (!seed) error = "--eawr-skirmish-seed expects an unsigned whole number";
+        else options.skirmish.seed = *seed;
+    } else if (name == "--eawr-skirmish-players") {
+        const auto comma = text.find(',');
+        const auto first = comma == std::string::npos ? std::nullopt : parse_u64(text.substr(0, comma));
+        const auto second = comma == std::string::npos ? std::nullopt : parse_u64(text.substr(comma + 1));
+        if (!first || !second || *first == 0 || *first >= *second || *second > tactical::max_players) {
+            error = "--eawr-skirmish-players requires exactly two increasing slot IDs; more than two players are not supported";
+        } else {
+            if (!options.skirmish.slots) options.skirmish.slots = skirmish::m2_fixture().slots;
+            (*options.skirmish.slots)[0].slot = static_cast<std::uint32_t>(*first);
+            (*options.skirmish.slots)[1].slot = static_cast<std::uint32_t>(*second);
+        }
+    } else if (name == "--eawr-skirmish-slot" || name == "--eawr-skirmish-fleet") {
+        const auto colon = text.find(':');
+        const auto slot = parse_u64(text.substr(0, colon));
+        if (colon == std::string::npos || !slot || *slot < 1 || *slot > tactical::max_players) {
+            error = std::string(name) + " expects a player slot followed by a colon";
+        } else {
+            if (!options.skirmish.slots) options.skirmish.slots = skirmish::m2_fixture().slots;
+            const auto found = std::find_if(options.skirmish.slots->begin(), options.skirmish.slots->end(),
+                [&](const auto& entry) { return entry.slot == *slot; });
+            if (found == options.skirmish.slots->end()) {
+                error = "slot is not one of the two skirmish players; set --eawr-skirmish-players first";
+                return true;
+            }
+            auto& entry = *found;
+            const auto body = text.substr(colon + 1);
+            if (name == "--eawr-skirmish-fleet") {
+                entry.fleet.clear();
+                if (body != "none") {
+                    std::istringstream names(body);
+                    std::string unit;
+                    while (std::getline(names, unit, ',')) {
+                        if (unit.empty()) error = "--eawr-skirmish-fleet has an empty unit name";
+                        else entry.fleet.push_back(unit);
+                    }
+                    if (entry.fleet.empty() || body.ends_with(',')) error = "--eawr-skirmish-fleet expects unit names or none";
+                }
+            } else {
+                const auto first = body.find(':');
+                const auto last = body.rfind(':');
+                const auto team = first == last ? std::nullopt : parse_u64(body.substr(first + 1, last - first - 1));
+                const auto control = last == std::string::npos ? std::string{} : body.substr(last + 1);
+                if (first == std::string::npos || first == 0 || !team || *team >= tactical::max_players
+                    || (control != "human" && control != "ai")) {
+                    error = "--eawr-skirmish-slot expects <1|2>:<faction>:<team>:<human|ai>";
+                } else {
+                    entry.faction = body.substr(0, first);
+                    entry.team = static_cast<std::uint32_t>(*team);
+                    entry.human = control == "human";
+                }
+            }
+        }
     } else if (name == "--eawr-live-replay") {
-        options.replay_input = std::filesystem::path(text);
+        options.replay_input = ViewerPath{text}.native();
     } else if (name == "--eawr-live-melee") {
         options.melee_size = skirmish::melee_size(text);
         if (!options.melee_size) error = "--eawr-live-melee expects s, m or l";
@@ -446,6 +533,13 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
     } else if (name == "--eawr-live-defend") {
         if (text != "on" && text != "off") error = "--eawr-live-defend expects on or off";
         options.defend = text == "on";
+    } else if (name == "--eawr-live-purchase-slots") {
+        const auto slots = parse_u64(text);
+        if (!slots || *slots == 0 || *slots > 64) error = "--eawr-live-purchase-slots expects 1 to 64";
+        else options.purchase_slots = static_cast<std::uint32_t>(*slots);
+    } else if (name == "--eawr-live-late-orders") {
+        if (text != "on" && text != "off") error = "--eawr-live-late-orders expects on or off";
+        options.late_orders = text == "on";
     } else if (name == "--eawr-live-shield-flash") {
         if (text != "on" && text != "off") error = "--eawr-live-shield-flash expects on or off";
         options.shield_flash = text == "on";
@@ -472,7 +566,8 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:<click|rclick>:minimap=x,y or <tick>:box:minimap=x,y/minimap=x,y, "
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
-                    "or <tick>:wheel:out, or <tick>:<click|hover>:hud=<pause|fast_forward|resume|quit>; "
+                    "or <tick>:wheel:out, or <tick>:<click|hover>:hud=<pause|fast_forward|resume|quit|"
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));
@@ -546,6 +641,10 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         const auto workers = parse_u64(text);
         if (!workers || *workers == 0 || *workers > 256) error = "--eawr-live-workers expects 1 to 256";
         else options.workers = static_cast<std::size_t>(*workers);
+    } else if (name == "--eawr-live-particle-workers") {
+        const auto workers = parse_u64(text);
+        if (!workers || *workers == 0 || *workers > 64) error = "--eawr-live-particle-workers expects 1 to 64";
+        else options.particle_workers = static_cast<std::size_t>(*workers);
     } else if (name == "--eawr-live-fault-tick") {
         const auto tick = parse_u64(text);
         if (!tick || *tick > tactical::max_ticks) error = "--eawr-live-fault-tick expects a tick";
@@ -582,9 +681,9 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         if (text != "on" && text != "off") error = "--eawr-live-verify expects on or off";
         options.verify = text == "on";
     } else if (name == "--eawr-live-hashes") {
-        options.hashes_path = std::filesystem::path(text);
+        options.hashes_path = ViewerPath{text}.native();
     } else if (name == "--eawr-live-replay-out") {
-        options.replay_path = std::filesystem::path(text);
+        options.replay_path = ViewerPath{text}.native();
     } else {
         value_used = false;
         error = "unknown live session option " + std::string(name);
@@ -619,13 +718,53 @@ LiveSessionView::~LiveSessionView() {
 }
 
 bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure) {
-    const skirmish::Fixture& fixture = skirmish::m2_fixture();
+    skirmish::Fixture fixture = skirmish::m2_fixture();
+    if (options_.fixture == "skirmish") {
+        auto selected = skirmish::fixture_from_options(options_.skirmish, filesystem, catalog);
+        if (!selected) {
+            failure = "live skirmish options: " + core::format_diagnostic(selected.error());
+            return false;
+        }
+        fixture = std::move(selected).value();
+    }
     auto tables = load_tables(filesystem, catalog, failure);
     if (!tables) return false;
     auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *tables);
     if (!inputs) {
         failure = "live session start inputs: " + core::format_diagnostic(inputs.error());
         return false;
+    }
+    if (options_.fixture == "skirmish") {
+        // SC-01: the existing loader follows the selected types' craft, hangar,
+        // hardpoint and projectile references. Keep its pinned inputs unchanged
+        // when every selected type is already loaded (including the M2 default).
+        std::set<std::string> missing;
+        const auto need = [&](const std::string& type) { if (!tables->find(type)) missing.insert(type); };
+        for (const auto& slot : fixture.slots) {
+            for (const auto& type : slot.fleet) need(type);
+            for (const auto& forces : inputs.value().faction_forces) {
+                if (lower_path(forces.faction) != lower_path(slot.faction)) continue;
+                for (const auto& type : forces.space_skirmish_default_forces) need(type);
+            }
+            const std::string station = "team_" + std::string(slot.team < 10 ? "0" : "")
+                + std::to_string(slot.team) + "_space_station";
+            for (const auto& placement : inputs.value().placements) {
+                if (!placement.marker || lower_path(placement.type) != station) continue;
+                for (const auto& candidate : placement.marker_for) {
+                    std::string affiliations = candidate.affiliation;
+                    std::replace(affiliations.begin(), affiliations.end(), ',', ' ');
+                    std::istringstream names(affiliations);
+                    std::string faction;
+                    while (names >> faction) if (lower_path(faction) == lower_path(slot.faction)) need(candidate.type);
+                }
+            }
+        }
+        if (!missing.empty()) {
+            auto extended = load_tables(filesystem, catalog, failure, missing);
+            if (!extended) return false;
+            tables = std::move(extended);
+            inputs.value().tables = &*tables;
+        }
     }
     auto start = skirmish::build_start(fixture, inputs.value());
     if (!start) {
@@ -669,6 +808,19 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
     setup_ = start_->setup;
     content_ = std::move(content).value();
     victory_ = skirmish::victory_rules(*start_, tables.value());
+    // #530: the skirmish economy (credits, the station build queues and hyperspace arrival).
+    auto economy = skirmish::economy_rules(*start_, inputs.value(), tables.value());
+    if (!economy) {
+        failure = "live session economy: " + core::format_diagnostic(economy.error());
+        return false;
+    }
+    economy_ = std::move(economy).value();
+    auto preview_colours = ui::reinforcement_colours(filesystem);
+    if (!preview_colours) {
+        failure = "reinforcement preview colours: " + core::format_diagnostic(preview_colours.error());
+        return false;
+    }
+    preview_colours_ = preview_colours.value();
     tables_ = std::move(*tables);
 
     const auto human = std::find_if(start_->players.begin(), start_->players.end(),
@@ -753,11 +905,11 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
         }
         std::ifstream file(options_.replay_input, std::ios::binary);
         if (!file) {
-            failure = "--eawr-live-replay: cannot read " + options_.replay_input.generic_string();
+            failure = "--eawr-live-replay: cannot read " + ViewerPath::utf8(options_.replay_input);
             return std::nullopt;
         }
         const std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        auto parsed = tactical::parse_replay(bytes, options_.replay_input.generic_string());
+        auto parsed = tactical::parse_replay(bytes, ViewerPath::utf8(options_.replay_input));
         if (!parsed) {
             failure = "--eawr-live-replay: " + core::format_diagnostic(parsed.error());
             return std::nullopt;
@@ -804,6 +956,16 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
         // live path places them straight from the map's placements (add_map_objects), so a
         // replay resolves their type the same way instead of a second lookup.
         for (const auto& [id, type] : skirmish::map_object_type_names(inputs.value().placements)) names.emplace(id, type);
+        // #530: a replay of the M2 start runs with its economy, as sim_headless does.
+        auto start = skirmish::build_start(skirmish::m2_fixture(), inputs.value());
+        if (start && start.value().setup.players == setup.players && start.value().setup.units == setup.units) {
+            auto economy = skirmish::economy_rules(start.value(), inputs.value(), *tables);
+            if (!economy) {
+                failure = "live session economy: " + core::format_diagnostic(economy.error());
+                return false;
+            }
+            economy_ = std::move(economy).value();
+        }
     }
     player_ = options_.player.value_or(setup.players.empty() ? 1U : setup.players.front().player_id);
     if (std::none_of(setup.players.begin(), setup.players.end(),
@@ -855,15 +1017,26 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         failure = "--eawr-live-session " + options_.fixture + " runs on " + fixture.map;
         return false;
     }
+    if (options_.fixture != "skirmish" && (options_.skirmish.map || options_.skirmish.slots || options_.skirmish.seed)) {
+        failure = "--eawr-skirmish-* options require --eawr-live-session skirmish";
+        return false;
+    }
+    if (options_.fixture == "skirmish") {
+        if (options_.skirmish.map && *options_.skirmish.map != lower_path(map_path)) {
+            failure = "--eawr-map and --eawr-skirmish-map must select the same map";
+            return false;
+        }
+        options_.skirmish.map = lower_path(map_path);
+    }
     if (options_.fixture != "melee" && (options_.melee_size || options_.melee_seed)) {
         failure = "--eawr-live-melee and --eawr-live-melee-seed go with --eawr-live-session melee";
         return false;
     }
-    if (options_.fixture != "m2" && options_.ai.has_value()) {
+    if (options_.fixture != "m2" && options_.fixture != "skirmish" && options_.ai.has_value()) {
         ai_flag_ignored_ = true;
         godot::UtilityFunctions::printerr(godot::String(
             ("--eawr-live-ai has no effect with --eawr-live-session " + options_.fixture + "; it only runs the AI"
-             + " of the m2 fixture").c_str()));
+             + " of m2 or skirmish starts").c_str()));
     }
     if (!(options_.fixture == "replay" || options_.fixture == "melee" ? prepare_replay(filesystem, catalog, failure)
                                                                       : prepare_m2(filesystem, catalog, failure))) {
@@ -918,10 +1091,17 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
             return false;
         }
     }
+    // --eawr-live-late-orders: a unit the start does not hold (bought or launched later) has an ID
+    // above every start unit's; an order on one is given as the local player, whose purchases they are.
+    sim::EntityId last_start_unit = 0;
+    for (const auto& [entity, ship] : ship_of_entity_) last_start_unit = std::max(last_start_unit, entity);
     for (const ScheduledOrder& order : options_.orders) {
+        const auto late = [&](const sim::EntityId id) {
+            return ship_of_entity_.contains(id) || (options_.late_orders && id > last_start_unit);
+        };
         const auto stranger = std::find_if(order.more.begin(), order.more.end(),
-            [&](const sim::EntityId id) { return !ship_of_entity_.contains(id); });
-        if (!ship_of_entity_.contains(order.unit) || stranger != order.more.end()) {
+            [&](const sim::EntityId id) { return !late(id); });
+        if (!late(order.unit) || stranger != order.more.end()) {
             failure = "--eawr-live-order: unit " + std::to_string(stranger != order.more.end() ? *stranger : order.unit)
                 + " is not a unit of the start";
             return false;
@@ -967,6 +1147,18 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
     // Past the debris props (max / 2 down) and the death clones (max down).
     constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 4U;
     if (!start_ || !tables_) return;
+    const auto add_slot = [&](const std::string& model, const skirmish::StartUnit& near,
+                              const std::optional<skirmish::LobbyColour>& colour) {
+        SpacePopulation::Options::PlacedShip ship;
+        ship.object_id = model;
+        ship.position = {to_float(near.state.position.x), to_float(near.state.position.y), to_float(near.state.position.z)};
+        ship.yaw_degrees = to_float(near.yaw_degrees);
+        ship.live_entity = first_slot_entity + launch_slots_.size();
+        ship.launch_slot = true;
+        if (colour) ship.team_colour = colour->rgb;
+        launch_slots_.push_back({skirmish::type_id(model), placed_ships_.size(), false, std::nullopt});
+        placed_ships_.push_back(std::move(ship));
+    };
     for (const skirmish::Launch& launch : start_->launches) {
         const units::UnitType* squadron = tables_->find(launch.squadron);
         const auto spawner = std::find_if(start_->units.begin(), start_->units.end(),
@@ -974,18 +1166,57 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
         if (squadron == nullptr || spawner == start_->units.end() || launch.count <= 0 || launch.count > 64) continue;
         const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
             [&](const skirmish::StartPlayer& player) { return player.player.player_id == launch.owner; });
+        const std::optional<skirmish::LobbyColour> colour =
+            owner != start_->players.end() ? owner->colour : std::optional<skirmish::LobbyColour>{};
         for (std::int32_t index = 0; index < launch.count; ++index) {
-            for (const units::SquadronMember& member : squadron->members) {
-                SpacePopulation::Options::PlacedShip ship;
-                ship.object_id = member.craft;
-                ship.position = {to_float(spawner->state.position.x), to_float(spawner->state.position.y),
-                                 to_float(spawner->state.position.z)};
-                ship.yaw_degrees = to_float(spawner->yaw_degrees);
-                ship.live_entity = first_slot_entity + launch_slots_.size();
-                ship.launch_slot = true;
-                if (owner != start_->players.end() && owner->colour) ship.team_colour = owner->colour->rgb;
-                launch_slots_.push_back({skirmish::type_id(member.craft), placed_ships_.size(), false, std::nullopt});
-                placed_ships_.push_back(std::move(ship));
+            for (const units::SquadronMember& member : squadron->members) add_slot(member.craft, *spawner, colour);
+        }
+    }
+    // #530: the units a human player can buy (PU-10) enter after tick zero too, so they get slots
+    // composed with the start: per available unit of its faction's menus, as many as fit its
+    // population cap, at most purchase_slots_per_type (space-purchasing PU-G25). Each slot is the
+    // unit's model, or for a squadron each craft's. The AI does not buy in M2 (PU-G12). A dead
+    // unit's slot is reused (release_dead_slots), so the count bounds what stands at once, not how
+    // many were ever bought.
+    const std::uint32_t purchase_slots_per_type = options_.purchase_slots;
+    for (const tactical::EconomyPlayer& buyer : economy_.players) {
+        if (buyer.ai) continue;
+        const auto owner = std::find_if(start_->players.begin(), start_->players.end(),
+            [&](const skirmish::StartPlayer& player) { return player.player.player_id == buyer.player; });
+        const auto near = std::find_if(start_->units.begin(), start_->units.end(),
+            [&](const skirmish::StartUnit& unit) { return unit.state.owner == buyer.player; });
+        if (owner == start_->players.end() || near == start_->units.end()) continue;
+        std::vector<tactical::TypeId> seen;
+        for (const tactical::StationMenu& menu : economy_.menus) {
+            if (menu.faction != owner->player.faction_id) continue;
+            for (const tactical::BuildOption& option : menu.options) {
+                if (!option.available || option.kind != tactical::BuildKind::unit) continue;
+                if (std::find(seen.begin(), seen.end(), option.type) != seen.end()) continue;
+                seen.push_back(option.type);
+                const auto named = std::find_if(tables_->units.begin(), tables_->units.end(),
+                    [&](const units::UnitType& type) { return skirmish::type_id(type.id) == option.type; });
+                if (named == tables_->units.end()) continue;
+                // WR-12/13: separate preloaded visual clones, never launch slots or live entities.
+                if (buyer.player == player_) {
+                    const auto add_preview = [&](const std::string& craft, const sim::math::Vec3 offset) {
+                        SpacePopulation::Options::PlacedShip preview;
+                        preview.object_id = craft;
+                        preview.live_entity = std::numeric_limits<sim::EntityId>::max() / 8U + placement_clones_.size();
+                        preview.placement_preview = true;
+                        preview.launch_slot = true; // starts hidden until an explicit preview pose
+                        if (owner->colour) preview.team_colour = owner->colour->rgb;
+                        const auto* footprint = economy_.footprint_of(skirmish::type_id(craft));
+                        placement_clones_.push_back({option.type, placed_ships_.size(), offset, footprint ? footprint->layer_z : sim::math::Fixed{}});
+                        placed_ships_.push_back(std::move(preview));
+                    };
+                    if (named->members.empty()) add_preview(named->id, {});
+                    for (const auto& member : named->members) add_preview(member.craft, member.offset.value_or(sim::math::Vec3{}));
+                }
+                const std::uint32_t fits = option.population == 0 ? purchase_slots_per_type : buyer.population_cap / option.population;
+                for (std::uint32_t index = 0; index < std::min(fits, purchase_slots_per_type); ++index) {
+                    if (named->members.empty()) add_slot(named->id, *near, owner->colour);
+                    for (const units::SquadronMember& member : named->members) add_slot(member.craft, *near, owner->colour);
+                }
             }
         }
     }
@@ -1006,6 +1237,32 @@ void LiveSessionView::register_squadron(const tactical::Squadron& squadron, cons
     squadron_seen_.emplace(squadron.container, tick);
     squadron_members_[squadron.container] = squadron.members;
     for (const sim::EntityId member : squadron.members) squadron_of_[member] = squadron.container;
+}
+
+void LiveSessionView::release_dead_slots(const tactical::TacticalSnapshot& latest) {
+    const auto instances = latest.instances();
+    const auto standing = [&](const sim::EntityId entity) {
+        const auto found = std::lower_bound(instances.begin(), instances.end(), entity,
+            [](const tactical::TacticalInstance& instance, const sim::EntityId id) { return instance.entity_id < id; });
+        return found != instances.end() && found->entity_id == entity;
+    };
+    const auto cloned = [&](const sim::EntityId entity) {
+        const auto is = [&](const ActiveClone& clone) { return clone.unit == entity; };
+        return std::any_of(active_clones_.begin(), active_clones_.end(), is)
+            || std::any_of(retiring_clones_.begin(), retiring_clones_.end(), is);
+    };
+    for (auto bound = launched_ship_of_entity_.begin(); bound != launched_ship_of_entity_.end();) {
+        if (standing(bound->first) || cloned(bound->first)) {
+            ++bound;
+            continue;
+        }
+        for (LaunchSlot& slot : launch_slots_) {
+            if (slot.ship == bound->second) slot.bound = false;
+        }
+        death_clones_.erase(bound->first);
+        ++slots_released_;
+        bound = launched_ship_of_entity_.erase(bound);
+    }
 }
 
 std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, const tactical::TypeId type) {
@@ -1187,7 +1444,8 @@ bool LiveSessionView::start(std::string& failure) {
         return commands;
     };
     auto live = platform::LiveSession::start(*setup_, content_->sensors, content_->durability, content_->motion,
-                                             content_->combat, session_options, victory_, content_->fog, content_->abilities);
+                                             content_->combat, session_options, victory_, content_->fog, content_->abilities,
+                                             economy_);
     if (!live) {
         failure = "live session: " + core::format_diagnostic(live.error());
         return false;
@@ -1195,7 +1453,9 @@ bool LiveSessionView::start(std::string& failure) {
     session_ = std::move(live).value();
     // The debug hook: each order as its unit's owner would give it, at its tick.
     for (const ScheduledOrder& order : options_.orders) {
-        platform::LiveOrder live_order{owner_of_entity_.at(order.unit), {order.unit}, tactical::StopPayload{}, order.tick};
+        const auto owner = owner_of_entity_.find(order.unit);
+        platform::LiveOrder live_order{owner != owner_of_entity_.end() ? owner->second : player_, {order.unit},
+                                       tactical::StopPayload{}, order.tick};
         live_order.units.insert(live_order.units.end(), order.more.begin(), order.more.end());
         if (order.kind == tactical::OrderKind::move) live_order.payload = tactical::MovePayload{order.point};
         if (order.kind == tactical::OrderKind::face) live_order.payload = tactical::FacePayload{order.point};
@@ -1285,6 +1545,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         latest = session_->snapshot_at(base + 1U);
         if (!previous || !latest) return fail("tick " + std::to_string(base) + " left the snapshot history");
     }
+    FrameTimer bookkeeping_timer(trace_frames_ ? &bookkeeping_ms_ : nullptr);
     // #518: a squadron a spawner launched registers like a tick-zero one (selection, icon,
     // dogfight grid, leader lookup). A frame may skip ticks, so both ends of it are read.
     for (const auto* snapshot : {previous.get(), latest.get()}) {
@@ -1346,6 +1607,24 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     latest_tick_ = latest->completed_tick();
     reached_tick_ = std::max(reached_tick_, latest_tick_);
     ability_snapshot_ = latest;
+    for (const tactical::TacticalInstance& instance : latest->instances()) {
+        if (instance.ion_stun_frames > 0) {
+            auto [row, added] = ion_stun_rows_.try_emplace(instance.entity_id, IonStunRow{latest->completed_tick(), 0U});
+            static_cast<void>(added);
+            row->second.max_frames = std::max(row->second.max_frames, instance.ion_stun_frames);
+        }
+        if (!squadron_members_.contains(instance.entity_id)) continue;
+        for (const tactical::AbilityStatus& status : instance.abilities) {
+            if (status.kind != tactical::AbilityKind::ion_cannon_shot) continue;
+            IonShotRow& row = ion_shot_rows_[instance.entity_id];
+            if (status.active && !row.on) {
+                ++row.switched_on;
+                if (row.first_on == 0) row.first_on = latest->completed_tick();
+            }
+            if (status.active) row.last_on = latest->completed_tick();
+            row.on = status.active;
+        }
+    }
     if (!outcome_ && latest->outcome()) {
         outcome_ = latest->outcome();
         // #453 BEP-02: the battle ends at end_tick; BE-02: the winner's team wins, every other
@@ -1367,16 +1646,35 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     battle_frame_.alpha = std::clamp(alpha, 0.0, 1.0);
     battle_frame_.presented_tick = presented_tick_;
     battle_frame_.fog = session_->fog_at(latest->completed_tick());
+    // #530 (PU-35, PU-36): evidence of each hyperspace arrival the local player saw start: the tick
+    // it was first listed, the first tick it was visible to the local team (frame 35) and the tick
+    // it had landed (no arrival frame any more).
+    for (const tactical::TacticalInstance& instance : latest->instances()) {
+        if (!instance.arrival) continue;
+        auto& row = arrivals_[instance.entity_id];
+        if (row.first_tick == 0) {
+            row.first_tick = latest->completed_tick();
+            row.owner = instance.owner;
+            row.type = instance.type_id;
+        }
+        row.last_frame = *instance.arrival;
+        if (row.visible_tick == 0 && *instance.arrival >= tactical::arrival_visible_frame) row.visible_tick = latest->completed_tick();
+    }
+    for (auto& [entity, row] : arrivals_) {
+        if (row.landed_tick != 0) continue;
+        const auto found = std::find_if(latest->instances().begin(), latest->instances().end(),
+            [entity = entity](const tactical::TacticalInstance& instance) { return instance.entity_id == entity; });
+        if (found != latest->instances().end() && !found->arrival) row.landed_tick = latest->completed_tick();
+    }
 
     // #535: the local player's per-unit fog fade (space-fog-presentation.md FW-16 to FW-18).
     // `visible_now` is exactly what visible_units() and selection keep reading (unchanged); the
     // fade only adds ghosts of units that just left it, still drawn at their true position while
     // they ease out. `--eawr-live-reveal` (#507's draw bypass) shows every instance at full
     // opacity: the fade is not advanced, so nothing ghosts and no opacity is applied (FW-16).
-    const std::vector<sim::EntityId> visible_now = latest->visible_entities(player_);
-    std::vector<sim::EntityId> alive_now;
-    alive_now.reserve(latest->instances().size());
-    for (const tactical::TacticalInstance& instance : latest->instances()) alive_now.push_back(instance.entity_id);
+    snapshot_index_.refresh(latest, player_);
+    const auto& visible_now = snapshot_index_.visible();
+    const auto& alive_now = snapshot_index_.alive();
     const double fade_frames = fade_presented_tick_ ? std::max(0.0, presented_tick_ - *fade_presented_tick_) : 0.0;
     fade_presented_tick_ = presented_tick_;
     if (!options_.reveal) fade_.advance(visible_now, alive_now, fade_frames);
@@ -1400,7 +1698,11 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         }
     }
 
-    const auto poses = space::interpolate_units(*previous, *latest, alpha, player_, options_.reveal, fading_entities);
+    if (!space::interpolate_visible_units(*previous, *latest, alpha, visible_now, options_.reveal,
+                                         fading_entities, poses_, pose_workers_)) {
+        return fail("live unit interpolation failed");
+    }
+    const auto& poses = poses_;
     // #447: the killed craft spinning away that the local player sees.
     const auto spinning = space::interpolate_spinning(*previous, *latest, alpha, player_, options_.reveal);
     unit_frames_.clear();
@@ -1422,6 +1724,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         const auto found = team_of_player_.find(owner);
         return found == team_of_player_.end() ? std::optional<tactical::TeamId>{} : found->second;
     };
+    release_dead_slots(*latest);
     visible_.clear();
     for (const space::LiveUnitPose& pose : poses) {
         if (!options_.reveal && !std::binary_search(visible_now.begin(), visible_now.end(), pose.entity)) continue;
@@ -1430,87 +1733,87 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         visible_.push_back({pose.entity, *ship, pose.type, pose.owner, pose.owner == player_,
                             team(pose.owner) != team(player_), pose.position, pose.yaw_degrees});
     }
-    alive_.clear();
-    for (const tactical::TacticalInstance& instance : latest->instances()) alive_.push_back(instance.entity_id);
-    std::vector<SpacePopulation::LivePose> live;
+    auto& live = live_poses_;
+    live.clear();
     live.reserve(poses.size() + spinning.size() + active_clones_.size());
-    std::vector<SpacePopulation::LiveClipPose> clip_poses;
-    last_poses_.clear();
-    std::vector<space::LiveUnitPose> drawn = poses;
-    drawn.insert(drawn.end(), spinning.begin(), spinning.end());
-    for (const space::LiveUnitPose& pose : drawn) {
-        // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
-        const auto ship = ship_of(pose.entity, pose.type);
-        if (!ship) continue;
-        SpacePopulation::LivePose placed;
-        placed.ship = *ship;
-        // #506: a squadron craft's pitch too, so it flies nose first (space-fighters FM-02, FM-05).
-        std::array<sim::math::Fixed, 6> values{};
-        const std::array<double, 6> source{pose.position[0], pose.position[1], pose.position[2], pose.yaw_degrees,
-                                           pose.roll_degrees, pose.pitch_degrees};
-        for (std::size_t index = 0; index < values.size(); ++index) {
-            auto fixed = scene::fixed_from_binary32(static_cast<float>(source[index]));
-            if (!fixed) return fail("live unit " + std::to_string(pose.entity) + " pose is not finite");
-            values[index] = fixed.value();
-        }
-        placed.position = {values[0], values[1], values[2]};
-        placed.yaw_degrees = values[3];
-        placed.roll_degrees = values[4];
-        placed.pitch_degrees = values[5];
-        // A spinning craft (#447) is dead: no DEFEND shell.
-        placed.defend_active = options_.defend && !pose.spinning;
-        if (pose.instance != nullptr) {
-            for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
-                if (ability.kind == tactical::AbilityKind::defend && ability.active) placed.defend_active = true;
+    auto& clip_poses = clip_poses_;
+    clip_poses.clear();
+    for (const auto* drawn : {&poses, &spinning}) {
+        for (const space::LiveUnitPose& pose : *drawn) {
+            // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
+            const auto ship = ship_of(pose.entity, pose.type);
+            if (!ship) continue;
+            SpacePopulation::LivePose placed;
+            placed.ship = *ship;
+            // #506: a squadron craft's pitch too, so it flies nose first (space-fighters FM-02, FM-05).
+            std::array<sim::math::Fixed, 6> values{};
+            const std::array<double, 6> source{pose.position[0], pose.position[1], pose.position[2], pose.yaw_degrees,
+                                               pose.roll_degrees, pose.pitch_degrees};
+            for (std::size_t index = 0; index < values.size(); ++index) {
+                auto fixed = scene::fixed_from_binary32(static_cast<float>(source[index]));
+                if (!fixed) return fail("live unit " + std::to_string(pose.entity) + " pose is not finite");
+                values[index] = fixed.value();
             }
-        }
-        if (pose.instance != nullptr && pose.instance->durability) {
-            for (const tactical::HardpointStatus& hardpoint : pose.instance->durability->hardpoints) {
-                placed.hardpoints.push_back(static_cast<scene::HardpointState>(hardpoint.state));
-            }
-        }
-        // #76 AB-31 (UA-06): the S-foils follow SPOILER_LOCK. A switch starts the other clip at the
-        // frame that mirrors the running clip's remaining frames, at the type's deployment rate
-        // (1.0 for the X-wing; retail's 1/30 s blend is not drawn), and it holds its last frame.
-        // A craft spinning away (#447) keeps the S-foils it died with.
-        if (const animation::Player* deploy = population.live_clip(*ship);
-            deploy != nullptr && (pose.instance != nullptr || pose.spinning) && population.live_clip(*ship, true) != nullptr) {
-            SFoil& foil = sfoils_[pose.entity];
-            bool on = foil.on;
+            placed.position = {values[0], values[1], values[2]};
+            placed.yaw_degrees = values[3];
+            placed.roll_degrees = values[4];
+            placed.pitch_degrees = values[5];
+            // A spinning craft (#447) is dead: no DEFEND shell.
+            placed.defend_active = options_.defend && !pose.spinning;
             if (pose.instance != nullptr) {
-                on = false;
                 for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
-                    if (ability.kind == tactical::AbilityKind::spoiler_lock && ability.active) on = true;
+                    if (ability.kind == tactical::AbilityKind::defend && ability.active) placed.defend_active = true;
                 }
             }
-            const auto frame_of = [&](const SFoil& state) {
-                const animation::Player* player = population.live_clip(*ship, state.alternate);
-                const double frames = player->playable_frames();
-                const double elapsed = std::max(0.0, presented_tick_ - state.since);
-                const double frame = state.start_frame
-                    + elapsed * player->frames_per_second() / tactical::logical_frames_per_second;
-                return std::pair{std::min(frame, std::max(0.0, frames - 1.0)), player->playable_frames()};
-            };
-            if (on != foil.on) {
-                std::int64_t start = 0;
+            if (pose.instance != nullptr && pose.instance->durability) {
+                for (const tactical::HardpointStatus& hardpoint : pose.instance->durability->hardpoints) {
+                    placed.hardpoints.push_back(static_cast<scene::HardpointState>(hardpoint.state));
+                }
+            }
+            // #76 AB-31 (UA-06): the S-foils follow SPOILER_LOCK. A switch starts the other clip at the
+            // frame that mirrors the running clip's remaining frames, at the type's deployment rate
+            // (1.0 for the X-wing; retail's 1/30 s blend is not drawn), and it holds its last frame.
+            // A craft spinning away (#447) keeps the S-foils it died with.
+            if (const animation::Player* deploy = population.live_clip(*ship);
+                deploy != nullptr && (pose.instance != nullptr || pose.spinning) && population.live_clip(*ship, true) != nullptr) {
+                SFoil& foil = sfoils_[pose.entity];
+                bool on = foil.on;
+                if (pose.instance != nullptr) {
+                    on = false;
+                    for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
+                        if (ability.kind == tactical::AbilityKind::spoiler_lock && ability.active) on = true;
+                    }
+                }
+                const auto frame_of = [&](const SFoil& state) {
+                    const animation::Player* player = population.live_clip(*ship, state.alternate);
+                    const double frames = player->playable_frames();
+                    const double elapsed = std::max(0.0, presented_tick_ - state.since);
+                    const double frame = state.start_frame
+                        + elapsed * player->frames_per_second() / tactical::logical_frames_per_second;
+                    return std::pair{std::min(frame, std::max(0.0, frames - 1.0)), player->playable_frames()};
+                };
+                if (on != foil.on) {
+                    std::int64_t start = 0;
+                    if (foil.started) {
+                        const auto [frame, count] = frame_of(foil);
+                        start = static_cast<std::int64_t>(count) - static_cast<std::int64_t>(frame) - 1;
+                    }
+                    foil = SFoil{on, true, !on, presented_tick_, static_cast<std::uint32_t>(std::max<std::int64_t>(start, 0))};
+                    ++sfoil_switches_;
+                }
                 if (foil.started) {
+                    constexpr std::uint32_t subdivisions = 64;
                     const auto [frame, count] = frame_of(foil);
-                    start = static_cast<std::int64_t>(count) - static_cast<std::int64_t>(frame) - 1;
+                    static_cast<void>(count);
+                    clip_poses.push_back({*ship, {static_cast<std::uint64_t>(frame * subdivisions), subdivisions}, 0.0F,
+                                          foil.alternate});
                 }
-                foil = SFoil{on, true, !on, presented_tick_, static_cast<std::uint32_t>(std::max<std::int64_t>(start, 0))};
-                ++sfoil_switches_;
             }
-            if (foil.started) {
-                constexpr std::uint32_t subdivisions = 64;
-                const auto [frame, count] = frame_of(foil);
-                static_cast<void>(count);
-                clip_poses.push_back({*ship, {static_cast<std::uint64_t>(frame * subdivisions), subdivisions}, 0.0F,
-                                      foil.alternate});
-            }
+            last_poses_[pose.entity] = placed;
+            live.push_back(std::move(placed));
         }
-        last_poses_[pose.entity] = placed;
-        live.push_back(std::move(placed));
     }
+    std::erase_if(last_poses_, [this](const auto& entry) { return !unit_frames_.contains(entry.first); });
     const std::size_t seen = options_.reveal ? poses.size() : visible_now.size();
     visible_units_ = seen;
     hidden_units_ = latest->instances().size() - seen;
@@ -1549,9 +1852,50 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
     // #456: the model projectiles in flight, each on its pool's placed ship.
     if (projectile_models_) {
+        // #862: the ion shots launched since the last frame pose as the ability shot's model.
+        projectile_models_->note_ability_shots(battle_frame_.reached, *latest,
+            [this](const std::uint64_t tick) { return session_->snapshot_at(tick); });
         projectile_models_->pose_projectile_models(*previous, *latest, battle_frame_.alpha,
             [this](const sim::EntityId entity) { return unit_frame(entity); }, live);
     }
+    // WR-12..14: cursor-following clones use the same composed model, scale and idle reader
+    // as ordinary ships. Emitters were removed from their private placements at composition.
+    if (preview_type_ && preview_point_ && reinforcement_allowed()) {
+        const auto* player = economy_.player(player_);
+        if (player != nullptr) {
+            const auto direction = tactical::planar_direction(player->reinforcement_yaw);
+            if (!direction) return fail(core::format_diagnostic(direction.error()));
+            std::ostringstream sample;
+            sample << "{\"tick\": " << latest->completed_tick() << ", \"valid\": "
+                   << (preview_valid_ ? "true" : "false") << ", \"clones\": [";
+            std::size_t clone_index = 0;
+            for (const auto& clone : placement_clones_) {
+                if (clone.type != *preview_type_) continue;
+                const auto xx = sim::math::multiply(clone.offset.x, direction.value().x);
+                const auto yy = sim::math::multiply(clone.offset.y, direction.value().y);
+                const auto xy = sim::math::multiply(clone.offset.x, direction.value().y);
+                const auto yx = sim::math::multiply(clone.offset.y, direction.value().x);
+                if (!xx || !yy || !xy || !yx) return fail("reinforcement preview offset overflow");
+                SpacePopulation::LivePose placed;
+                placed.ship = clone.ship;
+                placed.position = {sim::math::Fixed::from_raw(preview_point_->x.raw() + xx.value().raw() - yy.value().raw()),
+                    sim::math::Fixed::from_raw(preview_point_->y.raw() + xy.value().raw() + yx.value().raw()),
+                    sim::math::Fixed::from_raw(clone.layer_z.raw() + clone.offset.z.raw())};
+                placed.yaw_degrees = player->reinforcement_yaw;
+                live.push_back(placed);
+                sample << (clone_index++ ? ", " : "") << "[" << to_float(placed.position.x) << ", "
+                       << to_float(placed.position.y) << ", " << to_float(placed.position.z) << "]";
+                for (const auto entity : population.live_ship_entities(clone.ship)) {
+                    renderer.set_light_scale(entity, preview_colours_[preview_valid_ ? 0 : 1]);
+                    renderer.set_unit_opacity(entity, 1.0F); // authored colour alpha is not opacity
+                }
+            }
+            sample << "]}";
+            if (preview_rows_.size() < 256) preview_rows_.push_back(sample.str());
+            ++preview_frames_;
+        }
+    }
+    bookkeeping_timer.finish();
     if (!population.pose_live(live)) return fail(population.failure());
     // #535: the fog fade's opacity (FW-16 to FW-19) goes to every piece of the ship; the pieces
     // whose adapters carry the unit's opacity uniform (the hull surfaces, as BP-21's shield flash
@@ -1562,6 +1906,15 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         const float opacity = fade_.opacity(pose.entity).value_or(1.0F);
         for (const sim::EntityId piece : population.live_ship_entities(*ship)) {
             renderer.set_unit_opacity(piece, opacity);
+            // WR-37: frame 35 starts a light fade lasting 115/(FPS*4) seconds.
+            // Presentation time interpolates the logical counter; fog opacity stays independent.
+            float light = 1.0F;
+            if (pose.instance != nullptr && pose.instance->arrival) {
+                const double birth = static_cast<double>(latest->completed_tick()) - *pose.instance->arrival;
+                light = static_cast<float>(std::clamp((presented_tick_ - birth - tactical::arrival_visible_frame)
+                    / (static_cast<double>(tactical::arrival_sweep_frames) / 4.0), 0.0, 1.0));
+            }
+            renderer.set_light_scale(piece, {light, light, light});
         }
     }
     if (!population.pose_live_clips(renderer, clip_poses)) return fail(population.failure());
@@ -1736,6 +2089,110 @@ void LiveSessionView::Abilities::request(const ui::AbilityRequest& request) {
     }
 }
 
+const tactical::EconomyView* LiveSessionView::local_economy() const noexcept {
+    if (!battle_frame_.latest) return nullptr;
+    for (const tactical::EconomyView& view : battle_frame_.latest->economy()) {
+        if (view.player == player_) return &view;
+    }
+    return nullptr;
+}
+
+std::optional<tactical::FactionId> LiveSessionView::local_faction_id() const noexcept {
+    if (!setup_) return std::nullopt;
+    for (const tactical::Player& player : setup_->players) {
+        if (player.player_id == player_) return player.faction_id;
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+// #530: an economy intent through the order scheduler; false when the scheduler refused it.
+bool issue_economy(ui::CommandScheduler* scheduler, const ui::TacticalIntent& intent) {
+    return scheduler != nullptr && static_cast<bool>(scheduler->issue(intent));
+}
+
+} // namespace
+
+bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId type) {
+    ui::TacticalIntent intent;
+    intent.verb = ui::TacticalVerb::buy;
+    intent.units = {station};
+    intent.type = type;
+    intent.origin = ui::CommandOrigin::hud_button;
+    const bool issued = issue_economy(scheduler_.get(), intent);
+    ++(issued ? economy_requests_.buys : economy_requests_.refused);
+    return issued;
+}
+
+bool LiveSessionView::cancel_build(const tactical::BuildQueue queue, const std::uint32_t index) {
+    ui::TacticalIntent intent;
+    intent.verb = ui::TacticalVerb::cancel;
+    intent.queue = queue;
+    intent.index = index;
+    intent.origin = ui::CommandOrigin::hud_button;
+    const bool issued = issue_economy(scheduler_.get(), intent);
+    ++(issued ? economy_requests_.cancels : economy_requests_.refused);
+    return issued;
+}
+
+bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Vec3& point) {
+    // WR-15: drop checks placement before room. A busy preview query has no authority;
+    // the cached same-point verdict may be used, and the command independently rechecks state.
+    const auto valid = session_ ? session_->reinforcement_point(player_, type, point) : std::optional<bool>{false};
+    const bool cached = preview_type_ == type && preview_point_ == point && preview_valid_;
+    if (!reinforcement_allowed() || !valid.value_or(cached) || !reinforcement_room(type)) {
+        ++economy_requests_.refused;
+        return false;
+    }
+    ui::TacticalIntent intent;
+    intent.verb = ui::TacticalVerb::reinforce;
+    intent.type = type;
+    intent.destination = point;
+    intent.origin = ui::CommandOrigin::world_click;
+    const bool issued = issue_economy(scheduler_.get(), intent);
+    ++(issued ? economy_requests_.reinforcements : economy_requests_.refused);
+    return issued;
+}
+
+bool LiveSessionView::reinforcement_allowed() const noexcept {
+    if (!setup_ || outcome_ || local_economy() == nullptr) return false;
+    const auto found = std::find_if(setup_->players.begin(), setup_->players.end(), [this](const tactical::Player& player) {
+        return player.player_id == player_;
+    });
+    return found != setup_->players.end() && (found->flags & tactical::player_flag_commandable) != 0;
+}
+
+bool LiveSessionView::reinforcement_room(const tactical::TypeId type) const noexcept {
+    const auto* ledger = local_economy();
+    if (ledger == nullptr || std::find(ledger->pool.begin(), ledger->pool.end(), type) == ledger->pool.end()) return false;
+    for (const auto& menu : economy_.menus) {
+        if (const auto* option = menu.find(type)) {
+            return ledger->population <= ledger->population_cap && option->population <= ledger->population_cap - ledger->population;
+        }
+    }
+    return false;
+}
+
+void LiveSessionView::placement_preview(const std::optional<tactical::TypeId> type,
+    const std::optional<sim::math::Vec3> point) {
+    if (preview_type_ != type || preview_point_ != point) {
+        preview_valid_ = false;
+        preview_checked_tick_.reset();
+    }
+    preview_type_ = type;
+    preview_point_ = point;
+    if (!type || !point || !reinforcement_allowed()) return;
+    // WR-13: an unchanged cursor and snapshot need one predicate query, even while paused.
+    const auto tick = session_->completed_tick();
+    if (preview_checked_tick_ == tick) return;
+    ++preview_queries_;
+    if (const auto valid = session_->reinforcement_point(player_, *type, *point)) {
+        preview_valid_ = *valid;
+        preview_checked_tick_ = tick;
+    }
+}
+
 std::optional<animation::DeathFrame> LiveSessionView::clone_death_frame(const DeathClone& clone,
                                                                        const animation::Player* player,
                                                                        const std::uint64_t tick) {
@@ -1793,7 +2250,8 @@ void LiveSessionView::finish() {
     if (verify) {
         // The viewer-attached run against a headless run of the same command stream.
         auto headless = platform::headless_tick_hashes(replay, content_->sensors, content_->durability, content_->motion,
-                                                       content_->combat, victory_, content_->fog, content_->abilities);
+                                                       content_->combat, victory_, content_->fog, content_->abilities,
+                                                       economy_);
         shutdown_trace::mark("finish: headless replay done");
         headless_equal_ = headless && headless.value() == hashes_;
         if (!headless) finish_status_ = "headless replay failed: " + core::format_diagnostic(headless.error());
@@ -1807,19 +2265,19 @@ void LiveSessionView::finish() {
         std::ofstream output(options_.hashes_path, std::ios::binary | std::ios::trunc);
         output << "tick,sha256\n";
         for (std::size_t index = 0; index < hashes_.size(); ++index) output << index + 1 << ',' << hashes_[index] << '\n';
-        if (!output) finish_status_ = "could not write " + options_.hashes_path.generic_string();
+        if (!output) finish_status_ = "could not write " + ViewerPath::utf8(options_.hashes_path);
     }
     if (!options_.replay_path.empty()) {
         auto bytes = tactical::write_replay(replay);
         std::ofstream output(options_.replay_path, std::ios::binary | std::ios::trunc);
         if (bytes) output.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
-        if (!bytes || !output) finish_status_ = "could not write " + options_.replay_path.generic_string();
+        if (!bytes || !output) finish_status_ = "could not write " + ViewerPath::utf8(options_.replay_path);
         // #459 TP-04: the time track beside the replay; the replay itself is unchanged.
         std::filesystem::path time_path = options_.replay_path;
         time_path += ".time.csv";
         std::ofstream time(time_path, std::ios::binary | std::ios::trunc);
         time << time_.track_csv();
-        if (!time) finish_status_ = "could not write " + time_path.generic_string();
+        if (!time) finish_status_ = "could not write " + ViewerPath::utf8(time_path);
     }
 }
 
@@ -1852,11 +2310,11 @@ void LiveSessionView::save_failure_replay() {
     output.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
     output.close();
     if (!output) {
-        failure_replay_error_ = "could not write " + path.generic_string();
+        failure_replay_error_ = "could not write " + ViewerPath::utf8(path);
         godot::UtilityFunctions::printerr(godot::String(("live session: " + failure_replay_error_).c_str()));
         return;
     }
-    failure_replay_ = path.generic_string();
+    failure_replay_ = ViewerPath::utf8(path);
     godot::UtilityFunctions::print(godot::String(("live session: the failure replay is " + failure_replay_).c_str()));
 }
 
@@ -1894,7 +2352,7 @@ std::shared_ptr<const tactical::TacticalSnapshot> LiveSessionView::snapshot_at(c
 
 void LiveSessionView::write_report(std::ostream& output) const {
     output << "  \"live_session\": {\"fixture\": " << json(options_.fixture)
-           << ", \"replay\": " << json(options_.replay_input.generic_string())
+           << ", \"replay\": " << json(ViewerPath::utf8(options_.replay_input))
            << ", \"reveal\": " << (options_.reveal ? "true" : "false")
            << ", \"pacing\": " << json(options_.real_time ? "real_time" : "driven")
            << ", \"workers\": " << (session_ ? session_->worker_count() : 0U)
@@ -1902,6 +2360,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"units\": " << ship_of_entity_.size()
            << ", \"launch_slots\": " << launch_slots_.size()
            << ", \"launched_drawn\": " << launched_ship_of_entity_.size()
+           << ", \"slots_released\": " << slots_released_
            << ", \"squadrons\": [" << [&] {
                   // #518: every registered squadron, the setup's and the launched, as first seen.
                   std::string rows;
@@ -1967,6 +2426,31 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   return rows;
               }() << "]"
            << ", \"scripted_inputs\": " << options_.inputs.size()
+           << ", \"start_map\": " << json(start_ ? start_->map : "")
+           << ", \"start_map_sha256\": " << json(start_ ? start_->map_sha256 : "")
+           << ", \"start_seed\": " << (setup_ ? setup_->seed : 0)
+           << ", \"start_markers\": [" << [&] {
+                  std::string rows;
+                  if (start_) for (const auto& marker : start_->markers) {
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"record\": ") + std::to_string(marker.record)
+                          + ", \"player\": " + std::to_string(marker.player) + ", \"use\": " + json(skirmish::to_string(marker.use))
+                          + ", \"position\": [" + std::to_string(to_float(marker.position.x)) + ", "
+                          + std::to_string(to_float(marker.position.y)) + ", " + std::to_string(to_float(marker.position.z)) + "]}";
+                  }
+                  return rows;
+              }() << "]"
+           << ", \"start_fleet\": [" << [&] {
+                  std::string rows;
+                  if (start_) for (const auto& unit : start_->units) {
+                      if (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit) continue;
+                      rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ") + std::to_string(unit.state.entity_id)
+                          + ", \"player\": " + std::to_string(unit.state.owner) + ", \"record\": " + std::to_string(unit.record)
+                          + ", \"type\": " + json(unit.type) + ", \"position\": [" + std::to_string(to_float(unit.state.position.x))
+                          + ", " + std::to_string(to_float(unit.state.position.y)) + ", "
+                          + std::to_string(to_float(unit.state.position.z)) + "]}";
+                  }
+                  return rows;
+              }() << "]"
            << ", \"ai_flag_ignored\": " << (ai_flag_ignored_ ? "true" : "false")
            << ", \"time\": {\"speed_step\": " << time_.speed_step() << ", \"state\": "
            << json(time_.ended() ? std::string("ended") : std::string(ui::to_string(time_.state())))
@@ -2038,8 +2522,43 @@ void LiveSessionView::write_report(std::ostream& output) const {
     }
     output << ", \"unit_clips\": [";
     for (std::size_t index = 0; index < unit_clip_rows_.size(); ++index) output << (index ? ", " : "") << unit_clip_rows_[index];
-    output << "], \"sfoil_switches\": " << sfoil_switches_ << ", \"ability_requests\": {\"issued\": "
-           << abilities_.issued() << ", \"refused\": " << abilities_.refused() << "}, \"death_clones\": [";
+    output << "], \"ion_shots\": {\"squadrons\": [";
+    for (auto row = ion_shot_rows_.begin(); row != ion_shot_rows_.end(); ++row) {
+        output << (row == ion_shot_rows_.begin() ? "" : ", ") << "{\"squadron\": " << row->first << ", \"switched_on\": "
+               << row->second.switched_on << ", \"first_on\": " << row->second.first_on << ", \"last_on\": "
+               << row->second.last_on << ", \"on\": " << (row->second.on ? "true" : "false") << "}";
+    }
+    output << "], \"stunned\": [";
+    for (auto row = ion_stun_rows_.begin(); row != ion_stun_rows_.end(); ++row) {
+        output << (row == ion_stun_rows_.begin() ? "" : ", ") << "{\"unit\": " << row->first << ", \"first\": "
+               << row->second.first << ", \"max_frames\": " << row->second.max_frames << "}";
+    }
+    output << "]}, \"sfoil_switches\": " << sfoil_switches_ << ", \"ability_requests\": {\"issued\": "
+           << abilities_.issued() << ", \"refused\": " << abilities_.refused() << "}";
+    // #530: the economy requests, the local player's economy at the last frame and the arrivals.
+    output << ", \"economy_requests\": {\"buys\": " << economy_requests_.buys << ", \"cancels\": "
+           << economy_requests_.cancels << ", \"reinforcements\": " << economy_requests_.reinforcements
+           << ", \"refused\": " << economy_requests_.refused << "}, \"economy\": ";
+    if (const tactical::EconomyView* view = local_economy()) {
+        output << "{\"credits\": " << json(ui::credits_text(view->credits)) << ", \"population\": " << view->population
+               << ", \"population_cap\": " << view->population_cap << ", \"queued\": ["
+               << view->queues[0].size() << ", " << view->queues[1].size() << "], \"pool\": [";
+        for (std::size_t index = 0; index < view->pool.size(); ++index) output << (index ? ", " : "") << view->pool[index];
+        output << "]}";
+    } else {
+        output << "null";
+    }
+    output << ", \"placement_preview\": {\"frames\": " << preview_frames_ << ", \"queries\": "
+           << preview_queries_ << ", \"samples\": [";
+    for (std::size_t index = 0; index < preview_rows_.size(); ++index) output << (index ? ", " : "") << preview_rows_[index];
+    output << "]}, \"arrivals\": [";
+    std::size_t arrival_index = 0;
+    for (const auto& [entity, row] : arrivals_) {
+        output << (arrival_index++ ? ", " : "") << "{\"unit\": " << entity << ", \"owner\": " << row.owner
+               << ", \"type\": " << row.type << ", \"first_tick\": " << row.first_tick << ", \"visible_tick\": "
+               << row.visible_tick << ", \"landed_tick\": " << row.landed_tick << "}";
+    }
+    output << "], \"death_clones\": [";
     for (std::size_t index = 0; index < death_clone_rows_.size(); ++index) output << (index ? ", " : "") << death_clone_rows_[index];
     output << "], \"death_clones_shown\": [";
     for (std::size_t index = 0; index < active_clones_.size(); ++index) {

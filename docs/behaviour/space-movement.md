@@ -294,8 +294,7 @@ tolerances stay at the conversion bound.
 ## Heights (EAWR-666)
 
 Status: implemented for the skirmish start (companies, stations, map objects, squadron craft) and
-the hangar launch. Reinforcements, production and Lua or ability spawns do not exist in the sim yet;
-when they land (EAWR-556, EAWR-574) they must raise the unit they create (LZ-01). The rules come from the FoC debug build (evidence IDs E666-01 to E666-08,
+the hangar launch. Reinforcements (EAWR-556, PU-34) raise the unit they create (LZ-01, PL-08); Lua and ability spawns do not exist in the sim yet and must raise theirs when they land. The rules come from the FoC debug build (evidence IDs E666-01 to E666-08,
 private map) and the retail recordings. Space ships don't all fly on one plane: each type flies at
 its own height, and that gap is what keeps ships of different layers, which never avoid each other
 (AV-01), from meeting.
@@ -987,7 +986,10 @@ start runs it for each starting company, which before EAWR-597 the remake stacke
   members, such as a bought Nebulon-B) is created directly on the arrival point at height 0
   with **no search at all**, so it may overlap what stands there; a transport is likewise placed
   without a search. Bought units' arrival (EAWR-556, EAWR-574) reuses `find_free_space` for the squadron
-  and fleet members only, with the fixed start angle 0, the point as the fallback and height 0.
+  and fleet members only, with the fixed start angle 0, the point as the fallback and height 0. The
+  "height 0" is the arrival point's: the point is on the plane, and object creation then raises each created
+  unit by its `Layer_Z_Adjust` (LZ-01). The sim does this in `execute_economy` (EAWR-530); whether the reinforcement
+  call itself sets the raise flag is PU-G26 in [space purchasing](space-purchasing.md).
 - **PL-09** (research E71-01 to E71-24, AV-01 to AV-19) FoC does not push overlapping ships apart:
   its ships do not steer, avoidance happens only when a move is planned, and a ship at rest holds
   its position. FoC does have a resolver for stopped-against-stopped and moving-against-moving

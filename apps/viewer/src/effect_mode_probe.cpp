@@ -569,8 +569,8 @@ bool EffectMode::State::verify_capture(const CaptureResult& capture, const Frame
 std::filesystem::path EffectMode::State::capture_path_for(const std::string_view label) const {
     if (options.capture_path.empty()) return {};
     std::filesystem::path path = options.capture_path;
-    path.replace_filename(options.capture_path.stem().string() + "-" + std::string(label)
-        + options.capture_path.extension().string());
+    path.replace_filename(ViewerPath{ViewerPath::utf8(options.capture_path.stem()) + "-" + std::string(label)
+        + ViewerPath::utf8(options.capture_path.extension())}.native());
     return path;
 }
 

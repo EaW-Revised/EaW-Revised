@@ -141,6 +141,14 @@ SOFTWARE.
 
 ## pg-starwarsgame-lsp
 
+The Lua wire cross-check cases in `tests/ci/test_lua_debugger.py` are adapted
+from the MIT-licensed bitstream, handshake, datagram, reliable-channel, and
+Lua-message codec tests at v0.4.0 revision
+`19b37b8777ea8e1058b29bfbff70babccc1287d2`. The signed variable-type boundary
+in `tools/rig/lua_debugger/luadbg_harness.py` was cross-checked against that
+revision and the debug build (LD-X02). No implementation library is vendored
+or linked; the separately pinned Python client remains the wire transport.
+
 The active patch-slot ordering and leaf-first multi-MODPATH evidence documented
 for the VFS were cross-checked against pg-starwarsgame-lsp revision
 `4461416d401b0f665bc1fe82aad60b90bd707fa9`,

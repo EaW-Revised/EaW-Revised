@@ -35,12 +35,13 @@ If you enjoy the project and want to support its development, you can do so on
 
 ## Status
 
-The first milestone, rendering the world (FoC space and land maps with props, units,
-particles, lighting, sky and shadows in a Godot-based viewer), is done. Current work is
-the first playable space skirmish. The project targets Forces of Corruption only for now.
+The M2 space skirmish is playable: a human player fights one AI opponent with fixed
+starting forces. The project targets Forces of Corruption only for now.
 
 What works today:
 
+- Selecting ships and squadrons, movement and attack orders, combat, station purchasing,
+  unit abilities, tactical HUD, fog of war, battle audio, victory and defeat in M2.
 - Reading a FoC installation: MEG archives and loose files through a virtual file system,
   the XML object registry, maps, models, textures and animations.
 - A Godot viewer that renders FoC space and land maps from map and XML data.
@@ -48,8 +49,53 @@ What works today:
   replays recorded commands with identical state hashes on every platform.
 - A Lua 5.0.2 script host and a sandboxed, deterministic Lua VM for gameplay scripts.
 
-Not there yet: complete combat gameplay, the full HUD, campaigns and multiplayer.
+Limits: FoC only, two players (human versus AI), one demo map. Space hazards, playable
+land battles, galactic campaigns and multiplayer are not implemented yet. Land maps
+can be viewed, and the full interface and gameplay are still under development.
 The [roadmap](plan/backlog.md) and [phase plans](plan/) say what comes next.
+
+## Try the space battle
+
+You need your own FoC installation, Python 3.8 or newer, the standard **Godot 4.7.2**
+binary, and a GPU with Vulkan support (Forward+). You do not need a source checkout,
+CMake or a compiler. On Linux the game data can come from an existing Steam/Proton
+installation; the viewer itself runs natively.
+
+1. Download the `windows-x64-viewer.zip` or `linux-x64-viewer.zip` asset from
+   [Releases](https://github.com/EaW-Revised/EaW-Revised/releases) and extract the whole
+   archive to a writable folder.
+2. Download and extract the standard Godot binary for
+   [Windows x64](https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_win64.exe.zip)
+   or [Linux x64](https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip).
+   Put the executable beside `play-demo.cmd` / `play-demo.sh`, or supply its path when
+   asked. On Linux ensure it is executable (`chmod +x Godot_v4.7.2-stable_linux.x86_64`).
+3. Double-click **`play-demo.cmd`** on Windows, or run **`sh ./play-demo.sh`** on Linux.
+   The launcher finds Steam libraries or asks for the install folder containing
+   `GameData/` and `corruption/`. It remembers both paths under `out/`, validates and
+   extracts the HUD fonts from your own expansion executable, and starts the lit M2
+   battle with audio, shadows and the tactical HUD enabled. No game data or fonts
+   are included in the download. Close the window to quit.
+
+For explicit paths (quotes handle spaces), either script accepts
+`--game-root "<install>" --godot "<executable>"`. The environment variables
+`EAWR_EAW_GAME_ROOT` and `EAWR_GODOT_EXECUTABLE` also work. An unsupported game
+executable is reported before launch; `--allow-unknown-build` opts into structural
+font validation for another FoC build. Launcher errors stay visible on Windows.
+
+Controls:
+
+- **Select:** left-click a ship or squadron icon; drag a box to select several.
+  Shift adds/removes units; double-click selects matching visible units.
+- **Order:** right-click space to move, or an enemy to attack. **A** arms attack
+  mode, **S** stops; Ctrl+right-click gives an attack-move order. Ctrl+1..9 stores
+  a group; 1..9 recalls it.
+- **Buy:** select your station, open its reinforcement/production button, then
+  click a unit's build icon. Available units depend on the station and credits.
+- **Abilities:** select a ship with an ion shot, click its ion shot button or
+  press **Shift+I**, then left-click an enemy target. Right-click or Esc cancels.
+- **Camera:** arrows or screen edges pan, middle-drag pans, Ctrl+middle-drag
+  rotates/tilts, the wheel zooms, and a middle click resets. **Insert** opens
+  the overview. **F3** toggles the performance overlay.
 
 ## Quick start
 

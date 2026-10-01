@@ -378,14 +378,16 @@ struct EffectRegistry::Instance final {
     Instance(EffectHandle id, SystemDefinition definition, const std::uint32_t seed,
              const std::size_t capacity, std::optional<MeshBinding> mesh_binding)
         : handle(id), leave_particles(definition.leave_particles), plans(plan_system(definition)),
-          cpu(std::move(definition), seed, capacity, std::move(mesh_binding)) {}
+          cpu(std::move(definition), seed, capacity, std::move(mesh_binding)), streams(plans.size()) {}
 
     EffectHandle handle{};
     bool leave_particles{};
     std::vector<EmitterRenderPlan> plans;
     std::vector<std::uint64_t> resources;
     CpuSystem cpu;
-    VertexStream stream;
+    // One stream per plan, kept between frames so a grown stream allocates nothing (#439); the
+    // batched calls build them on the executor and upload them afterwards (#638).
+    std::vector<VertexStream> streams;
     float brightness{1.0F};
 };
 
@@ -547,7 +549,8 @@ core::Result<EffectFrameStats> EffectRegistry::advance(
     if (instance == nullptr) return core::Result<EffectFrameStats>::failure(unknown(handle));
     EffectFrameStats stats;
     stats.advance = instance->cpu.advance(delta_seconds);
-    publish(*instance, camera, &stats);
+    build(*instance, camera, &stats);
+    upload(*instance, true, stream_hashes_);
     return core::Result<EffectFrameStats>::success(std::move(stats));
 }
 
@@ -555,60 +558,164 @@ core::Result<void> EffectRegistry::present(const EffectHandle handle, const Came
     Instance* const instance = find(handle);
     if (instance == nullptr) return core::Result<void>::failure(unknown(handle));
     instance->cpu.follow_emitter();
-    publish(*instance, camera, nullptr);
+    build(*instance, camera, nullptr);
+    upload(*instance, false, false);
     return core::Result<void>::success();
 }
 
-void EffectRegistry::publish(Instance& instance, const CameraFrame& camera, EffectFrameStats* const stats) {
+core::Result<void> EffectRegistry::advance_all(const std::span<const EffectHandle> handles,
+    const float delta_seconds, const CameraFrame& camera, std::vector<EffectFrameStats>& stats) {
+    if (auto resolved = resolve(handles); !resolved) return resolved;
+    stats.resize(batch_.size());
+    auto ran = run_batch([&](const std::size_t index) {
+        // The slot keeps its per-emitter vector's storage; every field starts over.
+        EffectFrameStats& slot = stats[index];
+        std::vector<EmitterFrameStats> emitters = std::move(slot.emitters);
+        emitters.clear();
+        slot = EffectFrameStats{};
+        slot.emitters = std::move(emitters);
+        Instance& instance = *batch_[index];
+        slot.advance = instance.cpu.advance(delta_seconds);
+        build(instance, camera, &slot);
+    });
+    if (!ran) return ran;
+    for (Instance* const instance : batch_) upload(*instance, true, stream_hashes_);
+    return core::Result<void>::success();
+}
+
+core::Result<void> EffectRegistry::present_all(const std::span<const EffectHandle> handles, const CameraFrame& camera) {
+    if (auto resolved = resolve(handles); !resolved) return resolved;
+    auto ran = run_batch([&](const std::size_t index) {
+        Instance& instance = *batch_[index];
+        instance.cpu.follow_emitter();
+        build(instance, camera, nullptr);
+    });
+    if (!ran) return ran;
+    for (Instance* const instance : batch_) upload(*instance, false, false);
+    return core::Result<void>::success();
+}
+
+core::Result<void> EffectRegistry::resolve(const std::span<const EffectHandle> handles) {
+    batch_.clear();
+    batch_.reserve(handles.size());
+    for (const EffectHandle handle : handles) {
+        Instance* const instance = find(handle);
+        if (instance == nullptr) {
+            batch_.clear();
+            return core::Result<void>::failure(unknown(handle));
+        }
+        batch_.push_back(instance);
+    }
+    // Two tasks on one instance would race: a repeated handle fails the batch before any step.
+    sorted_.assign(batch_.begin(), batch_.end());
+    std::sort(sorted_.begin(), sorted_.end(), [](const Instance* left, const Instance* right) {
+        return left->handle < right->handle;
+    });
+    const auto repeated = std::adjacent_find(sorted_.begin(), sorted_.end());
+    if (repeated != sorted_.end()) {
+        core::Diagnostic diagnostic{std::string(diagnostic_codes::batch), core::Severity::error,
+            "effect handle " + std::to_string((*repeated)->handle) + " appears twice in one batch", {}, {}, {}, {}};
+        diagnostics_.push_back(diagnostic);
+        batch_.clear();
+        return core::Result<void>::failure(std::move(diagnostic));
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> EffectRegistry::run_batch(const std::function<void(std::size_t)>& task) {
+    const std::size_t count = batch_.size();
+    if (executor_ == nullptr || count < 2) {
+        for (std::size_t index = 0; index < count; ++index) task(index);
+        return core::Result<void>::success();
+    }
+    // Contiguous slices of the batch in order, at most ADR-009's 64 partitions, which the pool's
+    // workers claim; no two slices share an instance.
+    constexpr std::size_t max_tasks = 64;
+    const std::size_t tasks = std::min(count, max_tasks);
+    const bool ran = executor_->run(tasks, [&](const std::size_t slice) {
+        const std::size_t first = count * slice / tasks;
+        const std::size_t last = count * (slice + 1) / tasks;
+        for (std::size_t index = first; index < last; ++index) task(index);
+    });
+    ++work_.batches;
+    work_.tasks += tasks;
+    if (!ran) {
+        core::Diagnostic diagnostic{std::string(diagnostic_codes::batch), core::Severity::error,
+            "the particle executor could not run a batch of " + std::to_string(count) + " effects", {}, {}, {}, {}};
+        diagnostics_.push_back(diagnostic);
+        return core::Result<void>::failure(std::move(diagnostic));
+    }
+    return core::Result<void>::success();
+}
+
+void EffectRegistry::set_executor(const StepExecutor* const executor) noexcept { executor_ = executor; }
+void EffectRegistry::set_stream_hashes(const bool on) noexcept { stream_hashes_ = on; }
+const RegistryWorkCounts& EffectRegistry::work() const noexcept { return work_; }
+
+void EffectRegistry::build(Instance& instance, const CameraFrame& camera, EffectFrameStats* const stats) const {
     const std::span<const Particle> live = instance.cpu.particles();
+    const bool hash = stats != nullptr && stream_hashes_;
     if (stats != nullptr) {
         stats->particles = live.size();
-        stats->hash = 0xcbf29ce484222325ULL;
+        stats->hash = hash ? 0xcbf29ce484222325ULL : 0U;
         stats->emitters.resize(instance.plans.size());
         for (const Particle& particle : live) {
             if (particle.emitter_index < stats->emitters.size()) ++stats->emitters[particle.emitter_index].particles;
         }
     }
     for (std::size_t index = 0; index < instance.plans.size(); ++index) {
-        instance.stream.clear();
-        build_stream(instance.plans[index], live, camera, instance.stream);
+        VertexStream& stream = instance.streams[index];
+        stream.clear();
+        build_stream(instance.plans[index], live, camera, stream);
         if (instance.brightness != 1.0F) {
             // BP-45, as FoC's renderer: the vertex colour times the
             // brightness (FoC truncates to 8 bits; the stream keeps floats).
-            for (ParticleVertex& vertex : instance.stream.vertices) {
+            for (ParticleVertex& vertex : stream.vertices) {
                 vertex.color = {vertex.color.x * instance.brightness, vertex.color.y * instance.brightness,
                                 vertex.color.z * instance.brightness, vertex.color.w * instance.brightness};
             }
         }
-        const bool drawn = instance.resources[index] != 0U;
-        if (drawn) backend_->update_emitter(instance.resources[index], instance.stream);
         if (stats == nullptr) continue;
+        const bool drawn = instance.resources[index] != 0U;
         EmitterFrameStats& emitter = stats->emitters[index];
-        emitter.quads = instance.stream.quads;
-        for (const ParticleVertex& vertex : instance.stream.vertices) {
+        emitter.quads = stream.quads;
+        for (const ParticleVertex& vertex : stream.vertices) {
             emitter.maximum_alpha = std::max(emitter.maximum_alpha, vertex.color.w);
         }
-        emitter.hash = stream_hash(instance.stream);
+        if (hash) {
+            emitter.hash = stream_hash(stream);
+            stats->hash = stream_hash(stream, stats->hash);
+        }
         emitter.drawn = drawn;
-        stats->hash = stream_hash(instance.stream, stats->hash);
-        if (drawn && instance.stream.quads != 0) {
+        if (drawn && stream.quads != 0) {
             if (!stats->has_bounds) {
-                stats->bounds_min = instance.stream.bounds_min;
-                stats->bounds_max = instance.stream.bounds_max;
+                stats->bounds_min = stream.bounds_min;
+                stats->bounds_max = stream.bounds_max;
                 stats->has_bounds = true;
             } else {
-                stats->bounds_min = {std::min(stats->bounds_min.x, instance.stream.bounds_min.x),
-                    std::min(stats->bounds_min.y, instance.stream.bounds_min.y),
-                    std::min(stats->bounds_min.z, instance.stream.bounds_min.z)};
-                stats->bounds_max = {std::max(stats->bounds_max.x, instance.stream.bounds_max.x),
-                    std::max(stats->bounds_max.y, instance.stream.bounds_max.y),
-                    std::max(stats->bounds_max.z, instance.stream.bounds_max.z)};
+                stats->bounds_min = {std::min(stats->bounds_min.x, stream.bounds_min.x),
+                    std::min(stats->bounds_min.y, stream.bounds_min.y),
+                    std::min(stats->bounds_min.z, stream.bounds_min.z)};
+                stats->bounds_max = {std::max(stats->bounds_max.x, stream.bounds_max.x),
+                    std::max(stats->bounds_max.y, stream.bounds_max.y),
+                    std::max(stats->bounds_max.z, stream.bounds_max.z)};
             }
         }
     }
     if (stats == nullptr) return;
     stats->detached = instance.cpu.detached();
     stats->finished = instance.cpu.finished();
+}
+
+void EffectRegistry::upload(Instance& instance, const bool stepped, const bool hashed) {
+    for (std::size_t index = 0; index < instance.plans.size(); ++index) {
+        if (instance.resources[index] == 0U) continue;
+        backend_->update_emitter(instance.resources[index], instance.streams[index]);
+        ++work_.uploads;
+    }
+    ++(stepped ? work_.steps : work_.presents);
+    work_.streams_built += instance.plans.size();
+    if (hashed) work_.streams_hashed += instance.plans.size();
 }
 
 core::Result<void> EffectRegistry::release(const EffectHandle handle) {

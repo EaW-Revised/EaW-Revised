@@ -97,7 +97,7 @@ hardpoints (destroyed ones included) and S the sum of their current health; C th
 | HR-04 | After a paid frame, a hull fraction h below the combined hardpoint fraction c becomes a hull of H · (1 + c − h). | research E72-08 |
 | HR-05 | The repair ends when the hardpoint is back at full health; retail also re-enables it. | research E72-08 |
 | HR-06 | In the M2 roster only station hardpoints author repair values: 0.5 health per frame, for 1.3 credits (weapons), 1.5 credits (shield generator, fighter bay), and 1.5 (Rebel) or 1.3 (Empire) for the supply dock and comm array. Ship and craft hardpoints author none and cannot be repaired. | data; research IS-09, IS-10 (retail offers the repair order only on star-base hardpoints below full health and never reads the amount; a zero amount would repair without end) |
-| HR-07 | **Selected M2 behaviour: no repair.** Every M2 player has 0 credits and no income (SK-30, SK-31), so a retail repair stops on its first frame, unpaid. The session has no repair command; `sim::tactical::repair_frame` implements HR-01 to HR-05 for the phase that adds credits (fidelity list). Destroyed hardpoints stay destroyed and lost health never returns. | owner SK-30, SK-31; project |
+| HR-07 | **Selected M2 behaviour: no repair.** The session has no repair command, so destroyed hardpoints stay destroyed and lost health never returns. Until EAWR-530 every M2 player had 0 credits, so a retail repair stopped on its first frame, unpaid; since EAWR-530 players have credits and income ([space purchasing](space-purchasing.md) PU-01 to PU-06), and the missing repair command is fidelity item PU-G11. `sim::tactical::repair_frame` implements HR-01 to HR-05 for it. | owner SK-30, SK-31; project |
 
 ### Scripted damage
 

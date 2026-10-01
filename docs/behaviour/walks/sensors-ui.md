@@ -316,7 +316,7 @@ box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui
 | WSU-15 | `type_on_screen`: the projected box centre, closed rectangle | differs slightly (the model origin, half-open) |
 | WSU-16 | S-7 | same |
 | WSU-17 | fogged enemies are not in the pick list, so a right click moves | same, except during a fade-out (ours stops attacking at once) |
-| WSU-18 | `double_click` re-picks and runs `type_on_screen` | same order; the EAWR-665 symptom comes from WSU-10 to WSU-12 |
+| WSU-18 | `double_click` re-picks and runs `type_on_screen`; a reticle under the cursor stands for its ship (EAWR-531) | same order; the EAWR-665 symptom comes from WSU-10 to WSU-12 |
 | WSU-19 | `Selection::box` takes units only | **missing**: own icons in the box |
 | WSU-20 | G, V rules | same |
 | WSU-30, WSU-31 | `draw_icons` | same |

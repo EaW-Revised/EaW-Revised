@@ -738,16 +738,22 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     const tactical::PlayerId local = live.local_player();
 
     // Where each unit the player sees stands (the last visible frame of one that left).
-    if (battle.previous) {
-        for (const tactical::TacticalInstance& instance : battle.previous->instances()) {
+    if (metadata_snapshot_ != battle.latest) {
+        if (battle.previous) {
+            for (const tactical::TacticalInstance& instance : battle.previous->instances()) {
+                entity_types_[instance.entity_id] = instance.type_id;
+            }
+        }
+        live_entities_.clear();
+        for (const tactical::TacticalInstance& instance : battle.latest->instances()) {
+            live_entities_.insert(instance.entity_id);
+            owners_[instance.entity_id] = instance.owner;
             entity_types_[instance.entity_id] = instance.type_id;
         }
+        metadata_snapshot_ = battle.latest;
     }
-    live_entities_.clear();
+    // Positions still interpolate every frame; destruction events need the last visible pose.
     for (const tactical::TacticalInstance& instance : battle.latest->instances()) {
-        live_entities_.insert(instance.entity_id);
-        owners_[instance.entity_id] = instance.owner;
-        entity_types_[instance.entity_id] = instance.type_id;
         if (const auto unit = live.unit_frame(instance.entity_id)) {
             last_seen_[instance.entity_id] = {unit->position, unit->yaw_degrees, instance.type_id, instance.owner};
         } else {
@@ -771,20 +777,21 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         bool attack = false;
         if (snapshot) {
             const std::vector<sim::EntityId> visible = snapshot->visible_entities(local);
-            std::map<sim::EntityId, const tactical::TacticalInstance*> instances;
             for (const tactical::TacticalInstance& instance : snapshot->instances()) {
-                instances[instance.entity_id] = &instance;
                 entity_types_[instance.entity_id] = instance.type_id;
                 owners_[instance.entity_id] = instance.owner;
             }
+            // A lagging historical tick can overwrite metadata from the newest snapshot.
+            // Restore the newest metadata next frame even if its snapshot pointer holds.
+            if (snapshot != battle.latest) metadata_snapshot_.reset();
             toggle_abilities(*snapshot, live);
             for (const tactical::Projectile& projectile : snapshot->projectiles()) {
                 if (!projectiles_seen_.insert(projectile.id).second) continue;
-                const auto shooter = instances.find(projectile.shooter);
+                const auto* shooter = space::find_instance(*snapshot, projectile.shooter);
                 const auto target_owner = owners_.find(projectile.target);
                 if (projectile.owner == local || (target_owner != owners_.end() && target_owner->second == local)) attack = true;
-                if (shooter == instances.end()) continue;
-                const auto type = types_.find(shooter->second->type_id);
+                if (shooter == nullptr) continue;
+                const auto type = types_.find(shooter->type_id);
                 if (type == types_.end()) continue;
                 const auto fire = type->second.fire.find(projectile.weapon);
                 if (fire == type->second.fire.end()) continue;

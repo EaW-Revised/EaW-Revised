@@ -37,7 +37,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
         RenderingServer::get_singleton()->viewport_set_measure_render_time(viewport_, true);
     }
     output_ << "frame,frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,objects,primitives,tick,units,"
-               "projectiles,effects,effect_particles,emitter_particles\n";
+               "projectiles,effects,effect_particles,emitter_particles,particle_ms,ticks,tick_ms,submit_ms,pieces,sent,bookkeeping_ms,hud_ms,audio_ms,fog_ms\n";
     return true;
 }
 
@@ -54,7 +54,9 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_OBJECTS_IN_FRAME))
             << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_PRIMITIVES_IN_FRAME))
             << ',' << frame.presented_tick << ',' << frame.units << ',' << frame.projectiles << ',' << frame.effects << ','
-            << frame.effect_particles << ',' << frame.emitter_particles << '\n';
+            << frame.effect_particles << ',' << frame.emitter_particles << ',' << frame.particle_ms << ',' << frame.ticks
+            << ',' << frame.tick_ms << ',' << frame.submit_ms << ',' << frame.pieces << ',' << frame.sent
+            << ',' << frame.bookkeeping_ms << ',' << frame.hud_ms << ',' << frame.audio_ms << ',' << frame.fog_ms << '\n';
 }
 
 } // namespace eawr::presentation::godot_backend

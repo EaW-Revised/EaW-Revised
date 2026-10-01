@@ -13,6 +13,7 @@
 #include "live_fog_view.hpp"
 #include "overview_fade_view.hpp"
 #include "battle_audio.hpp"
+#include "particle_workers.hpp"
 #include "perf_trace.hpp"
 #include "unit_emitters.hpp"
 #include "space_environment.hpp"
@@ -413,6 +414,9 @@ struct MapMode::State final {
     // moment.
     std::optional<std::uint32_t> idle_offset;
     std::unique_ptr<SpaceEnvironment> space;
+    // #638: the pool the live battle's particle systems step on; declared before the objects
+    // that use it, so it goes last.
+    std::unique_ptr<ParticleWorkers> particle_workers;
     // #82: the local player's selection and orders on the live session; declared after the
     // session, the population and the space view, so it goes first.
     std::unique_ptr<BattleInput> battle;
@@ -424,6 +428,12 @@ struct MapMode::State final {
     std::string audio_argument;
     std::unique_ptr<UnitEmitters> unit_emitters;
     std::optional<PerfTrace> perf_trace;  // --eawr-perf-trace (#601)
+    // #638: the main thread's ms in this frame's unit emitters, battle effects and breakoff props.
+    double particle_ms{};
+    double hud_ms{};
+    double audio_ms{};
+    double fog_ms{};
+    std::uint64_t perf_trace_tick{};  // the newest tick whose cost the perf trace wrote
     std::unique_ptr<DebrisProps> debris_props;  // #391
     std::unique_ptr<LiveFogView> live_fog;      // #494
     std::string space_camera;
@@ -530,6 +540,15 @@ struct MapMode::State final {
     // #455: hands the live battle to the HUD's minimap (what the local player sees, the fog
     // revealers of the local team, the camera's outline). Called right after each live frame.
     void sync_minimap();
+    // #425, #454, #530: the command bar's card slots (the selection's unit cards, or the station's
+    // build buttons while it is the production object, PU-60) and the ability bar.
+    void sync_cards();
+    // The unit tables' type names by session type ID (filled once).
+    void fill_type_names();
+    // #530 (PU-63 to PU-68): the build queue, credits, pool pane and population from the local
+    // player's economy, and the pool slots' types for a pick.
+    void sync_production();
+    std::vector<sim::tactical::TypeId> pool_types;
     std::uint64_t minimap_syncs{};
     // #848 (docs/behaviour/foc-battle-selection.md V-5a to V-5g): the battle UI in the overview
     // levels x1 and x2. Once per live frame, after the camera took this frame's level and before
@@ -973,7 +992,7 @@ struct MapMode::State final {
     // Reads and hashes the map camera config and its bindings, and loads the
     // mode's constants from the effective VFS. Empty `failure` on success.
     [[nodiscard]] std::optional<eawr::viewer::MapCameraSource> load_map_camera(
-        camera::Mode mode, std::string& failure) const;
+        camera::Mode mode, std::string& failure, const eawr::viewer::MapCameraConfig* generated = nullptr) const;
 };
 
 } // namespace eawr::presentation::godot_backend

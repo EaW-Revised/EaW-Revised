@@ -24,7 +24,7 @@ namespace space_environment_detail {
         case '\r': output << "\\r"; break;
         case '\t': output << "\\t"; break;
         default:
-            if (character < 0x20U || character >= 0x7fU) {
+            if (character < 0x20U) {
                 output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
             } else {
                 output << static_cast<char>(character);

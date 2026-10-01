@@ -4,6 +4,7 @@
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/sim/math/geometry.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/victory.hpp"
@@ -56,6 +57,19 @@ struct Fixture final {
 // team 1, the retail lobby defaults and the owner's SK-22 fleet.
 [[nodiscard]] const Fixture& m2_fixture();
 
+// #908: project lobby options. Omitted fields retain the pinned M2 values;
+// an explicit slot list replaces the lobby, including each slot's fleet.
+struct FixtureOptions final {
+    std::optional<std::string> map;
+    std::optional<std::vector<LobbySlot>> slots;
+    std::optional<std::uint64_t> seed;
+};
+
+// Reads and validates the selected space map and binds its actual SHA-256.
+// The pinned map retains its expected hash; no options returns M2 unchanged.
+[[nodiscard]] core::Result<Fixture> fixture_from_options(
+    const FixtureOptions& options, const vfs::Vfs& filesystem, const data::Catalog& catalog);
+
 // A station-marker candidate (Marker_For_Specific_Object_Type) and its
 // Affiliation as authored.
 struct MarkerCandidate final {
@@ -92,6 +106,8 @@ struct StartFaction final {
     bool playable{};           // Is_Playable
     bool multiplayer_player{}; // Create_Player_In_Multiplayer_Games
     bool neutral{};            // Is_Neutral
+    // #530 PU-21: Space_Tactical_Unit_Cap, the faction's population cap in a space skirmish.
+    std::optional<std::uint32_t> space_unit_cap;
 };
 
 struct FactionForces final {
@@ -156,7 +172,8 @@ struct StartPlayer final {
     std::string start_side;                   // Team_NN for lobby players
     std::optional<LobbyColour> colour;        // lobby players (SK-12)
     std::optional<std::int32_t> owner_index;  // non-lobby players: the faction's editor player index
-    // SK-30, SK-31: no credits, income, production queue or population cap.
+    // SK-30, SK-31 (#530): the starting credits (MP_Default_Credits), and whether the player
+    // earns income, builds at its station and has a population cap.
     std::int64_t credits{};
     bool income{};
     bool production_queue{};
@@ -297,6 +314,23 @@ struct SessionContent final {
     const units::UnitTables& tables, std::span<const sim::tactical::PlayerId> humans);
 // The start's own human lobby players.
 [[nodiscard]] sim::tactical::VictoryRules victory_rules(const SkirmishStart& start, const units::UnitTables& tables);
+
+// The economy of a skirmish (#530, docs/behaviour/space-purchasing.md): every lobby player starts
+// with MP_Default_Credits (PU-01) and its faction's Space_Tactical_Unit_Cap (PU-21), and its
+// reinforcements arrive facing its SK-11 spawn marker (PU-34); the non-lobby players have none.
+// Each table station's Tactical_Buildable_Objects_Multiplayer becomes one menu per faction group
+// (PU-10): a table type is a unit with its multiplayer price, build time in frames (times
+// Tactical_Build_Time_Multiplier; the Normal AI's multiplier is 1, SK-42) and population, and
+// anything else (the upgrades, #540) is listed but not available (PU-20). A station's
+// Income_Stream_Ability pays its base value per interval per frame, and each
+// Income_Stream_Mod_Ability of the same station adds its additive value while the hardpoint that
+// enables it stands (PU-02 to PU-04). Every table type with a Reinforcement_Prevention_Radius
+// keeps reinforcements out (PU-31); the playable bounds are the map's declared extents about the
+// origin; the queue holds 5 (PU-14); an arrival is vulnerable for
+// Space_Elevated_Vulnerability_Duration by Space_Elevated_Vulnerability_Factor (PU-38). Fails when
+// a constant it needs is missing or validate_economy rejects the rules.
+[[nodiscard]] core::Result<sim::tactical::EconomyRules> economy_rules(
+    const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables);
 // The fixture's human slots: a replay does not record which players are human.
 [[nodiscard]] std::vector<sim::tactical::PlayerId> human_slots(const Fixture& fixture);
 

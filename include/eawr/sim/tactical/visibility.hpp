@@ -38,7 +38,8 @@ public:
     [[nodiscard]] static core::Result<SensorField> build(
         std::span<const Player> players,
         std::span<const UnitState> units,
-        std::span<const SensorProfile> sensors);
+        std::span<const SensorProfile> sensors,
+        std::span<const EntityId> disabled = {}); // WR-35/39: ascending IDs whose reveal service is disabled
 
     // Bit k is set when players[k] sees a unit of `owner` at `position`: players[k] is on
     // the owner's team, or a unit of players[k]'s team whose type has a sensor profile lies

@@ -204,7 +204,7 @@ void SpaceEnvironment::State::write_fog_report(std::ostream& output) const {
         << ",\n    \"source\": [";
     for (std::size_t index = 0; index < fog.sources().size(); ++index) {
         const auto& source = fog.sources()[index];
-        output << (index ? ", " : "") << "{\"path\": " << json(source.path.generic_string())
+        output << (index ? ", " : "") << "{\"path\": " << json(ViewerPath::utf8(source.path))
             << ", \"sha256\": " << json(source.sha256)
             << ", \"team\": " << source.team << ", \"revision\": " << source.revision << '}';
     }
@@ -308,7 +308,7 @@ void SpaceEnvironment::State::write_fog_report(std::ostream& output) const {
             << ", \"bound_revision\": " << count(fog_phase_revisions) << '}';
         first = false;
     }
-    output << "}, \"paint_evidence\": " << json(options.fog_paint_evidence.generic_string()) << "}"
+    output << "}, \"paint_evidence\": " << json(ViewerPath::utf8(options.fog_paint_evidence)) << "}"
         << ",\n    \"map_sha256\": " << json(options.map_sha256)
         << ", \"scene_sha256\": " << json(fog_units && fog_units->scene() ? fog_units->scene()->scene_sha256 : "")
         << "},\n";

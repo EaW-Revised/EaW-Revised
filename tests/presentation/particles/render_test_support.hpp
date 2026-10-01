@@ -251,4 +251,9 @@ void test_attachment_draining_bound();
 void test_attachment_determinism();
 void test_attachment_merge_stats();
 void test_heat_pixel_change_bound();
+void test_batch_matches_serial();
+void test_batch_hashes_on_request();
+void test_batch_work_counts();
+void test_batch_rejects_repeats_and_unknown();
+void test_batch_present_allocates_nothing();
 } // namespace particle_render_contracts

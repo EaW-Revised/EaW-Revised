@@ -28,6 +28,7 @@
 #include "ui/input_routing.hpp"
 #include "ui/kit.hpp"
 #include "ui/minimap_view.hpp"
+#include "ui/production_view.hpp"
 #include "ui/unit_cards_view.hpp"
 
 #include "eawr/presentation/ui/hud.hpp"
@@ -170,6 +171,12 @@ public:
     void world_input(const godot::Ref<godot::InputEvent>& event);
     // #425: the command bar's unit cards; null before build() or when the shell has no card slots.
     [[nodiscard]] EawrUnitCards* unit_cards() const noexcept;
+    // #530: the build queue, the credits and the reinforcement pane; null before build() or when
+    // the shell has none of them.
+    [[nodiscard]] EawrProductionPanel* production() const noexcept;
+    // #530 PU-62: a type's Tactical_Build_Cost_Multiplayer from the object catalog, for a build
+    // button whose type the session does not build (price 0 in the menu).
+    [[nodiscard]] std::optional<std::int64_t> listed_build_cost(const std::string& type) const;
     // The selection's cards (unit_cards.hpp) to draw; the HUD redraws only when they change.
     void set_unit_cards(const presentation::ui::CardLayout& layout, std::span<const presentation::ui::CardUnit> units);
     // #454 (docs/behaviour/foc-ability-buttons.md): the ability buttons and the cards' ability marks;

@@ -508,6 +508,35 @@ void test_present_allocates_nothing() {
     expect(backend.updates - updates == 150 && backend.quads - quads == 150, "each effect is uploaded once with its glow");
 }
 
+// #638: the batched frame (advance_all, present_all) allocates nothing either once its streams,
+// its statistics and its batch have grown.
+void test_batch_present_allocates_nothing() {
+    CountingBackend backend;
+    particles::EffectRegistry registry(backend);
+    particles::SystemDefinition system;
+    auto glow = drawable_emitter(); glow.translater_id = 26; glow.position.point = {0.0F, 2.0F, 0.0F};
+    system.emitters.push_back(glow);
+    std::vector<particles::EffectHandle> handles;
+    for (std::uint32_t index = 0; index < 150; ++index) {
+        const auto handle = registry.spawn(system, index + 1U, 16);
+        expect(bool(handle), "batch present fixture spawns");
+        if (!handle) return;
+        handles.push_back(handle.value());
+    }
+    const auto camera = test_camera();
+    std::vector<particles::EffectFrameStats> stats;
+    expect(bool(registry.advance_all(handles, 1.0F / 30.0F, camera, stats)), "batch fixture samples");
+    expect(bool(registry.advance_all(handles, 1.0F / 30.0F, camera, stats)), "batch fixture samples again");
+    expect(bool(registry.present_all(handles, camera)), "batch fixture presents");
+    const std::size_t updates = backend.updates;
+    const std::size_t before = global_allocations.load(std::memory_order_relaxed);
+    const bool presented = bool(registry.present_all(handles, camera));
+    const std::size_t allocated = global_allocations.load(std::memory_order_relaxed) - before;
+    expect(presented, "every running effect is presented in one batch");
+    expect(allocated == 0, "a batched frame presenting 150 effects allocates nothing");
+    expect(backend.updates - updates == 150, "the batch uploads each effect once");
+}
+
 void test_camera_and_attachment_frames() {
     const auto camera = particles::camera_frame_from_render({0, 0, 10}, {0, 0, 0}, {0, 1, 0});
     // Render eye (0,0,10) is ALO (0,-10,0); render up +Y is ALO +Z.

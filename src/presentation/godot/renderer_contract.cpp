@@ -220,27 +220,28 @@ std::optional<std::size_t> spatial_declaration_end(const std::string_view source
     return code ? declaration_end_in_code(*code) : std::nullopt;
 }
 
+PresentationTransform adapt_instance(const sim::RenderInstance& instance) {
+    constexpr double inverse_scale = 1.0 / static_cast<double>(sim::math::Fixed::scale);
+    PresentationTransform transform{
+        .entity_id = instance.entity_id,
+        .asset_id = instance.asset_id,
+        .column_major = {},
+    };
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            transform.column_major[column * 4 + row] = static_cast<float>(
+                static_cast<double>(instance.fixed_transform.rows[row][column].raw())
+                * inverse_scale);
+        }
+    }
+    transform.column_major[15] = 1.0F;
+    return transform;
+}
+
 std::vector<PresentationTransform> adapt_snapshot(const sim::RenderSnapshot& snapshot) {
     std::vector<PresentationTransform> result;
     result.reserve(snapshot.instances().size());
-    constexpr double inverse_scale = 1.0 / static_cast<double>(sim::math::Fixed::scale);
-
-    for (const sim::RenderInstance& instance : snapshot.instances()) {
-        PresentationTransform transform{
-            .entity_id = instance.entity_id,
-            .asset_id = instance.asset_id,
-            .column_major = {},
-        };
-        for (std::size_t row = 0; row < 3; ++row) {
-            for (std::size_t column = 0; column < 4; ++column) {
-                transform.column_major[column * 4 + row] = static_cast<float>(
-                    static_cast<double>(instance.fixed_transform.rows[row][column].raw())
-                    * inverse_scale);
-            }
-        }
-        transform.column_major[15] = 1.0F;
-        result.push_back(transform);
-    }
+    for (const sim::RenderInstance& instance : snapshot.instances()) result.push_back(adapt_instance(instance));
     return result;
 }
 

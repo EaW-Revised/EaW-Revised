@@ -168,6 +168,7 @@ private:
     // Every entity this tick's snapshot still carries (BA-24): a squadron's dead craft leave this
     // set the tick they leave the instances, ahead of last_seen_'s own, event-driven pruning.
     std::set<sim::EntityId> live_entities_;
+    std::shared_ptr<const sim::tactical::TacticalSnapshot> metadata_snapshot_;
     std::map<sim::EntityId, sim::tactical::PlayerId> owners_;
     // The type of every unit the session has held (a hit's shooter may have died).
     std::map<sim::EntityId, sim::tactical::TypeId> entity_types_;

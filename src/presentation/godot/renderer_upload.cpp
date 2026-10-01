@@ -482,6 +482,7 @@ struct UniformDeclaration final {
     resource.description = description;
     resource.identity = identity;
     resources_.emplace(asset_id, std::move(resource));
+    ++upload_generation_; // #888: the kept submission order resolves assets again
     static_cast<void>(leases_.upload(asset_id));
     return core::Result<void>::success();
 }
@@ -530,6 +531,7 @@ struct UniformDeclaration final {
     if (found->second.shadow_variant_failed) --shadow_variant_failures_;
     if (rendering) free_resource(*rendering, found->second);
     resources_.erase(found);
+    ++upload_generation_;
     return core::Result<void>::success();
 }
 

@@ -184,9 +184,11 @@ core::Result<void> validate_fog_rules(const FogRules& rules) {
 
 FogCells::FogCells(const FogRules& rules, const std::span<const Player> players)
     : rules_(rules), players_(players.begin(), players.end()) {
-    const auto cells = static_cast<std::size_t>(rules.cells_wide) * rules.cells_tall;
-    values_.assign(players_.size(), std::vector<std::uint8_t>(cells, 0U));
-    holds_.assign(players_.size(), std::vector<std::uint32_t>(cells, 0U));
+    const auto value_row = std::make_shared<std::vector<std::uint8_t>>(rules.cells_wide, 0U);
+    const auto hold_row = std::make_shared<std::vector<std::uint32_t>>(rules.cells_wide, 0U);
+    values_.assign(players_.size(), std::vector<ValueRow>(rules.cells_tall, value_row));
+    holds_.assign(players_.size(), std::vector<HoldRow>(rules.cells_tall, hold_row));
+    flat_values_.resize(players_.size());
 }
 
 core::Result<void> FogCells::advance(const std::uint64_t tick, const bool service,
@@ -202,8 +204,8 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
         const auto range = partition_range(partition, revealers.size());
         for (auto index = range.begin; index < range.end; ++index) {
             const auto& revealer = revealers[index];
-            const auto found = anchors_.find(revealer.id);
-            if (found != anchors_.end()) {
+            const auto found = anchors_->find(revealer.id);
+            if (found != anchors_->end()) {
                 const auto dx = distance_along(revealer.position.x.raw(), found->second.x.raw());
                 const auto dy = distance_along(revealer.position.y.raw(), found->second.y.raw());
                 auto moved = math::detail::multiply_u64(dx, dx);
@@ -229,7 +231,7 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     }
 
     // Serial, in ascending ID: the circles to release (revealers gone or re-marking) and mark.
-    auto anchors = anchors_;
+    auto anchors = *anchors_;
     std::vector<Change> changes;
     std::size_t next = 0;
     for (auto iterator = anchors.begin(); iterator != anchors.end();) {
@@ -296,64 +298,77 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     auto holds = holds_;
     const auto wide = static_cast<std::size_t>(rules_.cells_wide);
     const auto step = rules_.ramp_down_step;
+    // Row buffers are immutable inputs; each partition stages only its own changed rows.
+    std::vector<std::size_t> copied(tick_partition_count);
+    // Disjoint row flags share one allocation per grid, including empty partition bands.
+    std::vector<std::uint8_t> value_staged(players_.size() * rules_.cells_tall);
+    std::vector<std::uint8_t> hold_staged(players_.size() * rules_.cells_tall);
     const auto applied = executor.execute_phase("fog-cells", tick_partition_count, [&](const std::size_t partition) {
         const auto band = partition_range(partition, rules_.cells_tall);
         const auto in_band = [&](const Span& span) {
             return static_cast<std::size_t>(span.row) >= band.begin && static_cast<std::size_t>(span.row) < band.end;
         };
-        for (std::size_t player = 0; player < players_.size(); ++player) {
-            if (!serviced[player]) {
-                continue;
+        const auto write_value = [&](const std::size_t player, const std::size_t row, const std::size_t column, const std::uint8_t value) {
+            if ((*values[player][row])[column] == value) return;
+            auto& staged = value_staged[player * rules_.cells_tall + row];
+            if (staged == 0U) {
+                values[player][row] = std::make_shared<std::vector<std::uint8_t>>(*values[player][row]);
+                copied[partition] += wide * sizeof(std::uint8_t);
+                staged = 1U;
             }
-            auto& grid = values[player];
-            const auto& held = holds[player];
-            for (auto cell_index = band.begin * wide; cell_index < band.end * wide; ++cell_index) {
-                if (held[cell_index] != 0U) {
-                    grid[cell_index] = held_value;
-                } else if (grid[cell_index] > first_ramp_value) {
-                    grid[cell_index] = first_ramp_value;
-                } else {
-                    grid[cell_index] = grid[cell_index] > step ? static_cast<std::uint8_t>(grid[cell_index] - step) : 0U;
+            (*values[player][row])[column] = value;
+        };
+        const auto write_hold = [&](const std::size_t player, const std::size_t row, const std::size_t column, const bool add) {
+            auto& staged = hold_staged[player * rules_.cells_tall + row];
+            if (staged == 0U) {
+                holds[player][row] = std::make_shared<std::vector<std::uint32_t>>(*holds[player][row]);
+                copied[partition] += wide * sizeof(std::uint32_t);
+                staged = 1U;
+            }
+            auto& hold = (*holds[player][row])[column];
+            if (add) ++hold; else --hold;
+        };
+        // Keep service, releases, marks and flashes in their original order (V-11, V-15, V-19).
+        for (std::size_t player = 0; player < players_.size(); ++player) {
+            if (!serviced[player]) continue;
+            for (auto row = band.begin; row < band.end; ++row) {
+                for (std::size_t column = 0; column < wide; ++column) {
+                    const auto value = (*values[player][row])[column];
+                    const auto held = (*holds[player][row])[column];
+                    write_value(player, row, column, held != 0U ? held_value : value > first_ramp_value ? first_ramp_value
+                        : value > step ? static_cast<std::uint8_t>(value - step) : 0U);
                 }
             }
         }
         for (std::size_t index = 0; index < changes.size(); ++index) {
             for (const auto player : allies[index]) {
-                auto& grid = values[player];
-                auto& held = holds[player];
                 for (const auto& span : changes[index].released) {
-                    if (!in_band(span)) {
-                        continue;
-                    }
-                    const auto base = static_cast<std::size_t>(span.row) * wide;
+                    if (!in_band(span)) continue;
                     for (auto column = span.first; column <= span.last; ++column) {
-                        --held[base + static_cast<std::size_t>(column)];
+                        write_hold(player, static_cast<std::size_t>(span.row), static_cast<std::size_t>(column), false);
                     }
                 }
                 for (const auto& span : changes[index].marked) {
-                    if (!in_band(span)) {
-                        continue;
-                    }
-                    const auto base = static_cast<std::size_t>(span.row) * wide;
+                    if (!in_band(span)) continue;
                     for (auto column = span.first; column <= span.last; ++column) {
-                        ++held[base + static_cast<std::size_t>(column)];
-                        grid[base + static_cast<std::size_t>(column)] = held_value;
+                        write_hold(player, static_cast<std::size_t>(span.row), static_cast<std::size_t>(column), true);
+                        write_value(player, static_cast<std::size_t>(span.row), static_cast<std::size_t>(column), held_value);
                     }
                 }
             }
         }
         for (const auto& flash : flash_cells) {
-            if (static_cast<std::size_t>(flash.row) < band.begin || static_cast<std::size_t>(flash.row) >= band.end) {
-                continue;
-            }
-            values[flash.player][static_cast<std::size_t>(flash.row) * wide + static_cast<std::size_t>(flash.column)] =
-                held_value;
+            if (static_cast<std::size_t>(flash.row) < band.begin || static_cast<std::size_t>(flash.row) >= band.end) continue;
+            write_value(flash.player, static_cast<std::size_t>(flash.row), static_cast<std::size_t>(flash.column), held_value);
         }
     });
     if (!applied) {
         return applied;
     }
-    anchors_ = std::move(anchors);
+    anchors_ = std::make_shared<const std::map<EntityId, Anchor>>(std::move(anchors));
+    copied_grid_bytes_ = 0;
+    for (const auto bytes : copied) copied_grid_bytes_ += bytes;
+    for (auto& cached : flat_values_) cached.reset();
     values_ = std::move(values);
     holds_ = std::move(holds);
     return core::Result<void>::success();
@@ -365,16 +380,27 @@ bool FogCells::revealed(const std::size_t player_index, const math::Vec3& positi
     if (!column || !row || *column >= rules_.cells_wide || *row >= rules_.cells_tall) {
         return false;
     }
-    return values_[player_index][static_cast<std::size_t>(*row) * rules_.cells_wide + *column] != 0U;
+    return (*values_[player_index][static_cast<std::size_t>(*row)])[static_cast<std::size_t>(*column)] != 0U;
 }
 
-std::span<const std::uint8_t> FogCells::values(const std::size_t player_index) const noexcept {
-    return values_[player_index];
+std::span<const std::uint8_t> FogCells::values(const std::size_t player_index) const {
+    auto& cached = flat_values_[player_index];
+    if (!cached) {
+        auto flat = std::make_shared<std::vector<std::uint8_t>>();
+        flat->reserve(static_cast<std::size_t>(rules_.cells_wide) * rules_.cells_tall);
+        for (const auto& row : values_[player_index]) flat->insert(flat->end(), row->begin(), row->end());
+        cached = std::move(flat);
+    }
+    return *cached;
+}
+
+std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> FogCells::value_rows(const std::size_t player_index) const {
+    return {values_[player_index].begin(), values_[player_index].end()};
 }
 
 void FogCells::append_state(std::vector<std::uint8_t>& bytes) const {
-    sim::detail::append_u64(bytes, anchors_.size());
-    for (const auto& [id, anchor] : anchors_) {
+    sim::detail::append_u64(bytes, anchors_->size());
+    for (const auto& [id, anchor] : *anchors_) {
         sim::detail::append_u64(bytes, id);
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(anchor.column));
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(anchor.row));
@@ -385,7 +411,7 @@ void FogCells::append_state(std::vector<std::uint8_t>& bytes) const {
     }
     sim::detail::append_u64(bytes, values_.size());
     for (const auto& grid : values_) {
-        bytes.insert(bytes.end(), grid.begin(), grid.end());
+        for (const auto& row : grid) bytes.insert(bytes.end(), row->begin(), row->end());
     }
 }
 

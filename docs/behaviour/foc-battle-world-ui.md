@@ -66,7 +66,8 @@ Nothing here reaches the simulation.
   is shown by the pointer (WU-16); a squadron's container shows no bars in space (its icon does).
   Owner (EAWR-424): "hovering a craft shows that craft's stats": the remake shows the hovered craft's
   bar also while its squadron is selected. The debug build reads as if a selected squadron's craft
-  showed none (they are selected units); unverified, owner eye check.
+  showed none (they are selected units). **Deliberate difference** (owner, EAWR-790, 2026-10-01): the
+  remake keeps the hovered craft's bar; FoC's behaviour stays recorded here.
 - WU-18. The bars sit over the unit: its world bounds' centre moved along the camera's up axis by
   the largest extent of the bounds along it (`GUI_Bounds_Scale` 1, the default) or by the bounds'
   half diagonal (any other `GUI_Bounds_Scale`), times `GUI_Bounds_Scale`. The shield bar is drawn
@@ -225,10 +226,20 @@ Nothing here reaches the simulation.
   pitch of the owner's -60 degree `Pitch_Min` (the reticle pitch gap).
 - WU-36. After a click that targets a hardpoint, its reticle flashes: it halves in width and
   height and back every 3 frames for the flash's loop count (debug build). Hardpoint targeting
-  is EAWR-531's; not drawn here.
+  is EAWR-531's (WU-41, WU-42).
+- WU-41 (EAWR-531, debug build). The hardpoints are picked by the reticles' own rectangles: the last drawn
+  reticle whose rectangle holds the pointer is the one on top, and it replaces the object the pick ray
+  found. The test runs before the squadron icon's (the icon rule WU-23 comes after it, EAWR-553). A
+  reticle under the pointer keeps its unit hovered, so moving onto a reticle beyond the hull's pick
+  volume keeps the reticles. A right click on it orders the selection to attack that hardpoint of its
+  unit ([space orders](space-orders.md) OR-20); a left click selects its unit (project choice, unverified).
+- WU-42 (EAWR-531, debug build). After an attack order on a hardpoint its reticle flashes for 60 render
+  services: it shows the `_Tracked` art, half its width and height for the first three services and
+  then toggling between half and full size every three, whether or not the pointer is over the unit.
+  The flash ends early when the hardpoint is destroyed. The cursor keeps its plain attack look (no
+  hardpoint cursor).
 - Not drawn: the hovered hardpoint's tooltip ("Proton Torpedo Launcher - 100%" with a bar, retail
-  footage) and the right click that targets the hovered hardpoint (the tactical rules have no
-  hardpoint attack order); fidelity list.
+  footage); fidelity list.
 
 ## Cases
 
@@ -252,7 +263,6 @@ Nothing here reaches the simulation.
 
 - The skirmish's ring colour (WU-01) and icon frame colour (WU-21) are read from the footage: which
   of FoC's two multiplayer tests the skirmish passes was not traced.
-- The hovered craft's bar while its squadron is selected (WU-17).
 - The squadron icon's health (WU-22).
 - `GUI_Bounds_Scale` default 1 (WU-18) is inferred from the M2 ships, which do not set it.
 - The dogfight grid's origin, anchor, service order and jump (WU-27); its rows' direction (WU-26).

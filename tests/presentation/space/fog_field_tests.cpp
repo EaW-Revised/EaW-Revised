@@ -2,6 +2,7 @@
 // FW-14): the constants, the grid, the per-cell fade, the border ring, the blur and the ramp.
 #include "eawr/presentation/space/fog_field.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -170,6 +171,30 @@ void test_texture() {
 
 // FW-22 (#563): the deployment overlay draws the fogged cells and the unplayable border red, and
 // any clear cell the caller reports blocked, and leaves the rest clear.
+void test_shared_rows() {
+    const space::FogFieldLayout layout{-2.0, 2.0, 1.0, 4, 4};
+    space::FogField flat(layout, space::FogLooks{});
+    space::FogField shared(layout, space::FogLooks{});
+    std::vector<std::uint8_t> cells(16);
+    for (const auto source : {std::uint8_t{255}, std::uint8_t{238}, std::uint8_t{8}, std::uint8_t{0}}) {
+        cells[5] = source;
+        std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> rows;
+        for (std::size_t row = 0; row < 4; ++row) {
+            rows.push_back(std::make_shared<const std::vector<std::uint8_t>>(cells.begin() + row * 4, cells.begin() + (row + 1) * 4));
+        }
+        for (int frame = 0; frame < 18; ++frame) {
+            flat.advance(cells, frame % 16, 1.0);
+            shared.advance_rows(rows, frame % 16, 1.0);
+            expect(std::equal(flat.texels().begin(), flat.texels().end(), shared.texels().begin())
+                && flat.value(1, 1) == shared.value(1, 1), "shared rows preserve fade and texel results");
+        }
+    }
+    const auto before = std::vector<std::uint8_t>(shared.texels().begin(), shared.texels().end());
+    std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> invalid(4);
+    shared.advance_rows(invalid, 0.0, 1.0);
+    expect(std::equal(before.begin(), before.end(), shared.texels().begin()), "missing rows leave the field unchanged");
+}
+
 void test_deployment_overlay() {
     space::FogField fog = field();
     const std::vector<space::FogFieldRevealer> all{{0.0, 0.0, 5000.0}};
@@ -191,6 +216,67 @@ void test_deployment_overlay() {
     expect(!fog.deployment_overlay() && fog.texels()[0] == 255 && fog.texels()[1] == 255, "turning it off restores the fog's colour");
 }
 
+void test_settled_presentation_budget() {
+    space::FogField fog = field();
+    const std::vector<space::FogFieldRevealer> all{{0.0, 0.0, 5000.0}};
+    for (int frame = 0; frame < 20; ++frame) fog.advance(all, 1.0);
+    const std::vector<std::uint8_t> shown(fog.texels().begin(), fog.texels().end());
+    const auto budget = fog.presented_cells();
+    const auto fogged = fog.fogged_cells();
+    for (int frame = 0; frame < 100; ++frame) fog.advance(all, .5);
+    expect(fog.presented_cells() == budget && !fog.changed(),
+           "a settled grid does no blur or texel rebuild across one hundred fractional frames");
+    expect(std::equal(shown.begin(), shown.end(), fog.texels().begin()) && fog.fogged_cells() == fogged,
+           "settled caching preserves exact texels and the fogged-cell report");
+    std::vector<std::uint8_t> cells(21U * 21U, 238U);
+    fog.advance(cells, 1, .5);
+    expect(fog.presented_cells() == budget && fog.value(10, 10) < 238.0,
+           "an unchanged picture still advances its underlying fade value");
+    cells.assign(cells.size(), 8U);
+    fog.advance(cells, 0, .5);
+    expect(fog.presented_cells() > budget && fog.changed(), "a visible fade change invalidates the cached blur");
+    const auto after_fade = fog.presented_cells();
+    fog.set_deployment_overlay(true);
+    expect(fog.presented_cells() > after_fade && fog.changed(), "a palette switch redraws an unchanged intensity grid");
+}
+
+void test_settled_shared_row_updates() {
+    const space::FogFieldLayout layout{-2.0, 2.0, 1.0, 4, 4};
+    space::FogField current(layout, space::FogLooks{});
+    space::FogField historical(layout, space::FogLooks{});
+    const auto zero = std::make_shared<const std::vector<std::uint8_t>>(std::size_t{4}, std::uint8_t{0});
+    std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> rows(4, zero);
+    const auto retained = rows;
+    current.advance_rows(rows, 0.0, 0.0);
+    const auto settled = current.presented_cells();
+    for (int frame = 0; frame < 20; ++frame) current.advance_rows(rows, 0.0, .5);
+    expect(current.presented_cells() == settled && !current.changed(), "unchanged shared rows skip settled blur work");
+
+    // V-19, FW-09: a newly staged flash replaces one immutable row while the row list persists.
+    rows[1] = std::make_shared<const std::vector<std::uint8_t>>(std::initializer_list<std::uint8_t>{0, 255, 0, 0});
+    current.advance_rows(rows, 0.0, 0.0);
+    expect(current.changed() && current.presented_cells() > settled && current.value(1, 1) == 239.0,
+           "a staged row update invalidates settled blur even with no elapsed frames");
+    for (int frame = 0; frame < 16; ++frame) current.advance_rows(rows, 0.0, 1.0);
+    const auto held_budget = current.presented_cells();
+    current.advance_rows(rows, 0.0, .5);
+    expect(!current.changed() && current.presented_cells() == held_budget && current.value(1, 1) == 255.0,
+           "the replacement row can settle again without repeated blur work");
+
+    historical.advance_rows(retained, 0.0, 20.0);
+    expect(historical.value(1, 1) == 0.0 && (*retained[1])[1] == 0U && (*rows[1])[1] == 255U,
+           "interleaved historical presentation retains its old row and neither viewer edits source bytes");
+    const auto held_texels = std::vector<std::uint8_t>(current.texels().begin(), current.texels().end());
+    rows[1] = std::make_shared<const std::vector<std::uint8_t>>(std::initializer_list<std::uint8_t>{0, 8, 0, 0});
+    current.advance_rows(rows, 0.0, .5);
+    expect(current.changed() && current.presented_cells() > held_budget && current.value(1, 1) == 8.0
+               && !std::equal(held_texels.begin(), held_texels.end(), current.texels().begin()),
+           "a released staged row refreshes settled texels without retaining the previous source");
+    rows[1] = zero;
+    current.advance_rows(rows, 0.0, 0.0);
+    expect(current.changed() && current.value(1, 1) == 0.0, "a replacement zero row immediately restores fog");
+}
+
 } // namespace
 
 int main() {
@@ -201,7 +287,10 @@ int main() {
     test_resume_and_pause();
     test_texture();
     test_cells();
+    test_shared_rows();
     test_deployment_overlay();
+    test_settled_presentation_budget();
+    test_settled_shared_row_updates();
     if (failures != 0) {
         std::cerr << failures << " fog field contract(s) failed\n";
         return 1;

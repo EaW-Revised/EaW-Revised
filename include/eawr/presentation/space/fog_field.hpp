@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -84,6 +85,9 @@ public:
     // and the logical frames since that grid's last service (0 to 15). Cells of another size
     // leave the field unchanged.
     void advance(std::span<const std::uint8_t> cells, double since_service, double frames);
+    // Same cells supplied as immutable rows, without flattening a live snapshot.
+    void advance_rows(std::span<const std::shared_ptr<const std::vector<std::uint8_t>>> rows,
+        double since_service, double frames);
 
     [[nodiscard]] const FogFieldLayout& layout() const noexcept { return layout_; }
     // FW-22 (#563): turns the deployment overlay on or off, reusable for any deployment or
@@ -104,8 +108,12 @@ public:
     [[nodiscard]] std::size_t fogged_cells() const noexcept;
     // Whether the last advance changed any texel.
     [[nodiscard]] bool changed() const noexcept { return changed_; }
+    // Deterministic work budget: texels visited by blur/presentation, excluding unchanged frames.
+    [[nodiscard]] std::uint64_t presented_cells() const noexcept { return presented_cells_; }
 
 private:
+    template <typename ReadCell>
+    void advance_cells(std::size_t count, const ReadCell& read, double since_service, double frames);
     // FW-12, FW-11: the intensities, the ring, the blur and the texels from values_.
     void present();
 
@@ -118,10 +126,14 @@ private:
     std::vector<double> values_;
     std::vector<std::uint8_t> held_;
     std::vector<std::uint8_t> intensities_;
+    std::vector<std::uint8_t> next_intensities_;
     std::vector<std::uint8_t> blurred_;
     std::vector<std::uint8_t> texels_;
     std::size_t held_count_{};
     bool changed_{true};
+    bool force_present_{};
+    std::size_t fogged_count_{};
+    std::uint64_t presented_cells_{};
 };
 
 // FW-09: FoC's map from a cell's fade value to its shown intensity (before the blur).

@@ -362,6 +362,7 @@ struct Shot {
     tactical::CombatEventKind kind{};
     eawr::sim::EntityId shooter{};
     eawr::sim::EntityId target{};
+    std::uint32_t hardpoint{tactical::no_hardpoint};
 };
 
 // Steps `ticks` frames and returns every combat event.
@@ -373,7 +374,7 @@ std::vector<Shot> run(tactical::TacticalSession& value, const std::uint64_t tick
         expect(static_cast<bool>(stepped), "combat step succeeds");
         if (!stepped) break;
         for (const auto& event : stepped.value().snapshot->combat_events()) {
-            result.push_back({event.tick, event.kind, event.shooter, event.target});
+            result.push_back({event.tick, event.kind, event.shooter, event.target, event.target_hardpoint});
         }
     }
     return result;
@@ -1316,9 +1317,11 @@ public:
     [[nodiscard]] eawr::core::Result<void> execute_phase(const std::string_view phase, const std::size_t count,
         const std::function<void(std::size_t)>& partition) const override {
         if (phase == "orders") orders.push_back(count);
+        if (phase == "combat-world") worlds.push_back(count);
         return inline_executor.execute(count, partition);
     }
     mutable std::vector<std::size_t> orders;
+    mutable std::vector<std::size_t> worlds;
 
 private:
     eawr::sim::InlineExecutor inline_executor;
@@ -1337,6 +1340,9 @@ void test_orders_phase() {
         if (recorder.orders.size() != before) ran.push_back(tick);
     }
     expect(ran == std::vector<std::uint64_t>{10, 20, 30}, "the orders phase runs every 10 ticks after the order");
+    expect(recorder.worlds.size() == 35 && std::all_of(recorder.worlds.begin(), recorder.worlds.end(),
+        [](const std::size_t count) { return count == eawr::sim::tick_partition_count; }),
+        "every combat world fills disjoint slots in the named phase with the fixed partition count");
     expect(std::all_of(recorder.orders.begin(), recorder.orders.end(),
                [](const std::size_t count) { return count == eawr::sim::tick_partition_count; }),
         "the orders phase uses the fixed partition count");
@@ -1384,6 +1390,197 @@ void test_orders_workers_and_replay() {
     expect(replayed.value().state_sha256() == finals[0], "orders: the replay ends on the same state");
 }
 
+// --- Attack orders on one hardpoint (#531, docs/behaviour/space-orders.md OR-20 to OR-26) -------
+
+constexpr tactical::TypeId capital_type = 6;
+
+// A target with four targetable hardpoints: 0 and 1 abeam, 2 amidships (the nearest to a shooter
+// dead ahead), 3 far off to one side (outside the shooter's cone).
+[[nodiscard]] tactical::CombatTable hardpoint_table() {
+    auto result = table();
+    result.profiles.push_back(tactical::CombatProfile{capital_type, bomber_bit, std::nullopt, std::nullopt, {}, {},
+        {{0, at(0, -60), true}, {1, at(0, 60), true}, {2, at(0, 0), true}, {3, at(0, -400), true}}});
+    return result;
+}
+
+[[nodiscard]] tactical::DurabilityTable hardpoint_durability() {
+    tactical::HardpointProfile hardpoint;
+    hardpoint.role = tactical::HardpointRole::weapon;
+    hardpoint.destroyable = true;
+    hardpoint.max_health = units(100);
+    tactical::DurabilityTable durability;
+    durability.profiles.push_back(
+        {capital_type, units(100000), std::nullopt, false, {hardpoint, hardpoint, hardpoint, hardpoint}});
+    return durability;
+}
+
+[[nodiscard]] std::vector<tactical::SensorProfile> hardpoint_sensors() {
+    auto result = sensors();
+    result.push_back({capital_type, units(2000)});
+    return result;
+}
+
+[[nodiscard]] tactical::TacticalSession hardpoint_session(const tactical::TypeId target_type = capital_type) {
+    auto created = tactical::TacticalSession::create(
+        setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, target_type, 2, at(300, 0))}),
+        hardpoint_sensors(), hardpoint_durability(), {}, std::nullopt, hardpoint_table());
+    expect(static_cast<bool>(created), "hardpoint session is created");
+    return std::move(created).value();
+}
+
+[[nodiscard]] std::vector<Shot> fired(const std::vector<Shot>& shots, const std::uint64_t after = 0) {
+    std::vector<Shot> result;
+    for (const auto& shot : shots) {
+        if (shot.kind == tactical::CombatEventKind::weapon_fired && shot.tick > after) result.push_back(shot);
+    }
+    return result;
+}
+
+[[nodiscard]] bool all_at(const std::vector<Shot>& shots, const std::uint32_t hardpoint) {
+    return !shots.empty() && std::all_of(shots.begin(), shots.end(), [hardpoint](const Shot& shot) {
+        return shot.target == 2 && shot.hardpoint == hardpoint;
+    });
+}
+
+void test_hardpoint_orders() {
+    // OR-24: an attack on the unit picks its nearest standing hardpoint, the one amidships.
+    auto hull = hardpoint_session();
+    expect(static_cast<bool>(hull.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})), "hull attack is queued");
+    expect(all_at(fired(run(hull, 300)), 2), "an attack on the unit fires at its nearest hardpoint");
+    expect(hull.combat_state(1)->attack_hardpoint == tactical::no_hardpoint, "a hull attack orders no hardpoint");
+
+    // OR-20, OR-25: an attack on hardpoint 0 fires at hardpoint 0 alone.
+    auto ordered = hardpoint_session();
+    expect(static_cast<bool>(ordered.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 0}})), "hardpoint attack is queued");
+    expect(all_at(fired(run(ordered, 300)), 0), "an attack on a hardpoint fires at that hardpoint");
+    const auto state = ordered.combat_state(1);
+    expect(state && state->direct && state->attack_target == 2 && state->attack_hardpoint == 0,
+        "the order keeps the target and its hardpoint");
+    expect(state_of(ordered, 1).order.kind == tactical::OrderKind::attack && state_of(ordered, 1).order.hardpoint == 0,
+        "the unit's order records the hardpoint");
+
+    // OR-23: when the ordered hardpoint dies the unit goes back to the target's nearest hardpoint and
+    // keeps attacking the unit.
+    auto killed = hardpoint_session();
+    expect(static_cast<bool>(killed.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 0}})), "hardpoint attack is queued");
+    expect(all_at(fired(run(killed, 60)), 0), "before its death the ordered hardpoint is fired at");
+    expect(static_cast<bool>(killed.submit({{60, 1, 1}, {2}, tactical::DamagePayload{units(100), 0}})),
+        "the ordered hardpoint's destruction is queued");
+    const auto after = fired(run(killed, 400), 62);
+    expect(all_at(after, 2), "after the ordered hardpoint dies the nearest one is fired at");
+    const auto survivor = killed.combat_state(1);
+    expect(survivor && survivor->direct && survivor->attack_target == 2 && survivor->attack_hardpoint == tactical::no_hardpoint,
+        "the attack on the unit goes on with no ordered hardpoint");
+
+    // OR-25: a hardpoint no weapon can point at is not fired at, and no other point is picked.
+    auto arc = hardpoint_session();
+    expect(static_cast<bool>(arc.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 3}})), "out-of-arc attack is queued");
+    expect(fired(run(arc, 400)).empty(), "a hardpoint outside every weapon's arc is not fired at, nor is another");
+    expect(arc.combat_state(1)->attack_hardpoint == 3, "the order stays while the hardpoint stands");
+
+    // OR-21: the order names a targetable, standing hardpoint of the target's type.
+    const auto rejection = [](tactical::TacticalSession value, const tactical::PlayerCommand& command) {
+        expect(static_cast<bool>(value.submit(command)), "the attack is queued");
+        const auto events = run_events(value, 2);
+        return std::any_of(events.begin(), events.end(), [](const tactical::Event& event) {
+            return event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::hardpoint_invalid;
+        });
+    };
+    expect(rejection(hardpoint_session(), {{0, 1, 0}, {1}, tactical::AttackPayload{2, 9}}),
+        "a hardpoint the type does not have is rejected");
+    expect(rejection(hardpoint_session(fighter_type), {{0, 1, 0}, {1}, tactical::AttackPayload{2, 0}}),
+        "a type without hardpoints has none to attack");
+    auto gone = hardpoint_session();
+    expect(static_cast<bool>(gone.submit({{0, 1, 0}, {2}, tactical::DamagePayload{units(100), 1}})), "damage is queued");
+    static_cast<void>(run(gone, 5));
+    expect(static_cast<bool>(gone.submit({{5, 1, 1}, {1}, tactical::AttackPayload{2, 1}})), "attack is queued");
+    const auto gone_events = run_events(gone, 2);
+    expect(std::any_of(gone_events.begin(), gone_events.end(), [](const tactical::Event& event) {
+        return event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::hardpoint_invalid;
+    }), "a destroyed hardpoint is rejected");
+
+    // Another order ends the hardpoint order with the attack (OR-23).
+    auto stopped = hardpoint_session();
+    expect(static_cast<bool>(stopped.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 0}})), "hardpoint attack is queued");
+    static_cast<void>(run(stopped, 20));
+    expect(static_cast<bool>(stopped.submit({{20, 1, 1}, {1}, tactical::StopPayload{}})), "stop is queued");
+    static_cast<void>(run(stopped, 2));
+    expect(stopped.combat_state(1)->attack_hardpoint == tactical::no_hardpoint && !stopped.combat_state(1)->direct,
+        "a stop clears the ordered hardpoint");
+    expect(state_of(stopped, 1).order.hardpoint == tactical::attack_hull, "a stop leaves no ordered hardpoint");
+}
+
+void test_hardpoint_orders_replay() {
+    // An attack on a unit keeps opcode 3 and its bytes; an attack on a hardpoint is opcode 12. Both
+    // round-trip, and a recording replays to the state the live session ended on, at every worker count.
+    const tactical::PlayerCommand hull_command{{0, 1, 0}, {1}, tactical::AttackPayload{2}};
+    const tactical::PlayerCommand hardpoint_command{{0, 1, 0}, {1}, tactical::AttackPayload{2, 1}};
+    tactical::TacticalReplay replay;
+    replay.setup = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, capital_type, 2, at(300, 0))});
+    replay.final_tick_count = 10;
+    replay.commands = {hull_command};
+    const auto hull_bytes = tactical::write_replay(replay);
+    replay.commands = {hardpoint_command};
+    const auto hardpoint_bytes = tactical::write_replay(replay);
+    expect(hull_bytes && hardpoint_bytes, "both replays write");
+    if (!hull_bytes || !hardpoint_bytes) return;
+    // The command table follows the setup: a hardpoint attack is 8 bytes longer, and its opcode is 12.
+    expect(hardpoint_bytes.value().size() == hull_bytes.value().size() + 8, "opcode 12 adds a hardpoint index and a reserved word");
+    const auto parsed_hull = tactical::parse_replay(hull_bytes.value());
+    const auto parsed_hardpoint = tactical::parse_replay(hardpoint_bytes.value());
+    expect(parsed_hull && parsed_hull.value().commands == std::vector<tactical::PlayerCommand>{hull_command},
+        "a hull attack round-trips as opcode 3");
+    expect(parsed_hardpoint && parsed_hardpoint.value().commands == std::vector<tactical::PlayerCommand>{hardpoint_command},
+        "a hardpoint attack round-trips as opcode 12");
+    // The hardpoint index is the u32 before the unit list (header 8 bytes, one unit 8 bytes) and the
+    // reserved word after it; opcode 12 naming the hull is not a valid spelling of an attack on the unit.
+    auto forged = hardpoint_bytes.value();
+    std::fill(forged.end() - 24, forged.end() - 20, std::uint8_t{0xff});
+    expect(!tactical::parse_replay(forged), "opcode 12 naming the hull is refused");
+    // The target is the u64 before the index: zero is refused (docs/replay-format.md).
+    auto no_target = hardpoint_bytes.value();
+    std::fill(no_target.end() - 32, no_target.end() - 24, std::uint8_t{0});
+    expect(!tactical::parse_replay(no_target), "opcode 12 without a target is refused");
+    // The opcode byte sits 36 bytes from the end. 9 to 11 belong to the purchasing commands and are
+    // not this parser's yet; 13 is past the last opcode.
+    for (const std::uint8_t opcode : {std::uint8_t{9}, std::uint8_t{11}, std::uint8_t{13}}) {
+        auto unknown = hardpoint_bytes.value();
+        expect(unknown[unknown.size() - 36] == 12, "the fixture's opcode byte is where the test expects it");
+        unknown[unknown.size() - 36] = opcode;
+        expect(!tactical::parse_replay(unknown), "an opcode nothing handles is refused: " + std::to_string(opcode));
+    }
+
+    std::vector<std::string> finals;
+    std::optional<tactical::TacticalReplay> recorded;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto value = hardpoint_session();
+        expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 1}})), "hardpoint attack is queued");
+        expect(static_cast<bool>(value.submit({{80, 1, 1}, {2}, tactical::DamagePayload{units(100), 1}})), "damage is queued");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (int tick = 0; tick < 300; ++tick) {
+            const auto stepped = value.step(executor);
+            expect(static_cast<bool>(stepped), "worker step succeeds");
+            if (!stepped) break;
+        }
+        finals.push_back(value.state_sha256());
+        if (!recorded) recorded = value.record();
+    }
+    expect(std::all_of(finals.begin(), finals.end(), [&](const std::string& hash) { return hash == finals[0]; }),
+        "hardpoint orders: 1, 2, 4 and 8 workers end on the same state");
+    const auto bytes = tactical::write_replay(*recorded);
+    expect(static_cast<bool>(bytes), "the recording writes");
+    if (!bytes) return;
+    const auto parsed = tactical::parse_replay(bytes.value());
+    expect(parsed && parsed.value() == *recorded, "the recording round-trips");
+    if (!parsed) return;
+    auto replayed = tactical::TacticalSession::from_replay(
+        parsed.value(), hardpoint_sensors(), hardpoint_durability(), {}, std::nullopt, hardpoint_table());
+    expect(static_cast<bool>(replayed), "the recording replays");
+    if (!replayed) return;
+    static_cast<void>(run(replayed.value(), 300));
+    expect(replayed.value().state_sha256() == finals[0], "the replay ends on the same state");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1415,6 +1612,8 @@ int main(int argc, char** argv) {
     test_orders_guard();
     test_orders_workers_and_replay();
     test_orders_phase();
+    test_hardpoint_orders();
+    test_hardpoint_orders_replay();
     test_battle(argv[1], update);
     if (failures != 0) {
         std::cerr << failures << " combat contract test(s) failed\n";

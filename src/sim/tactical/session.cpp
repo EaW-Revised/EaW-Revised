@@ -106,6 +106,11 @@ struct IonStunned {
     IonStunState value;
 };
 
+// WR-41: authored defense duration may extend beyond locomotion release.
+struct ArrivalVulnerability {
+    std::uint64_t until;
+};
+
 // A unit as the step stages it: its public state and, when durable, its health; when it has a
 // motion profile, its movement, its speed and its roll at the staged tick; when it has a
 // combat profile, its targets and fire cycle; when a group move delays its plan, that plan.
@@ -120,6 +125,7 @@ struct LiveUnit {
     std::optional<AbilityState> abilities{}; // #76: a type with abilities
     std::optional<Approach> approach{};
     std::optional<IonStunState> ion_stun{}; // #561: while an ion stun runs (IS-03)
+    std::optional<std::uint64_t> arrival_vulnerable_until{}; // WR-41: independent of movement release
 };
 
 constexpr std::array<std::uint8_t, 8> state_magic{'E', 'A', 'W', 'R', 'T', 'S', 'T', 0};
@@ -152,6 +158,11 @@ constexpr std::array<std::uint8_t, 4> ability_tag{'A', 'B', 'I', 'L'};
 // Ion stuns (#561); only while a live unit has one.
 constexpr std::array<std::uint8_t, 4> ion_stun_tag{'I', 'O', 'N', 'S'};
 constexpr std::uint32_t victory_block_version = 1;
+// Skirmish purchasing (#530): credits, queues and pools, only with economy rules; arrivals and
+// population shares, only while any.
+constexpr std::array<std::uint8_t, 4> economy_tag{'E', 'C', 'O', 'N'};
+constexpr std::array<std::uint8_t, 4> arrival_tag{'A', 'R', 'R', 'V'};
+constexpr std::array<std::uint8_t, 4> population_tag{'P', 'O', 'P', 'S'};
 // Killed craft spinning away (#447), in the state and the snapshot; only while any spins.
 constexpr std::array<std::uint8_t, 4> spin_tag{'S', 'P', 'I', 'N'};
 constexpr std::array<std::uint8_t, 8> snapshot_magic{'E', 'A', 'W', 'R', 'T', 'S', 'N', 0};
@@ -219,6 +230,39 @@ void append_outcome(std::vector<std::uint8_t>& bytes, const BattleOutcome& outco
 void append_fixed(std::vector<std::uint8_t>& bytes, const math::Fixed value) {
     sim::detail::append_i64(bytes, value.raw());
 }
+
+// Canonical ledger record (#530): player, credits, both queues and the pool.
+void append_ledger(std::vector<std::uint8_t>& bytes, const PlayerEconomy& ledger) {
+    sim::detail::append_u32(bytes, ledger.player);
+    sim::detail::append_u32(bytes, 0);
+    append_fixed(bytes, ledger.credits);
+    for (const auto& queue : ledger.queues) {
+        sim::detail::append_u64(bytes, queue.size());
+        for (const auto& entry : queue) {
+            sim::detail::append_u64(bytes, entry.type);
+            sim::detail::append_u64(bytes, entry.station);
+            append_fixed(bytes, entry.paid);
+            sim::detail::append_u32(bytes, entry.frames);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, entry.complete_frame);
+        }
+    }
+    sim::detail::append_u64(bytes, ledger.pool.size());
+    for (const auto type : ledger.pool) {
+        sim::detail::append_u64(bytes, type);
+    }
+    sim::detail::append_u64(bytes, ledger.completed.size());
+    for (const auto& build : ledger.completed) {
+        sim::detail::append_u64(bytes, build.type);
+        sim::detail::append_u64(bytes, build.station);
+    }
+}
+
+// A reinforced unit's population share (#530, PU-21): its owner and its share.
+struct PopulationShare {
+    PlayerId owner{};
+    std::int64_t share{};
+};
 
 // floor((low + high) / 2) of two raw values with low <= high, without overflow.
 [[nodiscard]] constexpr std::int64_t midpoint(const std::int64_t low, const std::int64_t high) noexcept {
@@ -339,6 +383,10 @@ void append_squadron_state(std::vector<std::uint8_t>& bytes, const SquadronState
         append_fixed(bytes, state.lane->ahead);
         append_fixed(bytes, state.lane->aside);
     }
+    // #531: only a squadron on a hardpoint attack order carries the hardpoint (index plus one).
+    if (state.target_hardpoint != attack_hull) {
+        sim::detail::append_u32(bytes, state.target_hardpoint + 1U);
+    }
 }
 
 // Canonical hangar record (#75).
@@ -386,6 +434,7 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
         state.anchor = {destination.x, destination.y, layer_z};
         state.escorted = invalid_entity_id;
         state.target = invalid_entity_id;
+        state.target_hardpoint = attack_hull;
     };
     const auto follow = [&](const EntityId unit) {
         state.mode = SquadronMode::escort;
@@ -393,6 +442,7 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
         state.anchor = here; // the squadron frame moves it to the unit (FL-07)
         state.escorted = unit;
         state.target = invalid_entity_id;
+        state.target_hardpoint = attack_hull;
     };
     if (const auto* move = std::get_if<MovePayload>(&payload)) {
         fly_to(move->destination);
@@ -403,6 +453,7 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
         state.anchor = here;
         state.escorted = invalid_entity_id;
         state.target = invalid_entity_id;
+        state.target_hardpoint = attack_hull;
         state.diversion = SquadronDiversion::idle;
     } else if (const auto* attack = std::get_if<AttackPayload>(&payload)) {
         state.mode = SquadronMode::idle;
@@ -410,6 +461,7 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
         state.anchor = here;
         state.escorted = invalid_entity_id;
         state.target = attack->target;
+        state.target_hardpoint = attack->hardpoint;
         // FA-07 (#497): the attack order plans the squadron's move to the target, so it starts
         // the approach even when the target is the one the squadron already had.
         state.approach = attack->target != invalid_entity_id;
@@ -443,6 +495,7 @@ void apply_squadron_order(SquadronState& state, const CommandPayload& payload, c
         order.destination = face->target;
     } else if (const auto* attack = std::get_if<AttackPayload>(&payload)) {
         order.target = attack->target;
+        order.hardpoint = attack->hardpoint;
     } else if (const auto* attack_move = std::get_if<AttackMovePayload>(&payload)) {
         // OP-01: an order that names a unit keeps no point.
         order.target = attack_move->target;
@@ -534,6 +587,7 @@ struct Tracking {
     std::map<EntityId, TrackSamples> samples;
     std::array<std::optional<TrackingLayerView>, 4> views;
     std::optional<std::vector<TrackedLeaf>> statics;
+    std::set<EntityId> suspended; // WR-33: arrivals do not participate in ordinary tracking
 };
 
 // The first frame of the window that holds `frame` when windows roll every `interval` frames
@@ -641,6 +695,7 @@ template <typename Units>
     view.start_frame = rebuilt[index] ? tracking.frame : tracking.current_start[index];
     view.windows.resize(tracking.windows);
     for (const auto& [id, unit] : staged) {
+        if (tracking.suspended.contains(id)) continue;
         const auto* footprint = tracked_footprint(table, unit.state.type_id);
         if (footprint == nullptr || dynamic_layer_index(footprint->layer) != index) continue;
         const std::vector<Prediction>* samples = nullptr;
@@ -670,6 +725,7 @@ template <typename Units>
     motion_detail::Calc calc;
     std::vector<TrackedLeaf> leaves;
     for (const auto& [id, unit] : staged) {
+        if (tracking.suspended.contains(id)) continue;
         const auto* footprint = tracked_footprint(table, unit.state.type_id);
         if (footprint == nullptr || footprint->layer != SpaceLayer::static_object) continue;
         auto yaw = yaw_degrees(unit.state.rotation);
@@ -755,11 +811,12 @@ TacticalSnapshot::TacticalSnapshot(
     std::optional<BattleOutcome> outcome,
     std::vector<SpinningCraft> spinning,
     std::vector<SquadronTarget> squadron_targets,
-    std::vector<Squadron> squadrons)
+    std::vector<Squadron> squadrons,
+    std::vector<EconomyView> economy)
     : completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
       events_(std::move(events)), combat_events_(std::move(combat_events)), projectiles_(std::move(projectiles)),
       outcome_(outcome), spinning_(std::move(spinning)), squadron_targets_(std::move(squadron_targets)),
-      squadrons_(std::move(squadrons)) {}
+      squadrons_(std::move(squadrons)), economy_(std::move(economy)) {}
 
 std::uint64_t TacticalSnapshot::completed_tick() const noexcept { return completed_tick_; }
 std::span<const SnapshotPlayer> TacticalSnapshot::players() const noexcept { return players_; }
@@ -771,6 +828,7 @@ const std::optional<BattleOutcome>& TacticalSnapshot::outcome() const noexcept {
 std::span<const SpinningCraft> TacticalSnapshot::spinning() const noexcept { return spinning_; }
 std::span<const SquadronTarget> TacticalSnapshot::squadron_targets() const noexcept { return squadron_targets_; }
 std::span<const Squadron> TacticalSnapshot::squadrons() const noexcept { return squadrons_; }
+std::span<const EconomyView> TacticalSnapshot::economy() const noexcept { return economy_; }
 
 std::vector<EntityId> TacticalSnapshot::visible_entities(const PlayerId player) const {
     std::vector<EntityId> result;
@@ -929,16 +987,24 @@ class TacticalSession::Impl final {
 public:
     Impl(const TacticalSetup& source, const std::span<const SensorProfile> sensor_table, const DurabilityTable& table,
         const MotionTable& motion_table, const std::optional<FogRules>& fog_rules, const CombatTable& combat_table,
-        const VictoryRules& victory_rules, const AbilityTable& ability_table)
+        const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules)
         : setup(source), sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
-          combat(combat_table), victory(victory_rules), abilities(ability_table), squadrons(source.squadrons),
-          rng_state(source.seed) {
+          combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules),
+          squadrons(source.squadrons), rng_state(source.seed) {
+        for (const auto& player : economy.players) {
+            PlayerEconomy ledger;
+            ledger.player = player.player;
+            ledger.credits = player.credits;
+            ledgers.push_back(std::move(ledger));
+        }
         for (const auto& player : source.players) {
             teams.emplace(player.player_id, player.team_id);
             snapshot_players.push_back(SnapshotPlayer{player.player_id, player.team_id});
         }
         for (const auto& unit : source.units) {
             add_starbase(unit);
+            // #530 PU-02: the stations whose stream pays, ascending ID.
+            if (!economy.empty() && economy.stream(unit.type_id) != nullptr) earners.emplace_back(unit.entity_id, unit.owner);
         }
         if (source.units.empty()) {
             next_id = 1;
@@ -1324,14 +1390,393 @@ public:
         }
         current_snapshot = std::make_shared<const TacticalSnapshot>(completed_tick, snapshot_players,
             std::move(instances), std::move(events), std::move(combat_events), projectiles, outcome,
-            std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons);
+            std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons, economy_views(ledgers, shares));
+    }
+
+    // #530: each ledger with its owner's population (PU-21) for presentation.
+    [[nodiscard]] std::vector<EconomyView> economy_views(
+        const std::vector<PlayerEconomy>& staged_ledgers, const std::map<EntityId, PopulationShare>& staged_shares) const {
+        std::vector<EconomyView> views;
+        views.reserve(staged_ledgers.size());
+        for (const auto& ledger : staged_ledgers) {
+            std::int64_t total = 0;
+            for (const auto& [id, share] : staged_shares) {
+                static_cast<void>(id);
+                if (share.owner == ledger.player) total += share.share;
+            }
+            const auto* player = economy.player(ledger.player);
+            views.push_back(EconomyView{ledger.player, ledger.credits, population_count(total),
+                player != nullptr ? player->population_cap : 0U, ledger.queues, ledger.pool});
+        }
+        return views;
+    }
+
+    [[nodiscard]] bool allied(const PlayerId left, const PlayerId right) const {
+        return teams.at(left) == teams.at(right);
+    }
+
+    [[nodiscard]] const Player* player_of(const PlayerId id) const noexcept {
+        const auto found = std::find_if(setup.players.begin(), setup.players.end(),
+            [id](const Player& player) { return player.player_id == id; });
+        return found != setup.players.end() ? &*found : nullptr;
+    }
+
+    // The staged economy a step's commands and service change (#530).
+    struct EconomyStage {
+        std::vector<PlayerEconomy>& ledgers;
+        std::map<EntityId, ArrivalState>& arrivals;
+        std::map<EntityId, PopulationShare>& shares;
+        std::map<EntityId, CraftState>& crafts;
+        std::map<EntityId, SquadronState>& minds;
+        std::vector<Squadron>& squadrons; // squadrons brought in this frame
+        std::vector<std::pair<EntityId, PlayerId>>& earners;
+        EntityId& next_id;
+    };
+
+    [[nodiscard]] PlayerEconomy* ledger_of(std::vector<PlayerEconomy>& staged_ledgers, const PlayerId id) const {
+        const auto found = std::find_if(staged_ledgers.begin(), staged_ledgers.end(),
+            [id](const PlayerEconomy& ledger) { return ledger.player == id; });
+        return found != staged_ledgers.end() ? &*found : nullptr;
+    }
+
+    // PU-11: whether `station` (live, staged) builds `type` for `buyer`: an ally's station whose
+    // list for its owner's faction offers the type in M2.
+    [[nodiscard]] const BuildOption* build_option(const LiveUnit& station, const PlayerId buyer, const TypeId type) const {
+        if (!allied(station.state.owner, buyer)) return nullptr;
+        const auto* owner = player_of(station.state.owner);
+        if (owner == nullptr) return nullptr;
+        const auto* menu = economy.menu(station.state.type_id, owner->faction_id);
+        const auto* option = menu != nullptr ? menu->find(type) : nullptr;
+        return option != nullptr && option->available ? option : nullptr;
+    }
+
+    // PU-21: the population value of a type any station builds, 0 when none does.
+    [[nodiscard]] std::uint32_t population_of(const TypeId type) const noexcept {
+        for (const auto& menu : economy.menus) {
+            if (const auto* option = menu.find(type)) return option->population;
+        }
+        return 0;
+    }
+
+    // PU-31, PU-32: whether `player` may bring `type` in at `point` among the `staged` units.
+    // It visits the staged units once per reinforce command, never per tick.
+    [[nodiscard]] core::Result<bool> placement_valid(const PlayerId player, const TypeId type, const math::Vec3& point,
+        const std::map<EntityId, LiveUnit>& staged, const std::uint64_t tick,
+        const CollisionWorld* collisions = nullptr, TacticalSession::PlacementWork* work = nullptr) const {
+        using Valid = core::Result<bool>;
+        const auto* issuer = player_of(player);
+        if (issuer == nullptr) return Valid::success(false);
+        const auto index = static_cast<std::size_t>(issuer - setup.players.data());
+        if (fog && !fog->revealed(index, point)) return Valid::success(false);
+        const auto planar_within = [&](const math::Vec3& at, const std::int64_t reach) {
+            const auto dx = math::detail::unsigned_magnitude(at.x.raw() - point.x.raw());
+            const auto dy = math::detail::unsigned_magnitude(at.y.raw() - point.y.raw());
+            auto across = math::detail::multiply_u64(dx, dx);
+            static_cast<void>(math::detail::add_magnitude(across, math::detail::multiply_u64(dy, dy)));
+            const auto limit = static_cast<std::uint64_t>(reach < 0 ? 0 : reach);
+            return math::detail::compare(across, math::detail::multiply_u64(limit, limit)) < 0;
+        };
+        for (const auto& [id, unit] : staged) {
+            static_cast<void>(id);
+            // PU-31: a non-allied object's prevention circle.
+            if (!allied(unit.state.owner, player)) {
+                if (const auto* prevention = economy.prevention_of(unit.state.type_id);
+                    prevention != nullptr && planar_within(unit.state.position, prevention->radius.raw())) {
+                    return Valid::success(false);
+                }
+            }
+        }
+        // WR-21..24: fog, prevention, bounds, then the type/layer bypasses.
+        if (economy.bounds) {
+            const auto& box = *economy.bounds;
+            if (point.x < box[0] || point.y < box[1] || point.x > box[2] || point.y > box[3]) return Valid::success(false);
+        }
+        if (type == 0) return Valid::success(true);
+        const auto* squadron = motion.squadrons.find_squadron(type);
+        const auto* own = motion.footprint(type);
+        const auto layer = own != nullptr ? own->layer : SpaceLayer::none;
+        if ((squadron == nullptr && layer == SpaceLayer::none) || !motion.avoidance) return Valid::success(true);
+        const auto selected = dynamic_layer_index(layer == SpaceLayer::none ? SpaceLayer::corvette : layer);
+        if (!selected) return Valid::success(true);
+        math::Fixed x_extent = own != nullptr ? own->x_extent : math::Fixed{};
+        math::Fixed y_extent = own != nullptr ? own->y_extent : math::Fixed{};
+        if (squadron != nullptr && layer == SpaceLayer::none) {
+            // WR-26: independent rectangular formation extents, in authored axes.
+            for (std::size_t member = 0; member < squadron->members.size(); ++member) {
+                const auto* craft = motion.footprint(squadron->members[member]);
+                const auto& offset = squadron->offsets[member];
+                x_extent = std::max(x_extent, math::Fixed::from_raw(std::abs(offset.x.raw()) + (craft ? craft->x_extent.raw() : 0)));
+                y_extent = std::max(y_extent, math::Fixed::from_raw(std::abs(offset.y.raw()) + (craft ? craft->y_extent.raw() : 0)));
+            }
+        }
+        // Preview queries build a private prediction view; authoritative commands reuse the
+        // tick's staged tracking views. This work runs on demand, never in a per-entity tick phase.
+        Tracking preview;
+        CollisionWorld private_world;
+        if (collisions == nullptr) {
+            preview.frame = tick;
+            preview.interval = motion.avoidance->tracking_interval;
+            // WR-25: only windows intersecting the 115-frame query can affect its verdict.
+            // Roll the tracking anchor to the query frame, retaining the layer's window boundaries.
+            const auto anchor = rolled_start(tracking_anchor[*selected], tick, preview.interval);
+            const auto frames = tick - anchor + arrival_sweep_frames;
+            preview.windows = std::min(motion.avoidance->tracking_windows,
+                static_cast<std::uint32_t>((frames + preview.interval - 1) / preview.interval));
+            preview.current_start.fill(tick);
+            preview.current_start[*selected] = anchor;
+            for (const auto& [id, arrival] : arrivals) {
+                static_cast<void>(arrival);
+                preview.suspended.insert(id);
+            }
+            for (const auto& [id, unit] : staged) {
+                const auto* footprint = tracked_footprint(motion, unit.state.type_id);
+                if (!unit.motion || arrivals.contains(id) || footprint == nullptr
+                    || dynamic_layer_index(footprint->layer) != selected) continue;
+                auto yaw = yaw_degrees(unit.state.rotation);
+                if (!yaw) return Valid::failure(yaw.error());
+                auto samples = sample_windows(*unit.motion, anchor, preview.interval, preview.windows, unit.state.position, yaw.value());
+                if (!samples) return Valid::failure(samples.error());
+                if (work != nullptr) work->predictions += samples.value().size();
+                preview.samples.emplace(id, TrackSamples{std::move(samples).value(), {}});
+            }
+            if (auto built = ensure_view(preview, motion, staged, {}, *selected); !built) return Valid::failure(built.error());
+            if (auto built = ensure_statics(preview, motion, staged); !built) return Valid::failure(built.error());
+            private_world.interval = preview.interval;
+            private_world.layers[*selected] = &*preview.views[*selected];
+            private_world.statics = &*preview.statics;
+            collisions = &private_world;
+        }
+        if (collisions->layers[*selected] == nullptr) return Valid::success(true); // WR-24
+        const auto* player_rules = economy.player(player);
+        if (player_rules == nullptr) return Valid::success(false);
+        auto direction = planar_direction(player_rules->reinforcement_yaw);
+        if (!direction) return Valid::failure(direction.error());
+        auto dx = math::multiply(direction.value().x, economy.collision_distance);
+        auto dy = math::multiply(direction.value().y, economy.collision_distance);
+        if (!dx) return Valid::failure(dx.error());
+        if (!dy) return Valid::failure(dy.error());
+        // WR-25: sweep back along facing, from this frame through frame + 115.
+        LinearQuery query;
+        query.start = {math::Fixed::from_raw(point.x.raw() - dx.value().raw()), math::Fixed::from_raw(point.y.raw() - dy.value().raw())};
+        query.end = {point.x, point.y};
+        query.start_frame = math::Fixed::from_raw(static_cast<std::int64_t>(tick) * math::Fixed::scale);
+        query.end_frame = math::Fixed::from_raw(static_cast<std::int64_t>(tick + arrival_sweep_frames) * math::Fixed::scale);
+        query.facing = {direction.value().x, direction.value().y};
+        query.x_extent = x_extent;
+        query.y_extent = y_extent;
+        std::vector<EntityId> ignored;
+        if (squadron != nullptr && layer == SpaceLayer::none) {
+            // WR-27: resolved corvette objects and unresolved IDs do not reject a layer-less
+            // squadron. Filter IDs before the query so an ignored first hit cannot mask a blocker.
+            for (const auto& window : collisions->layers[*selected]->windows) {
+                for (const auto& leaf : window) {
+                    const auto found = staged.find(leaf.entity);
+                    const auto* footprint = found != staged.end() ? motion.footprint(found->second.state.type_id) : nullptr;
+                    if (footprint == nullptr || footprint->layer == SpaceLayer::corvette) ignored.push_back(leaf.entity);
+                }
+            }
+            std::sort(ignored.begin(), ignored.end());
+            ignored.erase(std::unique(ignored.begin(), ignored.end()), ignored.end());
+            query.ignore_group = ignored;
+        }
+        auto dynamic = find_linear_collision(*collisions->layers[*selected], collisions->interval, query);
+        if (!dynamic) return Valid::failure(dynamic.error());
+        if (dynamic.value() != 0) return Valid::success(false);
+        query.ignore_group = {}; // WR-28: every static collision rejects.
+        if (collisions->statics != nullptr) {
+            auto statics = find_static_collision(*collisions->statics, query);
+            if (!statics) return Valid::failure(statics.error());
+            if (statics.value() != 0) return Valid::success(false);
+        }
+        return Valid::success(true);
+    }
+
+    // PL-05: the world box a unit blocks in an arrival's free-space search, from its type's placement
+    // box and the yaw of its rotation; a type with no box never blocks (PL-02).
+    [[nodiscard]] core::Result<void> block_placement(const UnitState& unit, std::vector<PlacementBox>& blockers) const {
+        using Void = core::Result<void>;
+        const auto* footprint = economy.footprint_of(unit.type_id);
+        if (footprint == nullptr || !footprint->box) return Void::success();
+        // The heading of the rotated +X axis in degrees: x' = 1 - 2(y^2 + z^2), y' = 2(xy + wz).
+        const auto& q = unit.rotation;
+        const auto yy = math::multiply(q.y, q.y);
+        const auto zz = math::multiply(q.z, q.z);
+        const auto xy = math::multiply(q.x, q.y);
+        const auto wz = math::multiply(q.w, q.z);
+        if (!yy || !zz || !xy || !wz) return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, "arrival blocker heading"));
+        const auto one = math::Fixed::from_raw(math::Fixed::scale);
+        const auto heading_x = math::Fixed::from_raw(one.raw() - 2 * (yy.value().raw() + zz.value().raw()));
+        const auto heading_y = math::Fixed::from_raw(2 * (xy.value().raw() + wz.value().raw()));
+        const auto turns = math::atan2_turn(heading_y, heading_x);
+        if (!turns) return Void::failure(turns.error());
+        const auto degrees = math::multiply(turns.value(), math::Fixed::from_raw(360 * math::Fixed::scale));
+        if (!degrees) return Void::failure(degrees.error());
+        auto bounds = blocker_bounds(*footprint->box, unit.position, degrees.value());
+        if (!bounds) return Void::failure(bounds.error());
+        blockers.push_back(bounds.value());
+        return Void::success();
+    }
+
+    // #530: one buy, cancel or reinforce of the frame's commands phase (PU-10 to PU-17, PU-30 to
+    // PU-34), serial in command order. Appends its event.
+    [[nodiscard]] core::Result<void> execute_economy(const PlayerCommand& command, const std::uint64_t tick,
+        std::map<EntityId, LiveUnit>& staged, EconomyStage& stage, std::vector<Event>& events,
+        const CollisionWorld* collisions = nullptr) const {
+        using Void = core::Result<void>;
+        const auto issuer = command.key.player_id;
+        Event event{
+            .tick = tick,
+            .kind = EventKind::order_accepted,
+            .player = issuer,
+            .sequence = command.key.sequence,
+            .unit = command.units.empty() ? invalid_entity_id : command.units.front(),
+            .order = order_kind(command.payload),
+            .reason = RejectReason::none,
+            .hardpoint = 0,
+        };
+        const auto finish = [&](const RejectReason reason) {
+            event.reason = reason;
+            if (reason != RejectReason::none) event.kind = EventKind::order_rejected;
+            events.push_back(event);
+            return Void::success();
+        };
+        auto* ledger = ledger_of(stage.ledgers, issuer);
+        const auto* player = economy.player(issuer);
+        if (ledger == nullptr || player == nullptr) return finish(RejectReason::no_economy);
+        if (const auto* buy = std::get_if<BuyPayload>(&command.payload)) {
+            const auto station = staged.find(command.units.front());
+            if (station == staged.end()) return finish(RejectReason::unit_not_live);
+            const auto* option = build_option(station->second, issuer, buy->type);
+            if (option == nullptr) return finish(RejectReason::cannot_produce);
+            return finish(queue_build(*ledger, *player, economy, *option, station->first, tick));
+        }
+        if (const auto* cancel = std::get_if<CancelPayload>(&command.payload)) {
+            const bool removed = cancel_build(*ledger, static_cast<BuildQueue>(cancel->queue), cancel->index, tick);
+            return finish(removed ? RejectReason::none : RejectReason::no_queue_entry);
+        }
+        const auto& reinforce = std::get<ReinforcePayload>(command.payload);
+        if (outcome) return finish(RejectReason::battle_decided); // WR-19, before creation/pool consumption
+        const auto pooled = std::find(ledger->pool.begin(), ledger->pool.end(), reinforce.type);
+        if (pooled == ledger->pool.end()) return finish(RejectReason::not_in_pool);
+        std::int64_t owned = 0;
+        for (const auto& [id, share] : stage.shares) {
+            static_cast<void>(id);
+            if (share.owner == issuer) owned += share.share;
+        }
+        const auto population = population_of(reinforce.type);
+        const auto count = population_count(owned);
+        if (count > player->population_cap || population > player->population_cap - count) {
+            return finish(RejectReason::no_population_room);
+        }
+        // WR-25: tracking, including a layer rebuilt by an earlier command, starts at the staged frame.
+        auto valid = placement_valid(issuer, reinforce.type, reinforce.position, staged, tick + 1, collisions);
+        if (!valid) return Void::failure(valid.error());
+        if (!valid.value()) return finish(RejectReason::invalid_position);
+        const auto context = command_context(command.key) + ": ";
+        const auto direction = planar_direction(player->reinforcement_yaw);
+        const auto rotation = yaw_rotation(player->reinforcement_yaw);
+        if (!direction || !rotation) {
+            return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "reinforcement facing"));
+        }
+        // PU-34, PU-35: a new unit at the start of its lane, arriving at `exit`.
+        const auto add = [&](const TypeId type, const math::Vec3& exit, const math::Quat& facing,
+                             const std::int64_t share) -> core::Result<EntityId> {
+            if (stage.next_id == invalid_entity_id) {
+                return core::Result<EntityId>::failure(
+                    detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
+            }
+            const auto id = stage.next_id;
+            const ArrivalState arrival{0, exit, direction.value()};
+            auto start = arrival_position(arrival);
+            if (!start) return core::Result<EntityId>::failure(start.error());
+            staged.emplace(id, new_unit(UnitState{id, type, issuer, start.value(), facing, {}}, tick));
+            // WR-32/41: a squadron's craft receive the modifier; its container does not.
+            if (motion.squadrons.find_squadron(type) == nullptr
+                && economy.vulnerability_frames != 0 && economy.vulnerability.raw() != 0) {
+                staged.at(id).arrival_vulnerable_until = tick + 1 + economy.vulnerability_frames;
+            }
+            stage.arrivals.emplace(id, arrival);
+            if (share > 0) stage.shares.emplace(id, PopulationShare{issuer, share});
+            if (economy.stream(type) != nullptr) stage.earners.emplace_back(id, issuer); // PU-02
+            stage.next_id = id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : id + 1;
+            return core::Result<EntityId>::success(id);
+        };
+        // PL-08: the arrival point is on the plane (height 0). A created unit is then raised by its
+        // type's Layer_Z_Adjust (LZ-01): a single ship here, each squadron craft below.
+        const math::Vec3 point{reinforce.position.x, reinforce.position.y, {}};
+        const auto* squadron = motion.squadrons.find_squadron(reinforce.type);
+        if (squadron == nullptr) {
+            // PL-08: a single ship is created on the point without a search, so it may overlap.
+            const auto* footprint = economy.footprint_of(reinforce.type);
+            const math::Vec3 raised{point.x, point.y, footprint != nullptr ? footprint->layer_z : math::Fixed{}};
+            auto added = add(reinforce.type, raised, rotation.value(), population_share(population, 1));
+            if (!added) return Void::failure(added.error());
+            event.unit = added.value();
+        } else {
+            // PL-08: each craft is searched from the point (start angle 0) on the plane and, when
+            // nothing within the distance is free, put on the point itself; it is then raised by its
+            // own height (LZ-01). Every live unit with a placement box blocks, and so does each craft
+            // already placed. The team container follows its craft and holds the point afterwards.
+            const auto& facing = direction.value();
+            std::vector<PlacementBox> blockers;
+            for (const auto& [other_id, other] : staged) {
+                static_cast<void>(other_id);
+                auto blocked = block_placement(other.state, blockers);
+                if (!blocked) return blocked;
+            }
+            std::vector<EntityId> members;
+            math::Fixed layer_z{};
+            const auto craft_count = static_cast<std::uint32_t>(squadron->members.size());
+            for (std::size_t member = 0; member < squadron->members.size(); ++member) {
+                const auto* craft = motion.squadrons.find_craft(squadron->members[member]);
+                const auto height = craft != nullptr ? craft->layer_z : math::Fixed{};
+                if (member == 0) layer_z = height;
+                const auto* footprint = economy.footprint_of(squadron->members[member]);
+                math::Vec3 at = point;
+                if (footprint != nullptr && footprint->box) {
+                    const FreeSpaceSearch search{point, *footprint->box, math::Fixed{}};
+                    auto found = find_free_space(search, blockers);
+                    if (!found) return Void::failure(found.error());
+                    if (found.value()) at = *found.value();
+                    auto bounds = blocker_bounds(*footprint->box, at, player->reinforcement_yaw);
+                    if (!bounds) return Void::failure(bounds.error());
+                    blockers.push_back(bounds.value());
+                }
+                const auto x = at.x;
+                const auto y = at.y;
+                auto flight = launch_state(facing, math::Fixed{});
+                if (!flight) return Void::failure(flight.error());
+                auto turned = craft_rotation(flight.value());
+                if (!turned) return Void::failure(turned.error());
+                auto added = add(squadron->members[member], math::Vec3{x, y, height}, turned.value(),
+                    population_share(population, craft_count));
+                if (!added) return Void::failure(added.error());
+                stage.crafts[added.value()] = flight.value();
+                members.push_back(added.value());
+            }
+            auto container = add(reinforce.type, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0);
+            if (!container) return Void::failure(container.error());
+            SquadronState order;
+            order.container = container.value();
+            order.squadron_type = reinforce.type;
+            order.roster = members;
+            order.anchor = math::Vec3{point.x, point.y, layer_z};
+            order.next_scan_frame = tick + arrival_frames;
+            stage.minds.emplace(container.value(), std::move(order));
+            stage.squadrons.push_back(Squadron{container.value(), std::move(members)});
+            event.unit = container.value();
+        }
+        ledger->pool.erase(pooled);
+        return finish(RejectReason::none);
     }
 
     // Live units with a sensor profile, in the order of `units` (ascending ID).
-    [[nodiscard]] static std::vector<FogRevealer> revealers(const SensorField& field, const std::span<const UnitState> units) {
+    [[nodiscard]] static std::vector<FogRevealer> revealers(const SensorField& field, const std::span<const UnitState> units,
+        const std::span<const EntityId> disabled = {}) {
         std::vector<FogRevealer> result;
         for (const auto& unit : units) {
-            if (const auto range = field.reveal_range(unit.type_id)) {
+            if (const auto range = field.reveal_range(unit.type_id);
+                range && !std::binary_search(disabled.begin(), disabled.end(), unit.entity_id)) {
                 result.push_back(FogRevealer{unit.entity_id, unit.owner, unit.position, *range});
             }
         }
@@ -1382,6 +1827,7 @@ public:
             const auto* able = registry.try_get<Abilities>(handle);
             const auto* approaching = registry.try_get<Approaching>(handle);
             const auto* stunned = registry.try_get<IonStunned>(handle);
+            const auto* vulnerable = registry.try_get<ArrivalVulnerability>(handle);
             result.push_back(LiveUnit{
                 UnitState{
                     id,
@@ -1400,6 +1846,7 @@ public:
                 able != nullptr ? std::optional(able->value) : std::nullopt,
                 approaching != nullptr ? std::optional(approaching->value) : std::nullopt,
                 stunned != nullptr ? std::optional(stunned->value) : std::nullopt,
+                vulnerable != nullptr ? std::optional(vulnerable->until) : std::nullopt,
             });
         }
         return result;
@@ -1612,12 +2059,25 @@ public:
             guard, profile != nullptr ? profile->max_attack_distance : std::nullopt, motion.rules.guard_range);
     }
 
+    // OR-21: an attack may name a hardpoint of the target's type that is targetable and standing.
+    [[nodiscard]] bool target_hardpoint_standing(const LiveUnit& target, const std::uint32_t index) const {
+        const auto* profile = combat.find(target.state.type_id);
+        if (profile == nullptr) return false;
+        const auto hardpoint = std::find_if(profile->hardpoints.begin(), profile->hardpoints.end(),
+            [index](const TargetHardpoint& entry) { return entry.hardpoint == index && entry.targetable; });
+        if (hardpoint == profile->hardpoints.end()) return false;
+        const auto* health = durability.find(target.state.type_id);
+        return health == nullptr || !target.durability || index >= health->hardpoints.size()
+            || !hardpoint_destroyed(*health, *target.durability, index);
+    }
+
     // OR-04, OR-14: the point the in-range test measures to: a guarded unit's position, else the
-    // aim point of A-04 seen from `from`.
-    [[nodiscard]] static math::Vec3 approach_point(
-        const bool guard, const LiveUnit& target, const detail::CombatUnit* target_view, const math::Vec3& from) {
+    // aim point of A-04 seen from `from`; OR-25: an attack on a hardpoint measures to that
+    // hardpoint while it stands.
+    [[nodiscard]] static math::Vec3 approach_point(const bool guard, const LiveUnit& target,
+        const detail::CombatUnit* target_view, const math::Vec3& from, const std::uint32_t hardpoint = attack_hull) {
         if (guard || target_view == nullptr) return target.state.position;
-        return detail::ordered_aim_point(*target_view, from);
+        return detail::ordered_aim_point(*target_view, from, hardpoint);
     }
 
     // Where the unit's current movement leaves it (OR-06): the tracked prediction of its path at
@@ -1680,7 +2140,8 @@ public:
         using Checked = core::Result<std::optional<ApproachPlan>>;
         const bool guard = unit.state.order.kind == OrderKind::guard;
         const auto range = approach_range(unit, guard);
-        const auto now = approach_point(guard, target, target_view, unit.state.position);
+        const auto now = approach_point(guard, target, target_view, unit.state.position,
+            unit.state.order.kind == OrderKind::attack ? unit.state.order.hardpoint : attack_hull);
         if (within_range(unit.state.position, now, range, RangeMetric::planar)) return Checked::success(std::nullopt);
         const auto end = movement_end(unit);
         if (!end) return Checked::failure(end.error());
@@ -1734,6 +2195,9 @@ public:
             if (unit.ion_stun) {
                 registry.emplace<IonStunned>(handle, *unit.ion_stun);
             }
+            if (unit.arrival_vulnerable_until) {
+                registry.emplace<ArrivalVulnerability>(handle, *unit.arrival_vulnerable_until);
+            }
             handles.emplace(state.entity_id, handle);
         };
         if (reverse) {
@@ -1749,9 +2213,11 @@ public:
 
     // The targeting phase's world view (#73): the moved units in ascending ID with their health,
     // combat state and the visibility of the last published snapshot, and one space index over
-    // them. Built serially: one index over all units, like the sensor field.
+    // them. Workers fill disjoint ascending-ID slots; only the index build and squadron
+    // overrides are serial (one index and ordered team state).
     [[nodiscard]] core::Result<detail::CombatWorld> combat_world(const std::vector<LiveUnit>& units,
-        const std::vector<std::pair<EntityId, math::Vec3>>& starts, const std::uint64_t frame) const {
+        const std::vector<std::pair<EntityId, math::Vec3>>& starts, const std::uint64_t frame,
+        const PartitionExecutor& executor) const {
         detail::CombatWorld world;
         world.players = setup.players;
         world.table = &combat;
@@ -1798,53 +2264,64 @@ public:
             }
             reaches[profile_index] = math::Fixed::from_raw(own + own / 1024 + math::Fixed::scale);
         }
-        world.units.reserve(units.size());
-        std::vector<SpaceBody> bodies;
-        bodies.reserve(units.size());
+        world.units.resize(units.size());
+        std::vector<SpaceBody> bodies(units.size());
+        std::vector<std::optional<core::Diagnostic>> errors(units.size());
         const auto instances = current_snapshot->instances();
-        auto published = instances.begin();
-        for (const auto& unit : units) {
-            const auto& state = unit.state;
-            detail::CombatUnit entry;
-            entry.id = state.entity_id;
-            entry.type_id = state.type_id;
-            entry.owner = state.owner;
-            entry.team = teams.at(state.owner);
-            const auto player = std::find_if(setup.players.begin(), setup.players.end(),
-                [&](const Player& candidate) { return candidate.player_id == state.owner; });
-            entry.player_index = static_cast<std::size_t>(player - setup.players.begin());
-            entry.position = state.position;
-            // W-10: where the unit stood before this frame's movement (a unit new this frame: here).
-            const auto start = std::lower_bound(starts.begin(), starts.end(), state.entity_id,
+        const auto filled = executor.execute_phase("combat-world", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, units.size());
+            if (range.begin == range.end) return;
+            auto published = std::lower_bound(instances.begin(), instances.end(), units[range.begin].state.entity_id,
+                [](const TacticalInstance& instance, const EntityId id) { return instance.entity_id < id; });
+            auto start = std::lower_bound(starts.begin(), starts.end(), units[range.begin].state.entity_id,
                 [](const std::pair<EntityId, math::Vec3>& item, const EntityId id) { return item.first < id; });
-            entry.previous_position = start != starts.end() && start->first == state.entity_id ? start->second : state.position;
-            auto transform = math::to_matrix(state.rotation, state.position);
-            if (!transform) {
-                return core::Result<detail::CombatWorld>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
-                    "tick " + std::to_string(frame) + " unit " + std::to_string(state.entity_id) + ": "
-                        + transform.error().message));
+            for (auto slot = range.begin; slot < range.end; ++slot) {
+                const auto& unit = units[slot];
+                const auto& state = unit.state;
+                auto& entry = world.units[slot];
+                entry.id = state.entity_id;
+                entry.type_id = state.type_id;
+                entry.owner = state.owner;
+                const auto player = std::lower_bound(setup.players.begin(), setup.players.end(), state.owner,
+                    [](const Player& candidate, const PlayerId id) { return candidate.player_id < id; });
+                entry.team = player->team_id;
+                entry.player_index = static_cast<std::size_t>(player - setup.players.begin());
+                entry.position = state.position;
+                // W-10: where the unit stood before this frame's movement (a unit new this frame: here).
+                while (start != starts.end() && start->first < state.entity_id) ++start;
+                entry.previous_position = start != starts.end() && start->first == state.entity_id ? start->second : state.position;
+                auto transform = math::to_matrix(state.rotation, state.position);
+                if (!transform) {
+                    errors[slot] = detail::diagnostic(diagnostic_codes::worker_failure,
+                        "tick " + std::to_string(frame) + " unit " + std::to_string(state.entity_id) + ": "
+                            + transform.error().message);
+                    continue;
+                }
+                entry.transform = transform.value();
+                while (published != instances.end() && published->entity_id < state.entity_id) {
+                    ++published;
+                }
+                if (published != instances.end() && published->entity_id == state.entity_id) {
+                    entry.visible_to = published->visible_to;
+                }
+                entry.profile = combat.find(state.type_id);
+                if (entry.profile != nullptr) {
+                    entry.collision_reach = reaches[static_cast<std::size_t>(entry.profile - combat.profiles.data())];
+                }
+                entry.durability_profile = durability.find(state.type_id);
+                entry.durability = unit.durability ? &*unit.durability : nullptr;
+                entry.combat = unit.combat ? &*unit.combat : nullptr;
+                // A-04: only a unit at rest turns toward its target.
+                entry.can_turn = unit.motion && unit.motion->kind == MotionKind::none && !unit.formation
+                    && motion.find(state.type_id) != nullptr;
+                entry.weapon_delay = ability_factor(unit, AbilityModifier::weapon_delay);
+                entry.fire_rate = ion_fire_rate(unit.ion_stun, world.frame); // IS-06
+                bodies[slot] = SpaceBody{state.entity_id, state.owner, state.position};
             }
-            entry.transform = transform.value();
-            while (published != instances.end() && published->entity_id < state.entity_id) {
-                ++published;
-            }
-            if (published != instances.end() && published->entity_id == state.entity_id) {
-                entry.visible_to = published->visible_to;
-            }
-            entry.profile = combat.find(state.type_id);
-            if (entry.profile != nullptr) {
-                entry.collision_reach = reaches[static_cast<std::size_t>(entry.profile - combat.profiles.data())];
-            }
-            entry.durability_profile = durability.find(state.type_id);
-            entry.durability = unit.durability ? &*unit.durability : nullptr;
-            entry.combat = unit.combat ? &*unit.combat : nullptr;
-            // A-04: only a unit at rest turns toward its target (FoC's Is_Moving_To).
-            entry.can_turn = unit.motion && unit.motion->kind == MotionKind::none && !unit.formation
-                && motion.find(state.type_id) != nullptr;
-            entry.weapon_delay = ability_factor(unit, AbilityModifier::weapon_delay);
-            entry.fire_rate = ion_fire_rate(unit.ion_stun, world.frame); // IS-06
-            world.units.push_back(entry);
-            bodies.push_back(SpaceBody{state.entity_id, state.owner, state.position});
+        });
+        if (!filled) return core::Result<detail::CombatWorld>::failure(filled.error());
+        for (auto& error : errors) {
+            if (error) return core::Result<detail::CombatWorld>::failure(std::move(*error));
         }
         auto index = SpaceIndex::build(bodies);
         if (!index) {
@@ -2090,6 +2567,53 @@ public:
             bytes.insert(bytes.end(), collection_tag.begin(), collection_tag.end());
             collection.append_state(bytes);
         }
+        // Skirmish purchasing (#530): the ledgers with economy rules, arrivals and population
+        // shares while any; a session without an economy hashes as before.
+        if (!economy.empty()) {
+            bytes.insert(bytes.end(), economy_tag.begin(), economy_tag.end());
+            sim::detail::append_u64(bytes, ledgers.size());
+            for (const auto& ledger : ledgers) {
+                append_ledger(bytes, ledger);
+            }
+        }
+        if (!arrivals.empty()) {
+            bytes.insert(bytes.end(), arrival_tag.begin(), arrival_tag.end());
+            sim::detail::append_u64(bytes, arrivals.size());
+            for (const auto& [id, arrival] : arrivals) {
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u32(bytes, arrival.frame);
+                sim::detail::append_u32(bytes, 0);
+                append_vec3(bytes, arrival.exit);
+                append_vec3(bytes, arrival.direction);
+            }
+        }
+        if (!shares.empty()) {
+            bytes.insert(bytes.end(), population_tag.begin(), population_tag.end());
+            sim::detail::append_u64(bytes, shares.size());
+            for (const auto& [id, share] : shares) {
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u32(bytes, share.owner);
+                sim::detail::append_u32(bytes, 0);
+                sim::detail::append_i64(bytes, share.share);
+            }
+        }
+        // WR-41: AVUL v1, coordinator-reserved. Only active independent defense timers;
+        // the initial records and sessions without arrivals retain their existing encoding.
+        const auto vulnerable = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
+            return unit.arrival_vulnerable_until.has_value();
+        });
+        if (vulnerable != 0) {
+            constexpr std::array<std::uint8_t, 4> tag{'A', 'V', 'U', 'L'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, static_cast<std::uint64_t>(vulnerable));
+            for (const auto& unit : units) {
+                if (!unit.arrival_vulnerable_until) continue;
+                sim::detail::append_u64(bytes, unit.state.entity_id);
+                sim::detail::append_u64(bytes, *unit.arrival_vulnerable_until);
+            }
+        }
         // The decided battle (#77); an undecided session hashes as before.
         if (outcome) {
             append_outcome(bytes, *outcome);
@@ -2136,6 +2660,11 @@ public:
     CombatTable combat;
     VictoryRules victory;
     AbilityTable abilities;
+    EconomyRules economy;                           // #530
+    std::vector<PlayerEconomy> ledgers;             // #530: per economy player, ascending ID
+    std::map<EntityId, ArrivalState> arrivals;      // #530: arriving units (PU-35)
+    std::map<EntityId, PopulationShare> shares;     // #530: reinforced units' population (PU-21)
+    std::vector<std::pair<EntityId, PlayerId>> earners; // #530: live income stations, ascending ID
     std::vector<StarbaseEntry> starbases;   // counted star bases standing, ascending ID (#77)
     std::optional<BattleOutcome> outcome;   // hashed once decided (#77)
     std::vector<SnapshotPlayer> snapshot_players;
@@ -2179,7 +2708,7 @@ TacticalSession::~TacticalSession() = default;
 core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities) {
+    const AbilityTable& abilities, const EconomyRules& economy) {
     auto valid = validate_setup(setup);
     if (valid) {
         valid = validate_sensors(sensors);
@@ -2204,17 +2733,21 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (valid) {
         valid = validate_abilities(abilities);
     }
+    if (valid && !economy.empty()) {
+        valid = validate_economy(economy, setup.players);
+    }
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
     return core::Result<TacticalSession>::success(
-        TacticalSession(std::make_unique<Impl>(setup, sensors, durability, motion, fog, combat, victory, abilities)));
+        TacticalSession(std::make_unique<Impl>(setup, sensors, durability, motion, fog, combat, victory, abilities,
+            economy)));
 }
 
 core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities) {
+    const AbilityTable& abilities, const EconomyRules& economy) {
     auto valid = validate_replay(replay);
     if (valid) {
         valid = validate_sensors(sensors);
@@ -2239,11 +2772,15 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     if (valid) {
         valid = validate_abilities(abilities);
     }
+    if (valid && !economy.empty()) {
+        valid = validate_economy(economy, replay.setup.players);
+    }
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
     auto session = TacticalSession(
-        std::make_unique<Impl>(replay.setup, sensors, durability, motion, fog, combat, victory, abilities));
+        std::make_unique<Impl>(replay.setup, sensors, durability, motion, fog, combat, victory, abilities,
+            economy));
     for (const auto& command : replay.commands) {
         const auto submitted = session.submit(command);
         if (!submitted) {
@@ -2469,7 +3006,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     };
     // FT-05: hand a squadron's new target to its craft as their direct target, or take the old
     // one back.
-    const auto hand_target = [&](const EntityId container, const EntityId previous, const EntityId target) {
+    const auto hand_target = [&](const EntityId container, const EntityId previous, const EntityId target,
+                                 const std::uint32_t hardpoint = no_hardpoint) {
         for (const auto& squadron : impl_->squadrons) {
             if (squadron.container != container) continue;
             for (const auto member : squadron.members) {
@@ -2477,9 +3015,11 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                 if (craft == nullptr || !craft->combat) continue;
                 if (target != invalid_entity_id) {
                     craft->combat->attack_target = target;
+                    craft->combat->attack_hardpoint = hardpoint;
                     craft->combat->direct = true;
                 } else if (craft->combat->direct && craft->combat->attack_target == previous) {
                     craft->combat->attack_target = invalid_entity_id;
+                    craft->combat->attack_hardpoint = no_hardpoint;
                     craft->combat->direct = false;
                 }
             }
@@ -2548,6 +3088,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             }
             const auto previous = state.target;
             state.target = next;
+            state.target_hardpoint = attack_hull; // #531: the dogfight's own target names no hardpoint
             state.approach = next != invalid_entity_id;
             hand_target(container, previous, next);
             if (next == invalid_entity_id) end_combat(container, state, leader);
@@ -2612,6 +3153,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         if (near && other.mode != SquadronMode::move && squadron_of(other.target) == invalid_entity_id) {
             const auto previous = other.target;
             other.target = container;
+            other.target_hardpoint = attack_hull;
             other.approach = true;
             hand_target(target_squadron, previous, container);
         }
@@ -2727,6 +3269,23 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         const auto range = partition_range(partition, moving.size());
         for (auto index = range.begin; index < range.end; ++index) {
             auto& unit = moving[index];
+            if (unit.arrival_vulnerable_until && tick + 1 >= *unit.arrival_vulnerable_until) {
+                unit.arrival_vulnerable_until.reset();
+            }
+            // #530 PU-35: an arriving unit flies its arrival lane, not its locomotor.
+            if (const auto arriving = impl_->arrivals.find(unit.state.entity_id); arriving != impl_->arrivals.end()) {
+                auto next = arriving->second;
+                next.frame = std::min(next.frame + 1, arrival_frames);
+                auto placed = arrival_position(next);
+                if (!placed) {
+                    move_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                        "tick " + std::to_string(tick) + " unit " + std::to_string(unit.state.entity_id) + ": "
+                            + placed.error().message);
+                    continue;
+                }
+                unit.state.position = placed.value();
+                continue;
+            }
             const auto squadron = craft_squadron.find(unit.state.entity_id);
             if (squadron != craft_squadron.end()) {
                 // FM-01: a squadron craft flies by the fighter locomotor from the copied inputs.
@@ -2779,6 +3338,23 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         }
     }
     auto crafts = impl_->crafts;
+    // #530 PU-35, PU-39: the arrivals advance one frame; frame 150 ends an arrival. Serial over
+    // the few arriving units.
+    auto arrivals = impl_->arrivals;
+    std::vector<EntityId> unloaded;
+    for (auto iterator = arrivals.begin(); iterator != arrivals.end();) {
+        if (++iterator->second.frame >= arrival_frames) {
+            unloaded.push_back(iterator->first); // WR-40: ordered completion notification
+            iterator = arrivals.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+    auto ledgers = impl_->ledgers;
+    auto shares = impl_->shares;
+    std::vector<Squadron> arrived_squadrons;
+    auto earners = impl_->earners;
+    auto next_id = impl_->next_id;
     // DG-26: the defense each craft's locomotor set this frame, read by this frame's hits.
     std::map<EntityId, math::Fixed> craft_defense;
     // WU-25 (presentation, not hashed): the squadrons whose leader closes on its target (FA-01).
@@ -2803,9 +3379,17 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     // acts from the next frame like a move. Workers read one immutable world view (the moved
     // units, their health and the last published visibility) and write each unit's combat state
     // and events to its own slot; the serial commit below appends the events in ascending ID.
-    auto world = impl_->combat_world(moving, starts, tick);
+    auto world = impl_->combat_world(moving, starts, tick, executor);
     if (!world) {
         return core::Result<TacticalTick>::failure(world.error());
+    }
+    // #530 PU-37: a hidden arriving unit is seen only by its own team. Serial over the arrivals.
+    for (const auto& [id, arrival] : arrivals) {
+        if (arrival.frame >= arrival_visible_frame) continue;
+        auto& units = world.value().units;
+        const auto found = std::lower_bound(units.begin(), units.end(), id,
+            [](const detail::CombatUnit& unit, const EntityId value) { return unit.id < value; });
+        if (found != units.end() && found->id == id) found->visible_to = 0;
     }
     // CO-11: workers compute each unit's box into its own slot; the collection trees then take the
     // boxes serially in ascending ID, as FoC's trees take each object's transform update in turn
@@ -2853,7 +3437,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         std::vector<std::pair<EntityId, SquadronFrame*>> scanning;
         for (auto& [container, frame] : squadron_frames) {
             // FO-01, FO-05, FO-06: whether a squadron on a player order looks for targets.
-            if (frame.profile != nullptr && view.find(frame.leader) != nullptr && frame.scans) {
+            if (frame.profile != nullptr && view.find(frame.leader) != nullptr && frame.scans
+                && !arrivals.contains(container)) { // #530 PU-39: an arriving squadron holds its fire
                 scanning.emplace_back(container, &frame);
             }
         }
@@ -2877,12 +3462,19 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             state.next_scan_frame = scans[index].next_scan_frame;
             // FA-07: a new target starts an approach; none ends it.
             if (state.target != previous) state.approach = state.target != invalid_entity_id;
+            // OR-23: an ordered hardpoint ends with its target or when it is destroyed (#531).
+            if (state.target_hardpoint != attack_hull) {
+                const auto* ordered = state.target == previous ? view.find(state.target) : nullptr;
+                if (ordered == nullptr || detail::standing_hardpoint(*ordered, state.target_hardpoint) == nullptr) {
+                    state.target_hardpoint = attack_hull;
+                }
+            }
             // FD-09: a target lost from sight ends combat.
             if (previous != invalid_entity_id && state.target != previous) {
                 end_combat(scanning[index].first, state, craft_view(scanning[index].second->leader));
             }
             if (state.target == invalid_entity_id && previous == invalid_entity_id) continue;
-            hand_target(scanning[index].first, previous, state.target);
+            hand_target(scanning[index].first, previous, state.target, state.target_hardpoint);
         }
     }
     std::vector<std::optional<detail::CombatStep>> combat_steps(moving.size());
@@ -2890,7 +3482,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     const auto targeted = executor.execute_phase("targeting", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, moving.size());
         for (auto index = range.begin; index < range.end; ++index) {
-            if (!moving[index].combat) {
+            // #530 PU-39: an arriving unit neither targets nor fires.
+            if (!moving[index].combat || arrivals.contains(moving[index].state.entity_id)) {
                 continue;
             }
             // FT-07: a craft is idle while its squadron (committed above) has no target.
@@ -3166,7 +3759,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
              ++iterator) {
             const auto& payload = iterator->second.payload;
             moves_due = moves_due || point_move(payload).has_value() || approach_target_of(payload) != invalid_entity_id
-                || std::holds_alternative<AbilityPayload>(payload);
+                || std::holds_alternative<AbilityPayload>(payload) || std::holds_alternative<ReinforcePayload>(payload);
         }
         for (const auto& unit : moving) {
             moves_due = moves_due || (unit.formation && unit.formation->frame <= frame);
@@ -3177,6 +3770,10 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             tracking->frame = frame;
             tracking->interval = table.avoidance->tracking_interval;
             tracking->windows = table.avoidance->tracking_windows;
+            for (const auto& [id, arrival] : arrivals) {
+                static_cast<void>(arrival);
+                tracking->suspended.insert(id);
+            }
             for (std::size_t index = 0; index < 4; ++index) {
                 tracking->current_start[index] = rolled_start(impl_->tracking_anchor[index], frame, tracking->interval);
             }
@@ -3263,6 +3860,13 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     // DG-11). A unit killed by an earlier hit leaves at once; a later projectile that reached it
     // is spent without effect.
     std::vector<Event> events;
+    // WR-40: arrival completion restores the exit pose in the partitioned movement phase.
+    // Visibility is reevaluated below from that pose every tick, including this completion tick.
+    for (const auto id : unloaded) {
+        if (const auto found = staged.find(id); found != staged.end()) {
+            events.push_back(Event{tick, EventKind::reinforcement_unloaded, found->second.state.owner, 0, id});
+        }
+    }
     // #447: every unit killed this tick as it stood when it died, in destruction order.
     std::vector<UnitState> killed;
     std::vector<Projectile> projectiles;
@@ -3278,6 +3882,13 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         if (target == staged.end() || !target->second.durability) {
             continue;
         }
+        // #530 PU-37: a hidden arriving unit takes no damage; the projectile is spent. PU-38: a
+        // visible one takes the elevated vulnerability for the rules' duration.
+        const auto arriving = arrivals.find(*flight->hit);
+        if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) {
+            continue;
+        }
+        const auto arrival_defense = target->second.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
         const auto& projectile = flight->projectile;
         const auto& profile = *durability.find(target->second.state.type_id);
         // DG-11: with meshes, the hardpoint whose collision mesh the projectile met takes it (#536),
@@ -3293,10 +3904,12 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             hardpoint = projectile.target_hardpoint;
         }
         const auto defense = craft_defense.find(*flight->hit);
+        auto modifier = defense != craft_defense.end() ? defense->second : math::Fixed{};
+        // #530 PU-38: an arriving unit's elevated vulnerability adds to its defense modifier.
+        modifier = math::Fixed::from_raw(modifier.raw() + arrival_defense.raw());
         const Hit hit{projectile.damage, projectile.damage_type, true, projectile.shield_damage,
             projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
-            projectile.internal_damage_misc, defense != craft_defense.end() ? defense->second : math::Fixed{},
-            projectile.energy_damage};
+            projectile.internal_damage_misc, modifier, projectile.energy_damage};
         const auto hull_before = target->second.durability->hull;
         const auto shields_before = target->second.durability->shields;
         auto outcome = apply_hit(profile, *damage_rules, *target->second.durability, hit, tick);
@@ -3902,6 +4515,32 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             if (auto failed = plan_pending()) return unit_failure(failed->first, failed->second);
         }
         const auto issuer = command.key.player_id;
+        // #530: a buy, cancel or reinforce acts on the issuer's economy.
+        if (economy_command(command.payload)) {
+            Impl::EconomyStage stage{ledgers, arrivals, shares, crafts, minds, arrived_squadrons, earners, next_id};
+            CollisionWorld collisions;
+            const CollisionWorld* placement_world = nullptr;
+            if (tracking && std::holds_alternative<ReinforcePayload>(command.payload)) {
+                const auto type = std::get<ReinforcePayload>(command.payload).type;
+                const auto* footprint = table.footprint(type);
+                auto layer = footprint != nullptr ? footprint->layer : SpaceLayer::none;
+                if (layer == SpaceLayer::none && table.squadrons.find_squadron(type)) layer = SpaceLayer::corvette;
+                if (const auto selected = dynamic_layer_index(layer)) {
+                    if (auto built = world_for(*selected, collisions); !built) return core::Result<TacticalTick>::failure(built.error());
+                    placement_world = &collisions;
+                }
+            }
+            if (auto executed = impl_->execute_economy(command, tick, staged, stage, events, placement_world); !executed) {
+                return core::Result<TacticalTick>::failure(executed.error());
+            }
+            if (events.back().kind == EventKind::order_rejected) {
+                diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                    command_context(command.key) + ": " + std::string(to_string(events.back().order)) + " rejected ("
+                        + std::string(to_string(events.back().reason)) + ")",
+                    {}, core::Severity::warning));
+            }
+            continue;
+        }
         const auto issuer_team = impl_->teams.at(issuer);
         const auto* damage = std::get_if<DamagePayload>(&command.payload);
         auto command_reason = RejectReason::none;
@@ -3913,6 +4552,9 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                 command_reason = RejectReason::target_not_live;
             } else if (impl_->teams.at(target->second.state.owner) == issuer_team) {
                 command_reason = RejectReason::target_not_hostile;
+            } else if (attack->hardpoint != attack_hull
+                && !impl_->target_hardpoint_standing(target->second, attack->hardpoint)) {
+                command_reason = RejectReason::hardpoint_invalid;
             }
         } else if (approach != invalid_entity_id && staged.find(approach) == staged.end()) {
             command_reason = RejectReason::target_not_live;
@@ -3941,6 +4583,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                     }
                 } else if (unit->second.state.owner != issuer) {
                     reason = RejectReason::unit_not_owned;
+                } else if (arrivals.contains(unit_id)) {
+                    reason = RejectReason::arriving; // #530 PU-39
                 } else if (const auto* ability = std::get_if<AbilityPayload>(&command.payload)) {
                     auto applied = apply_ability(unit_id, *ability);
                     if (!applied) {
@@ -3989,9 +4633,11 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                 if (live.combat) {
                     if (const auto* attack = std::get_if<AttackPayload>(&command.payload)) {
                         live.combat->attack_target = attack->target;
+                        live.combat->attack_hardpoint = attack->hardpoint;
                         live.combat->direct = true;
                     } else if (live.combat->direct) {
                         live.combat->attack_target = invalid_entity_id;
+                        live.combat->attack_hardpoint = no_hardpoint;
                         live.combat->direct = false;
                     }
                 }
@@ -4032,8 +4678,9 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                         target_view->durability = target.durability ? &*target.durability : nullptr;
                         target_view->combat = target.combat ? &*target.combat : nullptr;
                     }
-                    const auto point = Impl::approach_point(
-                        guard, target, target_view ? &*target_view : nullptr, live.state.position);
+                    const auto* ordered_attack = std::get_if<AttackPayload>(&command.payload);
+                    const auto point = Impl::approach_point(guard, target, target_view ? &*target_view : nullptr,
+                        live.state.position, ordered_attack != nullptr ? ordered_attack->hardpoint : attack_hull);
                     if (within_range(live.state.position, point, range, RangeMetric::planar)) {
                         // A path is dropped; a turn in place under way (A-04's) carries on (OR-05).
                         if (live.motion->kind != MotionKind::path) continue;
@@ -4069,6 +4716,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
                 continue;
             }
             // With damage rules the shield absorbs scripted damage first (DG-20); without, it is raw.
+            // WR-33: Lua Take_Damage uses the privileged damage route, which bypasses immunity.
             auto outcome = DamageOutcome{};
             if (damage_rules != nullptr) {
                 const Hit hit{damage->amount, no_type_index, false, true, true, damage->hardpoint};
@@ -4290,6 +4938,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     // with its live craft and their bounding-box centre. The serial commit then moves each
     // container there, or removes a container whose last craft has died.
     auto squadrons = impl_->squadrons;
+    squadrons.insert(squadrons.end(), arrived_squadrons.begin(), arrived_squadrons.end()); // #530, ascending IDs
     if (!squadrons.empty()) {
         const auto find = [&survivors](const EntityId id) -> const LiveUnit* {
             const auto found = std::lower_bound(survivors.begin(), survivors.end(), id,
@@ -4408,10 +5057,45 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     std::erase_if(crafts, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
     std::erase_if(spawners, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
 
+    // #530 economy service (PU-02 to PU-05, PU-16, PU-18): serial per economy player, after the
+    // frame's commands and destructions. It visits the few income stations, queue entries and
+    // population shares, never every unit.
+    std::erase_if(earners, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
+    std::erase_if(shares, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
+    std::erase_if(arrivals, [&](const auto& entry) { return survivor(entry.first) == nullptr; });
+    for (auto& ledger : ledgers) {
+        const auto* player = impl_->economy.player(ledger.player);
+        for (const auto& [station_id, owner] : earners) {
+            if (!impl_->allied(owner, ledger.player)) continue; // PU-03: the owner and its allies
+            const auto* source = survivor(station_id);
+            const auto* stream = impl_->economy.stream(source->state.type_id);
+            auto amount = stream->per_frame.raw();
+            // PU-04: each bonus while its hardpoint stands.
+            const auto* hull = durability.find(source->state.type_id);
+            for (const auto& bonus : stream->bonuses) {
+                const bool standing = bonus.hardpoint == always_on
+                    || (source->durability && hull != nullptr && bonus.hardpoint < hull->hardpoints.size()
+                        && !hardpoint_destroyed(*hull, *source->durability, bonus.hardpoint));
+                if (standing) amount += bonus.per_frame.raw();
+            }
+            ledger.credits = math::Fixed::from_raw(ledger.credits.raw() + amount);
+        }
+        // PU-18: an entry whose station is gone or no longer offers its type is dropped.
+        service_production(ledger, *player, tick,
+            [&](const QueueEntry& entry) {
+                const auto* station = survivor(entry.station);
+                return station != nullptr && impl_->build_option(*station, ledger.player, entry.type) != nullptr;
+            },
+            [&](const QueueEntry& entry) {
+                const auto* station = survivor(entry.station);
+                const auto* option = station != nullptr ? impl_->build_option(*station, ledger.player, entry.type) : nullptr;
+                return option != nullptr ? option->kind : BuildKind::unit;
+            });
+    }
+
     // Hangar phase (#75, FL-01 to FL-06): workers service each spawner's hangar copy in its own
     // slot; the serial commit launches the squadrons in ascending spawner ID with the next stable
     // IDs, craft first and their team container last (FL-06).
-    auto next_id = impl_->next_id;
     if (!spawners.empty()) {
         std::vector<std::pair<EntityId, SpawnerState>> hangars(spawners.begin(), spawners.end());
         std::vector<std::optional<SpawnDecision>> decisions(hangars.size());
@@ -4454,7 +5138,13 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
 
     // Visibility phase: after every per-unit system, workers read one sensor field built
     // from the tick's final positions and fill the same disjoint slots.
-    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors);
+    // WR-35/39: only the few active arrivals supply disabled IDs; the field's existing
+    // observer build filters them. Model visibility at 35 never enables a sensor.
+    std::vector<EntityId> disabled_revealers;
+    for (const auto& [id, arrival] : arrivals) {
+        if (arrival.frame < arrival_reveal_frame) disabled_revealers.push_back(id);
+    }
+    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors, disabled_revealers);
     if (!field) {
         return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
             "tick " + std::to_string(tick) + ": " + field.error().message));
@@ -4462,7 +5152,10 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     const auto& sensing = field.value();
     // Fog cells (#274): the grids due this tick are serviced, then revealers release and mark
     // their circles, from the same final positions.
-    std::optional<FogCells> fog = impl_->fog;
+    // A transactional view of the session's shared rows: pointer metadata only, never grids.
+    // Keeping the old rows until visibility succeeds also preserves failed-tick atomicity.
+    std::optional<FogCells> fog;
+    if (impl_->fog) fog.emplace(*impl_->fog);
     if (fog) {
         // V-19 (#495): each shot of a revealing unit shows its shooter to the owner of the unit it
         // fired at, from where it fired. One entry per shot in event order, read serially: the
@@ -4479,7 +5172,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
             }
             flashes.push_back(FogFlash{target->owner, shooter->position});
         }
-        const auto advanced = fog->advance(tick, true, Impl::revealers(sensing, positions), executor, flashes);
+        const auto advanced = fog->advance(tick, true, Impl::revealers(sensing, positions, disabled_revealers), executor, flashes);
         if (!advanced) {
             return core::Result<TacticalTick>::failure(advanced.error());
         }
@@ -4492,7 +5185,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         const auto range = partition_range(partition, positions.size());
         for (auto index = range.begin; index < range.end; ++index) {
             instances[index].visible_to = impl_->visible_to(sensing, cells, positions[index].owner, positions[index].position);
-            instances[index].reveal_range = sensing.reveal_range(positions[index].type_id);
+            instances[index].reveal_range = std::binary_search(disabled_revealers.begin(), disabled_revealers.end(), positions[index].entity_id)
+                ? std::nullopt : sensing.reveal_range(positions[index].type_id);
         }
         const auto spun = partition_range(partition, spins.size());
         for (auto index = spun.begin; index < spun.end; ++index) {
@@ -4521,6 +5215,23 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     for (auto& error : spin_pose_errors) {
         if (error) {
             return core::Result<TacticalTick>::failure(std::move(*error));
+        }
+    }
+    // #530 PU-36, PU-37: an arriving unit's instance carries its arrival frame; while hidden only
+    // its own team sees it. Serial over the arrivals.
+    for (const auto& [id, arrival] : arrivals) {
+        const auto found = std::lower_bound(positions.begin(), positions.end(), id,
+            [](const UnitState& unit, const EntityId value) { return unit.entity_id < value; });
+        if (found == positions.end() || found->entity_id != id) continue;
+        auto& instance = instances[static_cast<std::size_t>(found - positions.begin())];
+        instance.arrival = arrival.frame;
+        if (arrival.frame < arrival_visible_frame) {
+            const auto team = impl_->teams.at(found->owner);
+            std::uint64_t mask = 0;
+            for (std::size_t index = 0; index < impl_->setup.players.size(); ++index) {
+                if (impl_->setup.players[index].team_id == team) mask |= std::uint64_t{1} << index;
+            }
+            instance.visible_to = mask;
         }
     }
 
@@ -4587,6 +5298,10 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     impl_->spins = std::move(spins);
     impl_->collection = std::move(collection);
     impl_->next_id = next_id;
+    impl_->ledgers = std::move(ledgers);
+    impl_->arrivals = std::move(arrivals);
+    impl_->shares = std::move(shares);
+    impl_->earners = std::move(earners);
     impl_->fog = std::move(fog);
     impl_->projectiles = std::move(projectiles);
     impl_->next_projectile = next_projectile;
@@ -4613,7 +5328,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
     }
     impl_->current_snapshot = std::make_shared<const TacticalSnapshot>(impl_->completed_tick, impl_->snapshot_players,
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
-        std::move(spinning), std::move(squadron_targets), impl_->squadrons);
+        std::move(spinning), std::move(squadron_targets), impl_->squadrons,
+        impl_->economy_views(impl_->ledgers, impl_->shares));
     return core::Result<TacticalTick>::success(TacticalTick{
         impl_->completed_tick,
         std::move(hash),
@@ -4637,6 +5353,16 @@ const AbilityTable& TacticalSession::abilities() const noexcept { return impl_->
 const MotionTable& TacticalSession::motion() const noexcept { return impl_->motion; }
 const CombatTable& TacticalSession::combat() const noexcept { return impl_->combat; }
 const VictoryRules& TacticalSession::victory() const noexcept { return impl_->victory; }
+const EconomyRules& TacticalSession::economy() const noexcept { return impl_->economy; }
+std::span<const PlayerEconomy> TacticalSession::ledgers() const noexcept { return impl_->ledgers; }
+const std::map<EntityId, ArrivalState>& TacticalSession::arrivals() const noexcept { return impl_->arrivals; }
+core::Result<bool> TacticalSession::reinforcement_point(const PlayerId player, const TypeId type, const math::Vec3& point,
+    PlacementWork* work) const {
+    if (impl_->outcome) return core::Result<bool>::success(false);
+    std::map<EntityId, LiveUnit> staged;
+    for (const auto& unit : impl_->sorted_live()) staged.emplace(unit.state.entity_id, unit);
+    return impl_->placement_valid(player, type, point, staged, impl_->completed_tick, nullptr, work);
+}
 const std::optional<BattleOutcome>& TacticalSession::outcome() const noexcept { return impl_->outcome; }
 std::vector<UnitState> TacticalSession::units() const { return impl_->sorted_units(); }
 std::span<const Squadron> TacticalSession::squadrons() const noexcept { return impl_->squadrons; }

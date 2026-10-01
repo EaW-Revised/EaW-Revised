@@ -593,6 +593,7 @@ bool InputRoutingMode::State::write_report(const bool passed) const {
         } else if (const auto* attack = std::get_if<tactical::AttackPayload>(&command.payload)) {
             verb = "attack";
             detail = ", \"target\": " + std::to_string(attack->target);
+            if (attack->hardpoint != tactical::attack_hull) detail += ", \"hardpoint\": " + std::to_string(attack->hardpoint);
         }
         out << (index == 0 ? "\n" : ",\n") << "    {\"tick\": " << command.key.tick << ", \"player\": "
             << command.key.player_id << ", \"sequence\": " << command.key.sequence << ", \"origin\": "

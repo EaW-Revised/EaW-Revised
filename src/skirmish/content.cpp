@@ -1,5 +1,7 @@
 #include "eawr/skirmish/start.hpp"
 
+#include "skirmish_internal.hpp"
+
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -26,11 +28,9 @@ core::Result<SessionContent> session_content(
     return ContentResult::success(std::move(content));
 }
 
-namespace {
+namespace detail {
 
-// A positive binary32 bit pattern as Q24 raw, exactly (bits below 2^-24 are dropped); nullopt for
-// zero, a negative, a subnormal, an infinity, a NaN or a value past the Q24 range.
-[[nodiscard]] std::optional<std::int64_t> q24_from_binary32_bits(const std::uint32_t bits) noexcept {
+std::optional<std::int64_t> q24_from_binary32_bits(const std::uint32_t bits) noexcept {
     const std::uint32_t exponent = (bits >> 23U) & 0xFFU;
     if ((bits >> 31U) != 0U || exponent == 0U || exponent == 0xFFU) return std::nullopt;
     const std::int64_t mantissa = static_cast<std::int64_t>((bits & 0x7FFFFFU) | 0x800000U);
@@ -43,13 +43,13 @@ namespace {
     return shift <= -24 ? std::int64_t{0} : mantissa >> -shift;
 }
 
-} // namespace
+} // namespace detail
 
 core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs& inputs) {
     using FogResult = core::Result<std::optional<sim::tactical::FogRules>>;
     if (!inputs.map_extents) return FogResult::success(std::nullopt);
-    const auto width = q24_from_binary32_bits(inputs.map_extents->first);
-    const auto height = q24_from_binary32_bits(inputs.map_extents->second);
+    const auto width = detail::q24_from_binary32_bits(inputs.map_extents->first);
+    const auto height = detail::q24_from_binary32_bits(inputs.map_extents->second);
     const auto cell = inputs.fog_cell_size.raw();
     if (!width || !height || *width <= 0 || *height <= 0 || cell <= 0) {
         core::Diagnostic diagnostic;

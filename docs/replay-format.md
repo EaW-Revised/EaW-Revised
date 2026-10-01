@@ -207,8 +207,8 @@ zero when exhausted); rules v1 creates no units.
 Each command is a uint32 body length, excluding that field, then a body. The 24-byte common
 part matches v1: uint64 tick, uint32 player_id (the issuer), uint64 sequence, uint8 opcode,
 uint8 flags (zero), uint16 reserved (zero). The opcode's fixed payload follows, then a unit
-list: uint32 unit_count (1 to 1,024), uint32 reserved (zero) and unit_count uint64 entity
-IDs, nonzero and strictly increasing.
+list: uint32 unit_count (1 to 1,024; exactly 1 for a buy, 0 for a cancel or reinforce), uint32
+reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasing.
 
 | Opcode | Order | Fixed payload | Body length |
 |---:|---|---|---:|
@@ -220,6 +220,10 @@ IDs, nonzero and strictly increasing.
 | 6 | Attack-move (EAWR-452) | three int64 destination raw values, uint64 target entity ID (zero: the point) | 64 + 8n |
 | 7 | Guard (EAWR-452) | three int64 destination raw values, uint64 guarded entity ID (zero: the point) | 64 + 8n |
 | 8 | Ability (P2-13, EAWR-76) | uint8 ability (1 `DEFEND`, 2 `TURBO`, 3 `POWER_TO_WEAPONS`, 4 `SPOILER_LOCK`, 5 `ION_CANNON_SHOT` since EAWR-561), uint8 action (1 activate, 2 deactivate, 3 autofire on, 4 autofire off), uint16 targeted (0, or 1 for a targeted activation, EAWR-561), uint32 target hardpoint (zero unless targeted; 0xffffffff for the whole unit), then only when targeted uint64 target | 40 + 8n, targeted 48 + 8n |
+| 9 | Buy (EAWR-530) | uint64 type ID; the unit list is the station | 48 |
+| 10 | Cancel (EAWR-530) | uint32 queue (0 units, 1 upgrades), uint32 entry index; no unit | 40 |
+| 11 | Reinforce (EAWR-530) | uint64 type ID, three int64 point raw values; no unit | 64 |
+| 12 | Attack on a hardpoint (EAWR-531) | uint64 target entity ID, nonzero, uint32 hardpoint index in the target type's HardPoints list (not `0xFFFFFFFF`), uint32 reserved (zero) | 48 + 8n |
 
 Commands are strictly ordered by `(tick, player_id, sequence)`; they are never sorted
 silently. Each tick is below final_tick_count. The issuer must be a declared player with
@@ -240,12 +244,25 @@ attack-move approaches it like an attack without making it the unit's target (OR
 guard follows it (OR-14). Opcodes 6 and 7 are additions to format version 2 (EAWR-452): files
 without them are unchanged.
 
+Opcode 12 is an attack that names one hardpoint of the target ([space orders](behaviour/space-orders.md)
+OR-20 to OR-25); it is the same order kind as opcode 3 (an attack), so events and orders report an attack.
+An attack on the unit is always written as opcode 3, so files without an attack on a hardpoint are
+unchanged. A hardpoint index of `0xFFFFFFFF` in opcode 12, a zero target or a nonzero reserved word is an invalid
+payload. Opcode 12 is an addition to format version 2 (EAWR-531); opcodes 9 to 11 are taken by the purchasing
+commands (EAWR-556/#574).
+
 Ability switches an ability of each listed unit on or off or sets its autofire, the command
 bar's buttons and the retail Lua `Activate_Ability`
 ([space abilities](behaviour/space-abilities.md) AB-10 to AB-15, AB-40). It is never a unit
 order: the unit keeps its move or attack. An unknown ability or action or a nonzero reserved
 field is an invalid payload. Opcode 8 is an addition to format version 2 (EAWR-76): files without
 it are unchanged.
+
+Buy, cancel and reinforce act on the issuer's economy ([space purchasing](behaviour/space-purchasing.md)):
+a buy queues the type at its one listed station (PU-10 to PU-15), a cancel removes an entry of
+the issuer's queue and refunds it (PU-17), and a reinforce brings the issuer's first pooled unit
+of the type in at the point (PU-30 to PU-34). They are never unit orders. Opcodes 9 to 11 are
+additions to format version 2 (EAWR-530): files without them are unchanged.
 
 ## Tick rules (tactical rules v1)
 
@@ -276,12 +293,15 @@ starts at completed tick t:
    projectiles in combat-event order.
 1. Takes the queued commands labelled t in `(tick, player_id, sequence)` order. For each
    one it judges every listed unit in list order against the staged state. An attack whose
-   target is not live rejects every listed unit with `target_not_live`. An attack on a target
+   target is not live rejects every listed unit with `target_not_live`; one that names a hardpoint the
+   target's type does not have as a targetable one, or that is destroyed, rejects them with
+   `hardpoint_invalid` (OR-21). An attack on a target
    owned by the issuer's team rejects them with `target_not_hostile`. Otherwise a unit that
    is not live is rejected with `unit_not_live`, and a unit the issuer does not own is
    rejected with `unit_not_owned`. Each remaining unit replaces its order with the command's
    kind, the tick t, the move destination, face target, attack-move or guard point (zero
-   otherwise) and the attack target, attack-move or guard unit (zero otherwise). An attack-move or
+   otherwise) and the attack target, attack-move or guard unit (zero otherwise); an attack on a hardpoint also
+   stores its index (OR-20). An attack-move or
    guard naming a unit that is not live rejects every listed unit with `target_not_live`; a listed
    unit it names itself is rejected with `target_is_unit` (OR-17). A unit with a combat profile takes an attack's target as its player-ordered
    target; any other order ends a player-ordered target. A unit with a motion profile then plans: a move or face starts a plan at
@@ -309,6 +329,12 @@ starts at completed tick t:
    same partitions: durations that are up end, lost engines end `TURBO` and `SPOILER_LOCK`,
    and at a multiple of 30 ticks the damage-rate window closes and the `DEFEND` stand-in runs
    (AB-11, AB-16, AB-41, AB-42); units whose speed changed plan again in ascending ID.
+   A buy, cancel or reinforce (EAWR-530) emits one event naming the station, no
+   unit, or the unit brought in (a squadron's team container); a refusal carries its reason.
+   A unit brought in joins the staged units at the start of its arrival lane. An order to a unit
+   still arriving is rejected with `arriving` (PU-39). With economy rules, step 0 moves each
+   arriving unit along its lane instead of its locomotor, the targeting phase skips it, and a
+   hit on it is spent without effect while it is hidden (PU-35 to PU-38).
 2. Runs the per-unit systems over the staged units in ascending ID order. The executor splits
    them into 64 fixed partitions, partition p the range `floor(p*N/64)..floor((p+1)*N/64)`,
    whatever the worker count. Workers read the copied inputs and fill disjoint output slots. Rules v1 has two systems. The
@@ -379,19 +405,27 @@ SHA-256 consumes, without padding:
 | optional | With group members waiting to plan (EAWR-344, FM-08): ASCII `FRMN`, a uint64 count and per waiting unit in ascending ID the uint64 unit, uint64 planning frame, int64 x, y and z raw of its slot, int64 raw planning speed, the group command's uint64 tick, uint32 player and uint64 sequence, and a uint32 rank |
 | optional | With approach mappings (EAWR-452, [space orders](behaviour/space-orders.md) OR-05 to OR-07): ASCII `APPR`, a uint64 count and per unit with one, in ascending ID, the uint64 unit and its uint64 prediction frame |
 | optional | With squadron craft that fly by a craft profile (EAWR-75): ASCII `CRFT`, a uint64 count and per craft in ascending ID the uint64 ID, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, uint32 flipping (0 or 1) and uint32 zero |
-| optional | With squadrons of a squadron-table type (EAWR-75): ASCII `SQST`, a uint64 count and per squadron in ascending container ID the uint64 container, squadron type and spawner, uint32 spawner entry and mode (0 idle, 1 escort, 2 a player's move, EAWR-424), uint64 escorted unit, int64 anchor x, y and z raw, uint64 target and next scan frame, and a uint64 roster count followed by the uint64 craft IDs in launch order; in mode 2 only, then the int64 move origin x, y and z raw; then, only on a player's attack-move or guard (EAWR-452, space-fighters FO-05, FO-06), the uint32 diversion (1 guard, 2 attack-move); then, only while it flies a group move's lane (EAWR-599, space-fighters FO-10), the uint64 container that started its formation and the int64 path origin x, y and z, path direction x, y and z, and lane ahead and aside raw |
+| optional | With squadrons of a squadron-table type (EAWR-75): ASCII `SQST`, a uint64 count and per squadron in ascending container ID the uint64 container, squadron type and spawner, uint32 spawner entry and mode (0 idle, 1 escort, 2 a player's move, EAWR-424), uint64 escorted unit, int64 anchor x, y and z raw, uint64 target and next scan frame, and a uint64 roster count followed by the uint64 craft IDs in launch order; in mode 2 only, then the int64 move origin x, y and z raw; then, only on a player's attack-move or guard (EAWR-452, space-fighters FO-05, FO-06), the uint32 diversion (1 guard, 2 attack-move); then, only while it holds an idle cell (EAWR-687, FM-23), the uint32 marker 0x1d1e and the uint32 cell x and y; then, only while it flies a group move's lane (EAWR-599, space-fighters FO-10), the uint64 container that started its formation and the int64 path origin x, y and z, path direction x, y and z, and lane ahead and aside raw; then, only on a squadron whose attack order names a hardpoint (EAWR-531), the uint32 hardpoint index plus one |
 | optional | With `SPAWN_SQUADRON` units of the squadron table (EAWR-75): ASCII `HNGR`, a uint64 count and per spawner in ascending ID the uint64 ID, next service frame and next spawn frame, uint32 ready (0 or 1), uint32 entry count and per entry int64 alive and remaining (-1 unlimited) |
+| optional | With economy rules (EAWR-530, [space purchasing](behaviour/space-purchasing.md)): ASCII `ECON`, a uint64 ledger count and per economy player in ascending ID the uint32 player, uint32 zero, int64 credits raw; per queue (units, then upgrades) a uint64 entry count and per entry the uint64 type and station, int64 price paid raw, uint32 build frames, uint32 zero and uint64 completion frame (zero but for the front); a uint64 pool count and the pooled uint64 types in completion order; a uint64 count of completed upgrades and structures and per one its uint64 type and station |
+| optional | With arriving units (EAWR-530): ASCII `ARRV`, a uint64 count and per unit in ascending ID the uint64 unit, uint32 arrival frame, uint32 zero, int64 exit point x, y and z raw and int64 facing x, y and z raw |
+| optional | With reinforced units (EAWR-530, PU-21): ASCII `POPS`, a uint64 count and per unit in ascending ID the uint64 unit, uint32 owner, uint32 zero and int64 population share (1/720720 of a population point) |
+| optional | With active arrival vulnerability timers (WR-41): ASCII `AVUL`, uint32 block version 1, uint32 zero, uint64 count, then per unit in ascending ID the uint64 unit and uint64 expiry tick. Expiry is independent of the frame-150 arrival completion; the default data expires at frame 150. |
 | optional | Once the battle is decided (EAWR-77, [space victory](behaviour/space-victory.md)): the outcome block, ASCII `VICT`, uint32 block version 1, uint32 condition (1 enemy star base destroyed), uint32 winner and winner team, uint64 deciding frame, deciding star base and end frame |
 | optional | With units whose type has abilities (EAWR-76, [space abilities](behaviour/space-abilities.md)): ASCII `ABIL`, a uint64 count and per unit in ascending ID the uint64 unit, a uint32 ability count and per ability (`Unit_Abilities_Data` order) uint32 flags (bit 0 on, bit 1 autofire, bit 2 holds a target, EAWR-561), uint64 start, end-of-duration (zero: none) and end-of-recharge ticks, and with bit 2 the uint64 target and uint32 target hardpoint; then int64 window damage and damage rate raw and uint32 replan due (0 or 1) |
 | optional | While a live unit is ion stunned (EAWR-561, [space damage](behaviour/space-damage.md) IS-03): ASCII `IONS`, a uint64 count and per stunned unit in ascending ID the uint64 unit, uint64 end frame, int64 speed and shot rate reductions raw |
 | optional | While killed craft spin away (EAWR-447, [space fighter deaths](behaviour/space-fighter-deaths.md)): ASCII `SPIN`, a uint64 count and per spin in ascending craft ID the uint64 craft ID and type, uint32 owner, uint32 path (0 or 1), int64 position x, y and z raw, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, int64 accumulated roll raw, int64 x, y and z raw of the four control points, int64 raw length of the three segments and int64 raw distance travelled |
 
-The optional tagged blocks after `ABIL` come in one fixed order, in the state bytes and in the
-snapshot bytes alike: `IONS` (EAWR-561), then `SPIN` (EAWR-447). The order is a deliberate choice, the order the
-two features landed on the integration branch, and a battle with both a stun and a spin hashes in it.
+The optional state blocks come in one fixed order, which is part of the format: the purchasing blocks
+(`ECON`, `ARRV`, `POPS`, EAWR-530, then `AVUL`, WR-41) follow the collection block, then come the outcome and ability blocks
+(`VICT`, `ABIL`), then `IONS` (EAWR-561), and the spin-away block (`SPIN`, EAWR-447) comes last. The order is a
+deliberate choice: EAWR-530's blocks sit with the economy's other per-player state before the battle outcome, and
+the two later blocks keep the order they landed on the integration branch. A session with none of them hashes
+as before, and a battle with several hashes in this order. The snapshot bytes carry `IONS` then `SPIN`; the
+economy views of a snapshot are presentation only and not in its canonical bytes.
 
 The order is uint64 issued_tick, uint32 kind (0 none, 1 stop, 2 move, 3 attack, 5 face, 6
-attack-move, 7 guard), uint32 zero, three int64 destination raw values and uint64 target. A unit whose type has a profile
+attack-move, 7 guard), uint32 ordered hardpoint (zero, or the hardpoint index plus one of an attack on a hardpoint, EAWR-531), three int64 destination raw values and uint64 target (9 to 11, EAWR-530, are command kinds only). A unit whose type has a profile
 in the bound durability table (EAWR-72) then appends int64 hull raw, uint32 hardpoint count,
 uint32 zero and one int64 health raw per hardpoint in `HardPoints` order; with damage rules
 (EAWR-74) it continues with int64 shield raw and, for the depletion frame and then the last
@@ -409,7 +443,8 @@ rules (EAWR-71) they depend on the other ships' predictions, so the record is fo
 node count and per node int64 frame, three position, yaw and speed raw values. A session
 bound to no motion table hashes as before EAWR-70, and one without avoidance rules as before EAWR-71.
 A unit whose type has a profile in the bound combat table (EAWR-73) then appends its
-combat record: uint64 ship-level target (zero for none), uint32 player-ordered flag, uint32
+combat record: uint64 ship-level target (zero for none), uint32 player-ordered flag (bit 0; an
+ordered hardpoint's index plus one in the bits above it, EAWR-531), uint32
 weapon count, uint64 next ship-level scan frame, and per weapon uint64 opportunity target,
 uint64 last opportunity scan frame, uint32 fire countdown and uint32 shots left in the burst. A
 session bound to no combat table hashes as before EAWR-73. The same holds for the optional blocks:
@@ -440,9 +475,12 @@ flags (bit 0 engines on-line, bit 1 shield on-line, bit 2 launch ready, bit 3 ha
 intact, 1 damaged, 2 destroyed), uint8 enabled, uint8 zero and uint32 zero. Then come a
 uint64 event count and 32-byte events: uint64 tick, uint32 player, uint8 kind (1
 order_accepted, 2 order_rejected, 3 hardpoint_destroyed, 4 unit_destroyed, 5 victory, 6
-spin_away_started, 7 spin_away_ended), uint8 order kind
-(4 is damage, 5 is face, 6 is attack-move, 7 is guard, 8 is ability), uint8 reason (0 none, 1 unit_not_live, 2 unit_not_owned, 3 target_not_live,
-4 target_not_hostile, 5 not_damageable, 6 hardpoint_invalid, 7 target_is_unit, 8 ability_unavailable), uint8 hardpoint index
+spin_away_started, 7 spin_away_ended, 8 unloaded), uint8 order kind
+(4 is damage, 5 is face, 6 is attack-move, 7 is guard, 8 is ability, 9 to 11 are buy, cancel and
+reinforce), uint8 reason (0 none, 1 unit_not_live, 2 unit_not_owned, 3 target_not_live,
+4 target_not_hostile, 5 not_damageable, 6 hardpoint_invalid, 7 target_is_unit, 8 ability_unavailable;
+EAWR-530: 9 cannot_produce, 10 queue_full, 11 insufficient_credits, 12 no_queue_entry, 13 not_in_pool,
+14 no_population_room, 15 invalid_position, 16 no_economy, 17 arriving, 18 battle_decided), uint8 hardpoint index
 (`hardpoint_destroyed` only, else zero), uint64 sequence and uint64 unit. A destruction event
 carries the unit's owner as player, sequence zero and order none; a victory event (EAWR-77) carries
 the winner as player and the deciding star base as unit. A spin-away event (EAWR-447) is like a
@@ -477,6 +515,10 @@ After the `IONS` block, if any, a snapshot with killed craft spinning away (EAWR
 and per craft in ascending ID the uint64 ID and type, uint32 owner, uint32 zero, the 12 int64
 raw values of its transform (rows), int64 roll, pitch and yaw raw (degrees) and uint64
 visible-to mask; a snapshot without one encodes exactly as before.
+
+A snapshot of a session with economy rules (EAWR-530) also carries each economy player's credits,
+population, queues and pool, and each arriving instance its arrival frame, for presentation only:
+they are not in the canonical bytes (the state hash carries the economy).
 
 An event's tick is the frame whose commands produced it. The event is published with the
 snapshot of completed tick + 1. The tick-zero snapshot has no events. Presentation and audio

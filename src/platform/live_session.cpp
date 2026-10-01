@@ -34,11 +34,15 @@ LiveEventLog::LiveEventLog(const Bounds bounds) noexcept : bounds_(bounds) {}
 
 bool LiveEventLog::presented(const tactical::Event& event) noexcept {
     return event.kind == tactical::EventKind::unit_destroyed || event.kind == tactical::EventKind::hardpoint_destroyed
-        || event.kind == tactical::EventKind::spin_away_started || event.kind == tactical::EventKind::spin_away_ended;
+        || event.kind == tactical::EventKind::spin_away_started || event.kind == tactical::EventKind::spin_away_ended
+        || event.kind == tactical::EventKind::reinforcement_unloaded;
 }
 
 bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
-    return event.kind == tactical::CombatEventKind::projectile_hit;
+    // #862: a shot fired as a weapon's ability shot (space-abilities AB-66) too, so the view draws
+    // its projectile with that shot's look; ordinary shots and acquisitions stay out.
+    return event.kind == tactical::CombatEventKind::projectile_hit
+        || (event.kind == tactical::CombatEventKind::weapon_fired && (event.outcome & tactical::fired_ability_shot) != 0U);
 }
 
 std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
@@ -105,7 +109,11 @@ public:
         // #637: each tick's state hash is computed off the simulation thread.
         auto hasher = std::make_shared<ThreadStateHasher>();
         if (session_) session_->set_state_hasher(std::move(hasher));
-        else scripted_->set_state_hasher(std::move(hasher));
+        else {
+            scripted_->set_state_hasher(std::move(hasher));
+            // #895: the live tick reads only the world's hash; the script hash is on request.
+            scripted_->set_authoritative_hash(false);
+        }
         options_.event_history = std::max(options_.event_history, options_.history);
         const auto zero = world().snapshot();
         history_.push_front(zero);
@@ -254,6 +262,14 @@ public:
         return scripted_ ? scripted_->record() : session_->record();
     }
 
+    std::optional<bool> reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
+        const sim::math::Vec3& point) const {
+        const std::unique_lock lock(session_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return std::nullopt;
+        const auto valid = world().reinforcement_point(player, type, point);
+        return valid && valid.value();
+    }
+
     tactical::TacticalReplay failure_record() const {
         const std::lock_guard lock(session_mutex_);
         return world().record_through_next_tick();
@@ -269,16 +285,15 @@ private:
         return scripted_ ? scripted_->world() : *session_;
     }
 
-    // #494: a copy of Options::fog_player's cells as the world stands; null without them.
+    // #494: immutable rows of Options::fog_player's cells; null without them.
     [[nodiscard]] std::shared_ptr<const LiveFog> capture_fog() const {
         const tactical::FogCells* cells = world().fog_cells();
         if (!options_.fog_player || cells == nullptr) return nullptr;
         const auto players = world().players();
         for (std::size_t index = 0; index < players.size(); ++index) {
             if (players[index].player_id != *options_.fog_player) continue;
-            const auto values = cells->values(index);
             return std::make_shared<const LiveFog>(LiveFog{world().completed_tick(), cells->rules(),
-                *options_.fog_player, std::vector<std::uint8_t>(values.begin(), values.end())});
+                *options_.fog_player, cells->value_rows(index)});
         }
         return nullptr;
     }
@@ -568,7 +583,8 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
     const Options options,
     const tactical::VictoryRules& victory,
     const std::optional<tactical::FogRules>& fog,
-    const tactical::AbilityTable& abilities) {
+    const tactical::AbilityTable& abilities,
+    const tactical::EconomyRules& economy) {
     using StartResult = core::Result<std::unique_ptr<LiveSession>>;
     if (options.workers == 0 || options.workers > ThreadWorkerAdapter::max_worker_count) {
         core::Diagnostic diagnostic;
@@ -577,7 +593,7 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
         return StartResult::failure(std::move(diagnostic));
     }
     auto session = tactical::TacticalSession::create(
-        setup, sensors, durability, motion, fog, combat, victory, abilities);
+        setup, sensors, durability, motion, fog, combat, victory, abilities, economy);
     if (!session) return StartResult::failure(session.error());
     if (options.scripts && options.scripts->wrap) {
         auto scripted = options.scripts->wrap(std::move(session).value());
@@ -596,10 +612,11 @@ core::Result<std::vector<std::string>> headless_tick_hashes(
     const tactical::MotionTable& motion,
     const tactical::CombatTable& combat,
     const tactical::VictoryRules& victory,
-    const std::optional<tactical::FogRules>& fog, const tactical::AbilityTable& abilities) {
+    const std::optional<tactical::FogRules>& fog, const tactical::AbilityTable& abilities,
+    const tactical::EconomyRules& economy) {
     using HashResult = core::Result<std::vector<std::string>>;
     auto session = tactical::TacticalSession::from_replay(
-        replay, sensors, durability, motion, fog, combat, victory, abilities);
+        replay, sensors, durability, motion, fog, combat, victory, abilities, economy);
     if (!session) return HashResult::failure(session.error());
     const sim::InlineExecutor executor;
     std::vector<std::string> hashes;
@@ -625,6 +642,8 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
     return impl_->wait_for(tick, timeout);
 }
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
+std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
+    const sim::math::Vec3& point) const { return impl_->reinforcement_point(player, type, point); }
 std::shared_ptr<const tactical::TacticalSnapshot> LiveSession::snapshot_at(const std::uint64_t tick) const {
     return impl_->snapshot_at(tick);
 }

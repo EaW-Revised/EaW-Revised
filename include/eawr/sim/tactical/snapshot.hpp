@@ -3,6 +3,7 @@
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/durability.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/victory.hpp"
@@ -72,6 +73,10 @@ struct TacticalInstance {
     std::optional<math::Fixed> reveal_range{};
     std::optional<InstanceDurability> durability{};
     std::vector<AbilityStatus> abilities{}; // #76: the type's abilities, Unit_Abilities_Data order
+    // #530 (PU-35 to PU-39): the arrival frames an arriving unit has flown (0 in the frame it was
+    // brought in, up to 149); nothing for a unit that is not arriving. Presentation only: not part
+    // of canonical_bytes().
+    std::optional<std::uint32_t> arrival{};
     // #561: the frames left of its ion stun (IS-03, IS-09 shows it); zero when not stunned.
     std::uint32_t ion_stun_frames{};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
@@ -133,7 +138,8 @@ public:
         std::optional<BattleOutcome> outcome = std::nullopt,
         std::vector<SpinningCraft> spinning = {},
         std::vector<SquadronTarget> squadron_targets = {},
-        std::vector<Squadron> squadrons = {});
+        std::vector<Squadron> squadrons = {},
+        std::vector<EconomyView> economy = {});
 
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::span<const SnapshotPlayer> players() const noexcept;
@@ -150,6 +156,9 @@ public:
     // #518: the live squadrons, ascending container ID: the setup's and those a spawner launched
     // since (FL-07). Presentation only, like squadron_targets(): not part of canonical_bytes().
     [[nodiscard]] std::span<const Squadron> squadrons() const noexcept;
+    // #530: each economy player's credits, population, queues and pool, ascending player ID; empty
+    // without economy rules. Presentation only: the state hash carries the economy.
+    [[nodiscard]] std::span<const EconomyView> economy() const noexcept;
     // Ascending IDs of the instances `player` sees; empty for an unknown player.
     [[nodiscard]] std::vector<EntityId> visible_entities(PlayerId player) const;
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes() const;
@@ -166,6 +175,7 @@ private:
     std::vector<SpinningCraft> spinning_;
     std::vector<SquadronTarget> squadron_targets_;
     std::vector<Squadron> squadrons_;
+    std::vector<EconomyView> economy_;
 };
 
 } // namespace eawr::sim::tactical

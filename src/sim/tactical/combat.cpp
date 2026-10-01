@@ -424,7 +424,10 @@ std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const ma
 
 void append_combat(std::vector<std::uint8_t>& bytes, const CombatState& state) {
     sim::detail::append_u64(bytes, state.attack_target);
-    sim::detail::append_u32(bytes, state.direct ? 1U : 0U);
+    // #531: bit 1 is the direct flag; an ordered hardpoint rides above it (index plus one), so a
+    // session without a hardpoint order hashes as before.
+    sim::detail::append_u32(bytes,
+        (state.direct ? 1U : 0U) | (state.attack_hardpoint == no_hardpoint ? 0U : (state.attack_hardpoint + 1U) << 1U));
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(state.weapons.size()));
     sim::detail::append_u64(bytes, state.next_scan_frame);
     for (const auto& weapon : state.weapons) {
@@ -450,6 +453,21 @@ void append_combat_event(std::vector<std::uint8_t>& bytes, const CombatEvent& ev
     }
 }
 
+const TargetHardpoint* standing_hardpoint(const CombatUnit& target, const std::uint32_t index) {
+    if (index == no_hardpoint || target.profile == nullptr) return nullptr;
+    for (const auto& hardpoint : target.profile->hardpoints) {
+        if (hardpoint.hardpoint != index) continue;
+        if (!hardpoint.targetable) return nullptr;
+        if (target.durability_profile != nullptr && target.durability != nullptr
+            && index < target.durability_profile->hardpoints.size()
+            && tactical::hardpoint_destroyed(*target.durability_profile, *target.durability, index)) {
+            return nullptr;
+        }
+        return &hardpoint;
+    }
+    return nullptr;
+}
+
 namespace {
 
 // One unit's targeting and fire for one frame. The first arithmetic failure is kept and fails
@@ -465,6 +483,16 @@ public:
                 "combat state does not match the type's weapons"));
         }
         ship_target();
+        // OR-23: an ordered hardpoint lasts while the order's target stands and so does it; then
+        // the unit goes back to picking the target's nearest hardpoint (OR-24).
+        if (state_.attack_hardpoint != no_hardpoint) {
+            const auto* ordered = state_.direct && state_.attack_target != invalid_entity_id
+                ? world_.resolve_target(world_.find(state_.attack_target), unit_.position)
+                : nullptr;
+            if (ordered == nullptr || standing_hardpoint(*ordered, state_.attack_hardpoint) == nullptr) {
+                state_.attack_hardpoint = no_hardpoint;
+            }
+        }
         face_target();
         for (std::uint32_t slot = 0; slot < profile_.weapons.size(); ++slot) {
             service_weapon(slot);
@@ -631,7 +659,13 @@ public:
         // The nearest live targetable hardpoint (spatial distance from the shooter, first on a
         // tie), else the aim-point search.
         std::optional<Aim> aim;
-        if (target->profile != nullptr) {
+        // OR-25: the ordered hardpoint of the ordered target, with no fallback to another point.
+        if (target_id == state_.attack_target && state_.direct) {
+            if (const auto* ordered = standing_hardpoint(*target, state_.attack_hardpoint)) {
+                aim = Aim{world_point(*target, ordered->position), ordered->hardpoint};
+            }
+        }
+        if (!aim && target->profile != nullptr) {
             const TargetHardpoint* nearest = nullptr;
             math::Vec3 nearest_point{};
             for (const auto& hardpoint : target->profile->hardpoints) {
@@ -1085,7 +1119,10 @@ public:
         const auto* target = world_.resolve_target(world_.find(state_.attack_target), unit_.position);
         if (target == nullptr) return;
         auto aim = target->position;
-        if (target->profile != nullptr) {
+        // HO-08 (OR-25): a unit ordered to attack a hardpoint turns to that hardpoint.
+        const auto* ordered = state_.direct ? standing_hardpoint(*target, state_.attack_hardpoint) : nullptr;
+        if (ordered != nullptr) aim = world_point(*target, ordered->position);
+        if (ordered == nullptr && target->profile != nullptr) {
             bool found = false;
             for (const auto& hardpoint : target->profile->hardpoints) {
                 if (!hardpoint.targetable || hardpoint_destroyed_on(*target, hardpoint.hardpoint)) continue;
@@ -1145,9 +1182,12 @@ private:
 
 } // namespace
 
-math::Vec3 ordered_aim_point(const CombatUnit& target, const math::Vec3& from) {
+math::Vec3 ordered_aim_point(const CombatUnit& target, const math::Vec3& from, const std::uint32_t ordered_index) {
     auto aim = target.position;
     if (target.profile == nullptr) return aim;
+    if (const auto* ordered = standing_hardpoint(target, ordered_index)) {
+        if (auto point = math::transform_point(target.transform, ordered->position)) return point.value();
+    }
     bool found = false;
     for (const auto& hardpoint : target.profile->hardpoints) {
         if (!hardpoint.targetable) continue;

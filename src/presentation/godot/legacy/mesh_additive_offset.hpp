@@ -27,6 +27,8 @@ uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
 uniform vec3 eawr_color = vec3(1.0);
 uniform vec2 eawr_uv_offset = vec2(0.0);
 uniform vec4 eawr_light_scale = vec4(1.0);
+// WR-14/37: object light scale also reaches attached additive model surfaces.
+instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
 varying vec2 eawr_offset_uv;
 varying vec3 eawr_vertex_color;
 
@@ -38,7 +40,7 @@ vec3 eawr_stored_albedo(vec3 stored_rgb) {
 
 void vertex() {
     eawr_offset_uv = UV + eawr_uv_offset;
-    eawr_vertex_color = clamp(eawr_color * eawr_light_scale.rgb * eawr_light_scale.a, 0.0, 1.0);
+    eawr_vertex_color = clamp(eawr_color * eawr_light_scale.rgb * eawr_unit_light_scale * eawr_light_scale.a, 0.0, 1.0);
 }
 
 void fragment() {

@@ -1182,6 +1182,83 @@ void test_team_retarget() {
     }
 }
 
+// #531 (space-orders OR-26): a squadron ordered to attack one hardpoint of a ship has each craft's
+// weapon aim at it. The frigate (20) has two targetable hardpoints, 0 abeam to one side and 1 to
+// the other; squadron 10 (craft 11, 12) attacks hardpoint 1. When it is destroyed the craft go back
+// to the nearest standing one; 1, 2, 4 and 8 workers hash alike.
+struct HardpointRun {
+    std::vector<std::string> hashes;
+    std::vector<tactical::CombatEvent> shots; // the craft's shots at the frigate
+};
+
+[[nodiscard]] HardpointRun run_hardpoint_attack(const std::size_t workers) {
+    HardpointRun run;
+    tactical::TacticalSetup setup;
+    setup.seed = seed;
+    setup.players = players();
+    setup.units = {unit(10, squadron_a, empire, at(0, 0)), unit(11, craft_type, empire, at(0, 0)),
+        unit(12, craft_type, empire, at(-10, 10)), unit(20, frigate_type, rebel, at(700, 0))};
+    setup.squadrons = {{10, {11, 12}}};
+    auto table = motion();
+    table.squadrons.spawners.clear();
+    auto health = durability();
+    tactical::HardpointProfile hardpoint;
+    hardpoint.role = tactical::HardpointRole::weapon;
+    hardpoint.destroyable = true;
+    hardpoint.max_health = units(100);
+    for (auto& profile : health.profiles) {
+        if (profile.type_id == frigate_type) profile.hardpoints = {hardpoint, hardpoint};
+    }
+    auto weapons = combat();
+    for (auto& profile : weapons.profiles) {
+        if (profile.type_id == frigate_type) profile.hardpoints = {{0, at(0, -30), true}, {1, at(0, 30), true}};
+    }
+    auto created = tactical::TacticalSession::create(setup, sensors(), health, table, std::nullopt, weapons);
+    expect(static_cast<bool>(created), "C-17: the session builds");
+    if (!created) return run;
+    auto session = std::move(created).value();
+    expect(static_cast<bool>(session.submit({{5, empire, 1}, {10}, tactical::AttackPayload{20, 1}})),
+        "C-17: the hardpoint attack submits");
+    expect(static_cast<bool>(session.submit({{400, empire, 2}, {20}, tactical::DamagePayload{units(100), 1}})),
+        "C-17: the ordered hardpoint's destruction submits");
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    for (int tick = 0; tick < 800; ++tick) {
+        const auto stepped = session.step(executor);
+        if (!stepped) {
+            expect(false, "C-17: step failed: " + stepped.error().message);
+            break;
+        }
+        run.hashes.push_back(stepped.value().state_sha256);
+        for (const auto& event : stepped.value().snapshot->combat_events()) {
+            if (event.kind == tactical::CombatEventKind::weapon_fired && event.target == 20) run.shots.push_back(event);
+        }
+    }
+    return run;
+}
+
+void test_squadron_hardpoint_attack() {
+    const auto run = run_hardpoint_attack(1);
+    expect(run.hashes.size() == 800, "C-17: 800 ticks");
+    std::size_t before = 0;
+    std::size_t after = 0;
+    for (const auto& shot : run.shots) {
+        if (shot.tick <= 402) {
+            expect(shot.target_hardpoint == 1, "C-17: before its destruction every shot goes to the ordered hardpoint, got "
+                + std::to_string(shot.target_hardpoint));
+            ++before;
+        } else if (shot.tick > 405) {
+            expect(shot.target_hardpoint == 0, "C-17: after its destruction the shots go to the one left, got "
+                + std::to_string(shot.target_hardpoint));
+            ++after;
+        }
+    }
+    expect(before != 0 && after != 0, "C-17: the craft fire before and after the destruction");
+    for (const std::size_t workers : {2U, 4U, 8U}) {
+        expect(run_hardpoint_attack(workers).hashes == run.hashes,
+            "C-17: " + std::to_string(workers) + " workers hash like one");
+    }
+}
+
 // An empty squadron table changes nothing: craft do not move and nothing launches.
 void test_empty_table() {
     tactical::TacticalSetup setup;
@@ -1224,6 +1301,7 @@ int main() {
     test_attack_order_approach();
     test_team_attack();
     test_team_retarget();
+    test_squadron_hardpoint_attack();
     test_empty_table();
     if (failures != 0) {
         std::cerr << failures << " fighter contract failure(s)\n";

@@ -2,6 +2,7 @@
 
 #include "eawr/sim/commands.hpp"
 #include "eawr/sim/math/geometry.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
@@ -11,6 +12,8 @@
 
 // Presentation of a live tactical session's units (#80): where each unit is drawn between the
 // two newest published ticks. It reads immutable snapshots only and never writes sim state.
+namespace eawr::presentation::particles { class StepExecutor; }
+
 namespace eawr::presentation::space {
 
 // One unit as drawn: source-basis position, the facing yaw in degrees (0 along source +X,
@@ -52,6 +55,7 @@ struct LiveUnitPose {
 // longer holds are not drawn. A level unit (no pitch in either tick) eases its yaw and roll
 // apart; a pitched one (a squadron craft, #506) turns along the shortest arc between its two
 // rotations, so a craft looping over the vertical (FM-06) keeps its nose on the loop.
+// #530 PU-36: an instance still arriving before frame 35 is never drawn.
 // `reveal` (--eawr-live-reveal, a viewer debug aid) draws every instance of `latest` regardless
 // of `viewer`'s visibility instead: a presentation-only bypass of the visibility filter, never
 // a change to what `viewer` sees in the snapshot itself.
@@ -61,6 +65,16 @@ struct LiveUnitPose {
                                                           sim::tactical::PlayerId viewer,
                                                           bool reveal = false,
                                                           std::span<const sim::EntityId> fading = {});
+
+// The same interpolation with tick-cached visibility and a reusable output buffer. Independent
+// pose arithmetic may run on the viewer executor; every task writes one preallocated pose.
+// Small frames stay inline. False means the executor failed; no partial frame may be drawn.
+[[nodiscard]] bool interpolate_visible_units(const sim::tactical::TacticalSnapshot& previous,
+                                             const sim::tactical::TacticalSnapshot& latest,
+                                             double alpha, std::span<const sim::EntityId> visible,
+                                             bool reveal, std::span<const sim::EntityId> fading,
+                                             std::vector<LiveUnitPose>& poses,
+                                             const particles::StepExecutor* executor = nullptr);
 
 // #447 (docs/behaviour/space-fighter-deaths.md): the craft of `latest` spinning away that
 // `viewer` sees, in ascending ID, with the snapshot's roll, pitch and yaw. One also spinning in

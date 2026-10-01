@@ -58,7 +58,8 @@ struct ScriptedTick {
     // This tick's service; its commands are the next tick's script input.
     ServiceReport scripts;
     // authoritative_state_sha256 of the completed tick: world and script state. Empty with a
-    // state hasher (set_state_hasher); then `state_hash` has it.
+    // state hasher (set_state_hasher); then `state_hash` has it. Both stay empty when the
+    // session does not compute it (set_authoritative_hash); `world` has the world's hash always.
     std::string state_sha256;
     // The same hash either way (#637): ready, or pending on the state hasher.
     sim::StateHash state_hash;
@@ -104,6 +105,13 @@ public:
     // #637: hashes the world (TacticalSession::set_state_hasher) and derives the tick's combined
     // hash on `hasher`, off the stepping thread. Null (the default) hashes on it.
     void set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept;
+    // #895: whether step() computes the tick's authoritative (world and script) hash. On by
+    // default: replay checks, the soak, tools and tests read it. Off, step() skips the save and
+    // hash of every script instance on the stepping thread, the tick's state_sha256 and
+    // state_hash stay empty, and script_state_hash() still gives the script hash on request at
+    // a tick barrier. The live session turns it off: it reads only the world's hash. The world,
+    // the scripts and every hash that is computed are the same either way.
+    void set_authoritative_hash(bool every_tick) noexcept;
 
     // One tick. Submits `player_input` with the keys it carries (UI-07
     // CommandScheduler::take; a refused command is reported and dropped),

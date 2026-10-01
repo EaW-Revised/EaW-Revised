@@ -43,12 +43,15 @@ constexpr auto clone_reappearance = particles::ReappearancePolicy::reset;
 [[nodiscard]] bool engine_emitter(const std::string_view name) { return has_prefix(name, "pe"); }
 [[nodiscard]] bool turbo_emitter(const std::string_view name) { return has_prefix(name, "pte"); }
 [[nodiscard]] bool power_to_weapons_emitter(const std::string_view name) { return has_prefix(name, "pptw"); }
+[[nodiscard]] bool ion_stun_emitter(const std::string_view name) { return has_prefix(name, "pi"); }
 
 // The emitter modes a unit's snapshot instance sets (BP-42, BP-43, space-abilities AB-31, AB-32).
 [[nodiscard]] UnitEmitters::Modes modes_of(const sim::tactical::TacticalInstance* instance) {
     UnitEmitters::Modes modes;
     if (instance == nullptr) return modes;
     modes.engines_online = !instance->durability || instance->durability->engines_online;
+    // IS-09: the stun shows its emitters from the hit until its end frame (IS-03).
+    modes.ion_stunned = instance->ion_stun_frames > 0;
     for (const auto& ability : instance->abilities) {
         if (!ability.active) continue;
         if (ability.kind == sim::tactical::AbilityKind::turbo || ability.kind == sim::tactical::AbilityKind::spoiler_lock) {
@@ -103,7 +106,10 @@ UnitEmitters::UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem)
     : host_(&host), filesystem_(&filesystem), cache_(filesystem),
       backend_(std::make_unique<GodotParticleBackend>(
           host, [this](const std::string_view name) { return resolve_texture(name); })),
-      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {}
+      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    // #638: nothing here reads the streams' hashes, so the frames do not compute them.
+    registry_->set_stream_hashes(false);
+}
 
 UnitEmitters::~UnitEmitters() { release(); }
 
@@ -191,6 +197,14 @@ void UnitEmitters::plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& 
     }
     // BP-41 to BP-43: the hardpoint states decide which damage and engine emitters run.
     const std::vector<std::uint8_t> hidden = scene::hidden_hardpoint_proxies(*model, view.hardpoints, states);
+    // IS-09: a stun clears the code-hidden flag of every ion-stun proxy, the flag an authored
+    // hidden proxy is loaded with, so the Tartan's authored-hidden pi_damage_elec_cap00 runs.
+    std::vector<std::uint8_t> shown(model->proxies.size(), 0U);
+    if (modes.ion_stunned) {
+        for (std::size_t ordinal = 0; ordinal < shown.size(); ++ordinal) {
+            shown[ordinal] = ion_stun_emitter(model->proxies[ordinal].name) ? 1U : 0U;
+        }
+    }
     // Planned in the ship's model space: the identity placement makes each record's frame the
     // proxy bone's bind frame; the ship's pose is composed with it every sample.
     scene::Placement local = *view.placement;
@@ -199,7 +213,7 @@ void UnitEmitters::plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& 
     local.scale_raw = sim::math::Fixed::scale;
     const particles::MapEffectPlacementInput input{model, &local, frames->bones, effects,
         frames->bind_pose ? particles::VisibilityEvidence::bind_pose : particles::VisibilityEvidence::unknown,
-        std::nullopt, std::nullopt, hidden};
+        std::nullopt, std::nullopt, hidden, shown};
     const particles::MapEffectPlan planned = particles::plan_map_effects({&input, 1}, plan_seed, SIZE_MAX / 2);
     for (const particles::MapEffectRecord& record : planned.records) {
         if (record.status != particles::MapEffectStatus::admitted || !record.emitter_frame) {
@@ -224,6 +238,7 @@ void UnitEmitters::plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& 
                       record.seed + static_cast<std::uint32_t>(view.entity), record.capacity};
         // BP-45: the brightness goes to the engine type in use.
         wanted.engine = engine_emitter(record.proxy_name) || turbo_emitter(record.proxy_name);
+        wanted.ion_stun = ion_stun_emitter(record.proxy_name);
         const EffectSystem& system = effect_system(wanted.effect);
         if (!system.system) {
             wanted.failed = true;
@@ -261,6 +276,9 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
                           const std::uint64_t tick, const std::uint64_t born) {
     // BP-65: only the turbo swap's hidden engine emitters drain (the recording shows that one).
     const bool turbo_swap = ship.planned && ship.modes.turbo != modes.turbo;
+    // IS-09: the stun's end hides its emitters as the swap hides the engines' (BP-65): their
+    // residual particles drain.
+    const bool stun_ended = ship.planned && ship.modes.ion_stunned && !modes.ion_stunned;
     if (!ship.planned || ship.modes != modes
         || !std::equal(ship.states.begin(), ship.states.end(), states.begin(), states.end())) {
         plan(ship, view, states, modes);
@@ -275,10 +293,11 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         }
         // BP-65: an engine emitter that the turbo swap hides stops emitting and its residual
         // particles drain, as a hidden proxy's do in FoC (rig recording, #559).
-        if (turbo_swap && running->engine && registry_->stop_emission(running->handle)) {
+        if (((turbo_swap && running->engine) || (stun_ended && running->ion_stun))
+            && registry_->stop_emission(running->handle)) {
             running->draining = true;
             running->drain_from = samples_;
-            ++engine_drains_started_;
+            ++(running->engine ? engine_drains_started_ : ion_stun_drains_started_);
             ++running;
             continue;
         }
@@ -305,7 +324,8 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
             log = start_log_.size();
             start_log_.push_back({view.entity, wanted.proxy_name, tick, born, std::nullopt, std::nullopt, 0});
         }
-        ship.running.push_back({wanted.proxy, handle.value(), wanted.local, wanted.mesh_local, wanted.engine, born, log});
+        ship.running.push_back(
+            {wanted.proxy, handle.value(), wanted.local, wanted.mesh_local, wanted.engine, wanted.ion_stun, born, log});
         ++started_[wanted.proxy_name];
     }
 }
@@ -504,19 +524,27 @@ bool UnitEmitters::advance_sample() {
     clone_max_particles_ = std::max(clone_max_particles_, clone_particles_now_);
     clone_particles_now_ = 0;
     std::uint64_t particles_now = 0;
+    // #638: every running emitter steps in one batch on the particle workers; the results are
+    // then taken in the running order, as one advance after another gave them.
+    batch_handles_.clear();
+    for (const Ship& ship : ships_) {
+        for (const Running& running : ship.running) batch_handles_.push_back(running.handle);
+    }
+    if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_); !advanced) {
+        failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
+        return false;
+    }
+    std::size_t next = 0;
     for (Ship& ship : ships_) {
         for (auto running = ship.running.begin(); running != ship.running.end();) {
-            auto advanced = registry_->advance(running->handle, 1.0F / 30.0F, camera_frame_);
-            if (!advanced) {
-                failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
-                return false;
-            }
-            particles_now += advanced.value().particles;
+            const particles::EffectFrameStats& advanced = batch_stats_[next++];
+            particles_now += advanced.particles;
             // A drain that has no particle left, or has drained for the bound, is released.
-            const bool finished = running->draining && advanced.value().finished;
+            const bool finished = running->draining && advanced.finished;
             if (running->draining && (finished || samples_ - running->drain_from >= engine_drain_limit_samples)) {
                 static_cast<void>(registry_->release(running->handle));
-                ++(finished ? engine_drains_finished_ : engine_drains_cut_short_);
+                if (running->engine) ++(finished ? engine_drains_finished_ : engine_drains_cut_short_);
+                if (running->ion_stun) ++(finished ? ion_stun_drains_finished_ : ion_stun_drains_cut_short_);
                 running = ship.running.erase(running);
                 continue;
             }
@@ -529,14 +557,18 @@ bool UnitEmitters::advance_sample() {
 }
 
 bool UnitEmitters::present_running() {
+    // #638: one batch on the particle workers, as advance_sample.
+    batch_handles_.clear();
+    for (const Ship& ship : ships_) {
+        for (const Running& running : ship.running) batch_handles_.push_back(running.handle);
+    }
+    if (auto presented = registry_->present_all(batch_handles_, camera_frame_); !presented) {
+        failure_ = "unit emitter: " + core::format_diagnostic(presented.error());
+        return false;
+    }
     std::uint64_t effects = 0;
-    for (Ship& ship : ships_) {
+    for (const Ship& ship : ships_) {
         for (const Running& running : ship.running) {
-            auto presented = registry_->present(running.handle, camera_frame_);
-            if (!presented) {
-                failure_ = "unit emitter: " + core::format_diagnostic(presented.error());
-                return false;
-            }
             ++effects;
             if (running.log < start_log_.size()) ++start_log_[running.log].presented;
         }
@@ -774,6 +806,8 @@ void UnitEmitters::write_report(std::ostream& output) const {
     counts(output, "start_failed", start_failed_);
     output << ", \"engine_drains\": {\"started\": " << engine_drains_started_ << ", \"finished\": "
            << engine_drains_finished_ << ", \"cut_short\": " << engine_drains_cut_short_ << "}";
+    output << ", \"ion_stun_drains\": {\"started\": " << ion_stun_drains_started_ << ", \"finished\": "
+           << ion_stun_drains_finished_ << ", \"cut_short\": " << ion_stun_drains_cut_short_ << "}";
     output << ", \"caught_up\": " << caught_up_ << ", \"unknown_samples\": " << unknown_samples_
            << ", \"presented_frames\": " << presented_frames_ << ", \"presented_effects\": " << presented_effects_;
     output << ", \"start_log\": [";

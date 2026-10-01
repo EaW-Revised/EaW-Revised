@@ -72,7 +72,8 @@ void EawrUnitCards::setup(Setup setup) {
 void EawrUnitCards::show(std::vector<Card> cards, std::vector<model::CardBorder> borders) {
     const auto same_card = [](const Card& a, const Card& b) {
         return a.slot == b.slot && a.type == b.type && a.count == b.count && a.stacked == b.stacked
-            && a.health_level == b.health_level && a.shield == b.shield;
+            && a.health_level == b.health_level && a.shield == b.shield && a.price == b.price && a.room == b.room
+            && a.disabled == b.disabled;
     };
     const bool same = cards.size() == cards_.size() && std::equal(cards.begin(), cards.end(), cards_.begin(), same_card)
         && borders.size() == borders_.size()
@@ -214,6 +215,12 @@ void EawrUnitCards::update_text() {
         if (card != cards_.end() && card->stacked) text = String("x") + String::num_int64(card->count);
         style.outline = look.outline;
         style.top = style.bottom = Color(look.colour.r / 255.0F, look.colour.g / 255.0F, look.colour.b / 255.0F, 1.0F);
+        if (card != cards_.end() && card->price) {
+            // #530 PU-62: the build price (unverified: drawn where a card's count sits).
+            text = String::num_int64(*card->price);
+            const float grey = card->room ? 1.0F : 128.0F / 255.0F;
+            style.top = style.bottom = Color(grey, grey, grey, 200.0F / 255.0F);
+        }
         // Text 2 sits centred on the bone plus Text_Offset2; a two-line-high box keeps it centred.
         const assets::Vec2f at{look.card.origin.x + look.count_offset.x, look.card.origin.y + look.count_offset.y};
         const Rect2 box = screen({at.x - 25.0F, at.y - 6.0F, 50.0F, 12.0F});
@@ -283,10 +290,11 @@ void EawrUnitCards::_draw() {
         const Ref<Texture2D> texture = portrait(card.type);
         if (texture.is_valid()) {
             const Vector2 size = texture->get_size();
-            const Color tint(look.colour.r / 255.0F, look.colour.g / 255.0F, look.colour.b / 255.0F, look.colour.a / 255.0F);
+            Color tint(look.colour.r / 255.0F, look.colour.g / 255.0F, look.colour.b / 255.0F, look.colour.a / 255.0F);
+            if (card.price && card.disabled) tint = Color(128.0F / 255.0F, 128.0F / 255.0F, 128.0F / 255.0F, 1.0F); // PU-61
             draw_texture_rect(texture, screen(model::button_quad(look.card, size.x, size.y)), false, tint);
         }
-        if (card.stacked) continue; // a stacked card hides its bars
+        if (card.stacked || card.price) continue; // a stacked card or a build button has no bars
         if (look.health) {
             const std::int32_t levels = std::max(1, look.health->max_level);
             draw_bar(*look.health, card.health_level, static_cast<double>(card.health_level) / levels);
@@ -312,6 +320,9 @@ std::string EawrUnitCards::report_json() const {
                << ", \"icon\": " << json(icon) << ", \"icon_drawn\": " << (texture.is_valid() ? "true" : "false")
                << ", \"count\": " << card.count << ", \"stacked\": " << (card.stacked ? "true" : "false")
                << ", \"health_level\": " << card.health_level;
+        if (card.price) {
+            output << ", \"price\": " << *card.price << ", \"disabled\": " << (card.disabled ? "true" : "false");
+        }
         if (const auto rect = slot_rect(card.slot)) output << ", \"rect\": " << rect_json(*rect);
         output << "}";
     }

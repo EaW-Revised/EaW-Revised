@@ -319,10 +319,15 @@ void MinimapFog::resize(const std::uint32_t width, const std::uint32_t height) {
 }
 
 bool MinimapFogCells::revealed(const double x, const double y) const noexcept {
-    if (!values || cell <= 0.0) return false;
+    if ((!values && !rows) || cell <= 0.0) return false;
     const double column = std::floor((x - left) / cell);
     const double row = std::floor((top - y) / cell);
     if (column < 0.0 || row < 0.0 || column >= wide || row >= tall) return false;
+    if (rows) {
+        const auto at = static_cast<std::size_t>(row);
+        const auto offset = static_cast<std::size_t>(column);
+        return at < rows->size() && (*rows)[at] && offset < (*rows)[at]->size() && (*(*rows)[at])[offset] != 0;
+    }
     const std::size_t index = static_cast<std::size_t>(row) * wide + static_cast<std::size_t>(column);
     return index < values->size() && (*values)[index] != 0;
 }

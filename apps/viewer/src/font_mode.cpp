@@ -418,7 +418,7 @@ bool FontMode::ready(Node3D& host) {
     const auto mounted = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
     const vfs::Vfs unmounted;
     model::FontCache cache = model::load_font_cache(mounted ? mounted.value() : unmounted,
-                                                    directory.generic_string());
+                                                    ViewerPath::utf8(directory));
     std::error_code error;
     if (!mounted && std::filesystem::is_directory(directory, error)) {
         core::Diagnostic diagnostic = mounted.error();

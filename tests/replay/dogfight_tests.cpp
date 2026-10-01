@@ -150,6 +150,7 @@ struct Session {
     tactical::TacticalSetup setup;
     tactical::MotionTable motion;
     tactical::DurabilityTable durability;
+    tactical::CombatTable weapons = combat();
     std::vector<Order> orders;
 };
 
@@ -167,7 +168,7 @@ struct Session {
         }
     }
     std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
-    auto created = tactical::TacticalSession::create(fixture.setup, sensors, fixture.durability, fixture.motion, std::nullopt, combat());
+    auto created = tactical::TacticalSession::create(fixture.setup, sensors, fixture.durability, fixture.motion, std::nullopt, fixture.weapons);
     expect(static_cast<bool>(created), "the session builds");
     if (!created) {
         std::cerr << created.error().message << '\n';
@@ -549,6 +550,56 @@ void test_intercepted() {
     expect(kept, "C-26 (FD-04, S-98): the squadron attacking the frigate keeps it as its target");
 }
 
+// C-29 (#531, OR-23; #585): a squadron ordered onto a hardpoint of a ship that a dogfight retargets
+// does not keep the hardpoint. Squadrons 10 and 20 fight in one cell, 20 on one of 10's craft;
+// the rebels then order 20 onto hardpoint 1 of the empire frigate 40. The service turns 20 back
+// on squadron 10 (FD-04, its target no longer a craft of a squadron), and the ordered hardpoint
+// would name a hardpoint of another target: neither the squadron's state nor its craft's weapons
+// may keep it.
+void test_retarget_clears_the_hardpoint() {
+    auto fixture = trio_fight();
+    fixture.setup.units.push_back(unit(40, frigate_type, empire, at(0, 2500)));
+    tactical::HardpointProfile hardpoint;
+    hardpoint.role = tactical::HardpointRole::weapon;
+    hardpoint.destroyable = true;
+    hardpoint.max_health = units(100);
+    for (auto& profile : fixture.durability.profiles) {
+        if (profile.type_id == frigate_type) profile.hardpoints = {hardpoint, hardpoint};
+    }
+    for (auto& profile : fixture.weapons.profiles) {
+        if (profile.type_id == frigate_type) profile.hardpoints = {{0, at(0, -30), true}, {1, at(0, 30), true}};
+    }
+    constexpr std::uint64_t order_tick = 500;
+    fixture.orders.push_back({rebel, 20, tactical::AttackPayload{40, 1}, {}, order_tick});
+    bool fighting = false;
+    bool retargeted = false;
+    bool stale = false;
+    bool craft_stale = false;
+    const auto hashes = run(fixture, 1, 700, [&](const tactical::TacticalSession& session, const tactical::TacticalTick& tick) {
+        const auto rebels = session.squadron_state(20);
+        const auto empires = session.squadron_state(10);
+        if (!rebels || !empires) return;
+        if (tick.completed_tick + 1 == order_tick) {
+            fighting = rebels->joined && empires->joined && rebels->cell == empires->cell;
+        }
+        if (tick.completed_tick < order_tick) return;
+        retargeted = retargeted || rebels->target == 10;
+        stale = stale || (rebels->target_hardpoint != tactical::attack_hull && rebels->target != 40);
+        for (const EntityId craft : {EntityId{21}, EntityId{22}, EntityId{23}}) {
+            const auto combat_state = session.combat_state(craft);
+            craft_stale = craft_stale
+                || (combat_state && combat_state->direct && combat_state->attack_hardpoint != tactical::no_hardpoint
+                    && combat_state->attack_target != 40);
+        }
+    });
+    expect(hashes.size() == 700, "C-29: 700 ticks");
+    expect(fighting, "C-29: the squadrons fight in one cell when the order comes");
+    expect(retargeted, "C-29 (FD-04): the dogfight turns the ordered squadron back on its attacker");
+    expect(!stale, "C-29 (OR-23): a retarget clears the squadron's ordered hardpoint");
+    expect(!craft_stale, "C-29 (OR-23): no craft keeps a hardpoint of a target it was retargeted from");
+    expect_workers(fixture, 700, hashes, "C-29");
+}
+
 // C-27 (#552, #599, FO-07 to FO-11): four squadrons moved together by one command take four
 // slots around the destination and fly their formation's lanes there; moved one by one they
 // converge on the one point.
@@ -777,6 +828,7 @@ int main() {
     test_spin_in_dogfight();
     test_avoidance();
     test_intercepted();
+    test_retarget_clears_the_hardpoint();
     test_group_move();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";

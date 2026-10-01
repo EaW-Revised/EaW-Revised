@@ -212,6 +212,12 @@ public:
     // #455: the space map camera's target bounds (source X/Y), which the minimap spans; nothing
     // without the populated view's map camera.
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> live_camera_bounds() const;
+    // #888 perf trace: the last frame's main-thread ms in the snapshot build and renderer submit,
+    // and the pieces it submitted; zero without the populated view.
+    [[nodiscard]] double live_submit_ms() const;
+    [[nodiscard]] std::size_t live_submit_pieces() const;
+    // The pieces whose transform that submit sent to the engine (#888: only the moved ones).
+    [[nodiscard]] std::uint64_t live_submit_sent() const;
     void live_camera_overview_key();
     [[nodiscard]] std::string live_camera_overview() const;
 

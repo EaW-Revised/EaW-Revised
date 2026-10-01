@@ -36,6 +36,11 @@ int main() {
     test_attachment_determinism();
     test_attachment_merge_stats();
     test_heat_pixel_change_bound();
+    test_batch_matches_serial();
+    test_batch_hashes_on_request();
+    test_batch_work_counts();
+    test_batch_rejects_repeats_and_unknown();
+    test_batch_present_allocates_nothing();
     if (failures != 0) { std::cerr << failures << " particle render contract(s) failed\n"; return 1; }
     std::cout << "particle render contracts passed\n";
     return 0;

@@ -43,9 +43,9 @@ using eawr::units::UnitKind;
 using eawr::units::Vec3;
 
 // The tick-zero state hash of the committed m2-start replay (FoC data, fixture seed 67).
-constexpr std::string_view m2_tick_zero_state = "506e48ffa375d8a6fd29c9fa69474f63d4f455a999126e5f232bef3aefd64a2a";
+constexpr std::string_view m2_tick_zero_state = "3cfadb5ada5c5cd1a7551ffde3f13341a290ef3efa421f234cb5c6c4e99fd7a3";
 // docs/unit-data.md: the FoC fleet's unit-table identity, the replay's content identity.
-constexpr std::string_view m2_content_identity = "984c71a99d5f6f58cef57bd3498754a5c2211bf7aec2b4f9ed7626273a0eb113";
+constexpr std::string_view m2_content_identity = "2e2540011dfee39f1e8ef1924b6232f172170a4d51a860c383267832aecb6079";
 
 int failures{};
 
@@ -175,8 +175,8 @@ skirmish::StartInputs synthetic_inputs(const eawr::units::UnitTables& tables) {
     inputs.tables = &tables;
     // Retail ownership: Rebel and Empire are playable, Pirates and Neutral get a skirmish
     // player, Wildlife (index 4) is non-playable without one.
-    inputs.factions = {{"Rebel", true, false, false}, {"Empire", true, false, false},
-        {"Pirates", false, true, false}, {"Neutral", false, true, true}, {"Wildlife", false, false, false}};
+    inputs.factions = {{"Rebel", true, false, false, std::nullopt}, {"Empire", true, false, false, std::nullopt},
+        {"Pirates", false, true, false, std::nullopt}, {"Neutral", false, true, true, std::nullopt}, {"Wildlife", false, false, false, std::nullopt}};
     inputs.faction_forces = {{"Rebel", {"Fighter_Squadron"}}, {"Empire", {"Fighter_Squadron", "Cruiser"}}};
     inputs.lobby_colours = {{"MP_Color_Blue", {1, 2, 3}}, {"MP_Color_Red", {4, 5, 6}}, {"MP_Color_Green", {7, 8, 9}}};
     auto station = marker(0, "Team_00_Space_Station", at(100, 200), 90);
@@ -234,8 +234,8 @@ void synthetic_start() {
                "slot 2 takes the second MP colour");
         expect(start.players[2].player.player_id == 3 && start.players[2].colour->constant == "MP_Color_Green",
                "slot 3 takes the third MP colour");
-        expect(rebel.credits == 0 && !rebel.income && !rebel.production_queue && !rebel.population_cap,
-               "no credits, income, production or population cap");
+        expect(rebel.income && rebel.production_queue && rebel.population_cap,
+               "SK-30, SK-31 (#530): a lobby player earns, builds and has a population cap");
         expect(start.players[3].player == tactical::Player{4, 2, skirmish::faction_id("Pirates"), 0U}
                    && start.players[3].owner_index == 2 && !start.players[3].lobby,
                "Pirates (index 2) is a non-commandable player after the lobby");
@@ -469,7 +469,7 @@ void synthetic_placement() {
     inputs.map = fixture.map;
     inputs.map_sha256 = fixture.map_sha256;
     inputs.tables = &tables;
-    inputs.factions = {{"Rebel", true, false, false}, {"Neutral", false, true, true}};
+    inputs.factions = {{"Rebel", true, false, false, std::nullopt}, {"Neutral", false, true, true, std::nullopt}};
     inputs.lobby_colours = {{"MP_Color_Blue", {1, 2, 3}}};
     inputs.placements.push_back(marker(1, "Team_00_Spawn_Point_Marker", at(0, 0), 0));
     inputs.placements.push_back(object(2, "Pad", "SpaceBuildable", 1, "Neutral", at(0, 0), 0));
@@ -1116,6 +1116,53 @@ void foc_start(const std::filesystem::path& fixtures) {
     foc_victory(start, tables.value());
     foc_mc80(start, tables.value());
     foc_heights(start);
+    {
+        auto selected = skirmish::fixture_from_options({}, filesystem.value(), catalog.value().catalog);
+        expect(selected && selected.value().map == fixture.map && selected.value().map_sha256 == fixture.map_sha256
+               && selected.value().seed == fixture.seed && selected.value().slots[0].fleet == fixture.slots[0].fleet,
+               "omitted skirmish options retain the pinned M2 fixture");
+        if (selected) {
+            auto rebuilt = skirmish::build_start(selected.value(), inputs.value());
+            const auto replay = rebuilt ? tactical::write_replay({rebuilt.value().setup, 30, {}})
+                                        : eawr::core::Result<std::vector<std::uint8_t>>::failure(rebuilt.error());
+            expect(replay && bytes && replay.value() == bytes.value(), "options default writes byte-identical M2 replay");
+        }
+        skirmish::FixtureOptions options;
+        options.slots = fixture.slots;
+        options.slots->push_back({3, "Rebel", 2, false, {}});
+        const auto too_many = skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog);
+        expect(!too_many && too_many.error().message.find("more than two") != std::string::npos,
+               "more than two players refused explicitly");
+        options = {};
+        options.map = "data/art/maps/_mp_land_naboo.ted";
+        expect(!skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog), "land map refused");
+        for (const std::string name : {"bespin", "kessel", "polus", "naboo", "coruscant"}) {
+            options = {};
+            options.map = "data/art/maps/_mp_space_" + name + ".ted";
+            options.seed = 908;
+            selected = skirmish::fixture_from_options(options, filesystem.value(), catalog.value().catalog);
+            expect(static_cast<bool>(selected), "select FoC space map " + name);
+            if (!selected) continue;
+            auto chosen_inputs = skirmish::read_start_inputs(selected.value(), filesystem.value(), catalog.value().catalog, tables.value());
+            expect(static_cast<bool>(chosen_inputs), "read selected FoC space map " + name);
+            if (!chosen_inputs) continue;
+            auto chosen_start = skirmish::build_start(selected.value(), chosen_inputs.value());
+            expect(chosen_start && chosen_start.value().setup.seed == 908, "build selected FoC map " + name);
+            if (!chosen_start) continue;
+            std::string hash;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                eawr::platform::ThreadWorkerAdapter pool(workers);
+                auto run = tactical::TacticalSession::create(chosen_start.value().setup, sensors);
+                expect(static_cast<bool>(run), "selected map starts for each worker count");
+                if (!run) continue;
+                for (int tick = 0; tick < 8; ++tick) {
+                    expect(static_cast<bool>(run.value().step(pool)), "selected map steps with each worker count");
+                }
+                if (hash.empty()) hash = run.value().state_sha256();
+                expect(hash == run.value().state_sha256(), "selected map state independent of worker count");
+            }
+        }
+    }
 }
 
 } // namespace

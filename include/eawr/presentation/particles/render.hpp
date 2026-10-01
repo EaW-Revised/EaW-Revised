@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -164,6 +165,8 @@ namespace diagnostic_codes {
 inline constexpr std::string_view unknown_effect = "EAWR-PARTICLE-0006";
 inline constexpr std::string_view backend_resource = "EAWR-PARTICLE-0007";
 inline constexpr std::string_view mesh_binding = "EAWR-PARTICLE-0008";
+// A batched advance or present given a handle twice, or whose executor could not run its tasks (#638).
+inline constexpr std::string_view batch = "EAWR-PARTICLE-0010";
 } // namespace diagnostic_codes
 
 struct EmitterFrameStats final {
@@ -192,6 +195,36 @@ struct EffectFrameStats final {
 };
 
 using EffectHandle = std::uint32_t;
+
+// Runs the independent per-instance work of EffectRegistry::advance_all and present_all (#638,
+// the ADR-009 pattern): each task reads its own instance and the shared camera and writes only
+// that instance and its own statistics slot, so the threads that run the tasks never change a
+// result. The viewer gives its registries a small worker pool; without an executor the tasks run
+// on the calling thread.
+class StepExecutor {
+public:
+    virtual ~StepExecutor() = default;
+    // Runs task(0) .. task(count - 1), each exactly once, possibly concurrently, and returns when
+    // all have finished; false when they could not all run (a task that threw, a pool that failed).
+    [[nodiscard]] virtual bool run(std::size_t count, const std::function<void(std::size_t)>& task) const = 0;
+
+protected:
+    StepExecutor() = default;
+    StepExecutor(const StepExecutor&) = default;
+    StepExecutor& operator=(const StepExecutor&) = default;
+};
+
+// What an EffectRegistry did, counted on the calling thread (#638). Deterministic for a given
+// sequence of calls whatever the executor, so a test can hold the work to a budget.
+struct RegistryWorkCounts final {
+    std::uint64_t steps{};          // instances advanced (their CPU system stepped)
+    std::uint64_t presents{};       // instances presented (followed their emitter, not stepped)
+    std::uint64_t streams_built{};  // emitter vertex streams built
+    std::uint64_t streams_hashed{}; // emitter streams hashed for the frame statistics
+    std::uint64_t uploads{};        // streams handed to the backend
+    std::uint64_t batches{};        // advance_all / present_all calls that ran their tasks on the executor
+    std::uint64_t tasks{};          // executor tasks those batches ran
+};
 
 // Outcome of EffectRegistry::detach. `draining` keeps the instance and its
 // backend resources until its owner releases it; `released` means the
@@ -227,6 +260,24 @@ public:
     // again for `camera` at the current brightness and uploaded, without advancing time. It keeps
     // no stats, so a present allocates nothing once the instance's stream has grown (#439).
     [[nodiscard]] core::Result<void> present(EffectHandle handle, const CameraFrame& camera);
+    // #638: advance() on every handle of `handles` with the same step and camera, with the same
+    // results and the same backend uploads in `handles` order. The instances step and build their
+    // streams as tasks on the executor (set_executor); the calling thread then uploads the
+    // streams in order. `stats` receives one entry per handle. A handle that is not live, or that
+    // appears twice, fails the batch before any instance changes.
+    [[nodiscard]] core::Result<void> advance_all(std::span<const EffectHandle> handles, float delta_seconds,
+        const CameraFrame& camera, std::vector<EffectFrameStats>& stats);
+    // present() on every handle of `handles`, batched as advance_all.
+    [[nodiscard]] core::Result<void> present_all(std::span<const EffectHandle> handles, const CameraFrame& camera);
+    // The pool advance_all and present_all run their tasks on (null, the default: the calling
+    // thread). It must outlive the registry's batched calls.
+    void set_executor(const StepExecutor* executor) noexcept;
+    // Whether an advance hashes the emitters' streams into EmitterFrameStats::hash and
+    // EffectFrameStats::hash (on by default: the reports and tests compare them). Off, both
+    // hashes are zero and every other statistic is unchanged (#638: the live battle's registries
+    // leave them off, as nothing there reads them).
+    void set_stream_hashes(bool on) noexcept;
+    [[nodiscard]] const RegistryWorkCounts& work() const noexcept;
     // Frees every backend resource of the instance. Releasing twice is a
     // diagnostic, not a crash.
     [[nodiscard]] core::Result<void> release(EffectHandle handle);
@@ -259,9 +310,21 @@ private:
     [[nodiscard]] Instance* find(EffectHandle handle) const noexcept;
     // Records and returns the unknown-handle diagnostic.
     [[nodiscard]] core::Diagnostic unknown(EffectHandle handle);
-    // Builds and uploads the instance's streams from its live particles; fills `stats` when given.
-    void publish(Instance& instance, const CameraFrame& camera, EffectFrameStats* stats);
+    // Builds the instance's streams from its live particles and fills `stats` when given; touches
+    // nothing but the instance and `stats`, so instances build concurrently.
+    void build(Instance& instance, const CameraFrame& camera, EffectFrameStats* stats) const;
+    // Hands the instance's built streams to the backend (the calling thread only) and counts the work.
+    void upload(Instance& instance, bool stepped, bool hashed);
+    // Resolves `handles` to live, distinct instances into batch_, or records the diagnostic.
+    [[nodiscard]] core::Result<void> resolve(std::span<const EffectHandle> handles);
+    // Runs task(i) for every instance of batch_, on the executor when there is more than one.
+    [[nodiscard]] core::Result<void> run_batch(const std::function<void(std::size_t)>& task);
     RenderBackend* backend_;
+    const StepExecutor* executor_{};
+    bool stream_hashes_{true};
+    RegistryWorkCounts work_;
+    std::vector<Instance*> batch_;
+    std::vector<Instance*> sorted_;
     std::vector<std::unique_ptr<Instance>> instances_;
     std::vector<core::Diagnostic> diagnostics_;
     EffectHandle next_handle_{1};

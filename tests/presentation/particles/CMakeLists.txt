@@ -14,6 +14,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_executable(
         particle_render_tests
         render_main.cpp
+        render_batch_tests.cpp
         render_proxy_tests.cpp
         render_stream_tests.cpp
         render_submission_tests.cpp
@@ -46,10 +47,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
             target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
         endif()
     endforeach()
+    # The batch contracts (#638) run their tasks on std::thread.
+    find_package(Threads REQUIRED)
+    target_link_libraries(particle_render_tests PRIVATE Threads::Threads)
 else()
     add_executable(particle_cpu_tests main.cpp)
     add_executable(particle_render_tests
         render_main.cpp
+        render_batch_tests.cpp
         render_proxy_tests.cpp
         render_stream_tests.cpp
         render_submission_tests.cpp)
@@ -59,6 +64,9 @@ else()
         target_compile_features(${target} PRIVATE cxx_std_20)
         eawr_target_project_warnings(${target})
     endforeach()
+    # The batch contracts (#638) run their tasks on std::thread.
+    find_package(Threads REQUIRED)
+    target_link_libraries(particle_render_tests PRIVATE Threads::Threads)
 endif()
 
 enable_testing()

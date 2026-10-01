@@ -27,4 +27,8 @@ namespace eawr::skirmish::detail {
 // Three or four integers in 0..255 separated by commas and/or whitespace.
 [[nodiscard]] std::optional<std::array<std::uint8_t, 3>> colour(std::string_view text);
 
+// A positive binary32 bit pattern as Q24 raw, exactly (bits below 2^-24 are dropped); nullopt for
+// zero, a negative, a subnormal, an infinity, a NaN or a value past the Q24 range.
+[[nodiscard]] std::optional<std::int64_t> q24_from_binary32_bits(std::uint32_t bits) noexcept;
+
 } // namespace eawr::skirmish::detail

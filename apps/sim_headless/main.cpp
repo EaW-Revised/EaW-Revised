@@ -484,6 +484,7 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
     // be the content the setup names.
     eawr::skirmish::SessionContent content;
     tactical::VictoryRules victory;
+    tactical::EconomyRules economy;
     if (!options.game_root.empty()) {
         auto loaded = load_tables(options);
         if (!loaded) {
@@ -521,10 +522,22 @@ int run_tactical(const Options& options, const std::vector<std::uint8_t>& bytes)
         }
         content.fog = fog.value();
         victory = eawr::skirmish::victory_rules(replay.value().setup, *loaded.value()->tables, humans);
+        // #530: a replay of the M2 start runs with its economy, as the live session does. The start
+        // is rebuilt from the same inputs; a replay of another setup has none.
+        auto start = eawr::skirmish::build_start(eawr::skirmish::m2_fixture(), inputs.value());
+        if (start && start.value().setup.players == replay.value().setup.players
+            && start.value().setup.units == replay.value().setup.units) {
+            auto rules = eawr::skirmish::economy_rules(start.value(), inputs.value(), *loaded.value()->tables);
+            if (!rules) {
+                std::cerr << eawr::core::format_diagnostic(rules.error()) << '\n';
+                return 3;
+            }
+            economy = std::move(rules).value();
+        }
     }
     auto session_result = tactical::TacticalSession::from_replay(
         replay.value(), content.sensors, content.durability, content.motion, content.fog, content.combat, victory,
-        content.abilities);
+        content.abilities, economy);
     if (!session_result) {
         std::cerr << eawr::core::format_diagnostic(session_result.error()) << '\n';
         return 3;
@@ -597,7 +610,9 @@ void list_start(std::ostream& output, const eawr::skirmish::SkirmishStart& start
                        << ", " << static_cast<int>(player.colour->rgb[1]) << ", "
                        << static_cast<int>(player.colour->rgb[2]) << ')';
             }
-            output << " credits " << player.credits << " income none production none power "
+            // SK-30, SK-31 (#530): the starting credits and whether the station earns and builds.
+            output << " credits " << player.credits << " income " << (player.income ? "station" : "none")
+                   << " production " << (player.production_queue ? "station" : "none") << " power "
                    << whole(player.combat_power_tick_zero);
         } else if (player.owner_index) {
             output << " non-playable (TED index " << *player.owner_index << ')';

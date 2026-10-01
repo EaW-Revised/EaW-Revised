@@ -63,6 +63,19 @@ public:
     [[nodiscard]] std::optional<sim::EntityId> icon_at(std::array<float, 2> point) const;
     // The centre of squadron `squadron`'s icon in the last drawn frame.
     [[nodiscard]] std::optional<std::array<float, 2>> icon_centre(sim::EntityId squadron) const;
+    // The hardpoint reticle the last drawn frame put under `point` (#531, WU-41): its unit and the
+    // hardpoint's index in the unit type's HardPoints list.
+    struct ReticleHit final {
+        sim::EntityId entity{};
+        std::uint32_t hardpoint{};
+    };
+    [[nodiscard]] std::optional<ReticleHit> reticle_at(std::array<float, 2> point) const;
+    // The centre of that hardpoint's reticle in the last drawn frame.
+    [[nodiscard]] std::optional<std::array<float, 2>> reticle_centre(sim::EntityId entity, std::uint32_t hardpoint) const;
+    // WU-42: an attack order on a hardpoint flashes its reticle for 60 render services.
+    void flash_reticle(sim::EntityId entity, std::uint32_t hardpoint);
+    // One render service: counts the flash down. Called once per frame, not per draw.
+    void service();
     // #550: the last drawn frame's icons as selectable units (the squadron, its type, the icon's
     // centre as its screen point), so a double click on an icon selects by icon like a unit's by model.
     [[nodiscard]] std::vector<ui::BattleUnit> icon_units() const;
@@ -104,6 +117,17 @@ private:
         bool own{};
         float min_x{}, min_y{}, max_x{}, max_y{};
     };
+    struct Reticle final {
+        sim::EntityId entity{};
+        std::uint32_t hardpoint{};
+        float min_x{}, min_y{}, max_x{}, max_y{};
+    };
+    struct Flash final {
+        sim::EntityId entity{};
+        std::uint32_t hardpoint{};
+        std::uint32_t services{};
+    };
+    static constexpr std::uint32_t flash_frames = 60;
     [[nodiscard]] godot::Ref<godot::ImageTexture> standalone(const vfs::Vfs& filesystem, const std::string& stem);
     [[nodiscard]] std::optional<godot::Rect2> atlas_region(const std::string& name) const;
     void place_circles(const Frame& frame);
@@ -125,6 +149,9 @@ private:
     std::map<std::string, godot::Rect2> atlas_regions_;
     std::map<std::string, godot::Ref<godot::ImageTexture>> reticles_;
     std::vector<Icon> icons_;
+    std::vector<Reticle> reticle_rects_;  // the hovered unit's reticles of the last drawn frame
+    std::optional<Flash> flash_;
+    std::size_t flashes_started_{};
     ui::CombatGrid grid_;
     std::size_t grid_icons_{};
     std::size_t max_grid_icons_{};

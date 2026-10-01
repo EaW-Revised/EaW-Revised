@@ -89,7 +89,10 @@ DebrisProps::DebrisProps(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     : host_(&host), filesystem_(&filesystem), catalog_(&catalog),
       backend_(std::make_unique<GodotParticleBackend>(
           host, [this](const std::string_view name) { return resolve_texture(name); })),
-      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {}
+      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    // #638: nothing here reads the streams' hashes, so the frames do not compute them.
+    registry_->set_stream_hashes(false);
+}
 
 DebrisProps::~DebrisProps() { release(); }
 
@@ -378,41 +381,63 @@ bool DebrisProps::start(const std::string& particle, const space::DebrisPose& po
     return true;
 }
 
+bool DebrisProps::follow(const Effect& effect, const std::uint64_t sample) {
+    if (!effect.follows) return true;
+    const auto flight = flights_.flights().find(*effect.follows);
+    if (flight == flights_.flights().end()) return true;
+    const double tick = *clock_start_ + static_cast<double>(sample);
+    if (!registry_->set_frame(effect.handle, frame_of(pose_at(flight->second, tick)))) {
+        failure_ = "breakoff fire " + effect.particle + ": its frame was refused";
+        return false;
+    }
+    return true;
+}
+
 bool DebrisProps::step(Effect& effect, const std::uint64_t sample, bool& gone) {
     gone = false;
-    if (effect.follows) {
-        const auto flight = flights_.flights().find(*effect.follows);
-        if (flight != flights_.flights().end()) {
-            const double tick = *clock_start_ + static_cast<double>(sample);
-            if (!registry_->set_frame(effect.handle, frame_of(pose_at(flight->second, tick)))) {
-                failure_ = "breakoff fire " + effect.particle + ": its frame was refused";
-                return false;
-            }
-        }
-    }
+    if (!follow(effect, sample)) return false;
     auto advanced = registry_->advance(effect.handle, 1.0F / 30.0F, camera_frame_);
     if (!advanced) {
         failure_ = "breakoff effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
     }
+    after_step(effect, advanced.value(), gone);
+    return true;
+}
+
+void DebrisProps::after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone) {
+    gone = false;
     ++effect.age;
     if (!effect.detached && effect.age >= effect.lifetime) {
         // The particle object's lifetime ends: FoC detaches its system, which drains.
         auto detached = registry_->detach(effect.handle);
         effect.detached = true;
         gone = !detached || detached.value() == particles::EffectDetachState::released;
-    } else if (effect.detached && (advanced.value().finished || effect.age >= effect.lifetime + drain_limit_frames)) {
+    } else if (effect.detached && (advanced.finished || effect.age >= effect.lifetime + drain_limit_frames)) {
         static_cast<void>(registry_->release(effect.handle));
         gone = true;
     }
-    return true;
 }
 
 bool DebrisProps::advance_until(const std::uint64_t target) {
     for (; samples_ < target; ++samples_) {
+        // #638: the effects born by this sample stand at their frames, step in one batch on the
+        // particle workers, then age, detach or go in effect order, as one step after another did.
+        batch_handles_.clear();
+        for (const Effect& effect : effects_) {
+            if (effect.born > samples_) continue;
+            if (!follow(effect, samples_)) return false;
+            batch_handles_.push_back(effect.handle);
+        }
+        if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_);
+            !advanced) {
+            failure_ = "breakoff effect: " + core::format_diagnostic(advanced.error());
+            return false;
+        }
+        std::size_t next = 0;
         for (auto effect = effects_.begin(); effect != effects_.end();) {
             bool gone = false;
-            if (effect->born <= samples_ && !step(*effect, samples_, gone)) return false;
+            if (effect->born <= samples_) after_step(*effect, batch_stats_[next++], gone);
             effect = gone ? effects_.erase(effect) : effect + 1;
         }
     }

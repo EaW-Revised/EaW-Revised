@@ -594,61 +594,130 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
 void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
     reticles_drawn_ = 0;
     tracked_reticles_ = 0;
-    if (!frame.hovered || *frame.hovered >= frame.units->size()) return;
-    const ui::BattleUnit& unit = (*frame.units)[*frame.hovered];
-    if (unit.part != sim::invalid_entity_id) return;  // a squadron has no hardpoints
-    const auto snapshot = frame.live->battle_frame().latest;
-    const auto* instance = instance_of(snapshot.get(), unit.entity);
-    const auto view = frame.live->unit_frame(unit.entity);
-    const auto type = types_.find(unit.type);
-    if (instance == nullptr || !instance->durability || !view || type == types_.end()) return;
-    RenderingServer* rendering = RenderingServer::get_singleton();
-    const Vec3 position{static_cast<float>(view->position[0]), static_cast<float>(view->position[1]),
-                        static_cast<float>(view->position[2])};
-    struct Placed final {
-        std::size_t index{};
-        Rect2 rect;
+    reticle_rects_.clear();
+    // The unit whose reticles show: the one under the pointer (WU-30), and the unit of a reticle that
+    // is still flashing from an order (WU-42), which shows only that reticle.
+    struct Shown final {
+        const ui::BattleUnit* unit{};
+        bool only_flash{};
     };
-    std::vector<Placed> placed;
-    const auto& statuses = instance->durability->hardpoints;
-    for (std::size_t index = 0; index < type->second.hardpoints.size() && index < statuses.size(); ++index) {
-        const HardpointUi& hardpoint = type->second.hardpoints[index];
-        // WU-30: every targetable hardpoint that still stands.
-        if (!hardpoint.targetable || hardpoint.texture.empty()
-            || statuses[index].state == sim::tactical::HardpointState::destroyed) {
-            continue;
-        }
-        // WU-34: on the attachment point as the ship is drawn, bank and pitch included.
-        const Vec3 world = ui::hardpoint_reticle_anchor(position, static_cast<float>(view->yaw_degrees),
-                                                        static_cast<float>(view->pitch_degrees),
-                                                        static_cast<float>(view->roll_degrees), hardpoint.local);
-        const auto screen = frame.project(world);
-        if (!screen) continue;
-        // WU-31: a fixed share of the screen, whatever the camera distance.
-        const ui::ReticleRect rect = ui::hardpoint_reticle_rect(*screen, frame.viewport);
-        placed.push_back({index, Rect2(rect.x, rect.y, rect.width, rect.height)});
+    std::vector<Shown> shown;
+    if (frame.hovered && *frame.hovered < frame.units->size()) {
+        const ui::BattleUnit& hovered = (*frame.units)[*frame.hovered];
+        if (hovered.part == sim::invalid_entity_id) shown.push_back({&hovered, false});  // a squadron has none
     }
-    // WU-32: the hardpoint under the pointer shows the tracked art (the last reticle drawn over
-    // the pointer, as the later one is on top).
-    std::optional<std::size_t> tracked;
-    if (frame.pointer) {
+    if (flash_) {
+        const bool listed = std::any_of(
+            shown.begin(), shown.end(), [&](const Shown& entry) { return entry.unit->entity == flash_->entity; });
+        if (!listed) {
+            for (const ui::BattleUnit& unit : *frame.units) {
+                if (unit.entity == flash_->entity && unit.part == sim::invalid_entity_id) {
+                    shown.push_back({&unit, true});
+                    break;
+                }
+            }
+        }
+    }
+    const auto snapshot = frame.live->battle_frame().latest;
+    RenderingServer* rendering = RenderingServer::get_singleton();
+        for (const Shown& entry_unit : shown) {
+        const ui::BattleUnit& unit = *entry_unit.unit;
+        const auto* instance = instance_of(snapshot.get(), unit.entity);
+        const auto view = frame.live->unit_frame(unit.entity);
+        const auto type = types_.find(unit.type);
+        if (instance == nullptr || !instance->durability || !view || type == types_.end()) continue;
+        const Vec3 position{static_cast<float>(view->position[0]), static_cast<float>(view->position[1]),
+                            static_cast<float>(view->position[2])};
+        struct Placed final {
+            std::size_t index{};
+            Rect2 rect;
+            bool flashing{};
+        };
+        std::vector<Placed> placed;
+        const auto& statuses = instance->durability->hardpoints;
+        for (std::size_t index = 0; index < type->second.hardpoints.size() && index < statuses.size(); ++index) {
+            const HardpointUi& hardpoint = type->second.hardpoints[index];
+            const bool flashing = flash_ && flash_->entity == unit.entity && flash_->hardpoint == index;
+            if (entry_unit.only_flash && !flashing) continue;
+            // WU-30: every targetable hardpoint that still stands.
+            if (!hardpoint.targetable || hardpoint.texture.empty()
+                || statuses[index].state == sim::tactical::HardpointState::destroyed) {
+                continue;
+            }
+            // WU-34: on the attachment point as the ship is drawn, bank and pitch included.
+            const Vec3 world = ui::hardpoint_reticle_anchor(position, static_cast<float>(view->yaw_degrees),
+                                                            static_cast<float>(view->pitch_degrees),
+                                                            static_cast<float>(view->roll_degrees), hardpoint.local);
+            const auto screen = frame.project(world);
+            if (!screen) continue;
+            // WU-31: a fixed share of the screen, whatever the camera distance.
+            const ui::ReticleRect base = ui::hardpoint_reticle_rect(*screen, frame.viewport);
+            // WU-42: a flashing reticle starts at half size and toggles every third render service.
+            const float scale = flashing && (flash_->services / 3U) % 2U == 0U ? 0.5F : 1.0F;
+            placed.push_back({index,
+                Rect2(base.x + base.width * (1.0F - scale) * 0.5F, base.y + base.height * (1.0F - scale) * 0.5F,
+                    base.width * scale, base.height * scale),
+                flashing});
+        }
+        // WU-32: the hardpoint under the pointer shows the tracked art (the last reticle drawn over
+        // the pointer, as the later one is on top). WU-41 picks by the same rectangles.
+        std::optional<std::size_t> tracked;
+        if (frame.pointer && !entry_unit.only_flash) {
+            for (const Placed& entry : placed) {
+                if (entry.rect.has_point(Vector2((*frame.pointer)[0], (*frame.pointer)[1]))) tracked = entry.index;
+            }
+        }
         for (const Placed& entry : placed) {
-            if (entry.rect.has_point(Vector2((*frame.pointer)[0], (*frame.pointer)[1]))) tracked = entry.index;
+            const HardpointUi& hardpoint = type->second.hardpoints[entry.index];
+            const bool is_tracked = (tracked && *tracked == entry.index) || entry.flashing;
+            const auto texture = reticles_.find(is_tracked ? hardpoint.texture + "_tracked" : hardpoint.texture);
+            if (texture == reticles_.end() || texture->second.is_null()) continue;
+            const float health = hardpoint.max_health > 0.0F ? to_float(statuses[entry.index].health) / hardpoint.max_health : 1.0F;
+            rendering->canvas_item_add_texture_rect(canvas_item, entry.rect, texture->second->get_rid(), false,
+                                                    colour(ui::hardpoint_reticle_tint(health, false)));
+            ++reticles_drawn_;
+            if (is_tracked) ++tracked_reticles_;
+            if (!entry.flashing) reticle_size_ = {entry.rect.size.x, entry.rect.size.y};
+            if (!entry_unit.only_flash) {
+                reticle_rects_.push_back({unit.entity, static_cast<std::uint32_t>(entry.index), entry.rect.position.x,
+                    entry.rect.position.y, entry.rect.position.x + entry.rect.size.x,
+                    entry.rect.position.y + entry.rect.size.y});
+            }
         }
-    }
-    for (const Placed& entry : placed) {
-        const HardpointUi& hardpoint = type->second.hardpoints[entry.index];
-        const bool is_tracked = tracked && *tracked == entry.index;
-        const auto texture = reticles_.find(is_tracked ? hardpoint.texture + "_tracked" : hardpoint.texture);
-        if (texture == reticles_.end() || texture->second.is_null()) continue;
-        const float health = hardpoint.max_health > 0.0F ? to_float(statuses[entry.index].health) / hardpoint.max_health : 1.0F;
-        rendering->canvas_item_add_texture_rect(canvas_item, entry.rect, texture->second->get_rid(), false,
-                                                colour(ui::hardpoint_reticle_tint(health, false)));
-        ++reticles_drawn_;
-        if (is_tracked) ++tracked_reticles_;
-        reticle_size_ = {entry.rect.size.x, entry.rect.size.y};
     }
     max_reticles_ = std::max(max_reticles_, reticles_drawn_);
+}
+
+std::optional<WorldUiView::ReticleHit> WorldUiView::reticle_at(const std::array<float, 2> point) const {
+    // The last reticle drawn over the point is the one on top (WU-32); the hit is its hardpoint's unit.
+    std::optional<ReticleHit> found;
+    for (const Reticle& reticle : reticle_rects_) {
+        if (point[0] >= reticle.min_x && point[0] < reticle.max_x && point[1] >= reticle.min_y && point[1] < reticle.max_y) {
+            found = ReticleHit{reticle.entity, reticle.hardpoint};
+        }
+    }
+    return found;
+}
+
+std::optional<std::array<float, 2>> WorldUiView::reticle_centre(const sim::EntityId entity, const std::uint32_t hardpoint) const {
+    for (const Reticle& reticle : reticle_rects_) {
+        // 0xffffffff asks for the first reticle drawn on the unit (the lowest hardpoint index).
+        if (reticle.entity == entity && (reticle.hardpoint == hardpoint || hardpoint == 0xffffffffU)) {
+            return std::array<float, 2>{0.5F * (reticle.min_x + reticle.max_x), 0.5F * (reticle.min_y + reticle.max_y)};
+        }
+    }
+    return std::nullopt;
+}
+
+void WorldUiView::flash_reticle(const sim::EntityId entity, const std::uint32_t hardpoint) {
+    // WU-42: FoC's flash lasts 60 render services.
+    flash_ = Flash{entity, hardpoint, 0U};
+    ++flashes_started_;
+}
+
+void WorldUiView::service() {
+    if (!flash_) return;
+    if (++flash_->services >= flash_frames) flash_.reset();
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
@@ -711,6 +780,7 @@ void WorldUiView::write_report(std::ostream& output) const {
            << ", \"circles\": " << circles_drawn_ << ", \"max_circles\": " << max_circles_
            << ", \"health_bars\": " << health_bars_ << ", \"shield_bars\": " << shield_bars_
            << ", \"max_health_bars\": " << max_health_bars_ << ", \"reticles\": " << reticles_drawn_
+           << ", \"reticle_flashes\": " << flashes_started_
            << ", \"tracked_reticles\": " << tracked_reticles_ << ", \"max_reticles\": " << max_reticles_
            << ", \"reticle_size\": [" << reticle_size_[0] << ", " << reticle_size_[1] << "]"
            << ", \"icons\": " << icons_.size() << ", \"grid_icons\": " << grid_icons_

@@ -176,9 +176,15 @@ void ViewerHost::_ready() {
             } catch (const std::exception&) {
                 options_->animation_time_seconds = std::numeric_limits<float>::quiet_NaN();
             }
-        } else if (argument == "--eawr-map") {
+        } else if (argument == "--eawr-map" || argument == "--eawr-skirmish-map") {
             if (index + 1 >= arguments.size()) break;
             options_->map_path = utf8(arguments[++index]);
+        } else if (argument == "--eawr-live-session") {
+            if (index + 1 >= arguments.size()) break;
+            const auto live_mode = utf8(arguments[++index]);
+            if (options_->map_path.empty() && (live_mode == "skirmish" || live_mode == "m2")) {
+                options_->map_path = "data/art/maps/_mp_space_coruscant.ted";
+            }
         } else if (argument == "--eawr-atlas") {
             if (index + 1 >= arguments.size()) break;
             options_->atlas_path = utf8(arguments[++index]);

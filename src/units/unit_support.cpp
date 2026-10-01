@@ -82,6 +82,7 @@ constexpr std::string_view combat_scalars[] = {
     "Engines_Disabled_Speed_Modifier",
     "Space_Elevated_Vulnerability_Duration",
     "Space_Elevated_Vulnerability_Factor",
+    "Space_Reinforcement_Collision_Check_Distance", // WR-25
     "Object_Max_Speed_Multiplier_Space",
     "Auto_Rotate_For_Space_Targeting",
     "Bombing_Run_Reduction_Per_Squadron_Percent",
@@ -107,6 +108,9 @@ constexpr std::string_view combat_scalars[] = {
     "SpaceObjectTrackingInterval",        // #71
     "SpaceObjectTrackingTreeCount",       // #71
     "DestinationSearchRadiusIncrementSpace", // #266
+    "MP_Default_Credits",                 // #530 PU-01
+    "Tactical_Build_Time_Multiplier",     // #530 PU-13
+    "Allow_Reinforcement_Percentage_Normalized", // #530 PU-21
     "FormationMinimumSideError",          // #599
     "FormationMaximumSideError",          // #599
 };

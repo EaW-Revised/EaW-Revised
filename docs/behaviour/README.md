@@ -25,6 +25,7 @@ These notes record format and runtime semantics used by the implementation. A ru
 - [Tactical AI](walks/tactical-ai.md): the computer player's tactical decisions in a space battle (goals, plans, TaskForces, the unit-level AI service, damage tracking and the flee response, difficulty), in FoC's evaluation order, with the gaps against the remake (walk 6)
 - [Space abilities](walks/abilities.md): every ability of the M2 space units (switching, the expiration and recharge countdown, autofire and the AI's use, the ion shot, `HUNT`, the interactions), in FoC's evaluation order, with the gaps against the remake and the EAWR-670 finding (walk 7)
 - [Sensors, selection and battle UI](walks/sensors-ui.md): sensors and fog, picking and selection, and the battle UI rules (icons, bars, grids) per frame, in FoC's evaluation order, with the gaps against the remake (walk 8)
+- [Space heroes and unique units](walks/heroes.md): skirmish roster, carried identities, command bonuses, hero abilities and UI, death and build limits, with sourced rules and implementation gaps (walk 11)
 
 ## Presentation
 

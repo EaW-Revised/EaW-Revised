@@ -29,6 +29,12 @@ std::string_view to_string(const OrderKind kind) noexcept {
         return "guard";
     case OrderKind::ability:
         return "ability";
+    case OrderKind::buy:
+        return "buy";
+    case OrderKind::cancel:
+        return "cancel";
+    case OrderKind::reinforce:
+        return "reinforce";
     }
     return "unknown";
 }
@@ -49,6 +55,8 @@ std::string_view to_string(const EventKind kind) noexcept {
         return "spin_away_started";
     case EventKind::spin_away_ended:
         return "spin_away_ended";
+    case EventKind::reinforcement_unloaded:
+        return "reinforcement_unloaded";
     }
     return "unknown";
 }
@@ -73,6 +81,26 @@ std::string_view to_string(const RejectReason reason) noexcept {
         return "target_is_unit";
     case RejectReason::ability_unavailable:
         return "ability_unavailable";
+    case RejectReason::cannot_produce:
+        return "cannot_produce";
+    case RejectReason::queue_full:
+        return "queue_full";
+    case RejectReason::insufficient_credits:
+        return "insufficient_credits";
+    case RejectReason::no_queue_entry:
+        return "no_queue_entry";
+    case RejectReason::not_in_pool:
+        return "not_in_pool";
+    case RejectReason::no_population_room:
+        return "no_population_room";
+    case RejectReason::invalid_position:
+        return "invalid_position";
+    case RejectReason::no_economy:
+        return "no_economy";
+    case RejectReason::arriving:
+        return "arriving";
+    case RejectReason::battle_decided:
+        return "battle_decided";
     }
     return "unknown";
 }
@@ -114,9 +142,25 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
         return 32;
     case 8:
         return 8;
+    case opcode_attack_hardpoint:
+        return 16;
+    case 9:  // #530 buy: type
+    case 10: // #530 cancel: queue, index
+        return 8;
+    case 11: // #530 reinforce: type, position
+        return 32;
     default:
         return 0;
     }
+}
+
+std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    // #531: an attack on one hardpoint has its own opcode, so attacks on a unit keep opcode 3 and their bytes.
+    if (const auto* attack = std::get_if<AttackPayload>(&command.payload);
+        attack != nullptr && attack->hardpoint != attack_hull) {
+        return opcode_attack_hardpoint;
+    }
+    return static_cast<std::uint8_t>(order_kind(command.payload));
 }
 
 std::size_t command_body_size(const PlayerCommand& command) noexcept {
@@ -124,7 +168,7 @@ std::size_t command_body_size(const PlayerCommand& command) noexcept {
     const auto* ability = std::get_if<AbilityPayload>(&command.payload);
     const std::size_t target = ability != nullptr && ability->target != invalid_entity_id ? 8U : 0U;
     return command_common_size
-        + payload_prefix_size(static_cast<std::uint8_t>(order_kind(command.payload))) + target
+        + payload_prefix_size(command_opcode(command)) + target
         + unit_list_header_size + 8U * command.units.size();
 }
 
@@ -153,7 +197,8 @@ void append_unit_record(std::vector<std::uint8_t>& bytes, const UnitState& unit)
 void append_order(std::vector<std::uint8_t>& bytes, const Order& order) {
     sim::detail::append_u64(bytes, order.issued_tick);
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(order.kind));
-    sim::detail::append_u32(bytes, 0);
+    // #531: the reserved word holds the ordered hardpoint's index plus one, zero for none.
+    sim::detail::append_u32(bytes, order.hardpoint == attack_hull ? 0U : order.hardpoint + 1U);
     sim::detail::append_i64(bytes, order.destination.x.raw());
     sim::detail::append_i64(bytes, order.destination.y.raw());
     sim::detail::append_i64(bytes, order.destination.z.raw());
@@ -165,7 +210,7 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     sim::detail::append_u64(bytes, command.key.tick);
     sim::detail::append_u32(bytes, command.key.player_id);
     sim::detail::append_u64(bytes, command.key.sequence);
-    bytes.push_back(static_cast<std::uint8_t>(order_kind(command.payload)));
+    bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
     if (const auto* move = std::get_if<MovePayload>(&command.payload)) {
@@ -174,6 +219,10 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_i64(bytes, move->destination.z.raw());
     } else if (const auto* attack = std::get_if<AttackPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, attack->target);
+        if (attack->hardpoint != attack_hull) {
+            sim::detail::append_u32(bytes, attack->hardpoint);
+            sim::detail::append_u32(bytes, 0);
+        }
     } else if (const auto* damage = std::get_if<DamagePayload>(&command.payload)) {
         sim::detail::append_i64(bytes, damage->amount.raw());
         sim::detail::append_u32(bytes, damage->hardpoint);
@@ -201,6 +250,16 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_u16(bytes, targeted ? 1U : 0U);
         sim::detail::append_u32(bytes, targeted ? ability->target_hardpoint : 0U);
         if (targeted) sim::detail::append_u64(bytes, ability->target);
+    } else if (const auto* buy = std::get_if<BuyPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, buy->type);
+    } else if (const auto* cancel = std::get_if<CancelPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, cancel->queue);
+        sim::detail::append_u32(bytes, cancel->index);
+    } else if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, reinforce->type);
+        sim::detail::append_i64(bytes, reinforce->position.x.raw());
+        sim::detail::append_i64(bytes, reinforce->position.y.raw());
+        sim::detail::append_i64(bytes, reinforce->position.z.raw());
     }
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
     sim::detail::append_u32(bytes, 0);
@@ -239,9 +298,25 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
-    if (command.units.empty()) {
+    // #530: a buy lists exactly its station; a cancel or reinforce lists no unit.
+    if (std::holds_alternative<BuyPayload>(command.payload) && command.units.size() != 1) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": a buy lists exactly one station", logical_path));
+    }
+    if ((std::holds_alternative<CancelPayload>(command.payload)
+            || std::holds_alternative<ReinforcePayload>(command.payload))
+        && !command.units.empty()) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": a cancel or reinforce lists no unit", logical_path));
+    }
+    if (command.units.empty() && !economy_command(command.payload)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": unit list is empty", logical_path));
+    }
+    if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+        cancel != nullptr && cancel->queue >= build_queue_count) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": cancel names no build queue", logical_path));
     }
     for (std::size_t index = 0; index < command.units.size(); ++index) {
         if (command.units[index] == invalid_entity_id

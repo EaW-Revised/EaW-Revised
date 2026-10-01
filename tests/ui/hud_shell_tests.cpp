@@ -71,6 +71,14 @@ data::ui::ShellAnchors synthetic_shell() {
     shell.add(anchor("Empire_Faceplate_ALT0", {-1, -1, 1078, 284}, "MeshAlpha.fx", "face_empire.tga", true, -1));
     shell.add(anchor("Underworld_Faceplate_ALT2", {-1, -8, 1078, 291}, "MeshAlpha.fx", "face_under.tga", true, -1));
     shell.add(anchor("Hidden_Art", {0, 0, 10, 10}, "MeshAlpha.fx", "hidden.tga", false, 0));
+    // #530: the build queue's ten slots, the credits text and the reinforcements button.
+    for (int index = 0; index < 10; ++index) {
+        auto slot = anchor("tqueue0" + std::to_string(index), {300.0F + 40.0F * static_cast<float>(index), 130, 36, 36});
+        slot.z_min = slot.z_max = 4;
+        shell.add(std::move(slot));
+    }
+    shell.add(anchor("Text_Credits_tactical", {190, 228, 90, 20}));
+    shell.add(anchor("b_reinforcement", {240, 125, 30, 30}));
     return shell;
 }
 
@@ -107,6 +115,23 @@ data::ui::CommandBarCatalog synthetic_catalog() {
 <CommandBarComponent Name="Text_Planet_tactical"><Type>TextButton</Type><Font_Name>EmpireAtWar-Bold</Font_Name>
   <Font_Point_Size>10</Font_Point_Size><Text_Outline>True</Text_Outline><Text_Color>255 212 33 255</Text_Color>
   <Max_Text_Width>110</Max_Text_Width></CommandBarComponent>
+<CommandBarComponent Name="tqueue00"><Type>TextButton</Type><Build_Texture_Name>i_button_build.tga</Build_Texture_Name>
+  <Font_Name>EmpireAtWar-Medium</Font_Name><Font_Point_Size>6</Font_Point_Size><Text_Offset>-3 -20</Text_Offset>
+  <Text_Color>192 192 255 180</Text_Color><Text_Outline>True</Text_Outline></CommandBarComponent>
+<CommandBarComponent Name="tqueue01"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue02"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue03"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue04"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue05"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue06"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue07"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue08"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="tqueue09"><Type>Button</Type></CommandBarComponent>
+<CommandBarComponent Name="Text_Credits_tactical"><Type>TextButton</Type><Icon_Texture_Name>i_icon_money_big.tga</Icon_Texture_Name>
+  <Font_Point_Size>7</Font_Point_Size><Text_Color>255 212 33 255</Text_Color><Right_Justified>True</Right_Justified>
+  <Blink_Duration>0.5</Blink_Duration><Blink_Rate>0.25</Blink_Rate></CommandBarComponent>
+<CommandBarComponent Name="b_reinforcement"><Type>Button</Type>
+  <Icon_Texture_Name>i_button_skirmish_reinforcements.tga</Icon_Texture_Name></CommandBarComponent>
 </CommandBarComponents>)";
     data::ui::CommandBarCatalog catalog;
     std::vector<core::Diagnostic> diagnostics;
@@ -129,6 +154,24 @@ void shell_parts() {
     const auto rebel = ui::hud_shell(shell, catalog, ui::HudFaction::rebel);
     expect(rebel.diagnostics.empty(), "the synthetic shell has every P2-20a part");
     expect(rebel.ability_buttons.empty(), "#454: a shell without special_button_NN draws no ability buttons");
+    // #530 PU-63, PU-65, PU-66.
+    expect(rebel.queue_slots.size() == 10U, "the build queue has its ten slots");
+    if (rebel.queue_slots.size() == 10U) {
+        const auto& front = rebel.queue_slots.front();
+        expect(front.button.name == "tqueue00" && front.text && front.build == "i_button_build.tga"
+                   && front.face == "EmpireAtWar-Medium" && front.point_size == 6
+                   && front.text_offset == (data::ui::Vec2{-3, -20})
+                   && front.colour == (data::ui::Rgba8{192, 192, 255, 180}) && front.outline,
+               "a queue slot takes its build art and its percent text's font, offset and colour");
+        expect(!rebel.queue_slots[5].text && rebel.queue_slots[5].button.name == "tqueue05",
+               "a plain button slot has no text");
+    }
+    expect(rebel.credits && rebel.credits->icon == "i_icon_money_big.tga" && rebel.credits->right_justified
+               && rebel.credits->text.point_size == 7 && rebel.credits->text.colour == (data::ui::Rgba8{255, 212, 33, 255})
+               && near(rebel.credits->blink_duration, 0.5) && near(rebel.credits->blink_rate, 0.25),
+           "the credits text takes its money icon, font and blink");
+    expect(rebel.reinforcement && rebel.reinforcement->normal == "i_button_skirmish_reinforcements.tga",
+           "the reinforcements button takes its icon");
     std::vector<std::string> names;
     for (const auto& mesh : rebel.meshes) names.push_back(mesh.name);
     expect((names == std::vector<std::string>{"b_Help_Droid_Rebel_ALT1", "Rebel_Faceplate_ALT1", "radar"}),
@@ -195,9 +238,11 @@ void shell_parts() {
     data::ui::ShellAnchors bare;
     bare.add(anchor("Rebel_Faceplate_ALT1", {-1, -1, 1078, 284}, "MeshAlpha.fx", "face_rebel.tga", true, -1));
     const auto partial = ui::hud_shell(bare, catalog, ui::HudFaction::empire);
-    expect(partial.diagnostics.size() == 8U && !partial.minimap && !partial.options && !partial.planet_name
+    expect(partial.diagnostics.size() == 10U && !partial.minimap && partial.queue_slots.empty() && !partial.credits
+               && !partial.reinforcement && !partial.options && !partial.planet_name
                && partial.panel_buttons.empty(),
-           "a missing faceplate, radar, options button, panel button and planet name are reported once each");
+           "a missing faceplate, radar, options button, panel button, planet name, credits text and reinforcements "
+           "button are reported once each; a shell without queue slots shows no queue");
 
     for (const auto* text : {"empire", "Rebel", "UNDERWORLD"}) expect(ui::hud_faction_from(text).has_value(), "factions parse");
     expect(!ui::hud_faction_from("pirate"), "an unknown faction is refused");

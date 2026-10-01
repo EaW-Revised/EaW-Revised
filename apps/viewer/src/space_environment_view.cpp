@@ -475,7 +475,9 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     const bool sky_drawn = std::any_of(items_.begin(), items_.end(), [](const Item& item) {
         return item.role == "primary_sky" && item.status == "drawn";
     });
-    if (!sky_drawn) return fail("the primary sky drew no surface");
+    // #908: some valid maps author only a secondary sky (Bespin). An absent
+    // primary is optional; a declared primary still needs a supported route.
+    if (!primary_sky_.empty() && !sky_drawn) return fail("the primary sky drew no surface");
     snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
     return true;
 }
@@ -687,6 +689,12 @@ void EnvironmentView::camera_viewport(const float width, const float height) {
 
 std::optional<int> EnvironmentView::process(const double delta) {
     if (!renderer_ || completed_) return std::nullopt;
+    // #888 perf trace: the main thread's ms in this frame's snapshot builds and renderer submit.
+    using SubmitClock = std::chrono::steady_clock;
+    submit_ms_ = 0.0;
+    const auto submit_since = [this](const SubmitClock::time_point start) {
+        submit_ms_ += std::chrono::duration<double, std::milli>(SubmitClock::now() - start).count();
+    };
     if (!failure_.empty()) {
         completed_ = true;
         static_cast<void>(fail(failure_));
@@ -729,7 +737,9 @@ std::optional<int> EnvironmentView::process(const double delta) {
             }
             instances_[index].fixed_transform = *matrix;
         }
+        const auto sky_start = SubmitClock::now();
         snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+        submit_since(sky_start);
     }
     // The idle clips' 30 Hz clock follows real time in the live view. The
     // attached effects run on it too, so their period does not scale with
@@ -760,10 +770,12 @@ std::optional<int> EnvironmentView::process(const double delta) {
             }
         }
         if (live.instances) {
+            const auto instances_start = SubmitClock::now();
             instances_.resize(populate_first_);
             instances_.insert(instances_.end(), live.instances->begin(), live.instances->end());
             populated_ = live.instances->size();
             snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+            submit_since(instances_start);
         }
     }
     // The effects' TIME runs on the same clock as the idle clips: held after
@@ -782,10 +794,15 @@ std::optional<int> EnvironmentView::process(const double delta) {
         }
     }
     ++frame_;
+    const auto submit_start = SubmitClock::now();
+    const std::uint64_t sent_before = renderer_->submit_work().transforms_sent;
     renderer_->submit(snapshot_);
+    submit_since(submit_start);
+    submit_sent_ = renderer_->submit_work().transforms_sent - sent_before;
     if (live.capture_suffix && !options_.capture_path.empty()) {
         std::filesystem::path path = options_.capture_path;
-        path.replace_filename(path.stem().string() + *live.capture_suffix + path.extension().string());
+        path.replace_filename(ViewerPath{ViewerPath::utf8(path.stem()) + *live.capture_suffix
+            + ViewerPath::utf8(path.extension())}.native());
         auto capture = renderer_->capture(camera_);
         if (!capture || capture.value().png_bytes.empty()) {
             completed_ = true;
@@ -794,10 +811,10 @@ std::optional<int> EnvironmentView::process(const double delta) {
         }
         if (const std::string problem = write_file(path, capture.value().png_bytes); !problem.empty()) {
             completed_ = true;
-            static_cast<void>(fail("live capture " + path.generic_string() + " " + problem));
+            static_cast<void>(fail("live capture " + ViewerPath::utf8(path) + " " + problem));
             return 2;
         }
-        live_captures_.emplace_back(path.filename().generic_string(), hash_bytes(capture.value().png_bytes));
+        live_captures_.emplace_back(ViewerPath::utf8(path.filename()), hash_bytes(capture.value().png_bytes));
     }
     if (frame_ == options_.warmup_frames) timing_start_ = std::chrono::steady_clock::now();
     if (!live.quit && (frame_ < options_.warmup_frames + options_.timed_frames || live.hold)) return std::nullopt;
@@ -818,7 +835,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
         capture_size_ = {capture.value().width, capture.value().height};
         if (const std::string problem = write_file(options_.capture_path, capture.value().png_bytes); !problem.empty()) {
             completed_ = true;
-            static_cast<void>(fail("requested capture " + options_.capture_path.generic_string() + " " + problem));
+            static_cast<void>(fail("requested capture " + ViewerPath::utf8(options_.capture_path) + " " + problem));
             return 2;
         }
     }
@@ -855,6 +872,14 @@ void SpaceEnvironment::live_camera_focus(const float source_x, const float sourc
 std::optional<presentation::camera::SourceTargetBounds> SpaceEnvironment::live_camera_bounds() const {
     return state_->view ? state_->view->camera_bounds() : std::nullopt;
 }
+
+double SpaceEnvironment::live_submit_ms() const { return state_->view ? state_->view->submit_ms() : 0.0; }
+
+std::size_t SpaceEnvironment::live_submit_pieces() const {
+    return state_->view ? state_->view->submit_pieces() : 0U;
+}
+
+std::uint64_t SpaceEnvironment::live_submit_sent() const { return state_->view ? state_->view->submit_sent() : 0U; }
 
 void SpaceEnvironment::live_camera_overview_key() {
     if (state_->view) state_->view->overview_key();

@@ -105,6 +105,53 @@ The full tables (every phase, every worker count) are the bench logs of `windows
   projectiles in flight, 109 against 145 on average, so it runs faster than the base), so its
   M and L rows compare two different fights.
 
+## Simulation after EAWR-656 (quiet host, 2026-09-30)
+
+Integration head 9ed921f5 (pool hashing and by-cost dispatch from EAWR-656, projectile broad phase from EAWR-636/#644),
+`path_bench --melee s|m|l --seed 601 --ticks 4500 --workers 1,2,4,8,hardware`, Release with debug symbols, on the
+RTX 4070 Laptop host (i7-14700HX, 28 hardware threads) under an exclusive lease: no GPU job, build or other
+process ran (total CPU load 0.0 to 0.1 % before and after every run). One binary serves both columns:
+`--execution live` (the default: by-cost dispatch, threaded state hasher) and `--execution legacy` (always-pool
+dispatch, synchronous hashing). Five repetitions each, live and legacy interleaved in alternating order. The
+sequence digest of the 4500 tick hashes is identical for every worker count and both modes (S
+865cfcb8a5fd002889b6ae27706ddd07fc644b448ddefd59157e4649abce83c8, M
+512ac827575a384463c60b62dd56bcf98fb3e86dd7c0b37bf39a1e77d7c3bc9c, L
+80fccae5aac9add590d72f1eed3474c327454ce6b5ffe3f86f85d40c2816fde8). These supersede the contended absolute numbers
+quoted with EAWR-656 (a shared host under load 17 to 28): the direction held, the magnitudes were different.
+
+*Live* columns are the mean over the five runs of each run's mean tick cost (median and standard deviation of the
+five run means after it), the mean of the runs' nearest-rank p99, the serial remainder and the ticks over 33.3 ms.
+*Legacy mean* and *change* compare the same binary in legacy mode.
+
+| Size | Workers | Live mean ms (mean / median / stdev) | p99 ms | Serial ms | Ticks over 33.3 ms | Speed-up vs 1 worker | Legacy mean ms | Live vs legacy |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| S | 1 | 4.33 / 4.33 / 0.03 | 13.2 | 1.66 | 0.0 | 1.00x | 4.71 | -8 % |
+| S | 2 | 3.65 / 3.65 / 0.02 | 10.8 | 1.43 | 0.0 | 1.19x | 4.89 | -25 % |
+| S | 4 | 3.25 / 3.24 / 0.02 | 9.2 | 1.36 | 0.0 | 1.33x | 5.00 | -35 % |
+| S | 8 | 3.10 / 3.10 / 0.08 | 8.8 | 1.37 | 0.0 | 1.39x | 5.51 | -44 % |
+| S | 28 | 2.61 / 2.62 / 0.05 | 5.3 | 1.29 | 0.0 | 1.66x | 6.47 | -60 % |
+| M | 1 | 6.27 / 6.35 / 0.17 | 29.0 | 2.22 | 2.4 | 1.00x | 6.64 | -6 % |
+| M | 2 | 5.11 / 5.13 / 0.08 | 24.1 | 1.84 | 0.0 | 1.23x | 6.40 | -20 % |
+| M | 4 | 4.25 / 4.27 / 0.04 | 18.1 | 1.86 | 0.0 | 1.48x | 5.73 | -26 % |
+| M | 8 | 3.92 / 3.92 / 0.04 | 16.2 | 1.88 | 0.0 | 1.60x | 5.81 | -33 % |
+| M | 28 | 3.04 / 3.03 / 0.02 | 9.4 | 1.67 | 0.0 | 2.06x | 6.30 | -52 % |
+| L | 1 | 17.52 / 17.42 / 0.67 | 64.6 | 4.18 | 817.8 | 1.00x | 18.83 | -7 % |
+| L | 2 | 13.44 / 14.00 / 1.49 | 46.6 | 4.11 | 524.4 | 1.30x | 16.57 | -19 % |
+| L | 4 | 10.04 / 10.68 / 1.23 | 32.1 | 4.08 | 53.2 | 1.75x | 13.65 | -26 % |
+| L | 8 | 8.19 / 8.97 / 1.32 | 23.8 | 3.95 | 2.8 | 2.14x | 12.30 | -33 % |
+| L | 28 | 6.66 / 6.79 / 0.21 | 18.2 | 3.67 | 2.0 | 2.63x | 11.30 | -41 % |
+
+- **Every size scales now, and never gets worse with workers.** S reaches 1.66x, M 2.06x and L 2.63x at 28 workers.
+  In legacy mode S at 28 workers is 0.73x (6.47 ms against 4.71 at 1 worker) and M is 1.05x: waking the pool
+  for small phases cost more than their work.
+- **The whole budget holds from 2 workers for S and M** (M at 1 worker goes over on 2 to 4 ticks of 4500). L needs 8
+  workers to get under it (3 ticks over; 818 at 1 worker, 524 at 2, 53 at 4).
+- **Serial remainder:** 1.3 to 1.7 ms (S), 1.7 to 2.2 ms (M), 3.7 to 4.2 ms (L), against 2.4 to 2.8, 2.8 to 3.1 and
+  6.0 to 6.6 ms in legacy mode. The serial part is now the limit of the speed-up (S: 1.3 ms of 2.6 ms at 28 workers).
+- **Noise:** S and M run-to-run stdev is at most 0.17 ms. L at 2 to 8 workers is noisier (stdev 1.2 to 1.5 ms):
+  one of the five runs is 25 to 30 % faster than the other four (run 2: 10.9 ms at 2 workers against 13.6 to 14.7).
+  The speed-ups for L at 2, 4 and 8 workers are therefore indicative; 1 and 28 workers are stable (stdev 0.7 and 0.2).
+
 ## Projectile broad phase (EAWR-636): before and after
 
 Fix 1 of the [ranked fixes](#ranked-fixes). The index query is unchanged (the step's box grown by
@@ -177,6 +224,34 @@ ship's): the reach test (`within_range`, 8.6 %), the index's box test and cell w
 next step, if the phase matters again, is a query grown by the small units' largest reach plus a
 short list of the few large-reach units tested directly.
 
+## The script state hash off the live tick (EAWR-895): before and after
+
+The scripted M2 battle (the FoC AI on both sides; the melee above runs no scripts) saved and
+hashed every Lua instance on the stepping thread each tick, for a combined world-and-script hash
+the live session never read. The live session now turns it off
+(`ScriptedTacticalSession::set_authoritative_hash`); replays, the soak, the tools and the tests
+keep it every tick, so no hash or pin changes.
+
+`foc_soak_tests --seeds 12 --ticks 2500 --no-invariants --workers 1|4` on the integration head
+0c94ad5d plus EAWR-895, timing each `step` (the world step, the AI engine, the script service and the
+hash). *Before* keeps the per-tick combined hash, as the live session did; *after* turns it off,
+as the live session does now. The two alternated three times at each worker count on a 20-thread
+desktop, each run in one slot of its shared build lane at below-normal priority, with other
+workers' jobs in the other slots; the table has the medians of the three runs. The timing was a
+local change to the soak and was not committed.
+
+| Workers | Build | Mean ms | p99 ms | Worst ms |
+|---:|---|---:|---:|---:|
+| 1 | before | 6.31 | 14.3 | 24.2 |
+| 1 | after | 3.10 (-51 %) | 9.4 | 17.7 |
+| 4 | before | 6.10 | 13.7 | 23.3 |
+| 4 | after | 2.83 (-54 %) | 9.5 | 18.7 |
+
+The hash cost 3.2 to 3.3 ms of every scripted live tick on this host, where the audit measured
+7.2 ms a tick on the laptop at head 7ca8aa2f. `lua_bridge_workers` checks at 1, 2, 4 and 8
+workers that the world hashes and the replay are the same with the hash off and that the combined
+hash asked for on request is the one every tick would have had.
+
 ## Viewer
 
 `--eawr-live-session melee` with `--eawr-perf-trace` at 1280x720 (the retail captures' size), the
@@ -235,6 +310,101 @@ battle drawn (GPU 0.2 ms, render CPU 1.4 to 2.4 ms), M's busiest stretch still t
 (28 FPS), so that cost is the main thread's own frame work (posing the units, the CPU particle
 systems of the battle effects and unit emitters, the projectile streams, the HUD) and the wait for
 the tick, not rendering. The runs with the fight on screen are the rig's and the laptop's.
+
+### The viewer's particles (EAWR-638)
+
+Ranked fix 4. The battle's particle systems (the unit emitters, the battle effects and the breakoff
+props) advance and present their effects in one batch per 30 Hz sample
+(`EffectRegistry::advance_all`, `present_all`). Each effect steps its CPU system and builds its
+emitter streams as a task on a small pool of its own, in contiguous slices of the batch (at most 64,
+as ADR-009's partitions); the main thread then uploads the streams to Godot in the batch's order.
+An effect reads only itself and the shared camera and writes only itself and its own statistics
+slot, so the streams, the statistics and the upload order are the same with any pool size
+(`particle_render_contracts`: the serial run against 1, 4 and 8 threads and a reversed task order).
+The live battle's registries no longer hash their streams (nothing there reads the hashes; the effect
+and map reports and the tests still do, `set_stream_hashes`). The Godot upload writes the packed
+arrays through their storage instead of one checked `set()` per element, and an emitter that drew
+nothing and draws nothing again is left alone. `RegistryWorkCounts` holds the per-frame work to a
+budget: one step and one stream build per effect and emitter, one upload per drawn stream, no hash
+in the live battle, at most 64 tasks a batch (`test_batch_work_counts`).
+
+**Pool size.** `ParticleWorkers::default_count`: a quarter of the hardware threads, at least 1 (the
+main thread alone) and at most 4, the main thread included (`--eawr-live-particle-workers n` sets
+it). The simulation's pool already takes all but two hardware threads
+(`LiveSession::game_worker_count`), so every particle worker shares a core with a simulation worker
+when a frame overlaps a tick. Kept small, it does not slow the tick: the real-time S runs below take
+2.79 ms a tick with the pool and 2.75 without on the rig, 1.78 and 1.80 on the laptop. A larger pool buys
+nothing: 4 workers on the rig (8 threads, default 2) leave M's busiest frames at 45.3 ms against
+44.0.
+
+The same benchmark as above (1280x720, lit, HUD on, revealed, one tick per frame, the tactical
+camera following both fleets), 2026-09-30, on the integration head with EAWR-638. *Before* is that
+head with only the `particle_ms` column added; *after* is the final head. `particle_ms` is the main
+thread's time in the frame's unit emitters, battle effects and breakoff props (the whole of their
+frames: posing the emitters, stepping, building, uploading, the projectile streams). The fight has
+changed since the EAWR-601 table (peaks S 263 projectiles, 155 effects, 5k particles; M 428, 256,
+9.5k), so compare within this table only. S replays hash-identical in every run
+(`headless_hashes_equal`); M runs with the verification off, as in EAWR-601.
+
+| Host | Size | Build | Frame ms (mean / p99) | Busiest 300 frames: mean ms (FPS) | `particle_ms` mean / p99 (busiest 300) | Tick ms (mean) |
+|---|---|---|---|---|---|---|
+| Rig (GTX 970, 8 threads, pool 2) | S | before | 14.9 / 33.3 | 24.7 (40) | 7.7 / 47.2 | |
+| Rig | S | after | 12.1 / 25.0 | 20.5 (49) | 4.8 / 6.3 | 2.77 |
+| Rig | M | before | 24.6 / 64.2 | 54.9 (18) | 13.7 / 46.7 | |
+| Rig | M | after | 19.6 / 50.0 | 44.0 (23) | 8.5 / 12.3 | 6.20 |
+| Rig | M | after, 1 worker | 20.4 / 51.5 | 45.8 (22) | 9.5 / 13.0 | 6.21 |
+| Rig | M | after, 4 workers | 19.9 / 50.0 | 45.3 (22) | 8.5 / 12.0 | 6.28 |
+| Laptop (RTX 4070 Laptop, 28 threads, pool 4) | S | before | 7.6 / 16.7 | 11.8 (85) | 3.4 / 6.2 | |
+| Laptop | S | after | 6.5 / 13.3 | 11.0 (91) | 2.6 / 4.0 | 1.71 |
+| Laptop | M | before | 12.0 / 30.3 | 21.9 (46) | 6.5 / 12.6 | |
+| Laptop | M | after | 10.3 / 24.2 | 20.1 (50) | 4.9 / 7.7 | 2.93 |
+| Laptop | M | after, 1 worker | 10.6 / 25.6 | 20.4 (49) | 5.2 / 7.8 | 2.91 |
+
+What it says:
+
+- **The main thread's particle time drops by a third to 40 %** (rig M 13.7 to 8.5 ms in the busiest
+  stretch, the laptop M 6.5 to 4.9) and its spikes are gone (rig p99 47 to 12 ms). The busiest frames
+  gain 10 to 20 % on the rig and 5 to 8 % on the laptop.
+- **Most of the gain is the hashes and the upload, not the pool.** With the pool off (1 worker) the
+  rig's M still drops from 13.7 to 9.5 ms; the pool takes it to 8.5, the laptop's from 5.2 to 4.9. With
+  the hashes gone, stepping and building the streams is a small part of what is left.
+- **What is left is serial main-thread work in the same frames**: the Godot upload (a new mesh
+  surface per drawn emitter per frame), placing each ship's emitters on its bones (fixed-point
+  transforms), the projectile kite and beam streams and the death clones' proxies, which still step
+  one by one. That is the next step for the viewer (fidelity list).
+- **The tick is not slowed**: the tick costs above and the real-time runs (rig S 2.79 ms a tick with
+  the pool, 2.75 without; the laptop 1.78 and 1.80).
+- The melee's effects look the same: a clip of M from tick 640 to 760 before and after on the laptop has
+  121 of 121 frames pixel-identical.
+
+### The renderer's submit (EAWR-888)
+
+Every frame the Godot renderer used to adapt the whole snapshot to floats, route and stable-sort it by
+pass, build a map of the live entities and set every piece's transform, moved or not. It now keeps
+its pass order while the snapshot's (entity, asset) sequence and the uploads are unchanged (a rebuild
+is a linear split into the four passes, sorting only a pass that is not already in entity order),
+sends a piece's transform only when its fixed transform differs from the one it last sent, and scans
+for removed instances only when a submit did not carry all of them. A piece moving by interpolation
+differs every frame and is sent every frame; parked units, static props and the sky are not.
+`GodotRenderer::submit_work()` counts the work and `renderer_contracts` holds it (the order equals
+the reference sort; a frame with 40 moving pieces out of 1000 sends 40).
+
+The M benchmark above on the rig, 2026-09-30, capture ticks 300 to 3000 (the read-back frames left
+out). `submit_ms` is the main thread's time in the space view's snapshot builds and the renderer's
+submit, `pieces` the snapshot's pieces, `sent` the transforms that reached Godot (new trace columns).
+*Before* is the integration head with only the `submit_ms` column.
+
+| Host | Build | Frame ms (mean / p99) | Busiest 300 frames: mean ms | `submit_ms` mean / p99, all frames | `submit_ms` mean / p99, busiest 300 | Pieces / sent (busiest 300) |
+|---|---|---|---|---|---|---|
+| Rig (GTX 970) | before | 16.1 / 38.9 | 35.3 | 0.55 / 1.58 | 0.79 / 1.73 | 1159 / all |
+| Rig | after | 15.5 / 36.7 | 34.1 | 0.20 / 1.13 | 0.35 / 1.19 | 1140 / 414 |
+
+- **The submit costs less than the audit's estimate** (0.8 ms of the busiest frames on the rig, not 2
+  to 3): Godot's server calls are cheap to queue. The change removes about 55 % of it (60 % over the
+  whole run), well within the frame noise of the busiest stretch.
+- **The pictures are identical**: the eight lit captures (sh lighting, map environment, shadows on) of
+  the before and after runs are byte-identical PNGs.
+- The laptop was busy with builds for the whole run and was not measured.
 
 ## Hotspots
 
@@ -316,7 +486,7 @@ hashes (each is a faster way to the same result, or work moved off the critical 
 | 1 | **Done (EAWR-636):** projectiles -83 to -94 % ([before and after](#projectile-broad-phase-636-before-and-after)). Projectile broad phase: query each candidate with its own collision reach instead of the largest one's, reject with a cheap integer sphere and box test before the model-space transform, and reuse a per-partition candidate buffer the index fills in ascending ID (no per-projectile heap vector or sort). | `step_projectile`, `SpaceIndex::box`, `segment_enters_box` | `projectiles` down 60 to 75 %: S at 1 worker about 7.7 to 5 ms mean and p99 37 to about 15 ms (no tick over budget); L at 28 workers about 16 to 11 ms and most of its 546 ticks over budget gone. The biggest win at every size. |
 | 2 | Pool dispatch: run a phase inline, or on fewer workers, when its input is small, and let the workers spin briefly between the phases of a tick before they park. | `ThreadWorkerAdapter` | About 1.5 ms a tick at 28 workers (the small phases' 0.1 to 0.2 ms each and the wake-ups): S 5.6 to about 4 ms; the speed-up curve stops falling with more workers. |
 | 3 | The state hash off the stepping thread: hash the frozen canonical bytes on a worker while the next tick runs (the hash is published a tick later), or with the CPU's SHA extensions where it has them (the same digest). Whether the live game needs a hash every tick at all is the owner's call. | `TacticalSession::state_sha256`, `core::sha256` | 1.3 to 1.6 ms of the 2.2 ms serial remainder at S (2 to 3 ms at L): the scaling limit moves from 1.4x to about 2x at S. |
-| 4 | The viewer's particles: step the effect and emitter particle systems on the worker pool (partitioned by emitter, the stream built there too), keep the main thread to the upload, and hash the streams only when a report or test asks for the statistics. | `EffectRegistry`, `UnitEmitters::frame`, `BattleEffects::frame`, `stream_hash` | Most of the extension's main-thread frame work (about 70 % of it at M): an estimate of 4 to 5 ms of the laptop's 20 ms frames at M (the frame less the tick and the render CPU time, times the profile's share), more on the rig. The hash alone is about 8 % of the busy samples. |
+| 4 | The viewer's particles: step the effect and emitter particle systems on the worker pool (partitioned by emitter, the stream built there too), keep the main thread to the upload, and hash the streams only when a report or test asks for the statistics. | `EffectRegistry`, `UnitEmitters::frame`, `BattleEffects::frame`, `stream_hash` | Most of the extension's main-thread frame work (about 70 % of it at M): an estimate of 4 to 5 ms of the laptop's 20 ms frames at M (the frame less the tick and the render CPU time, times the profile's share), more on the rig. The hash alone is about 8 % of the busy samples. **Done (EAWR-638)**: the main thread's particle time down a third to 40 %, the busiest frames 5 to 20 % faster ([below](#the-viewers-particles-638)). |
 | 5 | One transform per unit per tick, shared by the collection boxes, the unit systems and the combat world. | `to_matrix`, `transform_point` | 3 to 4 %. |
 | 6 | Allocation churn on hot paths: per-partition scratch buffers, fewer `Result` wrappers in the inner arithmetic. | projectiles, serial commits | 3 to 5 %. |
 | 7 | Craft locomotor: keep the sine and cosine of a heading that did not change. | `Locomotor::run` | 2 to 4 % at S, more with the EAWR-585 dogfights. |
@@ -329,3 +499,4 @@ hashes (each is a faster way to the same result, or work moved off the critical 
   (the debug build's readout on the rig: LFPS equal to RFPS below 30), so its battle slows down
   instead of skipping frames. The remake runs the simulation on its own thread at 30 Hz whatever
   the frame rate. Whether retail does the same as the debug build is **unverified**.
+- The viewer's main thread still uploads every drawn particle emitter as a new mesh surface each frame, places each ship's emitters on its bones and builds the projectile streams one after another (EAWR-638 left them serial); moving them off the main thread or reusing the mesh buffers is the next viewer step.

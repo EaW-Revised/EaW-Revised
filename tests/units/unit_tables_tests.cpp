@@ -118,7 +118,7 @@ std::string units_xml(const std::string_view frigate_health, const std::string_v
 <StarBase Name="Skirmish_Test_Base">
   <Variant_Of_Existing_Type>Test_Base</Variant_Of_Existing_Type>
   <Abilities SubObjectList="Yes">
-    <Income_Stream_Ability Name="Test_Income"><Base_Income_Value>30</Base_Income_Value></Income_Stream_Ability>
+    <Income_Stream_Ability Name="Test_Income"><Base_Income_Value>30</Base_Income_Value><Base_Interval_In_Secs>10</Base_Interval_In_Secs></Income_Stream_Ability>
   </Abilities>
 </StarBase>
 <SpaceUnit Name="Test_Frigate">
@@ -313,6 +313,7 @@ constexpr std::string_view properties_xml = R"xml(<EnumDefinition>
 </EnumDefinition>)xml";
 
 constexpr std::string_view constants_xml = R"xml(<GameConstants>
+<Space_Reinforcement_Collision_Check_Distance>200</Space_Reinforcement_Collision_Check_Distance>
   <ShieldRechargeIntervalInSecs>3.0</ShieldRechargeIntervalInSecs>
   <EnergyRechargeIntervalInSecs>5.0</EnergyRechargeIntervalInSecs>
   <EnergyToShieldExchangeRate>5.0</EnergyToShieldExchangeRate>
@@ -325,6 +326,9 @@ constexpr std::string_view constants_xml = R"xml(<GameConstants>
   <Engines_Disabled_Speed_Modifier> 0.4 </Engines_Disabled_Speed_Modifier>
   <Space_Elevated_Vulnerability_Duration>5.0</Space_Elevated_Vulnerability_Duration>
   <Space_Elevated_Vulnerability_Factor>-3.0</Space_Elevated_Vulnerability_Factor>
+  <MP_Default_Credits>6000</MP_Default_Credits>
+  <Tactical_Build_Time_Multiplier>1.0</Tactical_Build_Time_Multiplier>
+  <Allow_Reinforcement_Percentage_Normalized>0</Allow_Reinforcement_Percentage_Normalized>
   <Object_Max_Speed_Multiplier_Space> 1.2 </Object_Max_Speed_Multiplier_Space>
   <Auto_Rotate_For_Space_Targeting>False</Auto_Rotate_For_Space_Targeting>
   <Bombing_Run_Reduction_Per_Squadron_Percent>0</Bombing_Run_Reduction_Per_Squadron_Percent>
@@ -491,6 +495,11 @@ void synthetic_tables() {
            "a named container reveals with its own (inherited, last) range");
     expect(station.inactive_abilities == std::vector<std::string>{"Income_Stream_Ability Test_Income"},
            "station ability sub-objects are listed as inactive");
+    // #530 PU-02: the income stream through the variant.
+    expect(station.production.income.size() == 1 && station.production.income[0].name == "Test_Income"
+               && station.production.income[0].base_value == Fixed::from_raw(raw(30))
+               && station.production.income[0].interval_seconds == Fixed::from_raw(raw(10)),
+           "the station's income stream");
     expect(station.spawner.has_value(), "SPAWN_SQUADRON station has a spawner");
     if (station.spawner) {
         const auto& spawner = *station.spawner;
@@ -608,7 +617,7 @@ void synthetic_tables() {
                "the object weapon scatters by Targeting_Fire_Inaccuracy, not the unit's Fire_Inaccuracy_Distance (DG-24)");
     }
 
-    expect(tables.constants.scalars.size() == 39, "every required combat scalar has a row");
+    expect(tables.constants.scalars.size() == 43, "every required combat scalar has a row");
     for (const auto& constant : tables.constants.scalars) {
         // Diminishing_Firepower is a list: it keeps its text (#74).
         expect(constant.value.has_value() || constant.tag == "Diminishing_Firepower", constant.tag);
@@ -1126,7 +1135,7 @@ void foc_fleet() {
         expect((item.kind == UnitKind::squadron || item.category_bits != 0) && (item.property_bits & 0x100) == 0,
                "fleet type has categories and is an opportunity target: " + item.id);
     }
-    expect(tables.constants.scalars.size() == 39, "combat scalars");
+    expect(tables.constants.scalars.size() == 43, "combat scalars");
     // #70: the five roster ships move; Max_Speed, OverrideAcceleration/Deceleration and
     // Max_Rate_Of_Turn x 1.2 (docs/behaviour/space-movement.md MV-01).
     const auto motion = eawr::units::motion_table(tables);
@@ -1382,7 +1391,7 @@ void foc_fleet() {
     expect(tables.projectiles.size() == 13 && tables.constants.damage_to_armor.size() == 168, "projectile and damage rows");
     expect(tables.unresolved.empty(), "every pinned field and reference resolves");
     expect(tables.notes.size() == 6, "duplicate-tag notes");
-    expect(hex == "984c71a99d5f6f58cef57bd3498754a5c2211bf7aec2b4f9ed7626273a0eb113",
+    expect(hex == "2e2540011dfee39f1e8ef1924b6232f172170a4d51a860c383267832aecb6079",
            "pinned FoC content identity; update it only for an intended table or data change");
 
     // The Q24 root-to-bone composition agrees with a double-precision

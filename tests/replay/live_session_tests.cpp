@@ -347,6 +347,12 @@ void test_event_log_bounds_a_high_event_rate() {
         }
     }
     expect(presented_only, "only the hits are kept: no shots, acquisitions or orders");
+    // #862: a shot fired as an ability shot (AB-66) is kept for the view; an ordinary one is not.
+    tactical::CombatEvent shot;
+    shot.kind = tactical::CombatEventKind::weapon_fired;
+    expect(!LiveEventLog::presented(shot), "an ordinary shot is not presented");
+    shot.outcome = tactical::fired_ability_shot;
+    expect(LiveEventLog::presented(shot), "an ability shot is presented");
     const std::uint64_t oldest = events.ticks.empty() ? 0 : events.ticks.front().tick;
     expect(events.ticks.size() == log.size() && events.ticks.back().tick == ticks, "the newest ticks are kept");
     expect(events.lost_through == oldest - 1, "the gap ends right before the oldest kept tick");
@@ -677,6 +683,38 @@ void test_time_controls_keep_hashes(const std::filesystem::path& fixtures) {
     expect(driven.value()->tick_hashes().size() == 6, "six ticks ran");
 }
 
+void test_shared_fog_history() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
+    setup.units = {{1, 1010, 1, at(0, 0, 0), math::identity_quat(), {}}};
+    const std::vector<tactical::SensorProfile> sensors{{1010, units(1)}};
+    tactical::DurabilityTable durability;
+    durability.rules = {decimal("0.2"), decimal("0.4"), decimal("0.333")};
+    durability.profiles.push_back({1010, units(100), {}, false, {}});
+    tactical::FogRules fog{units(-256), units(256), units(1), 512, 512, 1, 21};
+    for (const auto workers : std::vector<std::size_t>{1, 2, 4, 8,
+             eawr::platform::ThreadWorkerAdapter::hardware_worker_count()}) {
+        auto started = LiveSession::start(setup, sensors, durability, {}, {},
+            {.workers = workers, .pacing = LiveSession::Pacing::driven, .history = 4, .fog_player = 1}, {}, fog);
+        expect(static_cast<bool>(started), "shared fog session starts");
+        if (!started) continue;
+        auto& session = *started.value();
+        const auto initial = session.fog_at(0);
+        expect(initial && (*initial->values[256])[256] == 255, "tick-zero fog is published as immutable rows");
+        session.advance_to(1);
+        expect(session.wait_for(1, std::chrono::seconds(20)), "unchanged fog tick completes");
+        const auto first = session.fog_at(1);
+        expect(initial && first && first->values == initial->values, "live publication shares every unchanged row");
+        session.submit({1, {1}, tactical::DamagePayload{units(1000)}, 1});
+        session.advance_to(20);
+        expect(session.wait_for(20, std::chrono::seconds(20)), "fog regrowth completes");
+        const auto latest = session.fog_at(20);
+        expect(latest && (*latest->values[256])[256] == 0 && !session.fog_at(0), "new rows regrow as history evicts old ticks");
+        expect(initial && (*initial->values[256])[256] == 255, "a retained fog snapshot outlives history and stays immutable");
+        session.stop();
+    }
+}
+
 void test_start_rejects_worker_counts() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
@@ -701,6 +739,7 @@ int main(const int argc, const char* const argv[]) {
         return 2;
     }
     test_start_rejects_worker_counts();
+    test_shared_fog_history();
     test_victory_outcome();
     test_driven_matches_headless(argv[1]);
     test_event_log_outlives_the_history();

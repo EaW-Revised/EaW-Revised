@@ -2,6 +2,7 @@
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <cstddef>
@@ -21,6 +22,13 @@ inline constexpr std::size_t event_record_size = 32;
 inline constexpr std::size_t instance_record_size = 144;
 inline constexpr std::size_t snapshot_player_record_size = 8;
 
+// An attack on one hardpoint of its target (#531). Opcodes 9 to 11 belong to #556/#574 (see the
+// replay opcode registry).
+inline constexpr std::uint8_t opcode_attack_hardpoint = 12;
+// The highest command opcode the parser accepts. Whichever of #591 and #556/#574 lands second
+// changes only this line; an opcode in the range that no branch handles fails as unsupported.
+inline constexpr std::uint8_t max_command_opcode = opcode_attack_hardpoint;
+
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,
     std::string message,
@@ -29,6 +37,8 @@ inline constexpr std::size_t snapshot_player_record_size = 8;
 
 // Payload bytes that follow the unit list header, by opcode (0 for an unknown opcode).
 [[nodiscard]] std::size_t payload_prefix_size(std::uint8_t opcode) noexcept;
+// The opcode a command is written with: its order kind, or opcode_attack_hardpoint for an attack on one hardpoint (#531).
+[[nodiscard]] std::uint8_t command_opcode(const PlayerCommand& command) noexcept;
 [[nodiscard]] std::size_t command_body_size(const PlayerCommand& command) noexcept;
 
 void append_player(std::vector<std::uint8_t>& bytes, const Player& player);

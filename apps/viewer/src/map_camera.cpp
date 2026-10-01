@@ -226,6 +226,47 @@ core::Result<MapCameraConfig> parse_map_camera_config(
     return Result::success(std::move(config));
 }
 
+core::Result<MapCameraConfig> skirmish_camera_config(
+    const assets::Map& map, const skirmish::SkirmishStart& start, const sim::tactical::PlayerId local_player) {
+    using Result = core::Result<MapCameraConfig>;
+    if (!map.declared_extents || !std::isfinite(map.declared_extents->first)
+        || !std::isfinite(map.declared_extents->second)
+        || map.declared_extents->first <= 0 || map.declared_extents->second <= 0) {
+        return Result::failure(invalid("live skirmish camera needs positive declared map extents or a camera XML"));
+    }
+    const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const auto& entry) {
+        return entry.use == skirmish::MarkerUse::spawn && entry.player == local_player;
+    });
+    if (marker == start.markers.end()) return Result::failure(invalid("live skirmish camera has no local spawn marker"));
+    const auto number = [](const skirmish::Fixed value) {
+        return static_cast<double>(value.raw()) / static_cast<double>(skirmish::Fixed::scale);
+    };
+    double x = 0, y = 0;
+    std::size_t count = 0;
+    for (const auto& unit : start.units) {
+        if (unit.state.owner != local_player || unit.record != marker->record
+            || (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit)) continue;
+        x += number(unit.state.position.x);
+        y += number(unit.state.position.y);
+        ++count;
+    }
+    MapCameraConfig config;
+    config.mode = presentation::camera::Mode::space;
+    config.map_path = start.map;
+    config.map_sha256 = start.map_sha256;
+    config.bindings_path = "space-live-camera-bindings.json";
+    const float half_x = map.declared_extents->first * 0.5F;
+    const float half_y = map.declared_extents->second * 0.5F;
+    config.bounds = {-half_x, half_x, -half_y, half_y, start.map, "skirmish-declared-extents", "project-authored"};
+    config.target_x = std::clamp(static_cast<float>(count ? x / static_cast<double>(count) : number(marker->position.x)), -half_x, half_x);
+    config.target_y = std::clamp(static_cast<float>(count ? y / static_cast<double>(count) : number(marker->position.y)), -half_y, half_y);
+    config.overrides_source_id = "space-camera-owner-deviations";
+    config.overrides_authority = "project-authored";
+    config.constant_overrides = {{"Distance_Min", "100"}, {"Tactical_Min_Scroll_Speed", "823.529412"}, {"Pitch_Min", "-60"}};
+    config.overview_clicks = 5;
+    return Result::success(std::move(config));
+}
+
 core::Result<presentation::camera::LoadedConstants> resolve_map_constants(
     const MapCameraConfig& config, presentation::camera::LoadedConstants xml,
     const std::string_view config_name, const std::string_view config_sha256) {

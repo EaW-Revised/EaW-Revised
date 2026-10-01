@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/particles/render.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -141,16 +142,34 @@ std::vector<LiveUnitPose> interpolate_units(const sim::tactical::TacticalSnapsho
                                             const sim::tactical::PlayerId viewer,
                                             const bool reveal,
                                             const std::span<const sim::EntityId> fading) {
-    const double t = std::clamp(alpha, 0.0, 1.0);
     const std::vector<sim::EntityId> visible = reveal ? std::vector<sim::EntityId>{} : latest.visible_entities(viewer);
-    const auto before = previous.instances();
     std::vector<LiveUnitPose> poses;
+    static_cast<void>(interpolate_visible_units(previous, latest, alpha, visible, reveal, fading, poses));
+    return poses;
+}
+
+bool interpolate_visible_units(const sim::tactical::TacticalSnapshot& previous,
+                               const sim::tactical::TacticalSnapshot& latest,
+                               const double alpha, const std::span<const sim::EntityId> visible,
+                               const bool reveal, const std::span<const sim::EntityId> fading,
+                               std::vector<LiveUnitPose>& poses, const particles::StepExecutor* executor) {
+    const double t = std::clamp(alpha, 0.0, 1.0);
+    const auto before = previous.instances();
+    poses.clear();
     poses.reserve(reveal ? latest.instances().size() : visible.size() + fading.size());
-    auto earlier = before.begin();
     for (const sim::tactical::TacticalInstance& instance : latest.instances()) {
-        const bool shown = reveal || std::binary_search(visible.begin(), visible.end(), instance.entity_id)
-            || std::binary_search(fading.begin(), fading.end(), instance.entity_id);
-        if (!shown) continue;
+        if (reveal || std::binary_search(visible.begin(), visible.end(), instance.entity_id)
+            || std::binary_search(fading.begin(), fading.end(), instance.entity_id)) {
+            // #530 PU-36: arrival visibility remains independent of the reveal bypass.
+            if (instance.arrival && *instance.arrival < sim::tactical::arrival_visible_frame) continue;
+            LiveUnitPose slot;
+            slot.instance = &instance;
+            poses.push_back(slot);
+        }
+    }
+    const auto interpolate = [&](const std::size_t index) {
+        const auto& instance = *poses[index].instance;
+
         const Angles latest_angles = angles_of(rotation_of(instance.fixed_transform));
         LiveUnitPose pose{instance.entity_id, instance.type_id, instance.owner,
                           translation(instance.fixed_transform), instance_yaw_degrees(instance.fixed_transform),
@@ -162,7 +181,7 @@ std::vector<LiveUnitPose> interpolate_units(const sim::tactical::TacticalSnapsho
             pose.roll_degrees = latest_angles.roll;
         }
         // Both lists ascend by ID.
-        earlier = std::lower_bound(earlier, before.end(), instance.entity_id,
+        const auto earlier = std::lower_bound(before.begin(), before.end(), instance.entity_id,
             [](const sim::tactical::TacticalInstance& item, const sim::EntityId id) { return item.entity_id < id; });
         if (earlier != before.end() && earlier->entity_id == instance.entity_id) {
             const auto from = translation(earlier->fixed_transform);
@@ -185,9 +204,13 @@ std::vector<LiveUnitPose> interpolate_units(const sim::tactical::TacticalSnapsho
                 pose.roll_degrees = short_way(instance_roll_degrees(earlier->fixed_transform), pose.roll_degrees, t);
             }
         }
-        poses.push_back(pose);
-    }
-    return poses;
+        poses[index] = pose;
+    };
+    // A pool wake should not cost more than the independent arithmetic it replaces.
+    constexpr std::size_t parallel_pose_threshold = 256;
+    if (executor != nullptr && poses.size() >= parallel_pose_threshold) return executor->run(poses.size(), interpolate);
+    for (std::size_t index = 0; index < poses.size(); ++index) interpolate(index);
+    return true;
 }
 
 std::vector<LiveUnitPose> interpolate_spinning(const sim::tactical::TacticalSnapshot& previous,

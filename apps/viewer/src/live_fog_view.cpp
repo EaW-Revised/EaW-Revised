@@ -231,13 +231,7 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
         status_ = "drawn";
     }
     // FW-08: the local team's sensors, as the minimap's fog reads them (MM-10).
-    std::vector<space::FogFieldRevealer> revealers;
-    const auto local_team = live.team_of(live.local_player());
-    for (const sim::tactical::TacticalInstance& instance : battle.latest->instances()) {
-        if (!instance.reveal_range || !local_team || instance.team != *local_team) continue;
-        revealers.push_back({to_double(instance.fixed_transform.rows[0][3]), to_double(instance.fixed_transform.rows[1][3]),
-                             to_double(*instance.reveal_range)});
-    }
+    const auto& revealers = live.snapshot_index().revealers();
     // FW-05: fades run on the battle's logical frames, so a paused battle holds them.
     const double tick = battle.presented_tick;
     const double frames = last_tick_ ? std::max(0.0, tick - *last_tick_) : 0.0;
@@ -248,7 +242,7 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
         // FW-10: the frames since the local player's grid was last serviced (V-12's phase).
         const std::uint64_t period = std::max<std::uint32_t>(fog->rules.service_period, 1U);
         const std::uint64_t since = (fog->tick % period + period - fog->player % period) % period;
-        field_->advance(fog->values, static_cast<double>(since), frames);
+        field_->advance_rows(fog->values, static_cast<double>(since), frames);
         cell_tick_ = fog->tick;
     }
     if (field_->changed()) {

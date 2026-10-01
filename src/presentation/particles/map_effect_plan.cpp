@@ -168,7 +168,9 @@ MapEffectPlan plan_map_effects(const std::span<const MapEffectPlacementInput> pl
                 finish(MapEffectStatus::unsupported, MapEffectCause::unknown_visibility,
                        "initial bind-pose visibility was not established"); continue;
             }
-            if (!proxy.visible) {
+            const bool code_shown =
+                ordinal < input.code_shown_proxies.size() && input.code_shown_proxies[ordinal] != 0U;
+            if (!proxy.visible && !code_shown) {
                 finish(MapEffectStatus::hidden, MapEffectCause::hidden_proxy,
                        "parsed proxy is initially hidden"); continue;
             }

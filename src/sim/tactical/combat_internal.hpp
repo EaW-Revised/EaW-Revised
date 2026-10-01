@@ -96,7 +96,13 @@ struct CombatStep {
 // A-04's aim point on `target` seen from `from`: its live targetable hardpoint nearest `from`
 // (the first in HardPoints order on a tie), else its position. The approach checks of #452 use it
 // (docs/behaviour/space-orders.md OR-04).
-[[nodiscard]] math::Vec3 ordered_aim_point(const CombatUnit& target, const math::Vec3& from);
+// With `hardpoint` (an attack order's, #531 OR-25) that hardpoint's position while it stands.
+[[nodiscard]] math::Vec3 ordered_aim_point(
+    const CombatUnit& target, const math::Vec3& from, std::uint32_t ordered_index = no_hardpoint);
+
+// The hardpoint of `target` with HardPoints index `index` while it is targetable and not
+// destroyed, else null (also for no_hardpoint and a target without a combat profile).
+[[nodiscard]] const TargetHardpoint* standing_hardpoint(const CombatUnit& target, std::uint32_t index);
 
 // One projectile's flight for one frame (docs/behaviour/space-damage.md DG-30 to DG-34): the
 // segment it flies this frame, the first unit of another team whose collision box it enters,
