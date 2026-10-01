@@ -42,6 +42,10 @@ struct Player {
     friend constexpr bool operator==(const Player&, const Player&) noexcept = default;
 };
 
+// An attack that names no hardpoint: it is on the unit (#531). The same value as hull_target and
+// no_hardpoint, which name it where damage and shots do.
+inline constexpr std::uint32_t attack_hull = 0xffffffffU;
+
 enum class OrderKind : std::uint8_t {
     none = 0,
     stop = 1,
@@ -58,6 +62,11 @@ enum class OrderKind : std::uint8_t {
     // A unit ability switched on or off, or its autofire set (#76): a command kind only; it
     // never becomes a unit's order.
     ability = 8,
+    // Skirmish purchasing (#530, docs/behaviour/space-purchasing.md): command kinds only; they
+    // never become a unit's order.
+    buy = 9,        // PU-10 to PU-15: queue a type at a station
+    cancel = 10,    // PU-17: cancel a queue entry
+    reinforce = 11, // PU-30 to PU-34: bring a pooled unit in at a point
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -67,6 +76,9 @@ struct Order {
     std::uint64_t issued_tick{};
     math::Vec3 destination{};
     EntityId target{};
+    // An attack on one of the target's hardpoints (#531, space-orders OR-20): its index in the
+    // target type's HardPoints list, or attack_hull for an attack on the unit.
+    std::uint32_t hardpoint{attack_hull};
     friend constexpr bool operator==(const Order&, const Order&) noexcept = default;
 };
 
@@ -89,8 +101,12 @@ struct MovePayload {
     friend constexpr bool operator==(const MovePayload&, const MovePayload&) noexcept = default;
 };
 
+// An attack names the unit, and optionally one of its hardpoints (#531, space-orders OR-20 to
+// OR-25): `hardpoint` is the index in the target type's HardPoints list, `attack_hull` for an
+// attack on the unit.
 struct AttackPayload {
     EntityId target{};
+    std::uint32_t hardpoint{attack_hull};
     friend constexpr bool operator==(const AttackPayload&, const AttackPayload&) noexcept = default;
 };
 
@@ -157,10 +173,39 @@ struct AbilityPayload {
     friend constexpr bool operator==(const AbilityPayload&, const AbilityPayload&) noexcept = default;
 };
 
-using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
-    AttackMovePayload, GuardPayload, AbilityPayload>;
+// Buy (#530, PU-10 to PU-15): queue `type` at the command's one listed unit, the station.
+struct BuyPayload {
+    TypeId type{};
+    friend constexpr bool operator==(const BuyPayload&, const BuyPayload&) noexcept = default;
+};
 
-// key.player_id is the issuer. Units are nonzero and strictly increasing.
+// Cancel (#530, PU-17): entry `index` of the issuer's queue `queue` (0 units, 1 upgrades). The
+// command lists no unit.
+struct CancelPayload {
+    std::uint32_t queue{};
+    std::uint32_t index{};
+    friend constexpr bool operator==(const CancelPayload&, const CancelPayload&) noexcept = default;
+};
+
+// Reinforce (#530, PU-30 to PU-34): bring the issuer's first pooled unit of `type` in at
+// `position`. The command lists no unit.
+struct ReinforcePayload {
+    TypeId type{};
+    math::Vec3 position{};
+    friend constexpr bool operator==(const ReinforcePayload&, const ReinforcePayload&) noexcept = default;
+};
+
+using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
+    AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload>;
+
+// Whether a command acts on the issuer's economy (#530) rather than on units.
+[[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
+    return std::holds_alternative<BuyPayload>(payload) || std::holds_alternative<CancelPayload>(payload)
+        || std::holds_alternative<ReinforcePayload>(payload);
+}
+
+// key.player_id is the issuer. Units are nonzero and strictly increasing; a buy lists exactly its
+// station, a cancel or reinforce none (#530), every other command at least one unit.
 struct PlayerCommand {
     CommandKey key;
     std::vector<EntityId> units;
@@ -182,6 +227,7 @@ enum class EventKind : std::uint8_t {
     // it explodes (right after its unit_destroyed event), and the spin ended: it explodes.
     spin_away_started = 6,
     spin_away_ended = 7,
+    reinforcement_unloaded = 8, // WR-40: reserved by coordinator; arrival completed for `unit`
 };
 
 enum class RejectReason : std::uint8_t {
@@ -194,6 +240,17 @@ enum class RejectReason : std::uint8_t {
     hardpoint_invalid = 6, // #72: no destroyable hardpoint with that index
     target_is_unit = 7,    // #452: a guard or attack-move naming the ordered unit itself
     ability_unavailable = 8, // #76: the unit lacks the ability, or it is not ready or already in that state
+    // #530 (docs/behaviour/space-purchasing.md):
+    cannot_produce = 9,        // PU-11: not in the station's list, the station not live or allied, or not available
+    queue_full = 10,           // PU-14
+    insufficient_credits = 11, // PU-15
+    no_queue_entry = 12,       // PU-17: no such entry to cancel
+    not_in_pool = 13,          // PU-33: no pooled unit of that type
+    no_population_room = 14,   // PU-21, PU-33
+    invalid_position = 15,     // PU-31, PU-32
+    no_economy = 16,           // the session has no economy rules, or the issuer none
+    arriving = 17,             // PU-39: the unit is still arriving from hyperspace
+    battle_decided = 18,       // WR-19: pending victory forbids reinforcement
 };
 
 // One event per listed unit of an executed command, in command order then unit order, each

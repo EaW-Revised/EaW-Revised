@@ -244,6 +244,7 @@ struct TickRecord {
     std::size_t projectiles{};
     std::uint64_t candidates{}; // #636: the projectile broad phase's work (TacticalTick)
     std::uint64_t exact_tests{};
+    std::size_t fog_copied_bytes{};
 };
 
 struct Run {
@@ -294,6 +295,7 @@ struct Run {
         record.projectiles = session.projectiles().size();
         record.candidates = stepped.value().projectile_candidates;
         record.exact_tests = stepped.value().projectile_exact_tests;
+        if (const auto* fog = session.fog_cells()) record.fog_copied_bytes = fog->copied_grid_bytes();
         out.ticks.push_back(std::move(record));
     }
     if (sampler != nullptr) sampler->stop();
@@ -413,7 +415,7 @@ void write_csv(const std::string& path, const Run& run) {
     const auto names = phase_names(run);
     out << "tick,ms";
     for (const auto& name : names) out << ',' << name;
-    out << ",serial,units,craft,squadrons,projectiles\n";
+    out << ",serial,units,craft,squadrons,projectiles,sha256,fog_copied_bytes\n";
     for (std::size_t index = 0; index < run.ticks.size(); ++index) {
         const auto& record = run.ticks[index];
         out << index << ',' << record.ms;
@@ -422,7 +424,7 @@ void write_csv(const std::string& path, const Run& run) {
             out << ',' << (found == record.phases.end() ? 0.0 : found->second);
         }
         out << ',' << serial_ms(record) << ',' << record.units << ',' << record.craft << ',' << record.squadrons << ','
-            << record.projectiles << '\n';
+            << record.projectiles << ',' << run.hashes[index] << ',' << record.fog_copied_bytes << '\n';
     }
 }
 

@@ -293,7 +293,9 @@ dropped too. A unit id that names no live unit is not a drop: the unit can die b
 service and the tick, so the world rejects that order when it executes it. Each script command is
 routed exactly once and enters the world's replay like any player command, so a headless
 replay of `record()` reproduces every world tick without a script (`lua_bridge_routing`).
-The tick's hash is `authoritative_state_sha256` over the world and script hashes. A failed
+The tick's hash is `authoritative_state_sha256` over the world and script hashes; the live
+session turns it off (`set_authoritative_hash`, EAWR-895) and asks for the script hash only on
+request, since it reads only the world's hash. A failed
 world step or script service is terminal.
 
 Presentation reaches authoritative scripts only through this input: `step` is the only

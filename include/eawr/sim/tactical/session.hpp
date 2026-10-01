@@ -7,6 +7,7 @@
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/durability.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -18,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -70,17 +72,22 @@ public:
     // targets or fires (#73). `victory` is its skirmish's victory rules (validate_victory); without
     // them the session never decides an outcome (#77). `abilities` is its ability table
     // (validate_abilities, #76); a unit whose type has no ability profile has no abilities.
+    // `economy` is its skirmish's economy (validate_economy, #530): credits, income, the build
+    // queues and hyperspace arrival; without it the session has no economy and every buy, cancel
+    // or reinforce is rejected.
     [[nodiscard]] static core::Result<TacticalSession> create(const TacticalSetup& setup,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
-        const AbilityTable& abilities = AbilityTable{});
+        const AbilityTable& abilities = AbilityTable{},
+        const EconomyRules& economy = EconomyRules{});
     // Creates the setup session and submits every recorded command.
     [[nodiscard]] static core::Result<TacticalSession> from_replay(const TacticalReplay& replay,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
-        const AbilityTable& abilities = AbilityTable{});
+        const AbilityTable& abilities = AbilityTable{},
+        const EconomyRules& economy = EconomyRules{});
 
     // Rejects, without changing the session, an unknown or non-commandable issuer, a
     // malformed payload, a command for a tick that has already executed, and a command
@@ -105,6 +112,18 @@ public:
     [[nodiscard]] const MotionTable& motion() const noexcept;
     [[nodiscard]] const CombatTable& combat() const noexcept;
     [[nodiscard]] const VictoryRules& victory() const noexcept;
+    [[nodiscard]] const EconomyRules& economy() const noexcept;
+    // #530: each economy player's credits, queues and pool, ascending player ID; empty without
+    // economy rules.
+    [[nodiscard]] std::span<const PlayerEconomy> ledgers() const noexcept;
+    // #530: the arriving units (PU-35), by ID.
+    [[nodiscard]] const std::map<EntityId, ArrivalState>& arrivals() const noexcept;
+    // WR-13/15: read-only point verdict for a preview; the command rechecks before creation.
+    struct PlacementWork {
+        std::uint64_t predictions{}; // diagnostics only: samples materialized for this query
+    };
+    [[nodiscard]] core::Result<bool> reinforcement_point(PlayerId player, TypeId type, const math::Vec3& point,
+        PlacementWork* work = nullptr) const;
     // The decided battle (#77, docs/behaviour/space-victory.md), or nothing while undecided.
     [[nodiscard]] const std::optional<BattleOutcome>& outcome() const noexcept;
     // Live units in ascending ID; a unit leaves the list when its hull reaches zero.

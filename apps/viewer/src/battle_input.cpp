@@ -186,6 +186,8 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
         // before Scale_Factor like the pick box, and the override sphere.
         for (const units::UnitType& type : live.tables()->units) {
             std::vector<std::array<ui::Vec3f, 3>> triangles;
+            // OR-20: include attached hardpoint meshes in the unit pick; only a reticle names
+            // a hardpoint in the order. Mesh contacts always identify the owning unit.
             for (const units::CollisionMesh& mesh : type.collision_meshes) {
                 for (const auto& triangle : mesh.triangles) {
                     std::array<ui::Vec3f, 3> corners{};
@@ -205,7 +207,6 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
     }
     units_.clear();
     const auto& squadron_of = live.squadron_of();
-    const auto latest = live.battle_frame().latest;
     for (const LiveSessionView::VisibleUnit& visible : live.visible_units()) {
         const auto box = population.live_ship_box(visible.ship);
         if (!box) continue;  // not drawn: nothing to point at
@@ -218,10 +219,8 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
         }
         // #424 (S-7): a craft is a pick volume of its squadron, the team container.
         if (const auto squadron = squadron_of.find(visible.entity); squadron != squadron_of.end()) {
-            const auto instances = latest ? latest->instances() : std::span<const sim::tactical::TacticalInstance>{};
-            const auto container = std::find_if(instances.begin(), instances.end(),
-                [&](const sim::tactical::TacticalInstance& instance) { return instance.entity_id == squadron->second; });
-            if (container == instances.end()) continue;  // the squadron left the session
+            const auto* container = live.snapshot_index().instance(squadron->second);
+            if (container == nullptr) continue;  // the squadron left the session
             unit.entity = squadron->second;
             unit.type = container->type_id;
             unit.part = visible.entity;
@@ -276,7 +275,11 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                     // FoC: the double click selects the type on screen and its release is spent.
                     // #550 (WU-23a, WSU-38): an own squadron's icon takes it before the world under
                     // it and selects every own squadron with a craft of its leader's type on screen.
-                    if (const auto icon = world_ui_->icon_at(at)) {
+                    // WSU-18 (#531): a hardpoint reticle under the cursor stands for its ship; it is
+                    // tested before the icon, as for a single click (WU-41).
+                    const auto reticle = world_ui_->reticle_at(at);
+                    const auto icon = reticle ? std::nullopt : world_ui_->icon_at(at);
+                    if (icon) {
                         const auto leader = own_squadron_leader_type(*icon);
                         if (leader && selection_.craft_type_on_screen(*leader, units_, viewport_rect())) {
                             note("double click: craft type on screen");
@@ -285,7 +288,8 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
                             note(leader ? "double click: no new squadron on screen" : "double click: not an own squadron");
                         }
                     } else {
-                        const auto picked = ray(at[0], at[1]) ? ui::pick_unit(*ray(at[0], at[1]), units_) : std::nullopt;
+                        auto picked = ray(at[0], at[1]) ? ui::pick_unit(*ray(at[0], at[1]), units_) : std::nullopt;
+                        if (reticle) picked = reticle->entity;
                         if (const auto pick_ray = ray(at[0], at[1])) record_pick_candidates(*pick_ray);
                         if (selection_.double_click(picked, units_, viewport_rect())) {
                             note("double click: type on screen");
@@ -353,11 +357,8 @@ std::optional<sim::tactical::TypeId> BattleInput::own_squadron_leader_type(const
         const auto latest = live_->battle_frame().latest;
         const auto members = live_->squadron_members().find(squadron);
         if (latest && members != live_->squadron_members().end()) {
-            const auto instances = latest->instances();
             for (const sim::EntityId member : members->second) {
-                const auto craft = std::find_if(instances.begin(), instances.end(),
-                    [&](const sim::tactical::TacticalInstance& instance) { return instance.entity_id == member; });
-                if (craft != instances.end()) return craft->type_id;
+                if (const auto* craft = live_->snapshot_index().instance(member)) return craft->type_id;
             }
         }
     }
@@ -368,6 +369,30 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     if (ignore_left_release_) {
         ignore_left_release_ = false;
         left_.reset();
+        return;
+    }
+    // WR-15: the original press belonged to the pool's GUI, so a drag drop needs no world press.
+    if (placing_) {
+        const auto type = *placing_;
+        placing_.reset();
+        left_.reset();
+        const auto placing_ray = ray(at[0], at[1]);
+        const auto point = placing_ray ? ui::battle_plane_point(*placing_ray) : std::nullopt;
+        if (!point) {
+            note("reinforce " + std::to_string(type) + ": no plane point");
+            return;
+        }
+        auto x = scene::fixed_from_binary32((*point)[0]);
+        auto y = scene::fixed_from_binary32((*point)[1]);
+        if (!x || !y) {
+            note("reinforce " + std::to_string(type) + ": no plane point");
+            return;
+        }
+        const bool issued = live.reinforce(type, sim::math::Vec3{x.value(), y.value(), sim::math::Fixed{}});
+        if (issued) ++placements_;
+        char where[96];
+        std::snprintf(where, sizeof(where), "%.9g,%.9g,0", static_cast<double>((*point)[0]), static_cast<double>((*point)[1]));
+        note("reinforce " + std::to_string(type) + (issued ? " @" : " refused @") + std::string(where));
         return;
     }
     if (!left_) return;
@@ -383,8 +408,13 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     }
     const auto pick_ray = ray(at[0], at[1]);
     auto picked = pick_ray ? ui::pick_unit(*pick_ray, units_) : std::nullopt;
-    // WU-23: a squadron icon takes the click before the world under it.
-    if (const auto icon = world_ui_->icon_at(at)) picked = *icon;
+    // WU-23: a squadron icon takes the click before the world under it; WU-41: a hardpoint reticle
+    // replaces the picked object and is tested before the icon.
+    if (const auto reticle = world_ui_->reticle_at(at)) {
+        picked = reticle->entity;
+    } else if (const auto icon = world_ui_->icon_at(at)) {
+        picked = *icon;
+    }
     if (ability_target_) {
         // #561 (AB-11): the click aims the waiting targeted ability; the selection stays.
         const auto unit = std::find_if(units_.begin(), units_.end(),
@@ -420,6 +450,13 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
 void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifiers modifiers, LiveSessionView& live) {
     const auto start = right_start_;
     right_start_.reset();
+    if (placing_) {
+        // #530 PU-68: a right click cancels the placement.
+        placing_.reset();
+        ++placements_cancelled_;
+        note("reinforce placement cancelled");
+        return;
+    }
     // #561 (AB-11): a right click cancels a waiting targeted ability and orders nothing.
     if (ability_target_) {
         cancel_ability_target("right click");
@@ -440,9 +477,16 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     const auto pick_ray = ray(at[0], at[1]);
     if (!pick_ray) return;
     auto picked = ui::pick_unit(*pick_ray, units_);
-    // #553 (WU-23b): a squadron icon takes the right click before the world under it, as it takes
-    // the left one; the order point stays the battle plane point under the cursor (P-3).
-    if (const auto icon = world_ui_->icon_at(at)) picked = *icon;
+    // WU-41 (OR-20): a hovered hardpoint reticle under the pointer replaces the picked object: the
+    // order's target is the reticle's unit and it names the hardpoint. #553 (WU-23b): otherwise a
+    // squadron icon takes the right click before the world under it, as it takes the left one; the
+    // order point stays the battle plane point under the cursor (P-3).
+    const auto reticle = world_ui_->reticle_at(at);
+    if (reticle) {
+        picked = reticle->entity;
+    } else if (const auto icon = world_ui_->icon_at(at)) {
+        picked = *icon;
+    }
     const auto unit = std::find_if(units_.begin(), units_.end(),
         [&](const ui::BattleUnit& candidate) { return picked && candidate.entity == *picked; });
     const ui::BattleUnit* over = unit == units_.end() ? nullptr : &*unit;
@@ -469,6 +513,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     if (!x || !y) return;
     ui::WorldPick pick{{x.value(), y.value(), sim::math::Fixed{}}, over ? over->entity : sim::invalid_entity_id,
                        over != nullptr && over->hostile, over != nullptr && over->own, over_selected};
+    if (reticle && over != nullptr && over->hostile) pick.hardpoint = reticle->hardpoint;
     input->set_selection(selection_.units());
     const std::uint64_t tick = live.order_tick();
     auto issued = input->world_command(pick, ui::CommandOrigin::world_click, ui::OrderModifiers{modifiers.ctrl, modifiers.alt});
@@ -483,6 +528,11 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         std::string what = "move @" + std::string(where);
         if (attacked) {
             what = "attack " + std::to_string(pick.entity);
+            if (pick.hardpoint != sim::tactical::attack_hull) {
+                what += " hardpoint " + std::to_string(pick.hardpoint);
+                world_ui_->flash_reticle(pick.entity, pick.hardpoint);  // WU-42
+                ++hardpoint_orders_;
+            }
         } else if (guarding) {
             what = pick.entity != sim::invalid_entity_id && pick.own && !over_selected
                 ? "guard " + std::to_string(pick.entity) : "guard @" + std::string(where);
@@ -652,6 +702,16 @@ void BattleInput::update_hover() {
     hovered_.reset();
     hovered_icon_.reset();
     if (!pointer_) return;
+    // WU-41: a reticle under the pointer keeps its unit hovered, ahead of an icon and the pick.
+    if (const auto reticle = world_ui_->reticle_at(*pointer_)) {
+        const auto unit = std::find_if(units_.begin(), units_.end(), [&](const ui::BattleUnit& candidate) {
+            return candidate.entity == reticle->entity && candidate.part == sim::invalid_entity_id;
+        });
+        if (unit != units_.end()) {
+            hovered_ = static_cast<std::size_t>(unit - units_.begin());
+            return;
+        }
+    }
     if (const auto icon = world_ui_->icon_at(*pointer_)) {
         hovered_icon_ = icon;
         return;
@@ -671,23 +731,57 @@ std::vector<BattleInput::Acknowledgement> BattleInput::take_acknowledgements() {
 }
 
 void BattleInput::refresh_cards(const LiveSessionView& live) {
-    card_units_.clear();
-    card_layout_ = {};
+
     const auto& latest = live.battle_frame().latest;
     const units::UnitTables* tables = live.tables();
+    if (cards_snapshot_ == latest && cards_selection_ == selection_.units() && cards_slots_ == card_slots_
+        && card_tables_ == tables) {
+        refresh_abilities(live);
+        return;
+    }
+    cards_snapshot_ = latest;
+    cards_selection_ = selection_.units();
+    cards_slots_ = card_slots_;
+    card_units_.clear();
+    card_layout_ = {};
+    production_station_.reset();
+    build_buttons_.clear();
     // #534: the ability bar mirrors the cards; an empty layout (deselect, the selection's last unit
     // dying or leaving a group) must clear it too, or its last button lingers over an empty panel.
     if (card_slots_ == 0 || selection_.empty() || !latest || tables == nullptr) {
         ability_bar_ = {};
         return;
     }
-    std::map<sim::tactical::TypeId, const units::UnitType*> types;
-    for (const units::UnitType& type : tables->units) types.emplace(skirmish::type_id(type.id), &type);
-    std::map<sim::EntityId, const sim::tactical::TacticalInstance*> instances;
-    for (const sim::tactical::TacticalInstance& instance : latest->instances()) instances.emplace(instance.entity_id, &instance);
+    if (card_tables_ != tables) {
+        card_tables_ = tables;
+        card_types_.clear();
+        for (const units::UnitType& type : tables->units) card_types_.emplace(skirmish::type_id(type.id), &type);
+    }
+    const auto& instances = live.snapshot_index();
+    // #530 PU-60: the first selected unit of the local player with a build menu for its faction
+    // turns the card slots into that station's build buttons.
+    if (const auto faction = live.local_faction_id(); faction && !live.economy().empty()) {
+        for (const sim::EntityId entity : selection_.units()) {
+            const auto* instance = instances.instance(entity);
+            if (instance == nullptr || instance->owner != live.local_player()) continue;
+            const sim::tactical::StationMenu* menu = live.economy().menu(instance->type_id, *faction);
+            if (menu == nullptr || menu->options.empty()) continue;
+            const sim::tactical::EconomyView* economy = live.local_economy();
+            std::array<std::size_t, sim::tactical::build_queue_count> sizes{};
+            if (economy != nullptr) {
+                for (std::size_t queue = 0; queue < sizes.size(); ++queue) sizes[queue] = economy->queues[queue].size();
+            }
+            production_station_ = entity;
+            build_buttons_ = ui::layout_build_buttons(*menu, economy != nullptr ? economy->credits : sim::math::Fixed{},
+                sizes, live.economy().max_queue, card_slots_);
+            ability_bar_ = {};
+            return;
+        }
+    }
+
     const auto type_of = [&](const sim::tactical::TacticalInstance& instance) -> const units::UnitType* {
-        const auto found = types.find(instance.type_id);
-        return found == types.end() ? nullptr : found->second;
+        const auto found = card_types_.find(instance.type_id);
+        return found == card_types_.end() ? nullptr : found->second;
     };
     const auto ability_of = [](const units::UnitType* type) {
         return type == nullptr || type->abilities.empty() ? ui::ability_none : ui::ability_index(type->abilities.front().type);
@@ -715,29 +809,29 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
             continue;
         }
         for (const sim::EntityId craft : squadron->second) {
-            if (instances.contains(craft)) shown.push_back(craft);
+            if (instances.instance(craft) != nullptr) shown.push_back(craft);
         }
     }
     std::vector<ui::SelectedUnit> selected;
     for (const sim::EntityId entity : shown) {
-        const auto instance = instances.find(entity);
-        if (instance == instances.end()) continue;
-        const units::UnitType* type = type_of(*instance->second);
+        const auto* instance = instances.instance(entity);
+        if (instance == nullptr) continue;
+        const units::UnitType* type = type_of(*instance);
         ui::SelectedUnit unit;
         unit.entity = entity;
-        unit.type = type != nullptr ? type->id : std::to_string(instance->second->type_id);
+        unit.type = type != nullptr ? type->id : std::to_string(instance->type_id);
         unit.ability = ability_of(type);
         unit.second_ability = second_ability_of(type);
-        unit.health = health_of(*instance->second);
-        const auto& durability = instance->second->durability;
+        unit.health = health_of(*instance);
+        const auto& durability = instance->durability;
         if (type != nullptr && type->shielded && durability && durability->shields && durability->max_shields
             && durability->max_shields->raw() > 0) {
             unit.shield = std::clamp(static_cast<double>(durability->shields->raw())
                                          / static_cast<double>(durability->max_shields->raw()), 0.0, 1.0);
         }
         if (const sim::tactical::Squadron* squadron = live.squadron_of(entity)) {
-            const auto container = instances.find(squadron->container);
-            const units::UnitType* squadron_type = container == instances.end() ? nullptr : type_of(*container->second);
+            const auto* container = instances.instance(squadron->container);
+            const units::UnitType* squadron_type = container == nullptr ? nullptr : type_of(*container);
             if (squadron_type != nullptr) {
                 ui::SquadronOf team;
                 team.container = squadron->container;
@@ -753,10 +847,10 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
                 // L-9 (foc-unit-cards): a squadron's health is the mean health of the craft still standing.
                 double sum = 0.0;
                 for (const sim::EntityId craft : squadron->members) {
-                    const auto live_craft = instances.find(craft);
-                    if (live_craft == instances.end()) continue;
+                    const auto* live_craft = instances.instance(craft);
+                    if (live_craft == nullptr) continue;
                     team.members.push_back(craft);
-                    sum += health_of(*live_craft->second);
+                    sum += health_of(*live_craft);
                 }
                 team.health = team.members.empty() ? 0.0 : sum / static_cast<double>(team.members.size());
                 unit.squadron = std::move(team);
@@ -863,7 +957,42 @@ bool BattleInput::card_click(const std::size_t slot, const bool shift, const Liv
     return changed;
 }
 
+bool BattleInput::build_click(const std::size_t slot, LiveSessionView& live) {
+    refresh_cards(live);
+    ++build_clicks_;
+    if (!production_station_) return false;
+    const auto found = std::find_if(build_buttons_.begin(), build_buttons_.end(),
+        [slot](const ui::BuildButton& button) { return button.slot == slot; });
+    if (found == build_buttons_.end() || !found->enabled) {
+        note("build " + std::to_string(slot) + ": disabled");
+        return false;
+    }
+    const bool issued = live.buy(*production_station_, found->type);
+    if (issued) ++buys_;
+    note("build " + std::to_string(slot) + ": " + (issued ? "buy " : "refused ") + std::to_string(found->type));
+    return issued;
+}
+
+void BattleInput::begin_placement(const sim::tactical::TypeId type) {
+    if (placing_) return; // WR-11: only one active drag
+    placing_ = type;
+    note("reinforce placing " + std::to_string(type));
+}
+
+std::optional<sim::math::Vec3> BattleInput::placement_point() const {
+    if (!placing_) return std::nullopt;
+    if (!pointer_) return std::nullopt;
+    const auto cursor_ray = ray((*pointer_)[0], (*pointer_)[1]);
+    const auto point = cursor_ray ? ui::battle_plane_point(*cursor_ray) : std::nullopt;
+    if (!point) return std::nullopt;
+    const auto x = scene::fixed_from_binary32((*point)[0]);
+    const auto y = scene::fixed_from_binary32((*point)[1]);
+    if (!x || !y) return std::nullopt;
+    return sim::math::Vec3{x.value(), y.value(), {}};
+}
+
 void BattleInput::cancel() noexcept {
+    placing_.reset();
     left_.reset();
     right_start_.reset();
     ignore_left_release_ = false;
@@ -916,6 +1045,7 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
         ++next_scripted_;
     }
     update_hover();
+    world_ui_->service();  // WU-42: one render service
     draw();
     if (overview_sample) {
         overview_samples_.push_back({*overview_sample, space.live_camera_overview(), world_ui_->drawn(),
@@ -1008,6 +1138,7 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
     }
     const auto screen_of = [&](const std::size_t index) -> std::optional<std::array<float, 2>> {
         if (scripted.unit && scripted.icon) return world_ui_->icon_centre(*scripted.unit);
+        if (scripted.unit && scripted.reticle) return world_ui_->reticle_centre(*scripted.unit, *scripted.reticle);
         if (scripted.card) return card_point_ ? card_point_(*scripted.card) : std::nullopt;
         if (scripted.ability) return ability_point_ ? ability_point_(*scripted.ability) : std::nullopt;
         if (!scripted.hud.empty()) return hud_point_ ? hud_point_(scripted.hud) : std::nullopt;
@@ -1069,6 +1200,8 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
         motion->set_global_position(Vector2((*at)[0], (*at)[1]));
         modifiers(**motion);
         engine->parse_input_event(motion);
+    } else if (scripted.kind == "press" || scripted.kind == "release") {
+        button(MOUSE_BUTTON_LEFT, scripted.kind == "press", *at, false);
     } else if (scripted.kind == "click" || scripted.kind == "rclick") {
         const MouseButton index = scripted.kind == "click" ? MOUSE_BUTTON_LEFT : MOUSE_BUTTON_RIGHT;
         button(index, true, *at, false);
@@ -1237,7 +1370,8 @@ void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& spa
         }
         output << "]";
     }
-    output << "}, \"orders\": " << orders_ << ", \"refused\": " << refused_ << ", \"boxes\": " << boxes_
+    output << "}, \"orders\": " << orders_ << ", \"hardpoint_orders\": " << hardpoint_orders_
+           << ", \"refused\": " << refused_ << ", \"boxes\": " << boxes_
            << ", \"camera_focuses\": " << focuses_ << ", \"camera_follow_moves\": " << follow_moves_
            << ", \"scripted_fired\": " << scripted_fired_
            << ", \"overview\": " << json(space.live_camera_overview()) << ", \"scripted_points\": [";
@@ -1307,6 +1441,18 @@ void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& spa
         const ui::AbilityButton& button = ability_bar_.buttons[index];
         output << (index ? ", " : "") << "{\"component\": " << button.component << ", \"ability\": "
                << json(std::string(ui::ability_name(button.ability))) << ", \"units\": " << button.units.size() << "}";
+    }
+    output << "]}";
+    // #530: the station's build buttons while it is the production object, and the clicks.
+    output << ", \"production\": {\"station\": " << (production_station_ ? std::to_string(*production_station_) : "null")
+           << ", \"clicks\": " << build_clicks_ << ", \"buys\": " << buys_ << ", \"placing\": "
+           << (placing_ ? std::to_string(*placing_) : "null") << ", \"placements\": " << placements_
+           << ", \"placements_cancelled\": " << placements_cancelled_ << ", \"buttons\": [";
+    for (std::size_t index = 0; index < build_buttons_.size(); ++index) {
+        const ui::BuildButton& button = build_buttons_[index];
+        output << (index ? ", " : "") << "{\"slot\": " << button.slot << ", \"type\": " << button.type << ", \"price\": "
+               << button.price << ", \"enabled\": " << (button.enabled ? "true" : "false") << ", \"state\": "
+               << static_cast<int>(button.state) << "}";
     }
     output << "]}";
     output << ", \"hovered\": ";

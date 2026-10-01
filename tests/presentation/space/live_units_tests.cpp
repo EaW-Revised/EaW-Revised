@@ -1,6 +1,13 @@
 // #80 part A: where the viewer draws a live session's units between two published ticks
 // (presentation::space::interpolate_units). Synthetic snapshots only.
 #include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/space/snapshot_index.hpp"
+#include "eawr/presentation/particles/render.hpp"
+
+#include <atomic>
+#include <functional>
+#include <memory>
+#include <thread>
 
 #include <cmath>
 #include <cstdint>
@@ -202,12 +209,116 @@ void test_spinning() {
            "between two spin poses it rolls a quarter of the way");
 }
 
+void test_snapshot_index_budget() {
+    std::vector<tactical::TacticalInstance> rows(1024);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        auto& row = rows[i];
+        row.entity_id = 1 + i * 1000000;
+        row.type_id = 7;
+        row.team = (i % 2 == 0) ? 10U : 20U;
+        row.visible_to = (i % 2 == 0) ? 1U : 2U;
+        row.reveal_range = math::Fixed::from_raw(100 * math::Fixed::scale);
+    }
+    const std::vector<tactical::SnapshotPlayer> players{{1, 10}, {2, 20}};
+    const auto snapshot = std::make_shared<const tactical::TacticalSnapshot>(5, players, rows, std::vector<tactical::Event>{});
+    space::SnapshotIndex index;
+    index.refresh(snapshot, 1);
+    expect(index.visible() == snapshot->visible_entities(1), "cached visibility matches the published visibility");
+    expect(index.alive().size() == 1024 && index.revealers().size() == 512, "liveness and allied sensors share one tick pass");
+    for (int frame = 0; frame < 100; ++frame) index.refresh(snapshot, 1);
+    expect(index.work().refreshes == 1 && index.work().instance_rows == 1024,
+           "one hundred fractional/paused frames do no repeated instance scan");
+    std::uint64_t comparisons = 0;
+    for (const auto& row : rows) {
+        expect(space::find_instance(*snapshot, row.entity_id, &comparisons) == index.instance(row.entity_id)
+               && index.instance(row.entity_id) != nullptr && index.instance(row.entity_id)->entity_id == row.entity_id,
+               "sparse IDs use the snapshot's sorted index");
+    }
+    expect(comparisons <= 1024 * 11, "craft lookups cost at most logarithmic comparisons, never a full scan per craft");
+    expect(index.instance(2) == nullptr && index.instance(0) == nullptr && index.instance(rows.back().entity_id + 1) == nullptr,
+           "missing sparse IDs never select a neighbouring instance");
+    index.refresh(snapshot, 2);
+    expect(index.visible() == snapshot->visible_entities(2) && index.work().instance_rows == 2048,
+           "changing viewer invalidates visibility even while the tick holds");
+    rows.front().type_id = 9;
+    rows.front().visible_to = 2;
+    auto replacement = std::make_shared<const tactical::TacticalSnapshot>(5, players, rows, std::vector<tactical::Event>{});
+    index.refresh(replacement, 2);
+    expect(index.instance(rows.front().entity_id)->type_id == 9 && index.work().instance_rows == 3072,
+           "a different snapshot of the same tick invalidates the cache and its pointers");
+    index.refresh(replacement, 99);
+    expect(index.visible().empty() && index.revealers().empty() && index.alive().size() == 1024,
+           "an unknown viewer sees no units or allied sensors");
+    index.refresh(nullptr, 99);
+    expect(index.alive().empty() && index.instance(1) == nullptr, "clearing a snapshot drops every borrowed pointer");
+}
+
+class PoseExecutor final : public eawr::presentation::particles::StepExecutor {
+public:
+    explicit PoseExecutor(std::size_t threads) : threads_(threads) {}
+    bool run(std::size_t count, const std::function<void(std::size_t)>& task) const override {
+        ++runs;
+        std::atomic<std::size_t> next{0};
+        const auto work = [&] {
+            for (std::size_t i = next.fetch_add(1); i < count; i = next.fetch_add(1)) {
+                task(i);
+                ++tasks;
+            }
+        };
+        std::vector<std::thread> helpers;
+        for (std::size_t i = 1; i < threads_; ++i) helpers.emplace_back(work);
+        work();
+        for (auto& helper : helpers) helper.join();
+        return true;
+    }
+    mutable std::size_t runs{};
+    mutable std::atomic<std::size_t> tasks{};
+private:
+    std::size_t threads_{};
+};
+
+void test_pose_worker_budget() {
+    std::vector<tactical::TacticalInstance> before(512), after(512);
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        before[i].entity_id = 1 + 2 * i;
+        before[i].fixed_transform = banked(170, 170);
+        after[i] = before[i];
+        after[i].fixed_transform = banked(-170, -170);
+        after[i].fixed_transform.rows[0][3] = math::Fixed::from_raw(10 * math::Fixed::scale);
+    }
+    tactical::TacticalSnapshot previous(0, {{1, 1}}, before, {});
+    tactical::TacticalSnapshot latest(1, {{1, 1}}, after, {});
+    const auto canonical = latest.canonical_bytes();
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        PoseExecutor executor(workers);
+        std::vector<space::LiveUnitPose> poses;
+        expect(space::interpolate_visible_units(previous, latest, .5, {}, true, {}, poses, &executor),
+               "pose executor completed");
+        expect(executor.runs == 1 && executor.tasks == 512 && poses.size() == 512,
+               "each shown unit is exactly one disjoint pose task at every worker count");
+        for (std::size_t i = 0; i < poses.size(); ++i) {
+            expect(poses[i].entity == after[i].entity_id && poses[i].instance == &latest.instances()[i]
+                   && poses[i].position[0] == 5.0 && poses[i].yaw_degrees == 180.0 && poses[i].roll_degrees == 180.0,
+                   "worker order preserves sorted poses, short-way angles and borrowed snapshot pointers");
+        }
+        const auto* buffer = poses.data();
+        const std::vector<eawr::sim::EntityId> visible{1};
+        expect(space::interpolate_visible_units(previous, latest, 1, visible, false, {}, poses, &executor)
+               && poses.size() == 1 && poses.data() == buffer && poses[0].position[0] == 10.0,
+               "smaller frames reuse storage without leaving stale poses");
+        expect(executor.runs == 1, "a small frame stays inline without waking the pool");
+    }
+    expect(latest.canonical_bytes() == canonical, "parallel presentation never writes the snapshot or its hash input");
+}
+
 } // namespace
 
 int main() {
     test_interpolation();
     test_roll();
     test_reveal();
+    test_snapshot_index_budget();
+    test_pose_worker_budget();
     test_fading_entities();
     test_spinning();
     if (failures != 0) {

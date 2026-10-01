@@ -201,6 +201,15 @@ void command_sink_contracts() {
     expect(ability != nullptr && ability->ability == tactical::AbilityKind::turbo
                && ability->action == tactical::AbilityAction::deactivate,
         "a unit ability intent becomes an ability command");
+    // #531 (space-orders OR-20): an attack intent that names a hardpoint becomes an attack on it.
+    auto on_hardpoint = intent(ui::TacticalVerb::attack, {4}, {}, 12, 0, ui::CommandOrigin::world_click);
+    on_hardpoint.hardpoint = 5;
+    const auto hardpoint_payload = ui::command_payload(on_hardpoint);
+    expect(hardpoint_payload && hardpoint_payload.value() == tactical::CommandPayload{tactical::AttackPayload{12, 5}},
+        "an attack intent with a hardpoint is an attack on that hardpoint");
+    const auto hull_payload = ui::command_payload(intent(ui::TacticalVerb::attack, {4}, {}, 12, 0, ui::CommandOrigin::world_click));
+    expect(hull_payload && hull_payload.value() == tactical::CommandPayload{tactical::AttackPayload{12, tactical::attack_hull}},
+        "an attack intent without one is an attack on the unit");
     std::vector<sim::EntityId> many(tactical::max_units_per_command + 1U);
     for (std::size_t i = 0; i < many.size(); ++i) many[i] = i + 1U;
     expect(!scheduler.issue(intent(ui::TacticalVerb::stop, many)), "the per-command unit limit holds");

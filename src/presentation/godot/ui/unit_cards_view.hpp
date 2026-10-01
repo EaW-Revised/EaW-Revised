@@ -63,6 +63,12 @@ public:
         bool stacked{};
         std::int32_t health_level{};
         std::optional<double> shield;
+        // #530 (space-purchasing PU-61, PU-62): a build button instead of a unit card: its price as
+        // the text, white (alpha 200) while its queue has room, else grey; a disabled button is
+        // greyed. No bars.
+        std::optional<std::int64_t> price;
+        bool room{true};
+        bool disabled{};
     };
 
     EawrUnitCards();

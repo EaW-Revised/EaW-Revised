@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -54,7 +55,8 @@ struct FogFlash {
 };
 
 // Per-player cell grids, the value copy retail keeps per player, plus each revealer's
-// last marked circle. A value type: a step stages a copy and commits it by assignment.
+// last marked circle. Copies share immutable row buffers; advance stages only rows that
+// change, then commits them after every partition succeeds.
 class FogCells final {
 public:
     FogCells() = default;
@@ -74,7 +76,11 @@ public:
     // the grid and its value is above zero.
     [[nodiscard]] bool revealed(std::size_t player_index, const math::Vec3& position) const noexcept;
     // The player_index-th player's cell values, row by row (255 held, 0 fogged).
-    [[nodiscard]] std::span<const std::uint8_t> values(std::size_t player_index) const noexcept;
+    [[nodiscard]] std::span<const std::uint8_t> values(std::size_t player_index) const;
+    // Immutable presentation rows: retaining them never copies cell bytes.
+    [[nodiscard]] std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> value_rows(std::size_t player_index) const;
+    // Deterministic work counter, excluding pointer metadata and canonical serialization.
+    [[nodiscard]] std::size_t copied_grid_bytes() const noexcept { return copied_grid_bytes_; }
     [[nodiscard]] const FogRules& rules() const noexcept { return rules_; }
     // Hashed state: every anchor in ascending ID, then every player's values.
     void append_state(std::vector<std::uint8_t>& bytes) const;
@@ -92,9 +98,13 @@ private:
 
     FogRules rules_{};
     std::vector<Player> players_;
-    std::map<EntityId, Anchor> anchors_;
-    std::vector<std::vector<std::uint8_t>> values_; // per player index
-    std::vector<std::vector<std::uint32_t>> holds_; // per player index: revealers holding the cell
+    std::shared_ptr<const std::map<EntityId, Anchor>> anchors_ = std::make_shared<const std::map<EntityId, Anchor>>();
+    using ValueRow = std::shared_ptr<std::vector<std::uint8_t>>;
+    using HoldRow = std::shared_ptr<std::vector<std::uint32_t>>;
+    std::vector<std::vector<ValueRow>> values_; // player, row, column
+    std::vector<std::vector<HoldRow>> holds_; // revealers holding each cell
+    mutable std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> flat_values_;
+    std::size_t copied_grid_bytes_{};
 };
 
 } // namespace eawr::sim::tactical

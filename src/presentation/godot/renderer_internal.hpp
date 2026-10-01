@@ -12,6 +12,7 @@
 #include "resource_lease_ledger.hpp"
 #include "shader_adapter.hpp"
 #include "stored_output.hpp"
+#include "submission_plan.hpp"
 #include "upload_identity.hpp"
 #include "upload_winding.hpp"
 
@@ -144,6 +145,7 @@ public:
         RID rid;
         RID skeleton;
         Transform3D object_transform;
+        detail::PlacedPiece placement; // #888: what it last sent, and the submit that carried it
     };
 
     struct PendingPose final {
@@ -231,6 +233,11 @@ public:
     }
 
     [[nodiscard]] std::size_t instance_count() const noexcept { return instances_.size(); }
+
+    [[nodiscard]] GodotRenderer::SubmitWork submit_work() const noexcept {
+        return {work_.submits, work_.pieces, work_.orders_built, work_.order_sorts, work_.transforms_sent,
+                work_.billboard_refreshes, work_.sweeps};
+    }
 
     [[nodiscard]] GodotRenderer::LifecycleCounts lifecycle_counts() const noexcept;
 
@@ -380,6 +387,16 @@ private:
     std::unordered_map<sim::EntityId, float> opacities_;
     detail::MissingAssetWaits missing_waits_;
     std::vector<GodotRenderer::SubmissionEvidence> submission_evidence_;
+    // #888: the submission state kept between frames. The order's resource
+    // pointers stay valid while upload_generation_ is unchanged (every upload
+    // and release of resources_ advances it).
+    detail::SubmissionOrder order_;
+    std::vector<Resource*> order_resources_;
+    detail::SubmitWork work_;
+    std::uint64_t upload_generation_{};
+    std::uint64_t submit_serial_{};
+    std::uint64_t billboard_generation_{};
+    std::uint64_t billboard_applied_generation_{};
     detail::DiagnosticBuffer diagnostics_;
     std::map<sim::AssetId, FogConsumer> fog_consumers_;
     std::map<GodotRenderer::ExternalFogHandle, ExternalFogConsumer> external_fog_consumers_;

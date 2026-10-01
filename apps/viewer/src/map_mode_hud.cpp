@@ -67,7 +67,7 @@ presentation::ui::FontCache load_hud_font_cache(const std::filesystem::path& dir
                                .active_archives = {}};
     auto mounted = vfs::Vfs::mount(std::span<const vfs::MountSpec>(&mount, 1));
     const vfs::Vfs unmounted;
-    return presentation::ui::load_font_cache(mounted ? mounted.value() : unmounted, directory.generic_string());
+    return presentation::ui::load_font_cache(mounted ? mounted.value() : unmounted, ViewerPath::utf8(directory));
 }
 
 std::string parse_hud_arguments(const PackedStringArray& arguments, const bool live_session,
@@ -221,12 +221,16 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             BattleInput* input = battle.get();
             battle->set_card_slots(cards->slot_count());
             if (live_session) {
-                const LiveSessionView* live = live_session.get();
-                TacticalHud* card_hud = hud.get();
-                cards->set_click([input, live, card_hud](const std::size_t slot, const bool shift) {
-                    input->card_click(slot, shift, *live);
-                    card_hud->set_unit_cards(input->card_layout(), input->card_units());
-                    card_hud->set_ability_bar(input->ability_bar());
+                LiveSessionView* live = live_session.get();
+                cards->set_click([this, input, live](const std::size_t slot, const bool shift) {
+                    // #530 PU-60: while the station is the production object the slots are its
+                    // build buttons, and a click buys.
+                    if (input->production_station()) {
+                        static_cast<void>(input->build_click(slot, *live));
+                    } else {
+                        input->card_click(slot, shift, *live);
+                    }
+                    sync_cards();
                 });
             }
             if (live_session) {
@@ -276,6 +280,25 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             });
         }
     }
+    // #530 PU-63, PU-68: a release on a queued slot cancels that entry; a press on a pool slot
+    // starts placing its type. Both reach the simulation only as commands.
+    if (battle && live_session) {
+        if (EawrProductionPanel* production = hud->production()) {
+            BattleInput* input = battle.get();
+            LiveSessionView* live = live_session.get();
+            production->set_cancel([live](const std::size_t component) {
+                const bool upgrades = component < presentation::ui::queue_slot_count;
+                const auto queue = upgrades ? sim::tactical::BuildQueue::upgrades : sim::tactical::BuildQueue::units;
+                const auto index = static_cast<std::uint32_t>(upgrades ? component : component - presentation::ui::queue_slot_count);
+                static_cast<void>(live->cancel_build(queue, index));
+            });
+            production->set_pick([this, input](const std::size_t slot) {
+                if (live_session->reinforcement_allowed() && slot < pool_types.size()) input->begin_placement(pool_types[slot]);
+            });
+            production->set_drag([input](const Vector2 point) { input->placement_move({point.x, point.y}); },
+                [input, live](const Vector2 point) { input->placement_drop({point.x, point.y}, *live); });
+        }
+    }
     // #455 MM-11: a left press or drag on the minimap looks at the point; a right click orders the
     // selection there. Both are presentation or player commands only.
     if (battle && live_session && space && hud->minimap() != nullptr) {
@@ -291,6 +314,81 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         battle->set_minimap_point([minimap_hud](const double x, const double y) { return minimap_hud->minimap_point(x, y); });
     }
     return true;
+}
+
+void MapMode::State::fill_type_names() {
+    if (!minimap_type_names.empty() || !live_session || live_session->tables() == nullptr) return;
+    for (const units::UnitType& type : live_session->tables()->units) minimap_type_names.emplace(skirmish::type_id(type.id), type.id);
+    // #530: the station build lists also name objects outside the unit tables (the upgrades, PU-20),
+    // so their build buttons find their Icon_Name.
+    for (const units::UnitType& type : live_session->tables()->units) {
+        for (const auto& group : type.production.buildable) {
+            for (const std::string& name : group.types) minimap_type_names.emplace(skirmish::type_id(name), name);
+        }
+    }
+}
+
+void MapMode::State::sync_cards() {
+    if (!hud || !battle) return;
+    if (battle->production_station()) {
+        if (EawrUnitCards* cards = hud->unit_cards()) {
+            fill_type_names();
+            std::vector<EawrUnitCards::Card> buttons;
+            for (const presentation::ui::BuildButton& button : battle->build_buttons()) {
+                EawrUnitCards::Card card;
+                card.slot = button.slot;
+                const auto name = minimap_type_names.find(button.type);
+                card.type = name != minimap_type_names.end() ? name->second : std::to_string(button.type);
+                card.price = button.price;
+                // PU-62: an option the session never builds (PU-20) carries no price; show the listed one.
+                if (button.price == 0) card.price = hud->listed_build_cost(card.type).value_or(0);
+                card.room = button.room;
+                card.disabled = !button.enabled;
+                buttons.push_back(std::move(card));
+            }
+            cards->show(std::move(buttons), {});
+        }
+    } else {
+        hud->set_unit_cards(battle->card_layout(), battle->card_units());
+    }
+    hud->set_ability_bar(battle->ability_bar());
+}
+
+void MapMode::State::sync_production() {
+    if (!hud || !live_session || hud->production() == nullptr) return;
+    const LiveSessionView& live = *live_session;
+    fill_type_names();
+    const auto name_of = [this](const sim::tactical::TypeId type) {
+        const auto name = minimap_type_names.find(type);
+        return name != minimap_type_names.end() ? name->second : std::to_string(type);
+    };
+    EawrProductionPanel::View view;
+    view.reinforcement_allowed = live.reinforcement_allowed() && overview_ui.tactical_shell;
+    if (!view.reinforcement_allowed && battle->placing()) battle->cancel();
+    pool_types.clear();
+    if (const sim::tactical::EconomyView* economy = live.local_economy()) {
+        // PU-64: the front's progress at the presented tick.
+        const auto frame = static_cast<std::uint64_t>(std::max(0.0, live.presented_tick()));
+        for (const presentation::ui::QueueSlot& slot : presentation::ui::layout_build_queue(economy->queues, frame)) {
+            view.queue.push_back({slot.component, name_of(slot.type), slot.progress, slot.percent});
+        }
+        view.credits = presentation::ui::credits_text(economy->credits);
+        // PU-21: a type's population value from the station menus.
+        const auto population_of = [&live](const sim::tactical::TypeId type) {
+            for (const sim::tactical::StationMenu& menu : live.economy().menus) {
+                if (const sim::tactical::BuildOption* option = menu.find(type)) return option->population;
+            }
+            return 0U;
+        };
+        const auto pool = presentation::ui::layout_pool(economy->pool, economy->population, economy->population_cap, population_of);
+        for (const presentation::ui::PoolSlot& slot : pool) {
+            view.pool.push_back({slot.slot, name_of(slot.type), slot.text, slot.enabled});
+            pool_types.push_back(slot.type);
+        }
+        view.population = presentation::ui::population_text(economy->population, economy->population_cap);
+        view.rows = presentation::ui::pool_rows(pool.size());
+    }
+    hud->production()->show(std::move(view));
 }
 
 void MapMode::State::sync_overview_ui() {
@@ -355,9 +453,7 @@ void MapMode::State::sync_minimap() {
     const auto& latest = live_session->battle_frame().latest;
     if (!bounds || !latest) return;
     const LiveSessionView& live = *live_session;
-    if (minimap_type_names.empty() && live.tables() != nullptr) {
-        for (const units::UnitType& type : live.tables()->units) minimap_type_names.emplace(skirmish::type_id(type.id), type.id);
-    }
+    fill_type_names();
     if (!minimap_height) {
         // MM-09: the mean height of the lobby players' radar-visible units, taken once there are any
         // (until then the outline uses the plane z = 0).
@@ -399,13 +495,10 @@ void MapMode::State::sync_minimap() {
         const auto& rules = cells->rules;
         view.cells = presentation::ui::MinimapFogCells{to_double(rules.map_left), to_double(rules.map_top),
             to_double(rules.cell_size), rules.cells_wide, rules.cells_tall,
-            std::shared_ptr<const std::vector<std::uint8_t>>(cells, &cells->values)};
+            {}, std::shared_ptr<const std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>>(cells, &cells->values)};
     }
-    const auto local_team = live.team_of(live.local_player());
-    for (const sim::tactical::TacticalInstance& instance : latest->instances()) {
-        if (!instance.reveal_range || !local_team || instance.team != *local_team) continue;
-        view.revealers.push_back({to_double(instance.fixed_transform.rows[0][3]), to_double(instance.fixed_transform.rows[1][3]),
-                                  to_double(*instance.reveal_range)});
+    for (const auto& revealer : live.snapshot_index().revealers()) {
+        view.revealers.push_back({revealer.x, revealer.y, revealer.range});
     }
     view.ground = battle->ground_corners(minimap_height.value_or(0.0));
     // FW-14: `--eawr-live-reveal on` draws no fog plane in the world, so the minimap's fog layer

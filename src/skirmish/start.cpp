@@ -240,6 +240,18 @@ private:
         player.lobby = true;
         player.human = slot.human;
         player.start_side = prefix.substr(0, prefix.size() - 1);
+        // SK-30, SK-31 (#530): MP_Default_Credits, the station's income, its build queue and
+        // the faction's population cap (economy_rules builds them for the session).
+        if (inputs_.tables != nullptr) {
+            for (const auto& constant : inputs_.tables->constants.scalars) {
+                if (constant.tag == "MP_Default_Credits" && constant.value) {
+                    player.credits = constant.value->raw() / Fixed::scale;
+                }
+            }
+        }
+        player.income = true;
+        player.production_queue = true;
+        player.population_cap = true;
         // SK-12: slot k takes the k-th MP_Color_* constant.
         if (slot.slot - 1U >= inputs_.lobby_colours.size()) {
             return Void::failure(fixture_error("no MP_Color_* constant for lobby slot " + std::to_string(slot.slot)));

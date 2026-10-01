@@ -41,6 +41,9 @@ namespace eawr::presentation::godot_backend {
 //   hidden when the object is created. While TURBO or SPOILER_LOCK runs the turbo engines
 //   replace the engine emitters, and POWER_TO_WEAPONS shows its effect (#76, AB-31, AB-32); a
 //   proxy the model authors hidden stays hidden.
+// - Ion-stun ("pi") emitters run while the unit is ion stunned (space-damage IS-09), authored
+//   hidden or not: FoC loads the authored flag into the code flag the stun clears. When the stun
+//   ends they stop emitting and their particles drain.
 // - A hardpoint's damage emitters (the proxies below its Damage_Particles bone) run from the
 //   moment it is destroyed; the emitters below a destroyed hardpoint's Engine_Particles bone
 //   stop when it sets Engine_Death_Hide_Engine_Particles.
@@ -80,6 +83,7 @@ public:
         bool engines_online{true};
         bool turbo{};
         bool power_to_weapons{};
+        bool ion_stunned{};  // IS-09: the stun shows the ion-stun ("pi") emitters
         friend bool operator==(const Modes&, const Modes&) = default;
     };
 
@@ -113,6 +117,9 @@ public:
                              const sim::tactical::TacticalSnapshot& latest, const ClonePoseAt& clone_pose_at,
                              const ProjectilePoseAt& projectile_pose_at, const FixedCamera& camera,
                              double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {});
+    // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
+    // this object's frames.
+    void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "unit_emitters" member, followed by ",\n".
@@ -135,6 +142,7 @@ private:
         std::optional<sim::math::Mat3x4> mesh_local;
         bool failed{};  // could not start; reported once per plan, not retried
         bool engine{};  // an engine emitter (BP-42): drawn at the ship's engine brightness
+        bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
     };
     struct Running final {
         std::size_t proxy{};
@@ -142,6 +150,7 @@ private:
         sim::math::Mat3x4 local{};
         std::optional<sim::math::Mat3x4> mesh_local;
         bool engine{};
+        bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
         std::uint64_t born{};  // the clock sample it was started for
         std::size_t log{};     // its start_log_ row, or start_log_limit
         // An engine emitter an ability swap hid (BP-65): it no longer emits, its residual
@@ -240,6 +249,9 @@ private:
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
     std::unique_ptr<particles::EffectRegistry> registry_;
+    // #638: the handles of one batched advance or present and their statistics, reused.
+    std::vector<particles::EffectHandle> batch_handles_;
+    std::vector<particles::EffectFrameStats> batch_stats_;
     std::map<std::string, ModelFrames> frames_;
     std::map<std::string, EffectSystem> systems_;
     std::vector<Ship> ships_;
@@ -271,6 +283,10 @@ private:
     std::uint64_t engine_drains_started_{};
     std::uint64_t engine_drains_finished_{};
     std::uint64_t engine_drains_cut_short_{};
+    // IS-09: ion-stun emitters the stun's end hid, drained like the engines' (BP-65).
+    std::uint64_t ion_stun_drains_started_{};
+    std::uint64_t ion_stun_drains_finished_{};
+    std::uint64_t ion_stun_drains_cut_short_{};
     std::uint64_t clone_drains_released_{};
     std::uint64_t clone_drains_cut_short_{};
     std::uint64_t clone_drains_reset_{};

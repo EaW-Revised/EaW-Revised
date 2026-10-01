@@ -315,9 +315,11 @@ struct TacticalHud::State final {
     model::ResolvedFont card_face;
     const std::pair<std::string, String>& card_type(const std::string& type);
     // A command bar texture (the atlas, then files) at texel size, decoded once; null when missing.
-    Ref<Texture2D> command_texture(const std::string& name, const std::string& use);
+    Ref<Texture2D> command_texture(const std::string& name, const std::string& use, bool quiet = false);
     // #454: the ability buttons.
     EawrAbilityButtons* abilities{};
+    // #530: the build queue, the credits and the reinforcement pane.
+    EawrProductionPanel* production{};
     // #455: the minimap and its model state.
     EawrMinimap* minimap{};
     model::MinimapSettings minimap_settings;
@@ -433,12 +435,12 @@ TacticalHud::TacticalHud(Options options) : state_(std::make_unique<State>(std::
 TacticalHud::~TacticalHud() = default;
 
 const std::string& TacticalHud::failure() const noexcept { return state_->failure; }
-Ref<Texture2D> TacticalHud::State::command_texture(const std::string& name, const std::string& use) {
+Ref<Texture2D> TacticalHud::State::command_texture(const std::string& name, const std::string& use, const bool quiet) {
     const auto found = card_textures.find(name);
     if (found != card_textures.end()) return found->second;
     const model::ThemeTexture slot = model::resolve_ui_texture(name, atlas ? &atlas->directory : nullptr, standalone);
     Ref<Texture2D> result = textures ? textures->texture(slot, 1.0, 1.0) : Ref<Texture2D>();
-    if (result.is_null()) warn("EAWR-UI-0322", use + " texture " + name + " cannot be drawn", name);
+    if (result.is_null() && !quiet) warn("EAWR-UI-0322", use + " texture " + name + " cannot be drawn", name);
     card_textures.emplace(name, result);
     return result;
 }
@@ -669,6 +671,37 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         state.hud->add_child(state.abilities);
         state.abilities->setup(std::move(abilities));
     }
+    // #530: the build queue, the credits and the reinforcement pane (space-purchasing PU-63 to
+    // PU-67), in the card slots' face.
+    if (!state.shell.queue_slots.empty() || state.shell.credits || state.shell.reinforcement) {
+        EawrProductionPanel::Setup production;
+        production.queue = state.shell.queue_slots;
+        production.credits = state.shell.credits;
+        production.reinforce = state.shell.reinforcement;
+        if (auto pane_anchors = data::ui::load_shell_anchors(filesystem, model::reinforce_pane_model(catalog))) {
+            for (const auto& diagnostic : pane_anchors.value().diagnostics) state.diagnostics.push_back(diagnostic);
+            auto pane = model::reinforce_pane(pane_anchors.value().shell, catalog, state.options.faction);
+            for (const auto& diagnostic : pane.diagnostics) state.diagnostics.push_back(diagnostic);
+            production.pane = std::move(pane);
+        } else {
+            state.diagnostics.push_back(pane_anchors.error());
+        }
+        production.texture = [&state](const std::string& name) { return state.command_texture(name, "production"); };
+        production.optional_texture = [&state](const std::string& name) { return state.command_texture(name, "production", true); };
+        production.icon = [&state](const std::string& type) { return state.card_type(type).first; };
+        if (!state.fonts) state.fonts = std::make_shared<FontProvider>(std::move(state.options.font_cache));
+        const model::ResolvedFont face = state.fonts->resolve({"EmpireAtWar-Medium", 6}, state.options.language);
+        production.font = state.fonts->font(face);
+        production.cell = [fonts = state.fonts, face](const std::int32_t height) {
+            return model::gdi_text_cell(fonts->cache(), face, height);
+        };
+        production.placement = [hud] { return hud->placement(); };
+        production.space = [hud] { return hud->space(); };
+        state.production = memnew(EawrProductionPanel);
+        state.production->set_name("EawrProductionPanel");
+        state.hud->add_child(state.production);
+        state.production->setup(std::move(production));
+    }
     // #455: the minimap inside the radar mesh; its icons are command bar textures (MM-06).
     if (state.shell.minimap) {
         state.minimap_settings = model::minimap_settings(filesystem);
@@ -807,6 +840,9 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
         return centre(Rect2(button->get_global_position() + button->hit_rect().position, button->hit_rect().size));
     };
     if (name == "pause") return button_centre(state.pause_button);
+    if (state.production != nullptr) {
+        if (const auto rect = state.production->control_rect(name)) return centre(*rect);
+    }
     if (name == "fast_forward") return button_centre(state.fast_forward_button);
     if (state.overlay != nullptr) {
         if (const auto rect = state.overlay->control_rect(name)) return centre(*rect);
@@ -815,6 +851,12 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
 }
 
 EawrUnitCards* TacticalHud::unit_cards() const noexcept { return state_->cards; }
+
+EawrProductionPanel* TacticalHud::production() const noexcept { return state_->production; }
+
+std::optional<std::int64_t> TacticalHud::listed_build_cost(const std::string& type) const {
+    return model::unit_card_looks(type, state_->objects, nullptr).build_cost;
+}
 
 EawrMinimap* TacticalHud::minimap() const noexcept { return state_->minimap; }
 
@@ -937,6 +979,7 @@ std::string TacticalHud::report_json() const {
         output << "]}";
     }
     if (state.cards != nullptr) output << ", \"unit_cards\": " << state.cards->report_json();
+    if (state.production != nullptr) output << ", \"production\": " << state.production->report_json();
     if (state.abilities != nullptr) output << ", \"ability_buttons\": " << state.abilities->report_json();
     if (state.minimap != nullptr) {
         output << ", \"minimap\": " << state.minimap->report_json() << ", \"minimap_fog\": {\"fogged\": "
@@ -978,6 +1021,7 @@ void register_tactical_hud_classes() {
     GDREGISTER_CLASS(EawrTacticalHud);
     GDREGISTER_CLASS(EawrHudButton);
     GDREGISTER_CLASS(EawrUnitCards);
+    GDREGISTER_CLASS(EawrProductionPanel);
     GDREGISTER_CLASS(EawrMinimap);
     GDREGISTER_CLASS(EawrAbilityButtons);
     GDREGISTER_CLASS(EawrBattleOverlay);

@@ -264,6 +264,28 @@ void test_out_of_combat() {
     expect(outcome && state.hull.raw() == 500 * one, "DG-26: scripted damage takes no combat modifier");
 }
 
+// DG-26 with #530 PU-38: an arriving unit's -3 adds to the out-of-combat -1. FoC applies the modifier
+// unclamped; the remake bounds it at -4..1, so -3 does 4 times, -4 five times and anything lower
+// five times too.
+void test_arrival_vulnerability() {
+    const auto profile = frigate();
+    const auto value = rules();
+    auto state = tactical::full_durability(profile);
+    state.shields = Fixed{};
+    // 10 x 3 (hull armor) = 30 without a modifier.
+    const auto hit_with = [&](const std::int64_t defense, const std::uint64_t frame) {
+        state.last_hit_frame.reset();
+        const auto before = state.hull;
+        const tactical::Hit hit{units(10), 0, true, false, true, tactical::hull_target, true, true, units(defense)};
+        const auto outcome = tactical::apply_hit(profile, value, state, hit, frame);
+        expect(static_cast<bool>(outcome), "the hit applies");
+        return (before.raw() - state.hull.raw()) / one;
+    };
+    expect(hit_with(-3, 100) == 120, "PU-38: an arriving unit takes 4 times the damage");
+    expect(hit_with(-4, 200) == 150, "PU-38 and DG-26: an arriving craft out of combat takes 5 times");
+    expect(hit_with(-6, 300) == 150, "DG-26: the remake bounds the modifier at -4");
+}
+
 void test_recharge() {
     const auto profile = frigate();
     const auto value = rules();
@@ -490,6 +512,59 @@ Tally run(tactical::TacticalSession& value, const std::uint64_t ticks) {
         tally.events.insert(tally.events.end(), events.begin(), events.end());
     }
     return tally;
+}
+
+// #530 PU-38, PU-39 in a battle: player 1 buys an armed unit and brings it in at (0, 0), 300 units
+// from player 2's shooter. It holds its fire until its arrival ends (frame 150); the first hit it
+// takes before then does what apply_hit gives for a defense modifier of -3.
+void test_arrival_in_battle() {
+    const auto staged = setup({unit(1, station_type, 1, at(-2000, 0)), unit(2, shooter_type, 2, at(300, 0), true)});
+    tactical::EconomyRules economy;
+    economy.players = {{1, units(1000), 25, false, Fixed{}}, {2, units(1000), 25, true, units(180)}};
+    economy.menus = {{station_type, 1,
+        {{shooter_type, tactical::BuildKind::unit, tactical::BuildQueue::units, units(100), 1, 1, 1, true}}}};
+    economy.vulnerability = units(-3);
+    economy.vulnerability_frames = 150;
+    auto created = tactical::TacticalSession::create(staged, sensors(), durability(), {}, std::nullopt, combat(), {}, {}, economy);
+    expect(static_cast<bool>(created), "the arrival battle session is created");
+    if (!created) return;
+    auto value = std::move(created).value();
+    expect(static_cast<bool>(value.submit({{0, 1, 0}, {1}, tactical::BuyPayload{shooter_type}})), "player 1 buys the unit");
+    static_cast<void>(run(value, 5));
+    const auto id = value.next_entity_id();
+    expect(static_cast<bool>(value.submit({{5, 1, 1}, {}, tactical::ReinforcePayload{shooter_type, at(0, 0)}})),
+        "player 1 brings it in");
+    constexpr std::uint64_t start = 5; // arrival frame 0 is tick 5, frame 150 tick 155
+    std::optional<std::uint64_t> first_fired;
+    std::optional<std::uint64_t> first_hit;
+    Fixed hull_before_hit{};
+    Fixed hull_after_hit{};
+    const eawr::sim::InlineExecutor executor;
+    for (std::uint64_t tick = start; tick < start + 400; ++tick) {
+        const auto before = value.durability_state(id);
+        auto stepped = value.step(executor);
+        expect(static_cast<bool>(stepped), "arrival battle step succeeds");
+        if (!stepped) break;
+        for (const auto& event : stepped.value().snapshot->combat_events()) {
+            if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == id && !first_fired) first_fired = tick;
+            if (event.kind == tactical::CombatEventKind::projectile_hit && event.target == id && !first_hit && before) {
+                first_hit = tick;
+                hull_before_hit = before->hull;
+                hull_after_hit = value.durability_state(id)->hull;
+            }
+        }
+    }
+    expect(first_fired.has_value() && *first_fired >= start + 150,
+        "PU-39: the arriving unit holds its fire until its arrival ends, then fires");
+    expect(first_hit.has_value() && *first_hit >= start + 35 && *first_hit < start + 150,
+        "PU-37, PU-38: the enemy hits it only once it is shown, and while it arrives");
+    if (!first_hit) return;
+    const auto profile = durability().profiles[0];
+    auto expected = tactical::full_durability(profile);
+    const tactical::Hit hit{units(10), 0, true, true, true, tactical::hull_target, true, true, units(-3)};
+    const auto outcome = tactical::apply_hit(profile, *durability().damage, expected, hit, *first_hit);
+    expect(outcome && hull_before_hit.raw() - hull_after_hit.raw() == profile.max_hull.raw() - expected.hull.raw(),
+        "PU-38: the hit does what a -3 defense modifier gives (4 times)");
 }
 
 // Fixture DG-F1, shield loss: a shooter 300 units from a shielded frigate. Its projectiles fly 25
@@ -894,6 +969,52 @@ void test_aimed_routes() {
     auto table = combat();
     table.profiles[2].aimed_routes = {static_cast<std::uint32_t>(tactical::max_hardpoints_per_type)};
     expect(!tactical::validate_combat(table), "DG-39: a route beyond the hardpoint limit is refused");
+}
+
+// #531 (space-orders OR-20, OR-25) with #669 (DG-39): a player's attack on one hardpoint takes the
+// aimed route. The corvette gets a second hardpoint (1, local x 5, behind hardpoint 0 and off its
+// axis), each routed to itself; the hull plate (local x 18) stands in front of both. Unordered, the
+// shooter aims at the nearest hardpoint, 0. Ordered onto hardpoint 1, every shot meets the hull
+// plate and still damages hardpoint 1: hardpoint 0 and the hull are untouched until it is destroyed.
+void test_ordered_hardpoint_route() {
+    const auto make = [] {
+        auto table = combat();
+        auto& profile = table.profiles[2];
+        profile.hardpoints = {{0, at(15, 0), true}, {1, at(5, 6), true}};
+        profile.meshes = {tactical::collision_mesh(plate(18, 9), tactical::no_hardpoint, tactical::no_hardpoint, false),
+            tactical::collision_mesh(plate(15, 4), 0, 0, false)};
+        profile.mesh_bounds = tactical::CollisionBox{at(5, -9, -9), at(18, 9, 9)};
+        profile.aimed_routes = {0, 1};
+        auto health = durability();
+        health.profiles[2].hardpoints.push_back(health.profiles[2].hardpoints.front());
+        auto created = tactical::TacticalSession::create(
+            setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, corvette_type, 2, at(300, 0), true)}), sensors(), health,
+            {}, std::nullopt, table);
+        expect(static_cast<bool>(created), "ordered-hardpoint session is created");
+        return std::move(created).value();
+    };
+    const auto intact = [](const std::optional<tactical::DurabilityState>& health, const std::size_t index) {
+        return health && health->hardpoints[index].raw() == 90 * one;
+    };
+
+    auto unordered = make();
+    static_cast<void>(run(unordered, 120));
+    auto health = unordered.durability_state(2);
+    expect(health && health->hardpoints[0].raw() < 90 * one && intact(health, 1),
+        "OR-24: unordered, the shots go to the nearest hardpoint, 0");
+
+    auto ordered = make();
+    expect(static_cast<bool>(ordered.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2, 1}})),
+        "OR-20: the attack on hardpoint 1 submits");
+    health = ordered.durability_state(2);
+    bool others_untouched = true;
+    for (int tick = 0; tick < 400 && health && health->hardpoints[1].raw() > 0; ++tick) {
+        static_cast<void>(run(ordered, 1));
+        health = ordered.durability_state(2);
+        others_untouched = others_untouched && intact(health, 0) && health->hull.raw() == 300 * one;
+    }
+    expect(health && health->hardpoints[1].raw() == 0 && others_untouched,
+        "OR-25, DG-39: shots on the ordered hardpoint damage it through the hull mesh, not the hull or hardpoint 0");
 }
 
 // Fixture DG-F3, out-of-range miss: the laser's projectile travels only 200 units (its range here),
@@ -1495,10 +1616,12 @@ int main(int argc, char** argv) {
     test_hit_pipeline();
     test_diminishing_gates();
     test_out_of_combat();
+    test_arrival_vulnerability();
     test_recharge();
     test_energy();
     test_segment();
     test_shield_loss();
+    test_arrival_in_battle();
     test_hardpoint_destroyed();
     test_meshes();
     test_mesh_hits();
@@ -1506,6 +1629,7 @@ int main(int argc, char** argv) {
     test_object_weapon_scatter();
     test_object_burst_clock();
     test_aimed_routes();
+    test_ordered_hardpoint_route();
     test_out_of_range_miss();
     test_range_boundary();
     test_path();

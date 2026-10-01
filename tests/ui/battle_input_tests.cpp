@@ -455,6 +455,28 @@ void modifier_orders() {
     expect(point != nullptr && point->target == 0 && point->destination == ground,
            "Ctrl+Alt on a selected unit: guard the point");
     expect(std::holds_alternative<tactical::AttackPayload>(issue(enemy, ctrl_alt)), "Ctrl+Alt on an enemy: an attack");
+    // #531 (OR-20): a pick that names a hardpoint of the enemy attacks that hardpoint, in every mode
+    // that attacks; a pick with none attacks the unit.
+    ui::WorldPick reticle = enemy;
+    reticle.hardpoint = 3;
+    const auto hardpoint_attack = issue(reticle, {});
+    const auto* on_hardpoint = std::get_if<tactical::AttackPayload>(&hardpoint_attack);
+    expect(on_hardpoint != nullptr && on_hardpoint->target == 30 && on_hardpoint->hardpoint == 3,
+           "a click on an enemy's reticle: an attack on that hardpoint");
+    const auto unit_attack = issue(enemy, {});
+    const auto* on_unit = std::get_if<tactical::AttackPayload>(&unit_attack);
+    expect(on_unit != nullptr && on_unit->hardpoint == tactical::attack_hull, "a click on an enemy: an attack on the unit");
+    const auto moded_attack = issue(reticle, ctrl);
+    const auto* under_ctrl = std::get_if<tactical::AttackPayload>(&moded_attack);
+    expect(under_ctrl != nullptr && under_ctrl->hardpoint == 3, "Ctrl on an enemy's reticle: an attack on that hardpoint");
+    input.arm(OrderMode::attack);
+    const auto armed_attack = issue(reticle, {});
+    const auto* armed = std::get_if<tactical::AttackPayload>(&armed_attack);
+    expect(armed != nullptr && armed->hardpoint == 3 && input.mode() == OrderMode::none,
+           "attack mode on an enemy's reticle: an attack on that hardpoint, then disarmed");
+    input.arm(OrderMode::move);
+    const auto moved_over = issue(reticle, {});
+    expect(std::holds_alternative<tactical::MovePayload>(moved_over), "move mode on an enemy's reticle: still a move");
     input.arm(OrderMode::guard);
     const auto moded = issue(friendly, {});
     expect(std::holds_alternative<tactical::GuardPayload>(moded) && input.mode() == OrderMode::none,
@@ -627,9 +649,41 @@ void pick_volumes() {
     expect(selection.units() == std::vector<sim::EntityId>({2, 3}), "a double click on the fighter adds no ship (#665)");
 }
 
+// OR-20, WSU-11: an attached hardpoint mesh participates in its ship's pick, but a mesh
+// click carries no hardpoint. A reticle is the only input that names one.
+void hardpoint_mesh_orders() {
+    const auto hull = deck(-20.0F, 20.0F, -20.0F, 20.0F, 10.0F);
+    const auto hardpoint = deck(60.0F, 80.0F, -10.0F, 10.0F, 30.0F);
+    auto triangles = hull.triangles;
+    triangles.insert(triangles.end(), hardpoint.triangles.begin(), hardpoint.triangles.end());
+    const auto mesh = ui::make_pick_mesh(std::move(triangles));
+    auto ship = unit(30, 7, false, {0.0F, 0.0F, 0.0F}, std::nullopt, true);
+    ship.box = box_at({0.0F, 0.0F, 0.0F}, 100.0F);
+    ship.mesh = &mesh;
+    const std::vector<ui::BattleUnit> units{ship};
+    expect(!ui::pick_unit(down_at(40.0F, 0.0F), units),
+           "OR-20: the empty gap between hull and hardpoint meshes is not a unit pick");
+    ui::CommandScheduler scheduler(1);
+    ui::OrderInput input(scheduler);
+    input.set_selection(std::vector<sim::EntityId>{1});
+    for (const float x : {0.0F, 70.0F}) {
+        const auto picked = ui::pick_unit(down_at(x, 0.0F), units);
+        expect(picked == ship.entity, "OR-20: hull and attached hardpoint mesh both pick the ship");
+        if (!picked) continue;
+        const ui::WorldPick pick{{}, *picked, ship.hostile, ship.own, false};
+        const auto issued = input.world_command(pick, ui::CommandOrigin::world_click);
+        expect(issued && issued.value(), "OR-20: the mesh click issues an attack");
+        const auto taken = scheduler.take(scheduler.open_tick());
+        const auto* attack = taken.empty() ? nullptr : std::get_if<tactical::AttackPayload>(&taken.back().payload);
+        expect(attack != nullptr && attack->target == ship.entity && attack->hardpoint == tactical::attack_hull,
+               "OR-20: a hull or hardpoint mesh click attacks the unit without naming a hardpoint");
+    }
+}
+
 int main() {
     picking();
     pick_volumes();
+    hardpoint_mesh_orders();
     squadrons();
     clicks_and_boxes();
     control_groups();

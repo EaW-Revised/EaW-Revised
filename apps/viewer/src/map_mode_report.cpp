@@ -1,3 +1,4 @@
+#include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
 #include "render_profile_viewport.hpp"
 
@@ -16,7 +17,7 @@ namespace map_mode_detail {
         case '\r': output << "\\r"; break;
         case '\t': output << "\\t"; break;
         default:
-            if (character < 0x20U || character >= 0x7fU) {
+            if (character < 0x20U) {
                 output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
             } else {
                 output << static_cast<char>(character);
@@ -378,7 +379,7 @@ bool MapMode::State::write_report() const {
         output << "  \"fog\": {\"source\": [";
         for (std::size_t i = 0; i < fog->sources().size(); ++i) {
             const auto& source = fog->sources()[i];
-            output << (i ? ", " : "") << "{\"path\": " << json(source.path.generic_string())
+            output << (i ? ", " : "") << "{\"path\": " << json(ViewerPath::utf8(source.path))
                 << ", \"sha256\": " << json(source.sha256)
                 << ", \"team\": " << source.team << ", \"revision\": " << source.revision << '}';
         }

@@ -205,6 +205,9 @@ struct SquadronState {
     EntityId escorted{};
     math::Vec3 anchor{};       // idle: the point it holds
     EntityId target{};         // the formation's attack target, zero for none
+    // #531: the hardpoint of `target` a player attack order named (attack_hull for none); hashed
+    // only when set, so sessions without a hardpoint order keep their hashes.
+    std::uint32_t target_hardpoint{attack_hull};
     std::uint64_t next_scan_frame{};
     // FO-01: where the move started; hashed only in move mode, so sessions without a squadron
     // move keep their hashes.

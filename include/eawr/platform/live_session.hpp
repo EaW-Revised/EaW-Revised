@@ -79,12 +79,12 @@ struct LiveTickCost {
 };
 
 // #494: one player's fog cells after a completed tick (FogCells::values, row by row), for the fog
-// drawn in the world. A copy for presentation: taking it changes nothing in the session.
+// drawn in the world. Immutable shared rows keep earlier ticks alive without copying cells.
 struct LiveFog {
     std::uint64_t tick{};
     sim::tactical::FogRules rules{};
     sim::tactical::PlayerId player{};
-    std::vector<std::uint8_t> values;
+    std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> values;
 };
 
 // The events of one completed tick that the battle view presents (LiveEventLog).
@@ -155,6 +155,10 @@ private:
 
 class LiveSession final {
 public:
+    // WR-13: nonblocking preview query. Busy simulation returns no verdict; presentation
+    // keeps its last preview until the next frame. The authoritative command always rechecks.
+    [[nodiscard]] std::optional<bool> reinforcement_point(sim::tactical::PlayerId player,
+        sim::tactical::TypeId type, const sim::math::Vec3& point) const;
     enum class Pacing : std::uint8_t {
         // The simulation thread keeps one tick due every wall-clock interval of the target rate
         // (1000 / target whole milliseconds, docs/behaviour/tactical-time-controls.md TM-02).
@@ -190,7 +194,7 @@ public:
         // Scripts beside the world (#79): the world steps inside their scripted session, whose
         // commands join the replay; the tick hashes stay the world's.
         std::shared_ptr<const LiveScripts> scripts{};
-        // #494: the player whose fog cells each kept tick carries (fog_at()); none keeps no copies.
+        // #494: the player whose fog cells each kept tick carries (fog_at()); none keeps no fog history.
         std::optional<sim::tactical::PlayerId> fog_player{};
     };
 
@@ -206,6 +210,7 @@ public:
     // switched by an order whose payload is a sim::tactical::AbilityPayload (docs/behaviour/
     // space-abilities.md AB-50 for the command bar); the snapshots carry each instance's
     // AbilityStatus list.
+    // `economy` is the skirmish's economy (#530); without it nothing is bought.
     [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
         const sim::tactical::TacticalSetup& setup,
         std::span<const sim::tactical::SensorProfile> sensors,
@@ -215,7 +220,8 @@ public:
         Options options,
         const sim::tactical::VictoryRules& victory = sim::tactical::VictoryRules{},
         const std::optional<sim::tactical::FogRules>& fog = std::nullopt,
-        const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{});
+        const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{},
+        const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{});
 
     ~LiveSession();
     LiveSession(const LiveSession&) = delete;
@@ -291,6 +297,7 @@ private:
     const sim::tactical::CombatTable& combat,
     const sim::tactical::VictoryRules& victory = sim::tactical::VictoryRules{},
     const std::optional<sim::tactical::FogRules>& fog = std::nullopt,
-    const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{});
+    const sim::tactical::AbilityTable& abilities = sim::tactical::AbilityTable{},
+    const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{});
 
 } // namespace eawr::platform

@@ -3,6 +3,7 @@
 #include "instance_reconciliation.hpp"
 #include "missing_asset_waits.hpp"
 #include "pass_submission.hpp"
+#include "submission_plan.hpp"
 #include "particle_texture.hpp"
 #include "resource_lease_ledger.hpp"
 #include "shader_adapter.hpp"
@@ -68,6 +69,8 @@ int main() {
     pass_order_contracts();
     surface_material_contracts();
     snapshot_adapter_contracts();
+    submission_plan_contracts();
+    submission_presence_contracts();
     instance_resource_contracts();
 
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

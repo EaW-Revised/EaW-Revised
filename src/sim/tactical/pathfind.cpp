@@ -1213,6 +1213,16 @@ core::Result<std::uint8_t> find_linear_collision(
     return core::Result<std::uint8_t>::success(hits);
 }
 
+core::Result<std::uint8_t> find_static_collision(const std::vector<TrackedLeaf>& statics, const LinearQuery& query) {
+    Calc calc;
+    PathSearchStats stats;
+    Boxes boxes;
+    const auto hits = detect(calc, statics, boxes.statics(calc, statics), boxes, query, query.start,
+        query.end, Fixed{}, Fixed{}, stats, facing_of(query));
+    if (!calc.ok()) return core::Result<std::uint8_t>::failure(calc.error("arrival static collision query"));
+    return core::Result<std::uint8_t>::success(hits);
+}
+
 core::Result<std::uint8_t> find_dual_collision(
     const CollisionWorld& world, const SpaceLayer layer, const LinearQuery& query) {
     Calc calc;

@@ -114,6 +114,7 @@ void GodotRenderer::Impl::set_billboard_light(const sim::AssetId asset_id, const
     const Vector3 direction(toward_light[0], toward_light[1], toward_light[2]);
     if (found != resources_.end() && direction.is_finite() && direction.length_squared() > 0.0F) {
         found->second.billboard_light = direction.normalized();
+        ++billboard_generation_; // #888: the next submit turns the billboards again
     }
 }
 
@@ -198,98 +199,124 @@ core::Result<void> GodotRenderer::Impl::set_material_scalar(const sim::AssetId a
 }
 
 void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snapshot) {
-    submission_evidence_.clear();
-    if (!snapshot) return;
+    if (!snapshot) {
+        submission_evidence_.clear();
+        order_.invalidate();
+        return;
+    }
     RenderingServer* rendering = RenderingServer::get_singleton();
-    if (!rendering || !scenario_.is_valid()) return;
-    const std::vector<PresentationTransform> transforms = adapt_snapshot(*snapshot);
+    if (!rendering || !scenario_.is_valid()) {
+        submission_evidence_.clear();
+        order_.invalidate();
+        return;
+    }
+    // #888: only what changed reaches Godot. The pass order is kept while the
+    // snapshot's (entity, asset) sequence and the uploads are unchanged, and a
+    // piece is sent only when its fixed transform differs from the one it last
+    // sent; the fixed-to-float bridge (adapt_snapshot's conversion) runs for
+    // those pieces only.
+    const std::span<const sim::RenderInstance> instances = snapshot->instances();
+    ++work_.submits;
+    work_.pieces += instances.size();
     // This is the project-owned submission dependency. It combines with
     // material priority below; Godot remains responsible for the final
     // depth and blend ordering within each class.
-    std::vector<detail::RoutedTransform> routed;
-    routed.reserve(transforms.size());
-    for (const PresentationTransform& transform : transforms) {
-        const auto resource = resources_.find(transform.asset_id);
-        routed.push_back({transform, resource == resources_.end()
-            ? RenderPass::post : resource->second.pass});
+    const bool reordered = order_.plan(instances, upload_generation_, [this](const sim::AssetId asset) {
+        const auto resource = resources_.find(asset);
+        return resource == resources_.end() ? std::nullopt : std::optional<RenderPass>(resource->second.pass);
+    }, work_);
+    const std::span<const detail::PlannedPiece> pieces = order_.pieces();
+    if (reordered) {
+        submission_evidence_.clear();
+        submission_evidence_.reserve(pieces.size());
+        order_resources_.assign(pieces.size(), nullptr);
+        for (std::size_t index = 0; index < pieces.size(); ++index) {
+            if (!pieces[index].uploaded) continue;
+            const sim::RenderInstance& source = instances[pieces[index].source];
+            order_resources_[index] = &resources_.at(source.asset_id);
+            submission_evidence_.push_back({source.entity_id, source.asset_id, pieces[index].pass});
+        }
     }
-    detail::order_pass_submissions(routed);
-    submission_evidence_.reserve(routed.size());
-    for (const detail::RoutedTransform& submission : routed) {
-        const auto resource = resources_.find(submission.transform.asset_id);
-        if (resource == resources_.end()) continue;
-        submission_evidence_.push_back({submission.transform.entity_id,
-            submission.transform.asset_id, submission.pass});
-    }
-    std::unordered_map<sim::EntityId, bool> live;
-    live.reserve(routed.size());
+    // A billboard turns with its piece, its pose (set_skin_pose), the camera
+    // (set_camera turns every one) and the light; the submit handles the
+    // piece and a new light.
+    const bool billboard_light_changed = billboard_generation_ != billboard_applied_generation_;
+    billboard_applied_generation_ = billboard_generation_;
+    detail::SubmissionPresence presence(++submit_serial_);
     missing_waits_.begin();
-    for (const detail::RoutedTransform& submission : routed) {
-        const PresentationTransform& transform = submission.transform;
-        const auto resource = resources_.find(transform.asset_id);
-        auto instance = instances_.find(transform.entity_id);
+    for (std::size_t index = 0; index < pieces.size(); ++index) {
+        const sim::RenderInstance& source = instances[pieces[index].source];
+        Resource* const resource = order_resources_[index];
+        auto instance = instances_.find(source.entity_id);
         const std::optional<sim::AssetId> current_asset = instance == instances_.end()
             ? std::nullopt
             : std::optional<sim::AssetId>(instance->second.asset_id);
-        const std::optional<sim::AssetId> requested_asset = resource == resources_.end()
+        const std::optional<sim::AssetId> requested_asset = resource == nullptr
             ? std::nullopt
-            : std::optional<sim::AssetId>(transform.asset_id);
+            : std::optional<sim::AssetId>(source.asset_id);
         const detail::InstanceTransition transition =
             detail::reconcile_instance(current_asset, requested_asset);
-        if (resource == resources_.end()) {
-            if (missing_waits_.wait(transform.entity_id, transform.asset_id)) {
+        if (resource == nullptr) {
+            if (missing_waits_.wait(source.entity_id, source.asset_id)) {
                 fail(diagnostic_codes::missing_asset,
                     "snapshot references unloaded renderer asset "
-                        + std::to_string(transform.asset_id));
+                        + std::to_string(source.asset_id));
             }
             if (transition == detail::InstanceTransition::remove) {
+                presence.remove(instance->second.placement);
                 static_cast<void>(remove_instance(rendering, instance));
             }
             continue;
         }
-        live.emplace(transform.entity_id, true);
         if (transition == detail::InstanceTransition::create) {
             const RID rid = rendering->instance_create();
-            rendering->instance_set_base(rid, resource->second.mesh);
+            rendering->instance_set_base(rid, resource->mesh);
             rendering->instance_set_scenario(rid, scenario_);
-            if (non_casting_.contains(transform.asset_id)) {
+            if (non_casting_.contains(source.asset_id)) {
                 rendering->instance_geometry_set_cast_shadows_setting(
                     rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
             }
             instance = instances_.emplace(
-                transform.entity_id, Instance{transform.asset_id, rid, {}}).first;
-            const auto pending = skin_poses_.find(transform.entity_id);
-            bind_instance_skin(*rendering, instance->second, resource->second,
+                source.entity_id, Instance{source.asset_id, rid, {}}).first;
+            const auto pending = skin_poses_.find(source.entity_id);
+            bind_instance_skin(*rendering, instance->second, *resource,
                 pending == skin_poses_.end() ? nullptr : &pending->second);
-            if (light_scales_.contains(transform.entity_id)) {
-                apply_light_scale(*rendering, transform.entity_id, instance->second);
+            if (light_scales_.contains(source.entity_id)) {
+                apply_light_scale(*rendering, source.entity_id, instance->second);
             }
-            if (opacities_.contains(transform.entity_id)) {
-                apply_unit_opacity(*rendering, transform.entity_id, instance->second);
+            if (opacities_.contains(source.entity_id)) {
+                apply_unit_opacity(*rendering, source.entity_id, instance->second);
             }
         } else if (transition == detail::InstanceTransition::replace) {
             if (instance->second.skeleton.is_valid()) {
                 rendering->free_rid(instance->second.skeleton);
                 instance->second.skeleton = {};
             }
-            rendering->instance_set_base(instance->second.rid, resource->second.mesh);
-            instance->second.asset_id = transform.asset_id;
-            const auto pending = skin_poses_.find(transform.entity_id);
-            bind_instance_skin(*rendering, instance->second, resource->second,
+            rendering->instance_set_base(instance->second.rid, resource->mesh);
+            instance->second.asset_id = source.asset_id;
+            const auto pending = skin_poses_.find(source.entity_id);
+            bind_instance_skin(*rendering, instance->second, *resource,
                 pending == skin_poses_.end() ? nullptr : &pending->second);
         }
-        rendering->instance_set_transform(
-            instance->second.rid, transform_from(transform.column_major));
-        instance->second.object_transform = transform_from(transform.column_major);
-        if (!resource->second.billboard_modes.empty()) {
-            refresh_billboards(*rendering, transform.entity_id, instance->second, resource->second);
+        presence.retain(instance->second.placement);
+        const bool rebound = transition != detail::InstanceTransition::retain;
+        const bool moved = detail::place_piece(instance->second.placement, rebound, source.fixed_transform);
+        if (moved) {
+            instance->second.object_transform = transform_from(adapt_instance(source).column_major);
+            rendering->instance_set_transform(instance->second.rid, instance->second.object_transform);
+            ++work_.transforms_sent;
+        }
+        if (!resource->billboard_modes.empty() && (moved || billboard_light_changed)) {
+            refresh_billboards(*rendering, source.entity_id, instance->second, *resource);
+            ++work_.billboard_refreshes;
         }
     }
     missing_waits_.end();
-    for (auto current = instances_.begin(); current != instances_.end();) {
-        current = live.contains(current->first)
-            ? std::next(current) : remove_instance(rendering, current);
-    }
+    // Every live instance this snapshot carried is stamped; only when some
+    // were not does the scan for the ones that left run.
+    presence.sweep(instances_, [&](const InstanceMap::iterator current) {
+        return remove_instance(rendering, current);
+    }, work_);
     if (fog_) {
         // Only the immutable grid set is kept (for a team switch without a
         // new snapshot); camera, transform and tick changes with identical

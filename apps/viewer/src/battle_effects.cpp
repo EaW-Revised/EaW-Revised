@@ -27,6 +27,9 @@ constexpr std::uint32_t drain_limit_frames = 300;
 constexpr std::size_t spawn_log_limit = 8192;
 // The report keeps this many placed shield hits.
 constexpr std::size_t shield_sample_limit = 64;
+// #862: how long an ability shot's projectile ID is remembered after its launch tick (its flight
+// and hit fall well inside: a shot's Max_Travel_Distance over its speed is far shorter).
+constexpr std::uint64_t ability_projectile_memory = 900;
 // GAMECONSTANTS.XML Laser_Beam_Z_Scale_Factor and Laser_Kite_Z_Scale_Factor (BP-04, BP-08).
 constexpr float beam_z_scale = 8.0F;
 constexpr float kite_z_scale = 1.2F;
@@ -275,7 +278,10 @@ BattleEffects::BattleEffects(godot::Node3D& host, const vfs::Vfs& filesystem, co
     : host_(&host), filesystem_(&filesystem), catalog_(&catalog),
       backend_(std::make_unique<GodotParticleBackend>(
           host, [this](const std::string_view name) { return resolve_texture(name); })),
-      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {}
+      registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    // #638: nothing here reads the streams' hashes, so the frames do not compute them.
+    registry_->set_stream_hashes(false);
+}
 
 BattleEffects::~BattleEffects() { release(); }
 
@@ -330,9 +336,23 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         look.shield_absorbed = tag(value, "Projectile_Absorbed_By_Shields_Particle");
         return look;
     };
+    // #862 (space-abilities AB-60, AB-66): the craft of a squadron whose team holds
+    // ION_CANNON_SHOT fire its Projectile_Types_Override while it is on; craft type -> projectile.
+    std::map<std::string, std::string> ability_projectiles;
+    for (const units::UnitType& squadron : tables.units) {
+        if (squadron.kind != units::UnitKind::squadron) continue;
+        for (const units::Ability& ability : squadron.team_abilities) {
+            if (ability.type != "ION_CANNON_SHOT" || ability.projectile_override.empty()) continue;
+            for (const units::SquadronMember& member : squadron.members) {
+                if (member.craft_index >= tables.units.size()) continue;
+                ability_projectiles.emplace(tables.units[member.craft_index].id, ability.projectile_override);
+            }
+        }
+    }
     for (const units::UnitType& type : tables.units) {
         TypeLooks looks;
         const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id));
+        const auto ability_projectile = ability_projectiles.find(type.id);
         // The shot's frame step (Max_Speed per frame), for where its flight meets a shield (BP-19).
         const auto step_of = [profile](const std::uint32_t slot) {
             if (profile == nullptr) return 0.0;
@@ -347,6 +367,18 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                 ProjectileLook look = look_of(hardpoint.weapon->projectile);
                 look.step_length = step_of(static_cast<std::uint32_t>(index));
                 looks.weapons.emplace(static_cast<std::uint32_t>(index), std::move(look));
+                // AB-66: a weapon the simulation gave an ability shot draws it with the override's look.
+                const tactical::WeaponProfile* weapon = nullptr;
+                if (profile != nullptr) {
+                    for (const tactical::WeaponProfile& entry : profile->weapons) {
+                        if (entry.hardpoint == index && entry.ability_shot) weapon = &entry;
+                    }
+                }
+                if (weapon != nullptr && ability_projectile != ability_projectiles.end()) {
+                    ProjectileLook ability = look_of(ability_projectile->second);
+                    ability.step_length = static_cast<double>(to_float(weapon->ability_shot->speed));
+                    looks.ability_weapons.emplace(static_cast<std::uint32_t>(index), std::move(ability));
+                }
             }
             auto object = catalog_->resolve(hardpoint.id);
             looks.hardpoint_explosions.push_back(object ? tag(object.value(), "Death_Explosion_Particles") : std::string{});
@@ -395,7 +427,12 @@ void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options:
     // Between the launch slots (max / 4 up) and the session's own entities.
     constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 8U;
     for (const auto& [type, looks] : types_) {
-        for (const auto& [slot, look] : looks.weapons) {
+        // #862: an ability shot (AB-66) may fly a model of its own.
+        std::vector<const ProjectileLook*> all;
+        for (const auto& [slot, look] : looks.weapons) all.push_back(&look);
+        for (const auto& [slot, look] : looks.ability_weapons) all.push_back(&look);
+        for (const ProjectileLook* entry : all) {
+            const ProjectileLook& look = *entry;
             if (look.render != Render::model || model_pools_.contains(look.projectile)) continue;
             ModelPool& pool = model_pools_[look.projectile];
             for (std::size_t index = 0; index < model_slots; ++index) {
@@ -426,6 +463,10 @@ const BattleEffects::ProjectileLook* BattleEffects::look_of(const tactical::Proj
     if (!shooter_type) return nullptr;
     const auto type = types_.find(*shooter_type);
     if (type == types_.end()) return nullptr;
+    if (ability_projectiles_.contains(projectile.id)) {
+        const auto ability = type->second.ability_weapons.find(projectile.weapon);
+        if (ability != type->second.ability_weapons.end()) return &ability->second;
+    }
     const auto weapon = type->second.weapons.find(projectile.weapon);
     return weapon == type->second.weapons.end() ? nullptr : &weapon->second;
 }
@@ -463,6 +504,7 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
             if (auto placed = live_pose(pool.ships[*slots[index]], *pose)) {
                 live.push_back(std::move(*placed));
                 modelled_now_.push_back(projectile.id);
+                if (ability_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[name];
                 auto& last = model_last_posed_tick_[projectile.id];
                 last = std::max(last, latest.completed_tick());
             }
@@ -707,6 +749,7 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         }
         ++stream.quads;
         ++projectiles_drawn_;
+        if (ability_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[look->projectile];
     }
     projectile_shooters_ = std::move(shooters);
     max_kites_ = std::max<std::uint64_t>(max_kites_, kites_.stream.quads);
@@ -724,30 +767,80 @@ bool BattleEffects::step_effect(LiveEffect& effect, bool& gone) {
         failure_ = "battle effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
     }
-    particles_ += advanced.value().particles;
+    after_step(effect, advanced.value(), gone);
+    return true;
+}
+
+void BattleEffects::after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone) {
+    gone = false;
+    particles_ += advanced.particles;
     ++effect.age;
     if (!effect.detached && effect.age >= effect.lifetime) {
         // The particle object's lifetime ends: FoC detaches its system, which drains.
         auto detached = registry_->detach(effect.handle);
         effect.detached = true;
         gone = !detached || detached.value() == particles::EffectDetachState::released;
-    } else if (effect.detached && (advanced.value().finished || effect.age >= effect.lifetime + drain_limit_frames)) {
+    } else if (effect.detached && (advanced.finished || effect.age >= effect.lifetime + drain_limit_frames)) {
         static_cast<void>(registry_->release(effect.handle));
         gone = true;
     }
-    return true;
 }
 
 bool BattleEffects::advance_until(const std::uint64_t target) {
     for (; samples_ < target; ++samples_) {
         particles_ = 0;
+        // #638: the effects born by this sample step in one batch on the particle workers; each
+        // then ages, detaches or goes in effect order, as one advance after another did.
+        batch_handles_.clear();
+        for (const LiveEffect& effect : effects_) {
+            if (effect.born <= samples_) batch_handles_.push_back(effect.handle);
+        }
+        if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_);
+            !advanced) {
+            failure_ = "battle effect: " + core::format_diagnostic(advanced.error());
+            return false;
+        }
+        std::size_t next = 0;
         for (auto effect = effects_.begin(); effect != effects_.end();) {
             bool gone = false;
-            if (effect->born <= samples_ && !step_effect(*effect, gone)) return false;
+            if (effect->born <= samples_) after_step(*effect, batch_stats_[next++], gone);
             effect = gone ? effects_.erase(effect) : effect + 1;
         }
     }
     return true;
+}
+
+void BattleEffects::note_ability_shots(const std::span<const platform::LiveTickEvents> reached,
+                                       const tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at) {
+    for (const platform::LiveTickEvents& record : reached) {
+        if (ability_noted_through_ && record.tick <= *ability_noted_through_) continue;
+        ability_noted_through_ = record.tick;
+        // #862 (AB-66): a shot a weapon fired as its ability shot is the newest projectile of that
+        // shooter and weapon in its tick's snapshot (the tick launches it in event order).
+        const auto launched = snapshot_at ? snapshot_at(record.tick) : nullptr;
+        for (const tactical::CombatEvent& event : record.combat_events) {
+            if (event.kind != tactical::CombatEventKind::weapon_fired
+                || (event.outcome & tactical::fired_ability_shot) == 0U) {
+                continue;
+            }
+            const auto list = launched ? launched->projectiles() : latest.projectiles();
+            const tactical::Projectile* shot = nullptr;
+            for (const tactical::Projectile& projectile : list) {
+                if (projectile.shooter != event.shooter || projectile.weapon != event.weapon
+                    || ability_projectiles_.contains(projectile.id)) {
+                    continue;
+                }
+                if (shot == nullptr || projectile.id > shot->id) shot = &projectile;
+            }
+            if (shot == nullptr) continue;
+            ability_projectiles_.emplace(shot->id, record.tick);
+            const ProjectileLook* look = look_of(*shot);
+            ++ability_shots_fired_[look == nullptr ? std::string("<unknown weapon>") : look->projectile];
+        }
+    }
+    std::erase_if(ability_projectiles_, [&](const auto& entry) {
+        return entry.second + ability_projectile_memory < latest.completed_tick();
+    });
 }
 
 bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reached,
@@ -785,6 +878,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         if (const auto unit = units(craft.entity_id)) last_seen_[craft.entity_id] = *unit;
         else last_seen_.erase(craft.entity_id);
     }
+    note_ability_shots(reached, latest, snapshot_at);
     // Events fire on the frame that first reaches their tick, oldest tick first; the effects
     // already live are aged up to each tick's birth before its effects are born.
     for (const platform::LiveTickEvents& record : reached) {
@@ -798,9 +892,18 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             ++hit_events_[record.tick];
             const auto shooter = entity_types_.find(event.shooter);
             const ProjectileLook* found = nullptr;
+            // #862 (AB-66): an ability shot's hit shows the ability shot's own particles.
+            std::optional<std::uint64_t> hit;
+            if (snapshot_at && event.tick > 0) {
+                if (const auto before = snapshot_at(event.tick - 1U)) hit = space::hit_projectile(before->projectiles(), event);
+            }
+            const bool ability = hit && ability_projectiles_.contains(*hit);
             if (shooter != entity_types_.end()) {
                 if (const auto type = types_.find(shooter->second); type != types_.end()) {
-                    if (const auto weapon = type->second.weapons.find(event.weapon); weapon != type->second.weapons.end()) {
+                    const auto& weapons = ability && type->second.ability_weapons.contains(event.weapon)
+                        ? type->second.ability_weapons
+                        : type->second.weapons;
+                    if (const auto weapon = weapons.find(event.weapon); weapon != weapons.end()) {
                         found = &weapon->second;
                     }
                 }
@@ -953,6 +1056,9 @@ void BattleEffects::write_report(std::ostream& output) const {
     counts("spawn_failed", spawn_failed_);
     counts("expired", expired_);
     counts("projectiles_not_drawn", not_drawn_);
+    // #862 (AB-66): ability shots fired and their drawn frames, by the projectile type they drew as.
+    counts("ability_shots_fired", ability_shots_fired_);
+    counts("ability_shot_frames_drawn", ability_shots_drawn_);
     // #456 BP-62: each model projectile pool: its slots, the most bound at once, the flights it
     // took and those it refused (every slot bound or resting).
     output << ", \"projectile_models\": {";

@@ -176,6 +176,35 @@ void activate_land(Land& land, const std::string_view overrides,
 
 int main() {
     using namespace eawr_map_camera_test;
+    {
+        eawr::assets::Map map;
+        map.declared_extents = eawr::assets::DeclaredExtents{0x10, 10000, 0x11, 8000, 0, 0};
+        eawr::skirmish::SkirmishStart start;
+        start.map = "synthetic.ted";
+        const auto whole = [](const std::int64_t v) { return eawr::skirmish::Fixed::from_raw(v * eawr::skirmish::Fixed::scale); };
+        start.markers.push_back({42, "Team_01_Spawn_Point_Marker", 2, eawr::skirmish::MarkerUse::spawn,
+            {whole(1000), whole(-2000), {}}, {}});
+        auto config = eawr::viewer::skirmish_camera_config(map, start, 2);
+        expect(config && config.value().bounds.min_x == -5000 && config.value().bounds.max_y == 4000
+               && config.value().target_x == 1000 && config.value().target_y == -2000,
+               "auto camera uses rectangular extents and the selected player's spawn");
+        eawr::skirmish::StartUnit unit;
+        unit.state.owner = 2;
+        unit.record = 42;
+        unit.role = eawr::skirmish::UnitRole::fleet;
+        unit.state.position = {whole(1400), whole(-2300), whole(999)};
+        start.units.push_back(unit);
+        unit.state.position = {whole(1800), whole(-2500), {}};
+        start.units.push_back(unit);
+        unit.state.owner = 1;
+        start.units.push_back(unit);
+        config = eawr::viewer::skirmish_camera_config(map, start, 2);
+        expect(config && config.value().target_x == 1600 && config.value().target_y == -2400
+               && config.value().target_height == 0, "auto camera centres the local placed fleet on the battle plane");
+        expect(!eawr::viewer::skirmish_camera_config(map, start, 3), "auto camera refuses a missing local spawn");
+        map.declared_extents.reset();
+        expect(!eawr::viewer::skirmish_camera_config(map, start, 2), "auto camera refuses missing extents");
+    }
     test_space_activation_and_provenance();
     test_incompatible_configs_and_bindings_reject();
     test_pan_basis_and_clamp();

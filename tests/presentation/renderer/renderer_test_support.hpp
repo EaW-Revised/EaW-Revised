@@ -9,6 +9,7 @@
 #include "instance_reconciliation.hpp"
 #include "missing_asset_waits.hpp"
 #include "pass_submission.hpp"
+#include "submission_plan.hpp"
 #include "particle_texture.hpp"
 #include "resource_lease_ledger.hpp"
 #include "shader_adapter.hpp"
@@ -22,6 +23,7 @@
 #include <iostream>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -47,6 +49,8 @@ void instance_resource_contracts();
 void missing_asset_wait_contracts();
 void pass_order_contracts();
 void snapshot_adapter_contracts();
+void submission_plan_contracts();
+void submission_presence_contracts();
 
 // renderer_surface_tests.cpp
 void derived_fog_variant_contracts();

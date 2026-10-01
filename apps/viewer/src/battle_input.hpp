@@ -7,6 +7,7 @@
 
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
@@ -78,6 +79,19 @@ public:
     // A left release on the card in `slot` (FoC's Component_Logic_Tactical_Select): Shift deselects.
     // True when the selection changed.
     bool card_click(std::size_t slot, bool shift, const LiveSessionView& live);
+    // #530 (docs/behaviour/space-purchasing.md PU-60 to PU-62): the first selected unit of the local
+    // player whose type has a build menu for its faction switches the card slots to that station's
+    // build buttons (no cards, no ability buttons). A left release on an enabled button buys its type
+    // at the station; a disabled one does nothing.
+    [[nodiscard]] std::optional<sim::EntityId> production_station() const noexcept { return production_station_; }
+    [[nodiscard]] std::span<const ui::BuildButton> build_buttons() const noexcept { return build_buttons_; }
+    bool build_click(std::size_t slot, LiveSessionView& live);
+    // WR-11/15: a pool press begins placement; release drops on Z=0 and always ends placement.
+    void begin_placement(sim::tactical::TypeId type);
+    void placement_move(std::array<float, 2> point) { pointer_ = point; }
+    void placement_drop(std::array<float, 2> point, LiveSessionView& live) { left_release(point, {}, live); }
+    [[nodiscard]] std::optional<sim::math::Vec3> placement_point() const;
+    [[nodiscard]] std::optional<sim::tactical::TypeId> placing() const noexcept { return placing_; }
     // Where a scripted `card=N` gesture points: the HUD's card centre in viewport pixels.
     // #459, #453: where a named HUD control's centre is (scripted hud=<name> gestures).
     void set_hud_point(std::function<std::optional<std::array<float, 2>>(const std::string&)> point) {
@@ -155,8 +169,20 @@ private:
     ui::Selection selection_;
     std::size_t card_slots_{};
     std::vector<ui::CardUnit> card_units_;
+    const units::UnitTables* card_tables_{};
+    std::map<sim::tactical::TypeId, const units::UnitType*> card_types_;
+    std::shared_ptr<const sim::tactical::TacticalSnapshot> cards_snapshot_;
+    std::vector<sim::EntityId> cards_selection_;
+    std::size_t cards_slots_{};
     ui::CardLayout card_layout_;
     std::uint64_t card_clicks_{};
+    std::optional<sim::EntityId> production_station_;
+    std::vector<ui::BuildButton> build_buttons_;
+    std::uint64_t build_clicks_{};
+    std::uint64_t buys_{};
+    std::optional<sim::tactical::TypeId> placing_;
+    std::uint64_t placements_{};
+    std::uint64_t placements_cancelled_{};
     std::function<std::optional<std::array<float, 2>>(std::size_t)> card_point_;
     std::function<std::optional<std::array<float, 2>>(const std::string&)> hud_point_;
     std::function<std::optional<std::array<float, 2>>(double, double)> minimap_point_;
@@ -221,6 +247,7 @@ private:
     // Evidence for the report: counts and the last gestures, never simulation state.
     std::uint64_t events_{};
     std::uint64_t orders_{};
+    std::uint64_t hardpoint_orders_{};  // #531: attack orders that named a hardpoint
     std::uint64_t refused_{};
     std::uint64_t boxes_{};
     std::uint64_t focuses_{};

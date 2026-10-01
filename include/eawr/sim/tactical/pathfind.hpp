@@ -76,6 +76,10 @@ struct LinearQuery {
 [[nodiscard]] core::Result<std::uint8_t> find_linear_collision(
     const TrackingLayerView& layer, std::uint32_t interval, const LinearQuery& query);
 
+// WR-28: the same arrival sweep against the static layer, without path-search padding.
+[[nodiscard]] core::Result<std::uint8_t> find_static_collision(
+    const std::vector<TrackedLeaf>& statics, const LinearQuery& query);
+
 // Find_Dual_Collision (FM-05, research E344-08): a query against the dynamic layer of `layer`
 // and the static layer. Fails only on arithmetic overflow.
 [[nodiscard]] core::Result<std::uint8_t> find_dual_collision(

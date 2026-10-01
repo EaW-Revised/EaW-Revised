@@ -383,7 +383,9 @@ Known differences and deferred work. None of these block M2.
 - The M2 start binds no fog rules yet: the retail fog cells (EAWR-274, V-11 to V-17) need the map's fog grid extents, which the TED reader does not read, so M2 contact uses the exact range test with no linger.
 - Fog cells: stations are sampled at their position only, not at `Multisample_FOW_Check` points; circles crossing a map edge are clipped, not shifted or wrapped as in retail; the retail container follows its craft one or two frames late; presentation still draws the exact-disc grid (F-01), not the cell values (G-V1, G-V6, G-V7).
 - The `Y-Wing` craft authors `REVEAL`, so each Y-wing reveals 600 besides its squadron's 1000; confirm with a Y-Wing squadron staging (G-V5).
-- No hardpoint repair: retail repairs station hardpoints per frame for credits, and M2 has none (SK-30). `repair_frame` implements the rule; a repair command and credits come with an economy (space-hardpoints HR-07, EAWR-72).
+- Space-map selection (EAWR-908): all stock maps have asteroid fields drawn without field collision/damage; nebulas, ion storms and mines remain unsimulated (viewer README map census).
+- Bespin (EAWR-908): its secondary skydome has no admitted environment material route; the battle opens without that background. The map authors no primary stars.
+- No hardpoint repair: retail repairs station hardpoints per frame for credits. M2 players have credits since EAWR-530 (SK-30), but the session has no repair command yet; `repair_frame` implements the rule (space-hardpoints HR-07, space-purchasing PU-G11, EAWR-72).
 - The "damaged" hardpoint state (below `Health_Low_Percent_Threshold` 0.33) is a remake presentation state; retail changes hardpoint art only on destruction (space-hardpoints G-H5, EAWR-72, EAWR-80).
 - Health ignores the AI difficulty health multiplier (1.0 at Normal) and combat health modifiers; ability modifiers come with EAWR-76 (space-hardpoints HD-01, EAWR-72).
 - A tick applies all damage before the hull/hardpoint service; the retail order inside one frame is untraced (space-hardpoints G-H1, EAWR-72).

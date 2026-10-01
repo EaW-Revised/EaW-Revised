@@ -79,8 +79,11 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   its type's `Layer_Z_Adjust` over the point it is placed on (a company or craft over the free
   point the placement found on its marker's plane); a squadron's team container is not ([space-movement](behaviour/space-movement.md#heights-666)
   LZ-01, LZ-02). The census lists the raised positions.
-- **Economy (SK-30, SK-31).** No credits, income, production queue or population cap. The
-  tactical state has no such fields; the census states them per player.
+- **Economy (SK-30, SK-31, EAWR-530).** Each lobby player starts with `MP_Default_Credits` (6000),
+  earns its station's income, builds at its station and has its faction's population cap; the
+  census states them per player. The pinned tick-zero state (`sim_headless --skirmish m2`) is
+  built without them; a session given the economy rules (`skirmish::economy_rules`,
+  [space purchasing](behaviour/space-purchasing.md)) carries its ledgers from tick zero.
 - **Launches (SK-23, SK-36).** Each spawner's `Starting_Spawned_Units_Tech_0` is census data for
   EAWR-75 (`"simulated": false`). Tick zero launches nothing, and reserves are not listed.
 
@@ -111,7 +114,7 @@ replay data. It changes the snapshot digest and never the state hash, so a repla
 which binds no sensor table, has the same state hash and a different snapshot digest.
 
 `tests/skirmish/fixtures/m2-start.eawr-replay` is that replay with 30 ticks. Its tick-zero state
-hash is `506e48ffa375d8a6fd29c9fa69474f63d4f455a999126e5f232bef3aefd64a2a`. The CLI test
+hash is `3cfadb5ada5c5cd1a7551ffde3f13341a290ef3efa421f234cb5c6c4e99fd7a3`. The CLI test
 recomputes it from the header and setup bytes with the frozen `EAWRTST` encoding; with
 `EAWR_EAW_GAME_ROOT` the start is rebuilt from FoC data and must write the same bytes.
 Regenerate it only when a start rule or the unit-table identity changes:

@@ -171,6 +171,21 @@ partition; the determinism tests and `sim_headless` use it, so they keep exercis
 threads. `tactical_contract_tests` also runs its golden replay with `by_cost` and the hashing
 thread at every worker count.
 
+### Fog row storage
+
+Fog cells retain shared row buffers for values and holds (EAWR-890). A staged session copies
+only row pointers and anchor ownership, then `fog-cells` clones each changed row at most
+once. Service of a zero or held value that stays unchanged copies no value bytes. All rows
+and anchors commit only after the phases succeed, so a failed fog or visibility phase
+leaves the session unchanged. `copied_grid_bytes()` counts the row payload bytes copied
+by the last advance, excluding pointer metadata and canonical serialization.
+
+Live fog snapshots share immutable value rows. The viewer reads those rows directly;
+retaining or publishing a snapshot never flattens a grid. The compatibility `values()`
+accessor flattens on demand and caches its result until the next advance; it is absent
+from the stepping and live-publication paths. Canonical encoding still appends every
+player's row bytes in the original order, keeping all replay hashes and pins unchanged.
+
 ### Phase map
 
 `TacticalSession::step`, in order:
@@ -179,7 +194,8 @@ thread at every worker count.
 |---|---|---|
 | Stage the units, ascending ID | serial | Copies the units out of storage into the inputs every phase reads (ADR-009). |
 | `movement`: advance each unit's move plan to completed tick + 1 (EAWR-70) | partitioned | Per unit: reads its own copied state and plan, writes its own slot and error slot. Runs before the commands, so an order acts from the next frame (MV-02). |
-| Combat world build | serial | One space index over the moved units and their copied transforms, health, combat state and last published visibility (EAWR-73). Like the sensor field build, one index over all units. |
+| `combat-world`: fill moved units | partitioned | Preallocated ascending-ID slots for transforms, health, combat state, player indices and published visibility; errors reduce in ID order. |
+| Combat index and squadron overrides | serial | One space index over the filled slots, then ordered squadron overrides (EAWR-73). |
 | `collection-boxes` (EAWR-469): each unit's world box | partitioned | Per unit with a combat profile: reads its own moved transform, writes its own box slot ([CO-11](behaviour/space-targeting.md#candidate-collection-order-469)). |
 | Collection tree update | serial | The per-player trees that order target scans take the boxes in ascending ID and are serviced (CO-04 to CO-07). The tree's order is its history, so each update depends on the ones before it, as in FoC; the work per unit is a short tree walk. |
 | `targeting`: ship-level target choice and weapon service (EAWR-73) | partitioned | Per unit: reads the immutable combat world, writes its own combat state, events and error slot; draws are keyed by seed, frame, unit and weapon ([P-02](behaviour/space-weapon-fire.md#project-choices)). Before the commands, so an attack order acts from the next frame. |
@@ -201,7 +217,7 @@ thread at every worker count.
 | Sensor field build | serial | One index over all observers. It is a few percent of the serial remainder at 1500 units, so splitting it does not pay yet. |
 | `fog-reveal` (EAWR-274): mark again? | partitioned | Per revealer, against the committed circles; only with fog rules. |
 | Fog changes | serial | Lists the circles to release and mark in ascending revealer ID; a few per tick. |
-| `fog-cells`: service, release, mark | partitioned | By bands of grid rows, every player's grid; each band applies the changes in ascending revealer ID. |
+| `fog-cells`: service, release, mark | partitioned | By bands of grid rows, every player's grid; each band applies the changes in ascending revealer ID. Immutable rows share storage until the first changed value or hold stages a private row (EAWR-890). |
 | `visibility` | partitioned | Per unit, a query against the immutable sensor field, and per spinning craft its pose and the same query (EAWR-447). The largest phase today. |
 | Commit | serial | The ordered commit alone writes storage (ADR-009). |
 | State hash | serial, or on the hashing thread | SHA-256 is one sequential chain over the frozen canonical encoding. With a state hasher (EAWR-637) the stepping thread only encodes the state; the digest is computed on the hasher's thread while the next tick runs. |
@@ -296,7 +312,8 @@ Who hashes where:
 
 | Consumer | Hash |
 |---|---|
-| Live session (the viewer's game), world alone or scripted (EAWR-79) | On the hashing thread; `tick_hashes()` resolves them when a report asks. A scripted tick's combined hash (the world's with the scripts') is derived on the same thread right after the world's (`ScriptedTacticalSession::set_state_hasher`); the scripts' own hash is still taken on the stepping thread at the tick barrier. |
+| Live session (the viewer's game), world alone or scripted (EAWR-79) | On the hashing thread; `tick_hashes()` resolves them when a report asks. A scripted live tick hashes only the world: the combined hash (the world's with the scripts') is off (`ScriptedTacticalSession::set_authoritative_hash(false)`, EAWR-895), because the save and hash of every script instance cost more than the world step on the stepping thread and nothing live reads it. `script_state_hash()` gives the scripts' hash on request at a tick barrier. |
+| Scripted sessions outside the live game (the soak, the FoC AI tests, tools) | The combined hash every tick (the default), derived on the hashing thread after the world's when one is set; the scripts' own hash is taken on the stepping thread at the tick barrier. |
 | `sim_headless`, replays and pins, `headless_tick_hashes`, the tests | On the stepping thread (the default): each writes or compares every tick's hash at once. |
 
 ### Path searches (EAWR-503)

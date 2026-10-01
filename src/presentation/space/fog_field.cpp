@@ -160,6 +160,8 @@ FogField::FogField(const FogFieldLayout layout, const FogLooks& looks)
     values_.assign(cells, 0.0);
     held_.assign(cells, 0U);
     intensities_.assign(cells, 0U);
+    next_intensities_.assign(cells, 0U);
+    fogged_count_ = cells;
     blurred_.assign(cells, 0U);
     texels_.resize(cells * 4U);
     for (std::size_t cell = 0; cell < cells; ++cell) {
@@ -212,14 +214,41 @@ void FogField::advance(const std::span<const FogFieldRevealer> revealers, double
     present();
 }
 
-void FogField::advance(const std::span<const std::uint8_t> cells, double since_service, double frames) {
-    if (cells.size() != values_.size()) return;
+void FogField::advance(const std::span<const std::uint8_t> cells, const double since_service, const double frames) {
+    advance_cells(cells.size(), [&](const std::size_t cell) { return cells[cell]; }, since_service, frames);
+}
+
+void FogField::advance_rows(const std::span<const std::shared_ptr<const std::vector<std::uint8_t>>> rows,
+    const double since_service, const double frames) {
+    if (rows.size() != layout_.tall) return;
+    for (const auto& row : rows) {
+        if (!row || row->size() != layout_.wide) return;
+    }
+    // The private cell loop reads in ascending order. Walk the row boundaries rather
+    // than dividing for every cell in a presentation frame.
+    std::size_t row = 0;
+    std::size_t base = 0;
+    std::size_t end = layout_.wide;
+    const auto* source = rows.empty() ? nullptr : rows.front()->data();
+    advance_cells(rows.size() * layout_.wide, [&](const std::size_t cell) {
+        if (cell == end) {
+            base = end;
+            end += layout_.wide;
+            source = rows[++row]->data();
+        }
+        return source[cell - base];
+    }, since_service, frames);
+}
+
+template <typename ReadCell>
+void FogField::advance_cells(const std::size_t count, const ReadCell& read, double since_service, double frames) {
+    if (count != values_.size()) return;
     if (!std::isfinite(frames) || frames < 0.0) frames = 0.0;
     if (!std::isfinite(since_service) || since_service < 0.0) since_service = 0.0;
     held_count_ = 0;
     for (std::size_t cell = 0; cell < values_.size(); ++cell) {
         double& value = values_[cell];
-        const std::uint8_t source = cells[cell];
+        const std::uint8_t source = read(cell);
         if (source == 255U) {
             // FW-08: held (or just flashed, V-19).
             value = held_value(value, frames);
@@ -242,13 +271,13 @@ void FogField::advance(const std::span<const std::uint8_t> cells, double since_s
 void FogField::present() {
     const std::uint32_t wide = layout_.wide;
     const std::uint32_t tall = layout_.tall;
-    for (std::size_t cell = 0; cell < values_.size(); ++cell) intensities_[cell] = fog_intensity(values_[cell]);
+    for (std::size_t cell = 0; cell < values_.size(); ++cell) next_intensities_[cell] = fog_intensity(values_[cell]);
     if (overlay_ && blocked_) {
         // FW-22: a cell that shows more than a quarter clear (intensity above 64) is asked whether
         // it is blocked: blocked becomes fully fogged, the rest fully clear.
         for (std::uint32_t row = 0; row < tall; ++row) {
             for (std::uint32_t column = 0; column < wide; ++column) {
-                std::uint8_t& intensity = intensities_[static_cast<std::size_t>(row) * wide + column];
+                std::uint8_t& intensity = next_intensities_[static_cast<std::size_t>(row) * wide + column];
                 if (intensity <= 64U) continue;
                 const double x = layout_.left + (column + 0.5) * layout_.cell;
                 const double y = layout_.top - (row + 0.5) * layout_.cell;
@@ -258,16 +287,23 @@ void FogField::present() {
     }
     // FW-12: the texture's outermost ring is fogged, then the inner cells take FoC's 3x3
     // (1, 2, 1) x (1, 2, 1) / 16 blur, rounded.
-    std::fill(blurred_.begin(), blurred_.end(), std::uint8_t{0});
     if (wide >= 3 && tall >= 3) {
         for (std::uint32_t x = 0; x < wide; ++x) {
-            intensities_[x] = 0U;
-            intensities_[static_cast<std::size_t>(tall - 1U) * wide + x] = 0U;
+            next_intensities_[x] = 0U;
+            next_intensities_[static_cast<std::size_t>(tall - 1U) * wide + x] = 0U;
         }
         for (std::uint32_t y = 0; y < tall; ++y) {
-            intensities_[static_cast<std::size_t>(y) * wide] = 0U;
-            intensities_[static_cast<std::size_t>(y) * wide + wide - 1U] = 0U;
+            next_intensities_[static_cast<std::size_t>(y) * wide] = 0U;
+            next_intensities_[static_cast<std::size_t>(y) * wide + wide - 1U] = 0U;
         }
+    }
+    changed_ = false;
+    if (!force_present_ && next_intensities_ == intensities_) return;
+    force_present_ = false;
+    intensities_.swap(next_intensities_);
+    presented_cells_ += values_.size();
+    std::fill(blurred_.begin(), blurred_.end(), std::uint8_t{0});
+    if (wide >= 3 && tall >= 3) {
         constexpr std::array<std::uint32_t, 3> weights{1U, 2U, 1U};
         for (std::uint32_t y = 1; y + 1 < tall; ++y) {
             for (std::uint32_t x = 1; x + 1 < wide; ++x) {
@@ -282,8 +318,9 @@ void FogField::present() {
             }
         }
     }
-    changed_ = false;
+    fogged_count_ = 0;
     for (std::size_t cell = 0; cell < blurred_.size(); ++cell) {
+        if (blurred_[cell] == 0U) ++fogged_count_;
         const auto& colour = (overlay_ ? overlay_ramp_ : ramp_)[blurred_[cell]];
         auto* texel = texels_.data() + cell * 4U;
         for (std::size_t channel = 0; channel < 4; ++channel) {
@@ -298,6 +335,7 @@ void FogField::present() {
 void FogField::set_deployment_overlay(const bool on, FogBlockedPoint blocked) {
     overlay_ = on;
     blocked_ = std::move(blocked);
+    force_present_ = true;
     present();
     changed_ = true;
 }
@@ -313,7 +351,7 @@ double FogField::value(const std::uint32_t column, const std::uint32_t row) cons
 }
 
 std::size_t FogField::fogged_cells() const noexcept {
-    return static_cast<std::size_t>(std::count(blurred_.begin(), blurred_.end(), std::uint8_t{0}));
+    return fogged_count_;
 }
 
 } // namespace eawr::presentation::space

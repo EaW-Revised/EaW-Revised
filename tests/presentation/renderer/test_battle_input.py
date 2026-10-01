@@ -21,6 +21,7 @@ what the frame drew (circles per selected craft, the hovered craft's own health 
 bar, the icons and their states, the hovered ship's hardpoint reticles).
 """
 
+import collections
 import hashlib
 import json
 import math
@@ -339,7 +340,7 @@ class BattleInputGraphical(unittest.TestCase):
     # the target, beyond its own sight and its 800-unit weapons, so any hit it lands comes from the
     # order: it closes (OR-02 to OR-06) and fires. The AI is off so the Empire stays where the debug
     # moves put it; the camera follows the corvette, then the spotter.
-    def _attack_through_fog(self, directory, name, target, target_point, order_tick, end_tick):
+    def _attack_through_fog(self, directory, name, target, target_point, order_tick, end_tick, reticle=False):
         camera = directory / f"{name}-camera.xml"
         shutil.copy(CAMERA.parent / "space-live-camera-bindings.json", directory)
         camera.write_text(re.sub(r"<initial [^>]*/>", f'<initial target_x="{ATTACKER_POINT[0]}" '
@@ -347,36 +348,70 @@ class BattleInputGraphical(unittest.TestCase):
                                  CAMERA.read_text(encoding="utf-8")), encoding="utf-8")
         code, result = self._run(directory, name, (
             *HUD_OFF, "--eawr-live-ai", "off", "--eawr-live-step", "10",
+            # #531: the run draws every unit (the Acclamator may not be spotted yet at the hover);
+            # the sim's fog and the order are unchanged.
+            *(("--eawr-live-reveal", "on") if reticle else ()),
             "--eawr-live-order", f"1:move:{CORVETTE}@{ATTACKER_POINT[0]},{ATTACKER_POINT[1]},0",
             "--eawr-live-order", f"1:move:{NEBULON}@{SPOTTER_POINT[0]},{SPOTTER_POINT[1]},0",
             "--eawr-live-order", f"1:move:{target}@{target_point[0]},{target_point[1]},0",
             "--eawr-live-follow-group", f"1:{CORVETTE}",
-            "--eawr-live-follow-group", f"{order_tick - 200}:{NEBULON}",
+            # #531: a reticle is only there to click while its target is on screen, so that run
+            # follows the target for the last stretch instead of the spotter.
+            "--eawr-live-follow-group", f"{order_tick - (100 if reticle else 200)}:{target if reticle else NEBULON}",
             "--eawr-live-input", f"900:click:unit={CORVETTE}",
-            "--eawr-live-input", f"{order_tick}:rclick:unit={target}"), camera=camera, end_tick=end_tick)
+            # #531: the hover draws the target's reticles; the right click lands on the first one.
+            *(("--eawr-live-input", f"{order_tick - 20}:hover:unit={target}") if reticle else ()),
+            "--eawr-live-input",
+            f"{order_tick}:rclick:reticle={target}:first" if reticle else f"{order_tick}:rclick:unit={target}"),
+            camera=camera, end_tick=end_tick)
         self.assertEqual(code, 0, result.get("failure"))
+        self.result = result
         battle, live = result["battle_input"], result["live_session"]
-        self.assertEqual((battle["scripted_fired"], battle["orders"]), (2, 1), battle["log"])
+        self.assertEqual((battle["scripted_fired"], battle["orders"]), (3 if reticle else 2, 1), battle["log"])
         self.assertEqual(battle["selected"], [CORVETTE], battle["log"])
         self.assertEqual(live["rejected"], [])
         self.assertIs(live["headless_hashes_equal"], True)
         # Fog is on: the local player does not see every unit.
-        self.assertIs(live["reveal"], False)
-        self.assertGreater(live["hidden_units"], 0)
+        self.assertIs(live["reveal"], bool(reticle))
+        if not reticle:
+            self.assertGreater(live["hidden_units"], 0)
         order = next(line for line in battle["log"] if line.startswith("attack "))
-        match = re.fullmatch(rf"attack {target} units {CORVETTE} tick (\d+)", order)
+        named = r" hardpoint (\d+)" if reticle else ""
+        match = re.fullmatch(rf"attack {target}{named} units {CORVETTE} tick (\d+)", order)
         self.assertTrue(match, battle["log"])
-        return int(match.group(1)), live
+        self.hardpoint = int(match.group(1)) if reticle else None
+        return int(match.group(match.lastindex)), live
 
     def test_right_click_attacks_a_capital_ship_seen_through_fog(self):
         with tempfile.TemporaryDirectory(prefix="eawr-battle-attack-ship-") as temporary:
             tick, live = self._attack_through_fog(pathlib.Path(temporary), "attack_ship", TARTAN, TARGET_POINT, 2500, 3300)
+            # OR-20: the unit hook aims at collision geometry (#841); only a reticle names a hardpoint.
+            self.assertEqual(self.result["battle_input"]["hardpoint_orders"], 0, self.result["battle_input"]["log"])
             hits = [hit for hit in live["first_hits"] if hit["shooter"] == CORVETTE and hit["target"] == TARTAN]
             self.assertEqual(len(hits), 1, live["first_hits"])
             self.assertGreater(hits[0]["tick"], tick, hits)
             # It closed to its slot (0.9 x 800 short of the Tartan) instead of holding 3000 away.
             position = next(unit["position"] for unit in live["own_units"] if unit["entity"] == CORVETTE)
             self.assertLess(math.dist(position[:2], TARGET_POINT), 1000.0, position)
+
+    def test_right_click_on_a_reticle_attacks_that_hardpoint(self):
+        # #531 (space-orders OR-20, OR-25; world UI WU-41, WU-42): hovering the Acclamator draws its
+        # hardpoint reticles (the Tartan's are not targetable), and the right click on the first one
+        # orders the corvette to attack that hardpoint: the order records its index, the session
+        # accepts it (where the shots go is the combat contracts' business), the corvette closes and
+        # hits the ship, and the reticle flashes. The same order on the hull (the test above) names
+        # no hardpoint.
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-attack-hardpoint-") as temporary:
+            tick, live = self._attack_through_fog(pathlib.Path(temporary), "attack_hardpoint", ACCLAMATOR, TARGET_POINT,
+                                                  3000, 3800, reticle=True)
+            battle, world = self.result["battle_input"], self.result["world_ui"]
+            self.assertEqual(battle["hardpoint_orders"], 1, battle["log"])
+            self.assertEqual(world["reticle_flashes"], 1, world)
+            self.assertGreater(world["max_reticles"], 0, world)
+            self.assertIsNotNone(self.hardpoint, battle["log"])
+            hits = [hit for hit in live["first_hits"] if hit["shooter"] == CORVETTE and hit["target"] == ACCLAMATOR]
+            self.assertEqual(len(hits), 1, live["first_hits"])
+            self.assertGreater(hits[0]["tick"], tick, hits)
 
     def test_right_click_attacks_a_squadron_seen_through_fog(self):
         # The right click on a TIE Interceptor's craft orders the attack on its squadron, the team
@@ -1173,6 +1208,69 @@ class BattleInputGraphical(unittest.TestCase):
             self.assertEqual(moved["hud"]["minimap"]["moves"], 1, moved["hud"]["minimap"])
             self.assertTrue(any("minimap move @" in line for line in moved["battle_input"]["log"]), moved["battle_input"]["log"])
 
+    # #862 (space-abilities AB-11, AB-60 to AB-67; foc-ability-buttons AB-11): the Y-wing
+    # squadron's ion shot as the owner plays it, with fog on and the AI off so the Empire stays
+    # where the debug moves put it. The Nebulon-B spots the Tartan (as in _attack_through_fog)
+    # and the squadron waits 900 units from it with the camera on it. A click on the squadron's
+    # icon selects it; its ION_CANNON_SHOT button (or Shift+I) waits for a target; a click on the
+    # Tartan sends the shot. Each Y-wing fires the override projectile once at the Tartan, which
+    # the viewer draws with that projectile's own look (battle-presentation BP-66), and the hits
+    # stun it (space-damage IS-01). The Tartan's guns take the squadron down afterwards.
+    def test_ion_shot_button_target_click_fires_and_stuns(self):
+        ion = "Proj_Ion_Cannon_Medium_Laser_Blue"
+        setup = ("--eawr-live-ai", "off", "--eawr-live-step", "10",
+                 "--eawr-live-order", f"1:move:{NEBULON}@{SPOTTER_POINT[0]},{SPOTTER_POINT[1]},0",
+                 "--eawr-live-order", f"1:move:{TARTAN}@{TARGET_POINT[0]},{TARGET_POINT[1]},0",
+                 "--eawr-live-order", f"1:move:{Y_WING_SQUADRON}@-1900,1750,0",
+                 "--eawr-live-follow", str(Y_WING_SQUADRON),
+                 "--eawr-live-input", f"2200:click:icon={Y_WING_SQUADRON}")
+        aim = ("--eawr-live-input", f"2220:click:unit={TARTAN}")
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-ion-shot-") as temporary:
+            directory = pathlib.Path(temporary)
+            for name, press in (("button", "2210:click:ability=0"), ("hotkey", "2210:key:I+shift")):
+                code, result = self._run(directory, f"ion-{name}", (*setup, "--eawr-live-input", press, *aim),
+                                         end_tick=2600)
+                self.assertEqual(code, 0, result.get("failure"))
+                battle, live, effects = result["battle_input"], result["live_session"], result["battle_effects"]
+                log = battle["log"]
+                bar = battle["ability_bar"]
+                self.assertEqual((bar["requests"], bar["targeted"], bar["target_cancels"], bar["targeting"]),
+                                 (1, 1, 0, False), log)
+                self.assertEqual(bar["hotkeys"], 1 if name == "hotkey" else 0, log)
+                self.assertIn("ability ION_CANNON_SHOT: pick a target", log)
+                self.assertIn(f"ability ION_CANNON_SHOT at {TARTAN}", log)
+                self.assertEqual(live["ability_requests"], {"issued": 1, "refused": 0})
+                self.assertEqual(live["rejected"], [])
+                self.assertIs(live["headless_hashes_equal"], True)
+                # AB-63 to AB-65: the squadron's shot switched on once, after the click, and ended.
+                shots = {row["squadron"]: row for row in live["ion_shots"]["squadrons"]}
+                self.assertEqual(shots[Y_WING_SQUADRON]["switched_on"], 1, shots)
+                self.assertGreaterEqual(shots[Y_WING_SQUADRON]["first_on"], 2220, shots)
+                self.assertFalse(shots[Y_WING_SQUADRON]["on"], shots)
+                # AB-66, AB-67: one override bolt per Y-wing, drawn as the override projectile.
+                fired = effects["ability_shots_fired"]
+                self.assertEqual(list(fired), [ion], effects)
+                self.assertTrue(1 <= fired[ion] <= len(Y_WINGS), fired)
+                self.assertGreater(effects["ability_shot_frames_drawn"].get(ion, 0), 0, effects)
+                # IS-01, IS-03: the bolts stun the Tartan.
+                stunned = {row["unit"]: row for row in live["ion_shots"]["stunned"]}
+                self.assertIn(TARTAN, stunned, live["ion_shots"])
+                self.assertGreater(stunned[TARTAN]["max_frames"], 0, stunned)
+                self.assertGreater(stunned[TARTAN]["first"], shots[Y_WING_SQUADRON]["first_on"], stunned)
+                # IS-09: the stun shows the Tartan's authored-hidden ion-stun emitter on its hull,
+                # from the stun on; when the stun ends it stops emitting and drains.
+                emitters = result["unit_emitters"]
+                started = {name.lower(): count for name, count in emitters["started"].items()}
+                self.assertGreater(started.get("pi_damage_elec_cap00", 0), 0, emitters["started"])
+                ion_rows = [row for row in emitters["start_log"]
+                            if row["unit"] == TARTAN and row["proxy"].lower().startswith("pi")]
+                if not emitters["start_log_full"]:
+                    self.assertTrue(ion_rows, emitters["start_log"])
+                for row in ion_rows:
+                    self.assertGreaterEqual(row["tick"], stunned[TARTAN]["first"], row)
+                    self.assertGreater(row["presented"], 0, row)
+                self.assertGreater(emitters["ion_stun_drains"]["started"], 0, emitters["ion_stun_drains"])
+
     def test_ability_buttons_draw_and_request(self):
         # #454 (docs/behaviour/foc-ability-buttons.md): the box's selection gets one button per
         # ability group under its border, with the engine's icons; a left release requests the ability
@@ -1341,6 +1439,188 @@ class BattleInputGraphical(unittest.TestCase):
             self.assertEqual(battle["events"], 2, battle["log"])
             self.assertEqual(sorted(member for card in battle["unit_cards"]["cards"]
                                     for member in card["members"]), expected)
+
+    def test_station_build_buttons_show_the_menu(self):
+        # #530 PU-60 to PU-62: the Rebel level-1 station's menu in list order, each button with its
+        # Icon_Name drawn and its multiplayer price (the retail still shows 500, 550, 850, 800 and
+        # 2000). The upgrades and the level-2 station are shown but disabled in M2 (PU-20).
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-menu-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._run(directory, "menu", ("--eawr-live-input", f"10:click:unit={STAR_BASE}"), end_tick=30)
+            self.assertEqual(code, 0, result.get("failure"))
+            drawn = sorted(result["hud"]["unit_cards"]["drawn"], key=lambda card: card["slot"])
+            self.assertEqual([card["type"] for card in drawn],
+                             ["Rebel_X-Wing_Squadron", "Y-Wing_Squadron", "RS_Enhanced_Shielding_L1_Upgrade",
+                              "RS_Improved_Weapons_L1_Upgrade", "RS_Level_Two_Starbase_Upgrade"], drawn)
+            self.assertEqual([card["price"] for card in drawn], [500, 550, 850, 800, 2000], drawn)
+            self.assertEqual([card["disabled"] for card in drawn], [False, False, True, True, True], drawn)
+            self.assertTrue(all(card["icon_drawn"] for card in drawn), drawn)
+
+    def test_station_buys_a_squadron_that_arrives(self):
+        # #530 (docs/behaviour/space-purchasing.md PU-60 to PU-68): selecting the Rebel station turns
+        # the card slots into its build buttons; the first buys an X-wing squadron (500 credits, 450
+        # frames). Once it is pooled, the reinforcements button opens the pane, a press on its slot
+        # starts a drag; its release on the battle plane brings it in through hyperspace: hidden
+        # until its frame 35, landed at frame 150. Every step is a player gesture through the HUD.
+        place = (STAR_BASE_POSITION[0] + 700.0, STAR_BASE_POSITION[1] - 500.0)
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-purchase-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._run(directory, "purchase", (
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "500:click:hud=b_reinforcement",
+                "--eawr-live-input", "510:press:hud=r_0000",
+                "--eawr-live-input", f"515:hover:@{place[0]},{place[1]},0",
+                "--eawr-live-input", f"520:release:@{place[0]},{place[1]},0",
+                "--eawr-live-capture-ticks", "30,480,512,540,560,700"), end_tick=720)
+            self.assertEqual(code, 0, result.get("failure"))
+            battle, live, hud = result["battle_input"], result["live_session"], result["hud"]
+            self.assertEqual(battle["scripted_fired"], 6, battle["log"])
+            production = battle["production"]
+            self.assertEqual(production["station"], STAR_BASE, battle["log"])
+            self.assertEqual(production["buys"], 1, battle["log"])
+            self.assertEqual(production["placements"], 1, battle["log"])
+            buttons = production["buttons"]
+            self.assertGreaterEqual(len(buttons), 2, buttons)
+            self.assertEqual(buttons[0]["price"], 500, buttons)
+            requests = live["economy_requests"]
+            self.assertEqual((requests["buys"], requests["reinforcements"], requests["refused"]), (1, 1, 0), requests)
+            self.assertEqual(live["rejected"], [])
+            # The squadron's craft and container arrived: hidden for 35 frames, landed after 150.
+            preview = live["placement_preview"]
+            self.assertGreater(preview["frames"], 0, preview)
+            valid = [row for row in preview["samples"] if row["valid"]]
+            self.assertTrue(valid, preview)
+            self.assertTrue(all(len(row["clones"]) == 5 for row in valid), valid)
+            self.assertGreater(len({tuple(pose) for pose in valid[-1]["clones"]}), 1, valid[-1])
+            arrivals = [row for row in live["arrivals"] if row["owner"] == 1]
+            self.assertGreaterEqual(len(arrivals), 2, live["arrivals"])
+            # Scripted input enters Godot's queue; compare the preview with the observed
+            # command application rather than its requested input tick.
+            first_arrival = min(row["first_tick"] for row in arrivals)
+            self.assertTrue(all(row["tick"] < first_arrival for row in preview["samples"]), preview)
+            self.assertIsNone(production["placing"], production)
+            for row in arrivals:
+                self.assertEqual(row["visible_tick"] - row["first_tick"], 35, row)
+                self.assertEqual(row["landed_tick"] - row["first_tick"], 150, row)
+            # Drawn once landed: the squadron's five craft have models (PU-G25's purchase slots).
+            drawn = {unit["entity"] for unit in live["own_units"]}
+            self.assertGreaterEqual(len(drawn & {row["unit"] for row in arrivals}), 5, live["own_units"])
+            economy = live["economy"]
+            self.assertEqual(economy["pool"], [], economy)
+            self.assertEqual(economy["population"], 1, economy)
+            # 6000 - 500 + about 720 frames of 5 credits a second (PU-07: Q24 per-frame steps, the HUD
+            # rounds down, and the last presented frame may trail the session by a tick).
+            self.assertLessEqual(abs(int(economy["credits"]) - (6000 - 500 + 720 * 5 // 30)), 2, economy)
+            self.assertIs(live["headless_hashes_equal"], True)
+            panel = hud["production"]
+            self.assertTrue(panel["pane_open"], panel)
+            self.assertEqual(panel["picks"], 1, panel)
+            self.assertEqual(panel["queue_slots"], 10, panel)
+            self.assertEqual(panel["pane_slots"], 20, panel)
+
+    def test_invalid_reinforcement_drag_cancels_and_keeps_the_pool(self):
+        # WR-13/15: the occupied station's point is red, release cancels, and a later click cannot deploy.
+        blocked = f"@{STAR_BASE_POSITION[0]},{STAR_BASE_POSITION[1]},0"
+        with tempfile.TemporaryDirectory(prefix="eawr-invalid-arrival-") as temporary:
+            code, result = self._run(pathlib.Path(temporary), "invalid", (
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "500:click:hud=b_reinforcement",
+                "--eawr-live-input", "510:press:hud=r_0000",
+                "--eawr-live-input", f"515:hover:{blocked}",
+                "--eawr-live-input", f"520:release:{blocked}",
+                "--eawr-live-input", f"530:click:{blocked}"), end_tick=540)
+            self.assertEqual(code, 0, result.get("failure"))
+            live = result["live_session"]
+            self.assertEqual(live["economy_requests"]["reinforcements"], 0, live)
+            self.assertEqual(live["economy_requests"]["refused"], 1, live)
+            self.assertEqual(len(live["economy"]["pool"]), 1, live)
+            self.assertEqual(live["arrivals"], [], live)
+            samples = live["placement_preview"]["samples"]
+            self.assertTrue(samples, live["placement_preview"])
+            self.assertTrue(any(not row["valid"] for row in samples), samples)
+            self.assertTrue(all(row["tick"] < 530 for row in samples), samples)
+            battle = result["battle_input"]
+            self.assertEqual(battle["scripted_fired"], 7, battle["log"])
+            self.assertIsNone(battle["production"]["placing"], battle["production"])
+
+    def test_pending_victory_closes_the_pane_and_cancels_a_drag(self):
+        # WR-07/19: both an already selected reserve and a new pane request are gated.
+        with tempfile.TemporaryDirectory(prefix="eawr-arrival-victory-") as temporary:
+            code, result = self._run(pathlib.Path(temporary), "arrival_victory", (
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "500:click:hud=b_reinforcement",
+                "--eawr-live-input", "510:press:hud=r_0000",
+                "--eawr-live-order", "515:damage:8@1000000",
+                "--eawr-live-input", "520:release:@-3111,3960,0",
+                "--eawr-live-input", "530:click:hud=b_reinforcement"), end_tick=540)
+            self.assertEqual(code, 0, result.get("failure"))
+            live = result["live_session"]
+            self.assertIsNotNone(live["outcome"], live)
+            self.assertEqual(live["economy_requests"]["reinforcements"], 0, live)
+            self.assertEqual(len(live["economy"]["pool"]), 1, live)
+            self.assertEqual(live["arrivals"], [], live)
+            self.assertFalse(result["hud"]["production"]["pane_open"], result["hud"])
+            self.assertIsNone(result["battle_input"]["production"]["placing"], result["battle_input"])
+
+    def test_bought_units_reuse_the_slots_of_the_dead(self):
+        # #530 PU-G25: the purchase slots are what can stand at once, not how many were ever
+        # bought. With one slot per buyable craft (--eawr-live-purchase-slots 1) the first bought
+        # X-wing squadron takes every X-wing slot; its craft die (scripted damage as their owner)
+        # and the second squadron, bought meanwhile and brought in after that, is drawn on the same
+        # slots. Before the fix the second squadron was simulated but never drawn. A first run
+        # without the kills finds the craft's entity IDs (the AI's launches decide them; the
+        # simulation is deterministic, so the second run sees the same ones).
+        place = (STAR_BASE_POSITION[0] + 700.0, STAR_BASE_POSITION[1] - 500.0)
+        second_place = (place[0] + 300.0, place[1])
+        second_arrives = 1000
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-slot-reuse-") as temporary:
+            directory = pathlib.Path(temporary)
+
+            def run(name, kills=()):
+                return self._run(directory, name, (
+                    "--eawr-live-purchase-slots", "1", "--eawr-live-late-orders", "on",
+                    "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                    "--eawr-live-input", "20:click:card=0",
+                    "--eawr-live-input", "30:click:card=0",
+                    "--eawr-live-input", "500:click:hud=b_reinforcement",
+                    "--eawr-live-input", "510:press:hud=r_0000",
+                    "--eawr-live-input", f"515:hover:@{place[0]},{place[1]},0",
+                    "--eawr-live-input", f"520:release:@{place[0]},{place[1]},0",
+                    *(argument for craft in kills
+                      for argument in ("--eawr-live-order", f"800:damage:{craft}@100000")),
+                    "--eawr-live-input", f"{second_arrives}:press:hud=r_0000",
+                    "--eawr-live-input", f"{second_arrives + 5}:hover:@{second_place[0]},{second_place[1]},0",
+                    "--eawr-live-input", f"{second_arrives + 10}:release:@{second_place[0]},{second_place[1]},0",
+                    "--eawr-live-capture-ticks", "700,1300"), end_tick=1320)
+
+            code, probe = run("slot-probe")
+            self.assertEqual(code, 0, probe.get("failure"))
+            rows = [row for row in probe["live_session"]["arrivals"] if row["owner"] == 1]
+            craft_type = collections.Counter(row["type"] for row in rows).most_common(1)[0][0]
+            craft = [row for row in rows if row["type"] == craft_type]
+            first_craft = sorted(row["unit"] for row in craft if row["first_tick"] < 800)
+            second_craft = sorted(row["unit"] for row in craft if row["first_tick"] >= 800)
+            self.assertEqual((len(first_craft), len(second_craft)), (5, 5), rows)
+            # Without the kills the second squadron has no free slot.
+            drawn = {unit["entity"] for unit in probe["live_session"]["own_units"]}
+            self.assertEqual(drawn & set(second_craft), set(), sorted(drawn))
+
+            code, result = run("slot-reuse", first_craft)
+            self.assertEqual(code, 0, result.get("failure"))
+            live = result["live_session"]
+            self.assertEqual(live["rejected"], [], live["rejected"])
+            self.assertEqual(live["economy_requests"]["buys"], 2, live["economy_requests"])
+            self.assertEqual(live["economy_requests"]["reinforcements"], 2, live["economy_requests"])
+            arrivals = {row["unit"] for row in live["arrivals"] if row["owner"] == 1}
+            self.assertTrue(set(first_craft) | set(second_craft) <= arrivals, live["arrivals"])
+            drawn = {unit["entity"] for unit in live["own_units"]}
+            self.assertEqual(drawn & set(first_craft), set(), "the first squadron died")
+            self.assertTrue(set(second_craft) <= drawn, (sorted(drawn), live["arrivals"]))
+            self.assertGreaterEqual(live["slots_released"], len(first_craft), live)
+            self.assertIs(live["headless_hashes_equal"], True)
 
     def test_bad_inputs_are_refused(self):
         with tempfile.TemporaryDirectory(prefix="eawr-battle-bad-") as temporary:

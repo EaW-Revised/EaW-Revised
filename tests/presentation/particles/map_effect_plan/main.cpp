@@ -53,13 +53,14 @@ struct Fixture {
     }
 
     std::vector<std::uint8_t> hardpoint_hidden;
+    std::vector<std::uint8_t> code_shown;
 
     MapEffectPlan run(std::size_t budget = 100, std::uint64_t seed = 99,
                       std::optional<std::uint32_t> alt = 0,
                       std::optional<std::uint32_t> lod = 0,
                       VisibilityEvidence visibility = VisibilityEvidence::bind_pose) {
         const MapEffectPlacementInput input{&model, &placement, frames, effects, visibility, alt, lod,
-                                            hardpoint_hidden};
+                                            hardpoint_hidden, code_shown};
         return plan_map_effects(std::span(&input, 1), seed, budget);
     }
 };
@@ -118,6 +119,20 @@ void hardpoint_states() {
     expect(f.run().records[0].status == MapEffectStatus::admitted, "a destroyed hardpoint's emitter is admitted");
 }
 
+// IS-09: a proxy whose type the code shows (an ion stun's) runs although authored hidden; a
+// hidden bone and a hardpoint's state still hide it.
+void code_shown_proxies() {
+    Fixture f{"pi_Elec", "pi_Elec", "pi_Elec"};
+    for (auto& proxy : f.model.proxies) proxy.visible = false;
+    expect(f.run().records[0].cause == MapEffectCause::hidden_proxy, "authored hidden without the code flag");
+    f.code_shown = {1, 1};
+    f.hardpoint_hidden = {0, 1};
+    auto p = f.run();
+    expect(p.records[0].status == MapEffectStatus::admitted, "the code shows an authored-hidden proxy");
+    expect(p.records[1].cause == MapEffectCause::hardpoint_state, "a hardpoint's state still hides it");
+    expect(p.records[2].cause == MapEffectCause::hidden_proxy, "a proxy past the mask keeps its authored flag");
+}
+
 void identity_frames_budget_seed() {
     Fixture f{"Smoke", "Smoke", "Smoke"};
     f.placement.effects[1].alternate_suffix_removed = true;
@@ -163,6 +178,7 @@ int main() {
     variants();
     visibility_and_resolution();
     hardpoint_states();
+    code_shown_proxies();
     identity_frames_budget_seed();
     std::cout << "map effect plan contracts passed\n";
 }

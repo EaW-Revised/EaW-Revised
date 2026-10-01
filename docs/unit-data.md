@@ -252,7 +252,7 @@ no `Space_Layer` and gets no footprint.
 ## Content identity
 
 `content_identity(tables)` is SHA-256 over `canonical_encoding(tables)`. The encoding
-starts with the length-framed text `eawr-unit-tables-v4` (v3 before EAWR-75, v2 before EAWR-71, v1 before EAWR-270). It
+starts with the length-framed text `eawr-unit-tables-v5` (v4 before EAWR-530, v3 before EAWR-75, v2 before EAWR-71, v1 before EAWR-270). It
 then writes every unit (with its EAWR-71 footprint fields after its inactive abilities), the
 pinned map obstacles (ID, XML type, `Space_Layer`, `Scale_Factor`, model path, footprint
 fields), projectile, priority set, category and property enum value, combat scalar and
@@ -274,7 +274,7 @@ fixtures keep their own identities, so their hashes do not change.
 
 The FoC profile gives 17 units (the 12 pinned types and 5 craft), 13 projectiles, 5
 priority sets, 36 combat scalars and 168 damage/armor rows. There are no unresolved rows.
-The identity is `984c71a99d5f6f58cef57bd3498754a5c2211bf7aec2b4f9ed7626273a0eb113` (pinned in `tests/units`; EAWR-340 corrected the hardpoint-death default; EAWR-68 added
+The identity is `2e2540011dfee39f1e8ef1924b6232f172170a4d51a860c383267832aecb6079` (pinned in `tests/units`; EAWR-340 corrected the hardpoint-death default; EAWR-68 added
 `Space_FOW_Reveal_Range`; EAWR-72 added hardpoint repair values and health rules;
 EAWR-270 added priority-set exclusions, entry kinds, `Property_Flags` and enum tables;
 EAWR-74 added `Diminishing_Firepower`, constant texts, `SHIELDED`, collision bounds and the opportunity-fire defaults;
@@ -283,7 +283,7 @@ path finder constants, footprints and the pinned map obstacles; the EAWR-343 rev
 started each axis of the collision box from its own bounds; EAWR-361 added the bone points' bind-frame axes; EAWR-266 added
 `DestinationSearchRadiusIncrementSpace`; EAWR-361 added the projectiles' `AI_Combat_Power`; EAWR-75 added the fighter-bay axis, `Strafe_Distance`,
 `Guard_Chase_Range`, `Idle_Chase_Range` and `Squadron_Formation_Error_Tolerance`; EAWR-452 added `Attack_Move_Response_Range`; EAWR-388 added the
-object weapon's turret extents; EAWR-409 added the craft's `Out_Of_Combat_Defense_Adjustment`; EAWR-361 added `POWERED`, the energy pool behaviour; EAWR-518 added the Rebel MC80 `Calamari_Cruiser`, SK-22; EAWR-536 added `Collision_Mesh`, `Collision_Box_Modifier` and the collision meshes, DG-36; EAWR-457 added the craft's `Minimum_Follow_Distance`; EAWR-561 added the projectiles' ion stun, `ION_STUN_EFFECT`, a hardpoint's own `Projectile_Damage`, the team types' abilities and `Projectile_Types_Override`; EAWR-599 added `FormationMinimumSideError` and `FormationMaximumSideError`, the squadron table's lane steer, space-fighters FO-11; EAWR-607 reads the object weapon's scatter rows from `Targeting_Fire_Inaccuracy`, not the unit's `Fire_Inaccuracy_Distance`, space-damage DG-24).
+object weapon's turret extents; EAWR-409 added the craft's `Out_Of_Combat_Defense_Adjustment`; EAWR-361 added `POWERED`, the energy pool behaviour; EAWR-518 added the Rebel MC80 `Calamari_Cruiser`, SK-22; EAWR-536 added `Collision_Mesh`, `Collision_Box_Modifier` and the collision meshes, DG-36; EAWR-457 added the craft's `Minimum_Follow_Distance`; EAWR-561 added the projectiles' ion stun, `ION_STUN_EFFECT`, a hardpoint's own `Projectile_Damage`, the team types' abilities and `Projectile_Types_Override`; EAWR-599 added `FormationMinimumSideError` and `FormationMaximumSideError`, the squadron table's lane steer, space-fighters FO-11; EAWR-607 reads the object weapon's scatter rows from `Targeting_Fire_Inaccuracy`, not the unit's `Fire_Inaccuracy_Distance`, space-damage DG-24; EAWR-530 added each type's production data (`Tactical_Buildable_Objects_Multiplayer`, `Tactical_Build_Cost_Multiplayer`, `Tactical_Build_Time_Seconds`, `Tactical_Production_Queue`, `Population_Value`, `Reinforcement_Prevention_Radius` and the stations' income streams and bonuses) and `MP_Default_Credits`, `Tactical_Build_Time_Multiplier` and `Allow_Reinforcement_Percentage_Normalized`).
 The durability table has 12 profiles (7 stations and ships, 5 craft). The motion table has 5
 ship profiles, 15-degree arcs and a 300-unit expansion distance. The duplicate-tag notes are
 pinned in `tests/units`. Retail keeps the last occurrence of each of these single-value tags as well (AU-80, re-read for these tags as IS-01 to IS-04), so none of them changes a value:

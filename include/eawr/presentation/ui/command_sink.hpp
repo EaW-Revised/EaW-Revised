@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/sim/tactical/economy.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <cstddef>
@@ -26,6 +27,11 @@ enum class TacticalVerb : std::uint8_t {
     ability = 4, // a unit ability (#76); a targeted special ability has no command yet
     attack_move = 5, // #452: move to a point, engaging what comes into range
     guard = 6,       // #452: follow and escort a unit, or hold a point
+    // #530 (space-purchasing PU-10 to PU-34): the local player's economy. A buy lists the station,
+    // a cancel and a reinforce no unit.
+    buy = 7,
+    cancel = 8,
+    reinforce = 9,
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -49,6 +55,14 @@ struct TacticalIntent {
     // do with it. With none the intent is a targeted special ability, which has no command yet.
     sim::tactical::AbilityKind unit_ability{sim::tactical::AbilityKind::none};
     sim::tactical::AbilityAction ability_action{sim::tactical::AbilityAction::activate};
+    // attack (#531, docs/behaviour/space-orders.md OR-20): the index in the target type's
+    // HardPoints list of the hardpoint to attack, or attack_hull for the unit.
+    std::uint32_t hardpoint{sim::tactical::attack_hull};
+    // #530: buy and reinforce: the type; cancel: the queue and its entry; reinforce: the point is
+    // `destination`.
+    sim::tactical::TypeId type{};
+    sim::tactical::BuildQueue queue{sim::tactical::BuildQueue::units};
+    std::uint32_t index{};
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 
@@ -134,6 +148,9 @@ struct WorldPick {
     bool hostile{};
     bool own{};
     bool selected{};
+    // #531 (OR-20): the hardpoint reticle under the pointer when `entity` is its unit, as its
+    // index in the unit type's HardPoints list, else attack_hull.
+    std::uint32_t hardpoint{sim::tactical::attack_hull};
 };
 
 // The modifier keys held with a world click (OR-01): Ctrl attack-moves, Ctrl and Alt guard.

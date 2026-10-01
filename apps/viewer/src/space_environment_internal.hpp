@@ -2,6 +2,7 @@
 
 // Private to the space environment translation units (space_environment*.cpp):
 // the environment's State, its default view, and the helpers the units share.
+#include "viewer_path.hpp"
 #include "space_environment.hpp"
 #include "capture_viewport.hpp"
 #include "fog_mode.hpp"
@@ -252,6 +253,10 @@ public:
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> camera_bounds() const;
     void overview_key();
     [[nodiscard]] std::string overview_level() const;
+    // #888 perf trace: the last frame's snapshot build and submit.
+    [[nodiscard]] double submit_ms() const noexcept { return submit_ms_; }
+    [[nodiscard]] std::size_t submit_pieces() const noexcept { return snapshot_ ? snapshot_->instances().size() : 0U; }
+    [[nodiscard]] std::uint64_t submit_sent() const noexcept { return submit_sent_; }
 
 private:
     struct Item final {
@@ -351,6 +356,8 @@ private:
     std::optional<SpacePopulateResult> populate_result_;
     bool effects_released_{};
     std::shared_ptr<const sim::RenderSnapshot> snapshot_;
+    double submit_ms_{};
+    std::uint64_t submit_sent_{};
     std::map<std::string, std::pair<std::string, std::optional<assets::Texture>>> textures_;
     std::map<std::string, std::string> texture_failures_;
     sim::AssetId next_asset_{1};
@@ -561,10 +568,10 @@ struct SpaceEnvironment::State final {
     [[nodiscard]] bool persist(const std::filesystem::path& path, const std::span<const std::byte> bytes) {
         const std::string problem = write_file(path, bytes);
         if (problem.empty()) {
-            artifacts_written.push_back(path.generic_string());
+            artifacts_written.push_back(ViewerPath::utf8(path));
             return true;
         }
-        artifacts_failed.push_back(path.generic_string() + ": " + problem);
+        artifacts_failed.push_back(ViewerPath::utf8(path) + ": " + problem);
         return false;
     }
     void release_all();

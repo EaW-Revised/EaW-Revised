@@ -1,4 +1,4 @@
-add_library(eawr_skirmish STATIC ai.cpp census.cpp content.cpp inputs.cpp melee.cpp placement.cpp start.cpp)
+add_library(eawr_skirmish STATIC ai.cpp census.cpp content.cpp economy.cpp inputs.cpp melee.cpp placement.cpp start.cpp)
 add_library(eawr::skirmish ALIAS eawr_skirmish)
 
 target_include_directories(

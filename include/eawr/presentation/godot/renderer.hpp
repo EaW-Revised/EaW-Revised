@@ -163,6 +163,20 @@ public:
     [[nodiscard]] std::vector<SubmissionEvidence> submission_evidence() const;
     [[nodiscard]] std::size_t instance_count() const noexcept;
 
+    // #888: the submission work so far, as counts (never wall-clock). A
+    // submit rebuilds the pass order only when the snapshot's pieces or the
+    // uploads changed, and sends a piece's transform only when it moved.
+    struct SubmitWork final {
+        std::uint64_t submits{};
+        std::uint64_t pieces{};
+        std::uint64_t orders_built{};
+        std::uint64_t order_sorts{};
+        std::uint64_t transforms_sent{};
+        std::uint64_t billboard_refreshes{};
+        std::uint64_t sweeps{};
+    };
+    [[nodiscard]] SubmitWork submit_work() const noexcept;
+
     // Resource churn qualification (#22). The counts are this adapter's own
     // registry; instance_evidence() reads each live instance's mesh and
     // skeleton back from RenderingServer instead of restating bookkeeping.

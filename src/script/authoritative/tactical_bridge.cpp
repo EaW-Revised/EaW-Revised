@@ -40,6 +40,7 @@ struct ScriptedTacticalSession::Impl {
     std::map<std::string, CommandTranslator, std::less<>> translators;
     std::shared_ptr<ScriptEngine> engine;
     std::shared_ptr<sim::StateHasher> hasher; // #637: null hashes on the stepping thread
+    bool authoritative_hash{true};            // #895: off, the tick's combined hash stays empty
     // The last service's commands, submitted with the next step.
     std::vector<ScriptCommand> pending;
     // Per issuer: (tick, one past the sequence) of the latest key the world
@@ -191,6 +192,7 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
         }
     }
     impl.pending = out.scripts.commands;
+    if (!impl.authoritative_hash) return core::Result<ScriptedTick>::success(std::move(out));
     auto script_hash = impl.scripts.state_hash();
     if (!script_hash) {
         impl.failure = script_hash.error();
@@ -212,6 +214,10 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
 void ScriptedTacticalSession::set_state_hasher(std::shared_ptr<sim::StateHasher> hasher) noexcept {
     impl_->world.set_state_hasher(hasher);
     impl_->hasher = std::move(hasher);
+}
+
+void ScriptedTacticalSession::set_authoritative_hash(const bool every_tick) noexcept {
+    impl_->authoritative_hash = every_tick;
 }
 
 const tactical::TacticalSession& ScriptedTacticalSession::world() const noexcept { return impl_->world; }

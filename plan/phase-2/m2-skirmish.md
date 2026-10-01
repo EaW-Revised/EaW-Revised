@@ -2,9 +2,11 @@
 
 **Issue:** EAWR-64. **Date:** 2026-09-25;
 owner answers from EAWR-179 applied 2026-09-26;
-SK-04 corrected and the EAWR-79 status added on 2026-09-28.
-**Owner decisions:** FoC only; map `_mp_space_coruscant.ted`; Empire vs Rebel; fixed forces
-(no station production, income or population cap); victory and defeat through EAWR-77; the
+SK-04 corrected and the EAWR-79 status added on 2026-09-28; SK-30 and SK-31 replaced by station
+purchasing on 2026-09-28 (EAWR-530, owner decisions EAWR-461, EAWR-522 and EAWR-538).
+**Owner decisions:** FoC only; map `_mp_space_coruscant.ted`; Empire vs Rebel; the fixed start
+forces plus FoC's skirmish economy (credits, income, the station build queue and hyperspace
+arrival; EAWR-522 = A replaced the fixed-force economy lock of EAWR-179); victory and defeat through EAWR-77; the
 opponent is the original FoC tactical AI in its galactic-conquest (GC) configuration (owner
 decision, option B), run by EAWR-79, with EAWR-78 as the fallback. In EAWR-179: the retail start plus a GC fleet
 chosen by the owner, no squadron replenishment, an AI attacker and Normal difficulty.
@@ -78,8 +80,8 @@ Pinned unit types (the EAWR-65 scan list; the scan decides fields and abilities)
 
 | Type | Role | Craft | Hull / shield | `AI_Combat_Power` | Unit ability (data) |
 |---|---|---|---|---:|---|
-| `Skirmish_Rebel_Star_Base_1` | Rebel station | | 1600 / 300 | 5,000 | income and radar abilities, off in M2 (SK-31) |
-| `Skirmish_Empire_Star_Base_1` | Empire station | | 1600 / 300 | 5,000 | income and radar abilities, off in M2 (SK-31) |
+| `Skirmish_Rebel_Star_Base_1` | Rebel station | | 1600 / 300 | 5,000 | income stream and Supply Dock bonus (SK-30); radar ability off (SK-31) |
+| `Skirmish_Empire_Star_Base_1` | Empire station | | 1600 / 300 | 5,000 | income stream and Supply Dock bonus (SK-30); radar ability off (SK-31) |
 | `Corellian_Corvette` | Rebel corvette (8 laser hardpoints, not targetable) | | 750 / 600 | 1,250 | `TURBO` |
 | `Nebulon_B_Frigate` | Rebel frigate (engine and 4 laser hardpoints, all targetable; no hangar) | | 3600 / 700 | 2,200 | `DEFEND` (autofire script, SK-47) |
 | `Calamari_Cruiser` | Rebel cruiser, the MC80 (engine, 4 laser and 2 ion-cannon hardpoints, all targetable; no hangar) | | 8500 / 2000 | 4,250 | `DEFEND` (autofire script, SK-47) |
@@ -98,9 +100,9 @@ Only `Nebulon_B_Frigate` and `Calamari_Cruiser` have a `Lua_Script` (SK-47); no 
 
 | Rule | Behaviour | Source |
 |---|---|---|
-| SK-30 | Every player starts with 0 credits and gains none. No player has a population cap. | owner |
-| SK-31 | Stations have no build queue (`Tactical_Buildable_Objects_Multiplayer` is ignored), no level upgrade (`Next_Level_Base`), no income stream or income bonus, and no comm-array radar ability. | owner |
-| SK-32 | Map capture points stay inert: build pads, the merchant dock and the gravity-well station are never captured. They keep their neutral owner and their hull. | owner (no economy or production); inference |
+| SK-30 | **Credits and income (EAWR-530).** Every lobby player starts with FoC's skirmish default, `MP_Default_Credits` = 6000, and earns from its station's income stream: 30 per 10 s, paid every frame, plus 20 while the station's Supply Dock hardpoint stands (5 credits a second in all). The population cap is the faction's `Space_Tactical_Unit_Cap`: Rebel 25, Empire 20. Only units brought in from the reinforcement pool count toward it. The rules are PU-01 to PU-07 and PU-21 of [space purchasing](../../docs/behaviour/space-purchasing.md). Until EAWR-530 this rule was 0 credits and no income or cap (EAWR-179). | owner (EAWR-461, EAWR-522 = A); data; debug build |
+| SK-31 | **The station build queue (EAWR-530).** Each level-1 station builds its `Tactical_Buildable_Objects_Multiplayer` list for its owner's faction (Rebel: X-wing and Y-wing squadrons; Empire: TIE interceptor and TIE bomber squadrons) at the multiplayer prices and build times; a finished unit waits in its owner's reinforcement pool until the owner brings it in through hyperspace at a point (PU-10 to PU-39). The list's upgrades and the level-2 station upgrade (`Next_Level_Base`) are shown but not built in EAWR-530; the owner put them and the build pads into M2 as EAWR-540 and EAWR-541 (EAWR-538 = A). No comm-array radar ability. | owner (EAWR-522 = A, EAWR-538 = A); data; debug build |
+| SK-32 | Map capture points stay inert: build pads, the merchant dock and the gravity-well station are never captured. They keep their neutral owner and their hull. The build pads and their mining facilities come with EAWR-541 (EAWR-538 = A). | owner (no economy or production; EAWR-538 for the pads); inference |
 | SK-33 | Victory: the retail default space condition, `MP_Default_Space_Tactical_Win_Condition = SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED`. A player wins when the enemy starbase is destroyed. Objects with `Victory_Relevant = no` (containers, pads, gravity-well station) never count. EAWR-77 owns the full rule: [space victory](../../docs/behaviour/space-victory.md). | data (`gameconstants.xml`); ticket EAWR-77 |
 | SK-34 | Retreat is off. `CanRetreat` is 0 for both players. | ticket (EAWR-77 scope excludes retreat) |
 | SK-35 | No heroes, superweapons, random events or game timer. The lobby defaults allow heroes and superweapons, but the fixed roster holds none. | data (lobby defaults); owner (fixed forces) |
@@ -117,7 +119,7 @@ this table pins the inputs that note left open (its AI-G03).
 | SK-41 | GC context: `Game.IsCampaignGame = 1`. | owner |
 | SK-42 | AI difficulty Normal (`Normal_Default`: every space and tactical multiplier 1.0, space goal-cycle sleep 0; only the galactic `Galactic_AI_Contrast_Multiplier` 1.1 and `Galactic_Build_Time_Multiplier` 0.8 and the Underworld `Bribe_Cost_Multiplier` 0.25 differ, none of which apply to this fixture). Rig captures for M2 use a Normal AI. The P1 capture route used Easy, which scales the AI's health by 0.4, shields by 0.3 and damage by 0.6. | data (`difficultyadjustments.xml`); owner (EAWR-179 Q4) |
 | SK-43 | `Variable_Self.IsDefender = 0` for the AI (the GC attacker role). | owner (EAWR-179 Q3) |
-| SK-44 | `Variable_Self.BaseLevel = 1` (the AI owns a level-1 station). `CanRetreat = 0` (SK-34). Credits 0 (SK-30). | data; owner |
+| SK-44 | `Variable_Self.BaseLevel = 1` (the AI owns a level-1 station). `CanRetreat = 0` (SK-34). Credits as SK-30, but the AI does not buy in M2: in the GC context (SK-41) FoC's build goal evaluates to zero (AI-23 of the AI note). Switching M2 to the skirmish context so the AI buys (PU-50 to PU-52) is owner question EAWR-571; until then SK-41 stands (PU-G12). | data; owner; coordinator (2026-09-29, EAWR-571 pending) |
 | SK-45 | AI fog of war stays off (retail default `AIUsesFogOfWarSpace = False`), so the AI sees the whole map. | data; AI note AI-14 |
 | SK-46 | With SK-20 to SK-45, the AI note's plan table gives these live plans: `destroyunit`, `flankplan` (Tartan and Acclamator give the 2 corvettes or frigates it needs), `destroyunitminimal`, `areasweep`, `spacescout`, `escortplan`, `bombingrun` (roster-dependent: 3 bomber squadrons, the Empire station's 2 and the Acclamator's 1 from SK-23), `hidesurpriseunits`, `turboattack`, `turboattacklocation`, `movetolocationrush` (pad goal, SK-32) and `burnunits`. These stay dormant: `spaceartillery`, `hidetransports`, `retreatplan`, `movetolocation` and the station-defence plan. | inference from the AI note plan table |
 | SK-47 | **Unit object script.** `Nebulon_B_Frigate` and `Calamari_Cruiser` name `Lua_Script` `ObjectScript_PowerToShields` (`objectscript_powertoshields.lua`, AI-32), which loads for either owner and exits outside space mode. For an AI owner it activates `DEFEND` whenever `Get_Rate_Of_Damage_Taken()` exceeds 20 and the ability is ready. For a human owner it does the same only while the player has set `DEFEND` to autofire. Both are the human's in M2 (SK-10), so they idle until autofire is on. EAWR-79 therefore needs the AI-32 script with `PGStateMachine` and the AI-43 functions, even though the AI owns neither. | data (`spaceunitsfrigates.xml`, `spaceunitscapital.xml`, the script); AI note AI-32, AI-43 |
@@ -133,6 +135,14 @@ on 2026-09-25.
 | Q2 | Station and carrier squadron replenishment: retail reserves, or no replenishment | No replenishment; each spawner launches its starting squadrons once. Starbase hangars are tested later. | SK-23, SK-36 |
 | Q3 | AI role in the GC context: attacker (`IsDefender = 0`) or defender (`IsDefender = 1`) | Attacker. | SK-43 |
 | Q4 | AI difficulty for the fixture and for rig captures | Normal. | SK-42 |
+
+Later owner decisions on the economy:
+
+| Issue | Question | Answer | Rules |
+|---|---|---|---|
+| EAWR-461 (D2) | Hyperspace arrivals in M2 | Needed in M2 for the units bought at the station; full reinforcements stay with galactic conquest (Phase 3). | SK-31, PU-30 to PU-39 |
+| EAWR-522 | Station purchasing in M2 | A: full purchasing (credits, income, the build menu and queue, the bought units' hyperspace arrival). | SK-30, SK-31 |
+| EAWR-538 | Station upgrades and build pads in M2 | A: M2 becomes a complete skirmish; the level-up and upgrades (EAWR-540) and the pads and mining (EAWR-541) build on EAWR-530's data-driven foundation. | SK-31, SK-32 |
 
 The data backs the Q1 roster. The Acclamator has a hangar in FoC data (`SPAWN_SQUADRON`,
 `HP_Acclamator_Fighter_Bay` and a starting-squadron list; SK-23). It has no other space

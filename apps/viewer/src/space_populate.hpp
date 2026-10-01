@@ -93,6 +93,7 @@ public:
             bool breakoff{};
             // #79: a slot for a craft launched after tick zero (counted apart as well).
             bool launch_slot{};
+            bool placement_preview{}; // WR-12: a visual clone, with attached particle emitters hidden
             // #456: a model slot for a projectile in flight (BattleEffects' pools; counted apart).
             bool projectile_slot{};
             // #427: its type has a DEFEND ability, so its SHIELD sub-object is composed as the

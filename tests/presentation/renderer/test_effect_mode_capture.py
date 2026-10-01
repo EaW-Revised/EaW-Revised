@@ -21,6 +21,24 @@ from effect_mode_fixtures import (build_proxy_host, _capture_path, DETACH_FRAME,
 class EffectModeGraphical(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
                          "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical effect mode")
+    def test_unicode_capture_basename_preserves_detach_suffixes(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-effect-caf\u00e9-") as temporary:
+            directory = pathlib.Path(temporary)
+            root = install_fixture(directory)
+            capture = directory / "\u6218\u6597.png"
+            result, completed = _run(root, PARENT_EFFECT_LOGICAL_PATH, directory / "effect.json", extra=(
+                "--eawr-effect-detach-frame", str(DETACH_FRAME), "--eawr-capture", str(capture)))
+            self.assertEqual(completed.returncode, 0, result.get("failure") or completed.stdout)
+            self.assertEqual(result["status"], "effect_render_passed")
+            for label in ("pre-detach", "draining"):
+                image = capture.with_name(f"{capture.stem}-{label}{capture.suffix}")
+                self.assertTrue(image.is_file(), label)
+                self.assertGreater(image.stat().st_size, 0)
+            self.assertTrue(capture.is_file())
+            self.assertTrue(result["evidence"]["verified"])
+
+    @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
+                         "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical effect mode")
     def test_synthetic_effect_is_deterministic_and_drawn_where_it_is(self):
         results = []
         with tempfile.TemporaryDirectory(prefix="eawr-effect-mode-") as temporary:

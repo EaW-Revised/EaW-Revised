@@ -74,7 +74,8 @@ core::Result<void> validate_sensors(const std::span<const SensorProfile> sensors
 core::Result<SensorField> SensorField::build(
     const std::span<const Player> players,
     const std::span<const UnitState> units,
-    const std::span<const SensorProfile> sensors) {
+    const std::span<const SensorProfile> sensors,
+    const std::span<const EntityId> disabled) {
     if (players.size() > max_players) {
         return core::Result<SensorField>::failure(detail::diagnostic(diagnostic_codes::resource_limit,
             "sensor field: more than " + std::to_string(max_players) + " players"));
@@ -105,7 +106,8 @@ core::Result<SensorField> SensorField::build(
                 "sensor field: unit " + std::to_string(unit.entity_id) + " owner "
                     + std::to_string(unit.owner) + " is not a declared player"));
         }
-        if (const auto range = field.reveal_range(unit.type_id)) {
+        if (const auto range = field.reveal_range(unit.type_id);
+            range && !std::binary_search(disabled.begin(), disabled.end(), unit.entity_id)) {
             observers.push_back(SpaceBody{unit.entity_id, unit.owner, unit.position});
             ranges.emplace_back(unit.entity_id, *range);
             field.max_range_ = std::max(field.max_range_, *range);

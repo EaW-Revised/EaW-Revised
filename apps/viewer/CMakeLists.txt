@@ -188,6 +188,7 @@ add_library(eawr_viewer_core STATIC
     "${EAWR_ROOT}/src/presentation/ui/battle_messages.cpp"
     "${EAWR_ROOT}/src/presentation/ui/shell_alpha.cpp"
     "${EAWR_ROOT}/src/presentation/ui/theme.cpp"
+    "${EAWR_ROOT}/src/presentation/ui/production.cpp"
     "${EAWR_ROOT}/src/presentation/ui/unit_cards.cpp"
     "${EAWR_ROOT}/src/scene/idle_tags.cpp"
     "${EAWR_ROOT}/src/scene/scene.cpp"
@@ -213,11 +214,13 @@ add_library(eawr_viewer_core STATIC
     "${EAWR_ROOT}/src/sim/tactical/damage.cpp"
     "${EAWR_ROOT}/src/sim/tactical/projectiles.cpp"
     "${EAWR_ROOT}/src/sim/tactical/durability.cpp"
+    "${EAWR_ROOT}/src/sim/tactical/economy.cpp"
     "${EAWR_ROOT}/src/sim/tactical/encoding.cpp"
     "${EAWR_ROOT}/src/sim/tactical/fog_cells.cpp"
     "${EAWR_ROOT}/src/sim/tactical/ion.cpp"
     "${EAWR_ROOT}/src/sim/tactical/motion.cpp"
     "${EAWR_ROOT}/src/sim/tactical/fighters.cpp"
+    "${EAWR_ROOT}/src/sim/tactical/free_space.cpp"
     "${EAWR_ROOT}/src/sim/tactical/death_spin.cpp"
     "${EAWR_ROOT}/src/sim/tactical/formation.cpp"
     "${EAWR_ROOT}/src/sim/tactical/orders.cpp"
@@ -238,6 +241,7 @@ add_library(eawr_viewer_core STATIC
     "${EAWR_ROOT}/src/skirmish/ai.cpp"
     "${EAWR_ROOT}/src/skirmish/census.cpp"
     "${EAWR_ROOT}/src/skirmish/content.cpp"
+    "${EAWR_ROOT}/src/skirmish/economy.cpp"
     "${EAWR_ROOT}/src/skirmish/inputs.cpp"
     "${EAWR_ROOT}/src/skirmish/melee.cpp"
     "${EAWR_ROOT}/src/platform/live_ai.cpp"
@@ -299,6 +303,7 @@ add_library(eawr_viewer SHARED
     src/unit_emitters.cpp
     src/perf_trace.cpp
     src/debris_props.cpp
+    src/particle_workers.cpp
     src/live_fog_view.cpp
     src/live_session_view.cpp
     src/effect_mode.cpp
@@ -320,6 +325,7 @@ add_library(eawr_viewer SHARED
     "${EAWR_ROOT}/src/presentation/godot/ui/theme_builder.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/battle_overlay.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/production_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/perf_overlay_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/unit_cards_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/minimap_view.cpp"

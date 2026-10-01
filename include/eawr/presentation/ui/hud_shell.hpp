@@ -153,6 +153,31 @@ struct HudShellText {
     std::optional<std::int32_t> max_text_width;
 };
 
+// #530 (space-purchasing PU-63, PU-64): a build queue slot `tqueueNN`. The queued type's icon is its
+// base quad at texture size around the bone, tinted; a TextButton slot (the queues' first, 00 and
+// 05) draws the front's "<n>%" at the bone plus Text_Offset.
+struct HudQueueSlot {
+    HudShellButton button;
+    std::string build;           // Build_Texture_Name: the build progress art
+    bool text{};                 // a TextButton
+    data::ui::Vec2 text_offset;  // Text_Offset
+    std::string face;
+    std::int32_t point_size{};
+    data::ui::Rgba8 colour{255, 255, 255, 255};
+    bool outline{};
+};
+
+// #530 (PU-65): a text with an icon (`Text_Credits_tactical`): Icon_Texture_Name at texture size
+// around the bone, the text right-justified at the bone plus Text_Offset when Right_Justified.
+struct HudIconText {
+    HudShellText text;
+    std::string icon;
+    data::ui::Vec2 text_offset;
+    bool right_justified{};
+    double blink_duration{};
+    double blink_rate{};
+};
+
 struct HudShell {
     std::string model;
     HudFaction faction{HudFaction::rebel};
@@ -171,8 +196,36 @@ struct HudShell {
     std::vector<HudShellButton> card_borders;
     // #454: the ability buttons special_button_00, 01, ... (two per column border, 24 in FoC).
     std::vector<HudAbilityButton> ability_buttons;
+    // #530: the build queue slots tqueue00..09 (empty when the shell lacks any), the credits text
+    // and the reinforcements button (b_reinforcement), which opens the reinforcement pane.
+    std::vector<HudQueueSlot> queue_slots;
+    std::optional<HudIconText> credits;
+    std::optional<HudShellButton> reinforcement;
     std::vector<core::Diagnostic> diagnostics;
 };
+
+// #530 (space-purchasing PU-66, PU-67): the skirmish reinforcement pane, the shell of the
+// `i_main_reinforce` component: its decorative meshes, the pool slots `r_RRCC` (row RR, column CC;
+// row-major, 4 per row), the close button `r_close` and the population text `r_pop_text`.
+struct HudReinforcePane {
+    std::string model;
+    std::vector<HudShellMesh> meshes;
+    std::vector<HudShellButton> slots;
+    std::optional<HudShellButton> close;
+    std::optional<HudIconText> population;
+    std::string slot_face;
+    std::int32_t slot_point_size{};
+    data::ui::Rgba8 slot_colour{255, 255, 255, 255};
+    data::ui::Vec2 slot_text_offset;
+    std::vector<core::Diagnostic> diagnostics;
+};
+
+// The pane's model: the Model_Name of the `i_main_reinforce` Shell component, else
+// `i_main_reinforce.alo`.
+[[nodiscard]] std::string reinforce_pane_model(const data::ui::CommandBarCatalog& catalog);
+// Never fails: a missing part is left out with one EAWR-UI-0320 warning.
+[[nodiscard]] HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
+                                              HudFaction faction);
 
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
@@ -223,6 +276,9 @@ struct PlanetName {
 struct UnitCardLooks {
     std::string icon;
     std::string name; // UTF-8
+    // #530 PU-62: Tactical_Build_Cost_Multiplayer, the price a build button shows for a type the
+    // session does not build (an upgrade object in M2, PU-20).
+    std::optional<std::int64_t> build_cost;
 };
 [[nodiscard]] UnitCardLooks unit_card_looks(std::string_view type, const data::Catalog* objects,
                                             const data::ui::TextDatabase* text);

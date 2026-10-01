@@ -28,6 +28,22 @@ public:
         std::uint64_t effects{};
         std::uint64_t effect_particles{};
         std::uint64_t emitter_particles{};
+        // #638: the main thread's wall-clock ms in the frame's unit emitters, battle effects and
+        // breakoff props (stepping their particle systems, building and uploading the streams).
+        double particle_ms{};
+        double bookkeeping_ms{};
+        double hud_ms{};
+        double audio_ms{};
+        double fog_ms{};
+        // #638: the simulation ticks completed since the previous row and their summed cost
+        // (platform::LiveTickCost::total_ms), so a run shows whether the frame slowed the tick.
+        std::uint64_t ticks{};
+        double tick_ms{};
+        // #888: the main thread's wall-clock ms in the space view's snapshot build and renderer
+        // submit, and the pieces that submit carried.
+        double submit_ms{};
+        std::uint64_t pieces{};
+        std::uint64_t sent{}; // of those, the transforms sent to the engine
     };
 
     // The path of --eawr-perf-trace, nothing without it, or an error text.

@@ -16,10 +16,12 @@ add_library(
         tactical/collection.cpp
         tactical/collision.cpp
         tactical/damage.cpp
+        tactical/economy.cpp
         tactical/projectiles.cpp
         tactical/durability.cpp
         tactical/motion.cpp
         tactical/fighters.cpp
+        tactical/free_space.cpp
         tactical/death_spin.cpp
         tactical/combat.cpp
         tactical/orders.cpp

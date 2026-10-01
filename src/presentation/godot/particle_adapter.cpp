@@ -393,6 +393,9 @@ public:
         const auto found = emitters_.find(id);
         if (rendering == nullptr || found == emitters_.end()) return;
         Emitter& emitter = found->second;
+        // #638: an emitter that drew nothing and draws nothing again keeps its empty mesh; most of a
+        // battle's emitters are idle on a given frame, and clearing them cost a server call each.
+        if (emitter.quads == 0 && (stream.quads == 0 || stream.vertices.empty())) return;
         rendering->mesh_clear(emitter.mesh);
         emitter.quads = stream.quads;
         emitter.source_points.clear();
@@ -405,19 +408,23 @@ public:
         vertices.resize(static_cast<int64_t>(stream.vertices.size()));
         colors.resize(static_cast<int64_t>(stream.vertices.size()));
         uv.resize(static_cast<int64_t>(stream.vertices.size()));
+        // #638: written through the arrays' own storage, not one checked set() per element.
+        Vector3* const vertex_out = vertices.ptrw();
+        Color* const color_out = colors.ptrw();
+        Vector2* const uv_out = uv.ptrw();
         for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
             const particles::ParticleVertex& vertex = stream.vertices[index];
-            vertices.set(static_cast<int64_t>(index), axis_convert(vertex.position));
-            colors.set(static_cast<int64_t>(index),
-                Color(vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w));
-            uv.set(static_cast<int64_t>(index), Vector2(vertex.u, vertex.v));
+            vertex_out[index] = axis_convert(vertex.position);
+            color_out[index] = Color(vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
+            uv_out[index] = Vector2(vertex.u, vertex.v);
             if (fog_.attenuation_at_source_xy) {
                 emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
             }
         }
         indices.resize(static_cast<int64_t>(stream.indices.size()));
+        std::int32_t* const index_out = indices.ptrw();
         for (std::size_t index = 0; index < stream.indices.size(); ++index) {
-            indices.set(static_cast<int64_t>(index), static_cast<std::int32_t>(stream.indices[index]));
+            index_out[index] = static_cast<std::int32_t>(stream.indices[index]);
         }
         Array arrays;
         arrays.resize(RenderingServer::ARRAY_MAX);

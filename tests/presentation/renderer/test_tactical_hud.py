@@ -99,8 +99,10 @@ class TacticalHudStructure(unittest.TestCase):
         wiring = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
         for call in ("abilities->set_click(", "input->ability_click(index, right, *live)", "battle->set_ability_point("):
             self.assertIn(call, wiring)
-        self.assertEqual((SRC / "map_mode.cpp").read_text(encoding="utf-8").count(
-            "state.hud->set_ability_bar(state.battle->ability_bar());"), 2)
+        # #530: the cards and the ability bar refresh together in State::sync_cards(), which the
+        # tick and the input paths both call.
+        self.assertIn("hud->set_ability_bar(battle->ability_bar());", wiring)
+        self.assertEqual((SRC / "map_mode.cpp").read_text(encoding="utf-8").count("state.sync_cards();"), 2)
         note = (ROOT / "docs/behaviour/foc-ability-buttons.md").read_text(encoding="utf-8")
         for rule in ("AB-01", "AB-05", "AB-06", "AB-08", "AB-09", "AB-10", "Interface to the simulation"):
             self.assertIn(rule, note)
@@ -118,8 +120,8 @@ class TacticalHudStructure(unittest.TestCase):
         for call in ("battle->set_card_slots(cards->slot_count());", "cards->set_click(", "input->card_click(slot, shift, *live)",
                      "battle->set_card_point(", "cards->set_clock("):
             self.assertIn(call, wiring)
-        self.assertIn("state.hud->set_unit_cards(state.battle->card_layout(), state.battle->card_units());",
-                      (SRC / "map_mode.cpp").read_text(encoding="utf-8"))
+        # #530: outside production mode (PU-60) State::sync_cards() shows the selection's cards.
+        self.assertIn("hud->set_unit_cards(battle->card_layout(), battle->card_units());", wiring)
         view = (UI / "unit_cards_view.cpp").read_text(encoding="utf-8")
         # FoC's command bar runs a component's left action on the release over it, and on a double click.
         self.assertIn("button->is_double_click()", view)

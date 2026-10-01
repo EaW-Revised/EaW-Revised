@@ -69,6 +69,9 @@ public:
     // The props' fires and explosions, after pose(), with the view this frame renders. False
     // (failure() set) when the particle backend failed.
     [[nodiscard]] bool effects(const FixedCamera& camera, double presented_tick);
+    // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
+    // this object's frames.
+    void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "breakoff_props" member, followed by ",\n".
@@ -118,6 +121,11 @@ private:
     [[nodiscard]] bool start(const std::string& particle, const space::DebrisPose& pose, std::uint64_t born,
                              std::uint64_t due, std::optional<std::uint64_t> follows, const std::string& reason);
     [[nodiscard]] bool step(Effect& effect, std::uint64_t sample, bool& gone);
+    // The frame a fire that follows its flight stands at in sample `sample`; false (failure() set)
+    // when it was refused.
+    [[nodiscard]] bool follow(const Effect& effect, std::uint64_t sample);
+    // What follows an effect's advance: its age, detach and release; `gone` when it was released.
+    void after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone);
     [[nodiscard]] bool advance_until(std::uint64_t target);
 
     godot::Node3D* host_;
@@ -126,6 +134,9 @@ private:
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
     std::unique_ptr<particles::EffectRegistry> registry_;
+    // #638: the handles of one batched advance or present and their statistics, reused.
+    std::vector<particles::EffectHandle> batch_handles_;
+    std::vector<particles::EffectFrameStats> batch_stats_;
     std::map<std::string, ParticleType> particle_types_;
     std::vector<Prop> props_;
     std::map<std::pair<sim::EntityId, std::uint32_t>, std::size_t> prop_of_;

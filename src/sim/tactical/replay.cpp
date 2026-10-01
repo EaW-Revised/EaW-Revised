@@ -341,6 +341,7 @@ core::Result<TacticalReplay> parse_replay(
         }
     }
 
+    // A cancel or reinforce (#530) lists no unit; the smallest record is a cancel.
     constexpr std::size_t minimum_command_record_size =
         4 + detail::command_common_size + detail::unit_list_header_size + 8;
     if (command_count > reader.remaining() / minimum_command_record_size) {
@@ -378,7 +379,7 @@ core::Result<TacticalReplay> parse_replay(
                 logical_path);
         }
         const auto prefix = detail::payload_prefix_size(opcode);
-        if (opcode == 0 || opcode > 8) {
+        if (opcode == 0 || opcode > detail::max_command_opcode) {
             return fail<Parsed>(diagnostic_codes::version,
                 "unsupported opcode " + std::to_string(opcode) + at, logical_path);
         }
@@ -401,6 +402,27 @@ core::Result<TacticalReplay> parse_replay(
             if (!reader.read_u64(attack.target)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated attack payload" + at,
                     logical_path);
+            }
+            command.payload = attack;
+        } else if (opcode == detail::opcode_attack_hardpoint) {
+            AttackPayload attack;
+            std::uint32_t hardpoint_reserved{};
+            if (!reader.read_u64(attack.target) || !reader.read_u32(attack.hardpoint)
+                || !reader.read_u32(hardpoint_reserved)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated hardpoint attack payload" + at,
+                    logical_path);
+            }
+            if (hardpoint_reserved != 0) {
+                return fail<Parsed>(diagnostic_codes::version, "nonzero reserved hardpoint attack field" + at,
+                    logical_path);
+            }
+            if (attack.target == 0) {
+                return fail<Parsed>(diagnostic_codes::invalid_command, "a hardpoint attack names no target" + at,
+                    logical_path);
+            }
+            if (attack.hardpoint == attack_hull) {
+                return fail<Parsed>(diagnostic_codes::invalid_command,
+                    "a hardpoint attack names the hull (write it as opcode 3)" + at, logical_path);
             }
             command.payload = attack;
         } else if (opcode == 5) {
@@ -443,7 +465,25 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::version, "nonzero reserved ability field" + at, logical_path);
             }
             command.payload = payload;
-        } else {
+        } else if (opcode == 9) {
+            BuyPayload buy;
+            if (!reader.read_u64(buy.type)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated buy payload" + at, logical_path);
+            }
+            command.payload = buy;
+        } else if (opcode == 10) {
+            CancelPayload cancel;
+            if (!reader.read_u32(cancel.queue) || !reader.read_u32(cancel.index)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated cancel payload" + at, logical_path);
+            }
+            command.payload = cancel;
+        } else if (opcode == 11) {
+            ReinforcePayload reinforce;
+            if (!reader.read_u64(reinforce.type) || !read_vec3(reader, reinforce.position)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated reinforce payload" + at, logical_path);
+            }
+            command.payload = reinforce;
+        } else if (opcode == 4) {
             DamagePayload damage;
             std::int64_t amount{};
             std::uint32_t damage_reserved{};
@@ -458,6 +498,9 @@ core::Result<TacticalReplay> parse_replay(
             }
             damage.amount = math::Fixed::from_raw(amount);
             command.payload = damage;
+        } else {
+            return fail<Parsed>(diagnostic_codes::version, "unsupported opcode " + std::to_string(opcode) + at,
+                logical_path);
         }
         std::uint32_t listed{};
         std::uint32_t list_reserved{};

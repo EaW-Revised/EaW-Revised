@@ -6,6 +6,7 @@
 #include "eawr/presentation/ui/minimap.hpp"
 #include "ui_test_support.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <map>
@@ -227,6 +228,16 @@ void test_fog_cells() {
     expect(alpha(12, 12) == 0, "a fading cell is still clear");
     expect(alpha(15, 7) == 100, "a zero cell is fogged");
     expect(!cells.revealed(-1200.0, 0.0) && !cells.revealed(0.0, 600.0), "outside the grid is fogged");
+    auto rows = std::make_shared<std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>>();
+    rows->push_back(std::make_shared<const std::vector<std::uint8_t>>(values->begin(), values->begin() + 4));
+    rows->push_back(std::make_shared<const std::vector<std::uint8_t>>(values->begin() + 4, values->end()));
+    const ui::MinimapFogCells shared{-1000.0, 500.0, 500.0, 4, 2, {}, rows};
+    ui::MinimapFog from_rows;
+    from_rows.resize(20, 20);
+    expect(from_rows.advance(extents, shared, colour, true)
+            && std::equal(fog.texels().begin(), fog.texels().end(), from_rows.texels().begin()),
+        "shared rows produce the same minimap fog texels as flat cells");
+    expect(!shared.revealed(-1200.0, 0.0) && !shared.revealed(0.0, 600.0), "shared rows keep grid clipping");
 }
 
 } // namespace

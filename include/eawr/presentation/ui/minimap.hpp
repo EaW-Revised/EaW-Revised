@@ -145,6 +145,7 @@ struct MinimapFogCells {
     std::uint32_t wide{};
     std::uint32_t tall{};
     std::shared_ptr<const std::vector<std::uint8_t>> values;
+    std::shared_ptr<const std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>> rows{};
     [[nodiscard]] bool revealed(double x, double y) const noexcept;
 };
 class MinimapFog final {

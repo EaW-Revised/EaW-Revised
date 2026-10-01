@@ -102,6 +102,9 @@ struct PresentationTransform final {
 // snapshot remains owned by simulation and is never retained mutably.
 [[nodiscard]] std::vector<PresentationTransform> adapt_snapshot(
     const sim::RenderSnapshot& snapshot);
+// One instance of adapt_snapshot, for a backend that converts only the
+// pieces it sends (#888).
+[[nodiscard]] PresentationTransform adapt_instance(const sim::RenderInstance& instance);
 
 struct ResourceReference final {
     sim::AssetId asset_id{};

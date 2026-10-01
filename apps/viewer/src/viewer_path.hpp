@@ -27,6 +27,11 @@ public:
             reinterpret_cast<const char8_t*>(value_.data()), value_.size()));
     }
 
+    [[nodiscard]] static std::string utf8(const std::filesystem::path& path) {
+        const std::u8string text = path.generic_u8string();
+        return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+    }
+
 private:
     std::string value_;
 };

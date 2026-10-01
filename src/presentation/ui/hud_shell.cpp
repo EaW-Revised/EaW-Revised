@@ -5,6 +5,7 @@
 #include "eawr/presentation/ui/theme.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -91,6 +92,21 @@ constexpr std::size_t card_slot_limit = 48; // COMPONENT_ID_TACTICAL_SELECT_00 t
 constexpr std::string_view radar_name = "radar";
 constexpr std::string_view options_name = "b_option_t";
 constexpr std::string_view planet_name_component = "Text_Planet_tactical";
+
+// #530: the build queue slots, the credits text and the reinforcements button.
+constexpr std::string_view queue_stem = "tqueue";
+constexpr std::size_t queue_slot_limit = 10; // tqueue00 to tqueue09
+constexpr std::string_view credits_component = "Text_Credits_tactical";
+constexpr std::string_view reinforcement_component = "b_reinforcement";
+// #530: the reinforcement pane shell and its parts.
+constexpr std::string_view pane_shell_component = "i_main_reinforce";
+constexpr std::string_view pane_shell_fallback_model = "i_main_reinforce.alo";
+constexpr std::string_view pane_slot_stem = "r_";
+constexpr std::size_t pane_rows = 5;
+constexpr std::size_t pane_columns = 4;
+constexpr std::string_view pane_close_component = "r_close";
+constexpr std::string_view pane_population_component = "r_pop_text";
+constexpr std::string_view pane_population_icon = "r_pop_icon";
 
 } // namespace
 
@@ -269,6 +285,137 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
         button.anim_fps = static_cast<float>(component->integer(data::ui::Field::anim_fps).value_or(5));
         out.ability_buttons.push_back(std::move(button));
     }
+    // #530 PU-63: the build queue slots. A shell without them shows no queue; a partial set warns.
+    for (std::size_t index = 0; index < queue_slot_limit; ++index) {
+        const std::string name = std::string(queue_stem) + (index < 10 ? "0" : "") + std::to_string(index);
+        const auto* anchor = shell.find(name);
+        const auto* component = catalog.find(name);
+        if (anchor == nullptr || component == nullptr) {
+            if (index != 0) missing(name, anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+            out.queue_slots.clear();
+            break;
+        }
+        HudQueueSlot slot;
+        slot.button = shell_button(*anchor, *component);
+        slot.build = first_token(*component, data::ui::Field::build_texture_name);
+        slot.text = component->type == data::ui::ComponentType::text_button;
+        slot.text_offset = component->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+        slot.face = std::string(component->text(data::ui::Field::font_name));
+        if (slot.face.empty()) slot.face = std::string(last_resort_face);
+        slot.point_size = component->integer(data::ui::Field::font_point_size).value_or(8);
+        if (const auto colour = component->color(data::ui::Field::text_color)) slot.colour = *colour;
+        slot.outline = component->flag(data::ui::Field::text_outline);
+        out.queue_slots.push_back(std::move(slot));
+    }
+    // #530 PU-65: the credits text and its money icon.
+    const auto* credits_anchor = shell.find(credits_component);
+    const auto* credits = catalog.find(credits_component);
+    if (credits_anchor != nullptr && credits != nullptr) {
+        HudIconText text;
+        text.text.name = std::string(credits_component);
+        text.text.rect = credits_anchor->rect;
+        text.text.face = std::string(credits->text(data::ui::Field::font_name));
+        if (text.text.face.empty()) text.text.face = std::string(last_resort_face);
+        text.text.point_size = credits->integer(data::ui::Field::font_point_size).value_or(8);
+        if (const auto colour = credits->color(data::ui::Field::text_color)) text.text.colour = *colour;
+        text.text.outline = credits->flag(data::ui::Field::text_outline);
+        text.icon = first_token(*credits, data::ui::Field::icon_texture_name);
+        text.text_offset = credits->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+        text.right_justified = credits->flag(data::ui::Field::right_justified);
+        text.blink_duration = credits->number(data::ui::Field::blink_duration).value_or(0.0F);
+        text.blink_rate = credits->number(data::ui::Field::blink_rate).value_or(0.0F);
+        out.credits = std::move(text);
+    } else {
+        missing(credits_component, credits_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+    }
+    const auto* reinforce_anchor = shell.find(reinforcement_component);
+    const auto* reinforce = catalog.find(reinforcement_component);
+    if (reinforce_anchor != nullptr && reinforce != nullptr) {
+        out.reinforcement = shell_button(*reinforce_anchor, *reinforce);
+    } else {
+        missing(reinforcement_component, reinforce_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+    }
+    return out;
+}
+
+std::string reinforce_pane_model(const data::ui::CommandBarCatalog& catalog) {
+    const auto* shell = catalog.find(pane_shell_component);
+    if (shell != nullptr && shell->type == data::ui::ComponentType::shell) {
+        const auto model = shell->text(data::ui::Field::model_name);
+        if (!model.empty()) return std::string(model);
+    }
+    return std::string(pane_shell_fallback_model);
+}
+
+HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
+                                const HudFaction faction) {
+    HudReinforcePane out;
+    out.model = shell.model_path();
+    const auto missing = [&](const std::string_view part, const std::string_view why) {
+        out.diagnostics.push_back(warning(diagnostic_codes::hud_shell_part,
+            std::string(part) + " " + std::string(why) + "; the reinforcement pane draws without it", out.model));
+    };
+    for (const auto* anchor : shell.for_variant(alt_variant(faction))) {
+        const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
+        const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
+        if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+        if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
+        out.meshes.push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+                              anchor->base_texture, anchor->z_min, anchor->triangles});
+    }
+    std::stable_sort(out.meshes.begin(), out.meshes.end(),
+                     [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
+    for (std::size_t row = 0; row < pane_rows; ++row) {
+        for (std::size_t column = 0; column < pane_columns; ++column) {
+            const std::string name = std::string(pane_slot_stem) + numbered("", row) + numbered("", column);
+            const auto* anchor = shell.find(name);
+            const auto* component = catalog.find(name);
+            if (anchor == nullptr || component == nullptr) {
+                missing(name, anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+                out.slots.clear();
+                row = pane_rows;
+                break;
+            }
+            if (out.slots.empty()) {
+                out.slot_face = std::string(component->text(data::ui::Field::font_name));
+                if (out.slot_face.empty()) out.slot_face = std::string(last_resort_face);
+                out.slot_point_size = component->integer(data::ui::Field::font_point_size).value_or(6);
+                if (const auto colour = component->color(data::ui::Field::text_color)) out.slot_colour = *colour;
+                out.slot_text_offset = component->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+            }
+            out.slots.push_back(shell_button(*anchor, *component));
+        }
+    }
+    if (const auto* anchor = shell.find(pane_close_component); anchor != nullptr) {
+        if (const auto* component = catalog.find(pane_close_component)) {
+            out.close = shell_button(*anchor, *component);
+            out.close->normal = first_token(*component, data::ui::Field::icon_texture_name);
+        }
+    }
+    if (!out.close) missing(pane_close_component, "is missing");
+    const auto* text_anchor = shell.find(pane_population_component);
+    const auto* text = catalog.find(pane_population_component);
+    if (text_anchor != nullptr && text != nullptr) {
+        HudIconText population;
+        population.text.name = std::string(pane_population_component);
+        population.text.rect = text_anchor->rect;
+        population.text.face = std::string(text->text(data::ui::Field::font_name));
+        if (population.text.face.empty()) population.text.face = std::string(last_resort_face);
+        population.text.point_size = text->integer(data::ui::Field::font_point_size).value_or(6);
+        if (const auto colour = text->color(data::ui::Field::color)) population.text.colour = *colour;
+        population.text_offset = text->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+        if (const auto* icon_anchor = shell.find(pane_population_icon)) {
+            if (const auto* icon = catalog.find(pane_population_icon)) {
+                population.icon = first_token(*icon, data::ui::Field::icon_texture_name);
+                population.text.rect = icon_anchor->rect;
+            }
+        }
+        out.population = std::move(population);
+    } else if (text_anchor != nullptr) {
+        missing(pane_population_component, "is not in the catalogue");
+    }
+    // FoC's own i_main_reinforce.alo has no r_pop_text bone, so the pane carries no population
+    // text there; that is the game's content, not a gap to report (space-purchasing PU-G24).
     return out;
 }
 
@@ -355,7 +502,7 @@ PlanetName planet_name(const std::optional<std::string>& context_name, const dat
 
 UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* objects,
                               const data::ui::TextDatabase* text) {
-    UnitCardLooks out{std::string(), std::string(type)};
+    UnitCardLooks out{std::string(), std::string(type), std::nullopt};
     if (objects == nullptr || objects->find(type) == nullptr) return out;
     auto resolved = objects->resolve(type);
     if (!resolved) return out;
@@ -365,6 +512,12 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
         return first == std::string::npos ? std::string() : value.substr(first, last - first + 1U);
     };
     if (const data::EffectiveValue* icon = resolved.value().value("Icon_Name")) out.icon = trimmed(icon->value.raw_text);
+    if (const data::EffectiveValue* cost = resolved.value().value("Tactical_Build_Cost_Multiplayer")) {
+        const std::string digits = trimmed(cost->value.raw_text);
+        std::int64_t value{};
+        const auto [end, error] = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+        if (error == std::errc{} && end == digits.data() + digits.size()) out.build_cost = value;
+    }
     if (const data::EffectiveValue* id = resolved.value().value("Text_ID")) {
         const std::string key = trimmed(id->value.raw_text);
         const data::ui::TextEntry* entry = text != nullptr && !key.empty() ? text->find(key) : nullptr;

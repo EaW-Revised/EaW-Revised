@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -184,18 +185,99 @@ class LiveSessionSources(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "set EAWR_GODOT_VIEWER_RUNTIME_TEST, EAWR_GODOT_EXECUTABLE and EAWR_EAW_GAME_ROOT")
 class LiveSessionGraphical(unittest.TestCase):
-    def _run(self, directory: pathlib.Path, name: str, extra=(), session=("--eawr-live-session", "m2"), camera=CAMERA, env=None):
+    def test_unicode_camera_bindings_and_live_file_paths(self):
+        with tempfile.TemporaryDirectory(prefix="eawr live caf\u00e9 ") as temporary:
+            directory = pathlib.Path(temporary)
+            camera = directory / "camera caf\u00e9.xml"
+            shutil.copy2(CAMERA, camera)
+            shutil.copy2(CAMERA.parent / "space-live-camera-bindings.json", directory)
+            replay = directory / "record caf\u00e9.eawr-replay"
+            hashes = directory / "live caf\u00e9.hashes.csv"
+            font_cache = directory / "fonts"
+            shutil.copytree(os.environ.get("EAWR_FONT_CACHE", ROOT / "out/fonts"), font_cache)
+            common = ("--eawr-live-ticks", "8", "--eawr-live-step", "1", "--eawr-audio", "off",
+                      "--eawr-font-cache", str(font_cache))
+            code, recorded = self._run(directory, "record", (
+                *common, "--eawr-live-hashes", str(hashes), "--eawr-live-replay-out", str(replay)), camera=camera)
+            self.assertEqual(code, 0, recorded.get("failure"))
+            self.assertTrue(hashes.is_file())
+            self.assertTrue(replay.is_file())
+            self.assertTrue((directory / "record.png").is_file())
+            self.assertEqual(recorded["hud"]["font_cache"]["directory"], font_cache.as_posix())
+            self.assertEqual(recorded["map_camera"]["overview_clicks"]["override"]["file"], camera.name)
+            code, replayed = self._run(directory, "replay", (
+                *common, "--eawr-live-replay", str(replay)), camera=camera,
+                session=("--eawr-live-session", "replay"))
+            self.assertEqual(code, 0, replayed.get("failure"))
+            self.assertEqual(replayed["live_session"]["replay"], replay.as_posix())
+            self.assertTrue(replayed["live_session"]["headless_hashes_equal"])
+            self.assertEqual(replayed["live_session"]["final_state_sha256"],
+                             recorded["live_session"]["final_state_sha256"])
+
+            name = "\u6218\u6597"
+            code, captured = self._run(directory, name, (
+                *common, "--eawr-live-capture-ticks", "2,4"), camera=camera)
+            self.assertEqual(code, 0, captured.get("failure"))
+            for filename in (f"{name}.png", f"{name}_t0002.png", f"{name}_t0004.png"):
+                image = directory / filename
+                self.assertTrue(image.is_file(), filename)
+                self.assertGreater(image.stat().st_size, 0)
+            self.assertEqual([file for file in captured["captures"] if file != "configured"],
+                             [f"{name}_t0002.png", f"{name}_t0004.png"])
+
+            missing = directory / "missing caf\u00e9.fog"
+            code, refused = self._run(directory, "missing-fog", (
+                "--eawr-fog-grid", str(missing), "--eawr-fog-sha256", "0" * 64,
+                "--eawr-fog-team", "1", "--eawr-fog-revision", "0", "--eawr-fog-tick", "0"),
+                session=(), camera=camera)
+            self.assertEqual(code, 2)
+            self.assertEqual(refused["failure"], f"cannot read fog grid: {missing.as_posix()}")
+
+    def _run(self, directory: pathlib.Path, name: str, extra=(), session=("--eawr-live-session", "m2"), camera=CAMERA, env=None, map_name=CORUSCANT):
         executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
         self.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
         report = directory / f"{name}.json"
+        camera_args = ("--eawr-map-camera-config", str(camera)) if camera is not None else ()
         completed = subprocess.run(
             [executable, "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--",
-             "--eawr-map", CORUSCANT, "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+             "--eawr-map", map_name, "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
              "--eawr-report", str(report), "--eawr-capture", str(directory / f"{name}.png"),
-             "--eawr-populate", "--eawr-map-camera-config", str(camera), *session, *extra],
+             "--eawr-populate", *camera_args, *session, *extra],
             cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
         self.assertTrue(report.is_file(), completed.stdout[-4000:])
         return completed.returncode, strict_json(report.read_text(encoding="utf-8"))
+
+    def test_skirmish_loads_selected_faction_and_fleet_beyond_m2(self):
+        # SC-01: default forces and fleet choices extend the unit tables at startup.
+        # These types are absent from the pinned M2 load, so this catches silently
+        # retaining that whitelist after accepting different lobby choices.
+        with tempfile.TemporaryDirectory(prefix="eawr-selected-skirmish-") as temporary:
+            code, result = self._run(pathlib.Path(temporary), "selected", (
+                "--eawr-skirmish-players", "3,4",
+                "--eawr-skirmish-slot", "3:Underworld:1:human",
+                "--eawr-skirmish-slot", "4:Empire:0:ai",
+                "--eawr-skirmish-fleet", "3:none",
+                "--eawr-skirmish-fleet", "4:Star_Destroyer",
+                "--eawr-skirmish-seed", "908",
+                "--eawr-live-ai", "off", "--eawr-audio", "off",
+                "--eawr-live-step", "1", "--eawr-live-ticks", "8",
+                "--eawr-map-timed-frames", "8"),
+                session=("--eawr-live-session", "skirmish"), camera=None,
+                map_name="data/art/maps/_mp_space_polus.ted")
+            self.assertEqual(code, 0, result.get("failure"))
+            live = result["live_session"]
+            self.assertEqual(live["start_map"], "data/art/maps/_mp_space_polus.ted")
+            self.assertEqual(live["start_seed"], 908)
+            self.assertEqual(live["local_player"], 3)
+            spawns = {row["player"]: row["record"] for row in live["start_markers"]
+                      if row["use"] == "spawn"}
+            self.assertEqual(set(spawns), {3, 4})
+            for player, unit_type in ((3, "starviper_squadron"), (4, "star_destroyer")):
+                units = [row for row in live["start_fleet"]
+                         if row["player"] == player and row["type"].lower() == unit_type]
+                self.assertTrue(units, live["start_fleet"])
+                self.assertTrue(all(row["record"] == spawns[player] for row in units))
+            self.assertTrue(live["headless_hashes_equal"])
 
     def test_corvette_moves_and_turns_with_equal_hashes(self):
         with tempfile.TemporaryDirectory(prefix="eawr-live-session-") as temporary:
@@ -476,7 +558,10 @@ class LiveSessionGraphical(unittest.TestCase):
             self.assertGreater(effects["spawned"].get("detonation:Conc_Missile_Detonation_Particle", 0), 0)
             self.assertEqual(effects["hit_picks"], {"by_projectile": 0, "by_event": 0})
             units = result["populate"]["live_units"]
-            self.assertEqual((units["projectile_slots_drawn"], units["projectile_slots_not_drawn"]), (32, []))
+            # BP-66: the ion override has its own prepared pool, even when this replay never fires it.
+            ion_pool = effects["projectile_models"]["Proj_Ion_Cannon_Medium_Laser_Blue"]
+            self.assertEqual((ion_pool["slots"], ion_pool["bindings"], ion_pool["refused"]), (32, 0, 0), ion_pool)
+            self.assertEqual((units["projectile_slots_drawn"], units["projectile_slots_not_drawn"]), (64, []))
             self.assertEqual(result["unit_emitters"]["started"].get("p_concussion"), pool["bindings"],
                              result["unit_emitters"]["started"])
 
@@ -1663,6 +1748,44 @@ class LiveSessionGraphical(unittest.TestCase):
             self.assertGreaterEqual(emitters["presented_frames"], engines[0]["presented"], emitters)
             self.assertGreaterEqual(emitters["presented_effects"], emitters["presented_frames"], emitters)
 
+    def assert_map_teardown_before_host_destruction(self, text):
+        # #961: Godot deletes the host's child nodes before its extension destructor.
+        # The audio players are those children, so releasing the map from that
+        # destructor dereferenced freed nodes even when --eawr-audio was off.
+        # Check the actual lifecycle trace as well as the exit code: a stale
+        # pointer can survive several clean exits before the allocator reuses it.
+        teardown = text.index("map mode teardown begins")
+        freed = text.index("space view freed")
+        host = text.index("viewer host freed (members follow)")
+        self.assertLess(teardown, freed, text[-4000:])
+        self.assertLess(freed, host, text[-4000:])
+
+    def test_quit_after_teardown_stress(self):
+        executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
+        self.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
+        with tempfile.TemporaryDirectory(prefix="eawr-live-teardown-") as temporary:
+            directory = pathlib.Path(temporary)
+            for frames in (300, 450, 600, 900):
+                for mode, map_name in (("m2", CORUSCANT),
+                                       ("skirmish", "data/art/maps/_mp_space_polus.ted")):
+                    with self.subTest(frames=frames, mode=mode):
+                        completed = subprocess.run(
+                            [executable, "--resolution", "1280x720", "--path",
+                             str(ROOT / "apps/viewer/project"), "--quit-after", str(frames), "--",
+                             "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                             "--eawr-map", map_name, "--eawr-populate", "--eawr-camera-interactive",
+                             "--eawr-live-session", mode, "--eawr-live-ai", "on",
+                             "--eawr-map-effects", "on", "--eawr-audio", "off",
+                             "--eawr-lighting", "sh", "--eawr-environment", "map",
+                             "--eawr-shadows", "on", "--eawr-hud", "tactical",
+                             "--eawr-report", str(directory / f"{mode}-{frames}.json")],
+                            cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, timeout=180, check=False)
+                        self.assertEqual(completed.returncode, 0, completed.stdout[-4000:])
+                        self.assertIn("EAWR live session started", completed.stdout)
+                        self.assertNotIn("headless replay done", completed.stdout)
+                        self.assert_map_teardown_before_host_destruction(completed.stdout)
+
     @unittest.skipUnless(sys.platform == "win32", "closes the viewer's window through Win32")
     def test_window_close_quits_promptly_and_writes_the_report(self):
         # The owner's close of a running battle took seconds: the teardown replayed the whole battle
@@ -1703,6 +1826,8 @@ class LiveSessionGraphical(unittest.TestCase):
                     process.kill()
                     process.wait()
             text = log.read_text(errors="replace")
+            self.assertEqual(process.returncode, 0, text[-4000:])
+            self.assert_map_teardown_before_host_destruction(text)
             self.assertLess(exit_seconds, LIVE_QUIT_EXIT_BOUND_SECONDS, text[-4000:])
             self.assertNotIn("headless replay done", text)
             self.assertIn("EAWR shutdown", text)

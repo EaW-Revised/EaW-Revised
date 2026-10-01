@@ -22,9 +22,9 @@ import sys
 import tempfile
 
 FIXTURE = "m2-start.eawr-replay"
-FIXTURE_SHA256 = "c997bdd7bd7608816a83b29e8b9fefa5c88dfa1150240c7acc5a196d24e5fa77"
-TICK_ZERO_STATE = "506e48ffa375d8a6fd29c9fa69474f63d4f455a999126e5f232bef3aefd64a2a"
-CONTENT_IDENTITY = "984c71a99d5f6f58cef57bd3498754a5c2211bf7aec2b4f9ed7626273a0eb113"
+FIXTURE_SHA256 = "ab6ae40f42348a6f3dc85f637096a0087865c952104f40658003ede74ef2acc6"
+TICK_ZERO_STATE = "3cfadb5ada5c5cd1a7551ffde3f13341a290ef3efa421f234cb5c6c4e99fd7a3"
+CONTENT_IDENTITY = "2e2540011dfee39f1e8ef1924b6232f172170a4d51a860c383267832aecb6079"
 FINAL_TICKS = 30
 
 
@@ -170,7 +170,7 @@ def check_replay_runs(program: str, fixtures: pathlib.Path, work: pathlib.Path) 
         errors.append("hash output has a header and 30 rows")
     census = json.loads(outputs["1"][2])
     if census["source"] != "replay" or census["tick_zero"]["state_sha256"] != TICK_ZERO_STATE:
-        errors.append("the replay census carries the tick-zero hash")
+        errors.append(f"the replay census carries the tick-zero hash (found {census['tick_zero']['state_sha256']})")
     if census["tick_zero"]["sensor_profiles"] != 0:
         errors.append("a replay run binds no sensor table")
     snapshot_rows = outputs["1"][1].decode("utf-8").splitlines()
@@ -224,10 +224,10 @@ def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_
     if replay_census is not None and sim_fields(census) != sim_fields(replay_census):
         errors.append("the fixture census and the replay census disagree")
     listing = completed.stdout
-    for line in ("player 1 Rebel team 0 human start Team_00 colour MP_Color_Blue (78, 150, 237) credits 0 income none "
-                 "production none power 13525",
-                 "player 2 Empire team 1 ai start Team_01 colour MP_Color_Red (237, 78, 78) credits 0 income none "
-                 "production none power 9590",
+    for line in ("player 1 Rebel team 0 human start Team_00 colour MP_Color_Blue (78, 150, 237) credits 6000 income station "
+                 "production station power 13525",
+                 "player 2 Empire team 1 ai start Team_01 colour MP_Color_Red (237, 78, 78) credits 6000 income station "
+                 "production station power 9590",
                  f"tick 0 state {TICK_ZERO_STATE}"):
         if line not in listing:
             errors.append(f"listing lacks: {line}")

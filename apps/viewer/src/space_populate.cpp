@@ -381,6 +381,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
             return false;
         }
         scene::Placement placed = std::move(placed_scene.placements.front());
+        if (ship.placement_preview) placed.effects.clear(); // WR-12: preview clones never emit particles
         if (live) {
             placed.team_colour = ship.team_colour;
             placed.team_colour_status = ship.team_colour ? "live_session_owner" : "owner_absent";

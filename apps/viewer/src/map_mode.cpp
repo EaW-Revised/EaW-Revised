@@ -1,7 +1,11 @@
+#include "frame_timer.hpp"
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
+#include "viewer_path.hpp"
+
+#include <godot_cpp/classes/project_settings.hpp>
 
 #include <cctype>
 #include <cmath>
@@ -317,7 +321,8 @@ bool MapMode::ready(Node3D& host) {
             if (argument == String("--eawr-populate") && !state.options.populate) state.populate = true;
             if (argument == String("--eawr-map-camera-config")) {
                 if (!has_value) fog_argument_error = "missing value for --eawr-map-camera-config";
-                else state.map_camera_config_path = std::string(String(arguments[++index]).utf8().get_data());
+                else state.map_camera_config_path =
+                    ViewerPath{std::string(String(arguments[++index]).utf8().get_data())}.native();
                 continue;
             }
             if (argument == String("--eawr-space-place-object")) {
@@ -486,7 +491,7 @@ bool MapMode::ready(Node3D& host) {
             if (argument == String("--eawr-map-camera-unlocked-capture")) {
                 if (!has_value) fog_argument_error = "missing value for --eawr-map-camera-unlocked-capture";
                 else state.map_camera_unlocked_capture_path =
-                    std::string(String(arguments[++index]).utf8().get_data());
+                    ViewerPath{std::string(String(arguments[++index]).utf8().get_data())}.native();
                 continue;
             }
             if (argument == String("--eawr-map-effects") && has_value) {
@@ -574,7 +579,7 @@ bool MapMode::ready(Node3D& host) {
             }
             const CharString value = String(arguments[index + 1]).utf8();
             if (argument == String("--eawr-fog-grid")) {
-                state.fog_paths.emplace_back(value.get_data());
+                state.fog_paths.push_back(ViewerPath{std::string(value.get_data())}.native());
                 ++index;
                 continue;
             }
@@ -584,7 +589,7 @@ bool MapMode::ready(Node3D& host) {
                 continue;
             }
             if (argument == String("--eawr-fog-paint-evidence")) {
-                state.fog_paint_evidence = value.get_data();
+                state.fog_paint_evidence = ViewerPath{std::string(value.get_data())}.native();
                 ++index;
                 continue;
             }
@@ -630,6 +635,10 @@ bool MapMode::ready(Node3D& host) {
         return false;
     };
     if (!fog_argument_error.empty()) return give_up(fog_argument_error);
+    if (state.live_options.fixture != "skirmish" && (state.live_options.skirmish.map
+        || state.live_options.skirmish.slots || state.live_options.skirmish.seed)) {
+        return give_up("--eawr-skirmish-* options require --eawr-live-session skirmish");
+    }
     if (!state.audio_argument.empty() && state.audio_argument != "on" && state.audio_argument != "off") {
         return give_up("--eawr-audio expects on or off");
     }
@@ -694,13 +703,13 @@ bool MapMode::ready(Node3D& host) {
         && (state.map_camera_config_path.empty() || !state.options.capture_path.empty())) {
         return give_up("unlocked camera capture requires an unlocked map camera");
     }
-    if (state.options.camera_zoom && (state.map_camera_config_path.empty()
+    if (state.options.camera_zoom && ((state.map_camera_config_path.empty() && state.live_options.fixture.empty())
             || !std::isfinite(*state.options.camera_zoom)
             || *state.options.camera_zoom < 0.0F || *state.options.camera_zoom > 1.0F)) {
         return give_up("--eawr-camera-zoom with a map needs --eawr-map-camera-config and a zoom in [0, 1]");
     }
     if (state.options.interactive) {
-        if (state.map_camera_config_path.empty() || !state.options.capture_path.empty()
+        if ((state.map_camera_config_path.empty() && state.live_options.fixture.empty()) || !state.options.capture_path.empty()
             || !state.map_camera_unlocked_capture_path.empty() || state.map_camera_selftest
             || state.map_free_selftest || state.map_camera_terminal_baseline_test
             || state.map_camera_terminal_hold_test
@@ -757,7 +766,7 @@ bool MapMode::ready(Node3D& host) {
         if (!state.fog) return give_up(fog_error);
         for (std::size_t i = 0; i < state.fog_expected_hashes.size(); ++i) {
             if (state.fog_expected_hashes[i] != state.fog->sources()[i].sha256) {
-                return give_up("fog source SHA-256 mismatch: " + state.fog_paths[i].string());
+                return give_up("fog source SHA-256 mismatch: " + ViewerPath::utf8(state.fog_paths[i]));
             }
         }
         if (state.fog->source().find(*state.fog_team)->revision() != *state.fog_revision) {
@@ -962,11 +971,25 @@ bool MapMode::ready(Node3D& host) {
                 if (!state.live_session->prepare(*state.filesystem, *state.catalog, state.options.map_path, live_failure)) {
                     return give_up(live_failure);
                 }
+                if (!space_camera_source && state.live_session->start_data()) {
+                    auto config = eawr::viewer::skirmish_camera_config(
+                        map, *state.live_session->start_data(), state.live_session->local_player());
+                    if (!config) return give_up(core::format_diagnostic(config.error()));
+                    space_camera_source = state.load_map_camera(camera::Mode::space, live_failure, &config.value());
+                    if (!space_camera_source) return give_up(live_failure);
+                }
                 // #391: the breakoff props join the placed ships before they are composed.
+                // #638: the particle systems of the battle step on a small pool of their own
+                // (ParticleWorkers::default_count; --eawr-live-particle-workers sets it).
+                state.particle_workers = std::make_unique<ParticleWorkers>(state.live_options.particle_workers.value_or(
+                    ParticleWorkers::default_count(platform::ThreadWorkerAdapter::hardware_worker_count())));
                 state.debris_props = std::make_unique<DebrisProps>(host, *state.filesystem, *state.catalog);
+                state.live_session->set_pose_workers(state.particle_workers.get());
+                state.debris_props->set_workers(state.particle_workers.get());
                 state.live_session->attach_debris(*state.debris_props);
                 // #456: so do the model projectiles' slots.
                 state.battle_effects = std::make_unique<BattleEffects>(host, *state.filesystem, *state.catalog);
+                state.battle_effects->set_workers(state.particle_workers.get());
                 state.battle_effects->prepare(*state.live_session->tables(), *state.live_session->combat());
                 state.live_session->attach_projectile_models(*state.battle_effects);
                 state.space_place_at = state.live_session->placed_ships();
@@ -989,7 +1012,10 @@ bool MapMode::ready(Node3D& host) {
                                             state.live_session->local_faction());
                 // #394: the live units' own emitters (engines, destroyed hardpoints' damage), which
                 // the static attached plan cannot run on moving units.
-                if (state.options.map_effects) state.unit_emitters = std::make_unique<UnitEmitters>(host, *state.filesystem);
+                if (state.options.map_effects) {
+                    state.unit_emitters = std::make_unique<UnitEmitters>(host, *state.filesystem);
+                    state.unit_emitters->set_workers(state.particle_workers.get());
+                }
             }
             state.space_population = std::make_unique<SpacePopulation>(SpacePopulation::Options{
                 .map_sha256 = state.map_hash,
@@ -1131,16 +1157,29 @@ bool MapMode::ready(Node3D& host) {
                         result.live = [population, live_session, effects, debris, emitters, sound, fog,
                                        map_state](GodotRenderer& renderer, const double delta,
                                                   const FixedCamera& camera) {
+                            live_session->trace_frames(map_state->perf_trace.has_value());
+                            map_state->fog_ms = 0.0;
+                            map_state->audio_ms = 0.0;
                             auto update = live_session->frame(*population, renderer, delta);
                             // #494: the fog plane follows this frame's snapshot before it is drawn.
                             if (fog && update && !update.value().error) {
+                                FrameTimer timer(map_state->perf_trace ? &map_state->fog_ms : nullptr);
                                 fog->frame(*live_session, map_state->space ? map_state->space->live_camera_bounds()
                                                                            : std::nullopt);
                             }
                             // #453, #459: the HUD shows this frame's time panel and outcome.
                             map_state->sync_battle_hud();
                             const auto& battle = live_session->battle_frame();
+                            map_state->particle_ms = 0.0;
                             if (!update || update.value().error || !battle.latest) return update;
+                            // #638: the perf trace's particle_ms, the main thread's time in the unit
+                            // emitters', battle effects' and breakoff props' frames below.
+                            using ParticleClock = std::chrono::steady_clock;
+                            const auto particle_since = [map_state](const ParticleClock::time_point start) {
+                                map_state->particle_ms
+                                    += std::chrono::duration<double, std::milli>(ParticleClock::now() - start).count();
+                            };
+                            auto particle_start = ParticleClock::now();
                             // #394: the units' engine and damage emitters, at the poses just drawn.
                             if (emitters && !emitters->frame(*population, battle.reached,
                                     [live_session](const std::uint64_t tick) { return live_session->snapshot_at(tick); },
@@ -1169,16 +1208,19 @@ bool MapMode::ready(Node3D& host) {
                                 return core::Result<SpaceLiveUpdate>::failure(
                                     {.code = "EAWR-VIEWER-UNIT-EMITTERS", .message = emitters->failure()});
                             }
+                            particle_since(particle_start);
                             // #429: the clones that left this frame go once the emitters ran the
                             // samples they still stood in.
                             live_session->retire_clones(*population, renderer);
                             if (!effects) return update;
                             // #80: the frame's shots, hits and explosions, from the snapshots only.
+                            particle_start = ParticleClock::now();
                             const bool shown = effects->frame(battle.reached, *battle.previous, *battle.latest,
                                 battle.alpha, [live_session](const sim::EntityId entity) {
                                     return live_session->unit_frame(entity);
                                 }, camera, battle.presented_tick,
                                 [live_session](const std::uint64_t tick) { return live_session->snapshot_at(tick); });
+                            particle_since(particle_start);
                             if (!shown) {
                                 return core::Result<SpaceLiveUpdate>::failure(
                                     {.code = "EAWR-VIEWER-BATTLE-EFFECTS", .message = effects->failure()});
@@ -1187,15 +1229,18 @@ bool MapMode::ready(Node3D& host) {
                             // The ability clicks are taken every frame so a run without battle audio keeps none.
                             auto ability_clicks = live_session->take_ability_clicks();
                             if (sound) {
+                                FrameTimer timer(map_state->perf_trace ? &map_state->audio_ms : nullptr);
                                 sound->frame(*live_session, map_state->battle ? map_state->battle->take_acknowledgements()
                                                                               : std::vector<BattleInput::Acknowledgement>{},
                                              std::move(ability_clicks), camera, delta);
                             }
                             // #391: the breakoff props' fires and explosions.
+                            particle_start = ParticleClock::now();
                             if (debris && !debris->effects(camera, battle.presented_tick)) {
                                 return core::Result<SpaceLiveUpdate>::failure(
                                     {.code = "EAWR-VIEWER-BREAKOFF-PROPS", .message = debris->failure()});
                             }
+                            particle_since(particle_start);
                             return update;
                         };
                     }
@@ -1670,25 +1715,38 @@ bool MapMode::ready(Node3D& host) {
 }
 
 std::optional<eawr::viewer::MapCameraSource> MapMode::State::load_map_camera(
-    const camera::Mode mode, std::string& failure_text) const {
+    const camera::Mode mode, std::string& failure_text, const eawr::viewer::MapCameraConfig* generated) const {
     eawr::viewer::MapCameraSource source;
-    const auto config_text = read_camera_file(map_camera_config_path);
+    std::optional<std::string> config_text;
+    if (generated) {
+        std::ostringstream identity;
+        identity << std::setprecision(std::numeric_limits<float>::max_digits10)
+                 << "SC-02 " << generated->map_path << ' ' << generated->map_sha256 << ' '
+                 << generated->bounds.min_x << ' ' << generated->bounds.max_x << ' '
+                 << generated->bounds.min_y << ' ' << generated->bounds.max_y << ' '
+                 << generated->target_x << ' ' << generated->target_y << " distance=1200 yaw=XML"
+                 << " Distance_Min=100 Tactical_Min_Scroll_Speed=823.529412 Pitch_Min=-60 overview=5";
+        config_text = identity.str();
+    } else config_text = read_camera_file(map_camera_config_path);
     if (!config_text) {
         failure_text = "map camera config could not be read or exceeds 1 MiB";
         return std::nullopt;
     }
     source.config_sha256 = sim::sha256_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(config_text->data()), config_text->size()));
-    source.config_file = map_camera_config_path.filename().generic_string();
+    source.config_file = generated ? "skirmish-auto-camera" : ViewerPath::utf8(map_camera_config_path.filename());
     // Map identity and bounds are validated here, before any activation.
-    auto config = eawr::viewer::parse_map_camera_config(*config_text, options.map_path, map_hash, mode);
+    auto config = generated ? core::Result<eawr::viewer::MapCameraConfig>::success(*generated)
+                            : eawr::viewer::parse_map_camera_config(*config_text, options.map_path, map_hash, mode);
     if (!config) {
         failure_text = core::format_diagnostic(config.error());
         return std::nullopt;
     }
     // --eawr-camera-zoom (validated in ready) replaces the initial and reset zoom.
     if (options.camera_zoom) config.value().zoom = *options.camera_zoom;
-    const std::filesystem::path bindings_path = map_camera_config_path.parent_path() / config.value().bindings_path;
+    const std::filesystem::path bindings_path = (generated ? ViewerPath{std::string(
+        ProjectSettings::get_singleton()->globalize_path("res://config").utf8().get_data())}.native()
+        : map_camera_config_path.parent_path()) / ViewerPath{config.value().bindings_path}.native();
     auto bindings_text = read_camera_file(bindings_path);
     if (!bindings_text) {
         failure_text = "map camera bindings could not be read or exceeds 1 MiB";
@@ -1718,10 +1776,17 @@ std::optional<eawr::viewer::MapCameraSource> MapMode::State::load_map_camera(
         failure_text = core::format_diagnostic(loaded.error());
         return std::nullopt;
     }
+    if (generated) {
+        // Same project distance and owner overrides as the Coruscant live XML.
+        const auto& constants = loaded.value().constants;
+        config.value().zoom = options.camera_zoom.value_or(std::clamp(
+            (1200.0F - 100.0F) / (constants.distance_max - 100.0F), 0.0F, 1.0F));
+        config.value().yaw_degrees = constants.yaw_default;
+    }
     // Precedence: effective-VFS XML, then the config's project-authored map
     // overrides; a fixed capture later pins the whole frame over both.
     auto resolved = eawr::viewer::resolve_map_constants(config.value(), std::move(loaded.value()),
-        map_camera_config_path.filename().generic_string(), source.config_sha256);
+        source.config_file, source.config_sha256);
     if (!resolved) {
         failure_text = core::format_diagnostic(resolved.error());
         return std::nullopt;
@@ -2130,6 +2195,17 @@ std::optional<int> MapMode::process(const double delta) {
     state.sync_perf_overlay();
     if (state.space) {
         const std::optional<int> finished = state.space->process(delta);
+        // #82: selection and orders see the frame the view just drew.
+        // #848: the overview level the camera just took decides what the battle UI draws this frame.
+        if (!finished) state.sync_overview_ui();
+        if (!finished && state.battle && state.live_session && state.space_population) {
+            FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr);
+            state.battle->frame(*state.live_session, *state.space_population, *state.space);
+            state.live_session->placement_preview(state.battle->placing(), state.battle->placement_point());
+            state.sync_cards();
+            state.sync_production();
+            state.sync_minimap();
+        }
         if (state.perf_trace && state.live_session) {
             PerfTrace::Frame frame;
             frame.frame_ms = delta * 1000.0;
@@ -2143,16 +2219,21 @@ std::optional<int> MapMode::process(const double delta) {
                 frame.effect_particles = state.battle_effects->particles();
             }
             if (state.unit_emitters) frame.emitter_particles = state.unit_emitters->particles();
+            frame.particle_ms = state.particle_ms;
+            frame.submit_ms = state.space->live_submit_ms();
+            frame.pieces = state.space->live_submit_pieces();
+            frame.sent = state.space->live_submit_sent();
+            frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
+            frame.hud_ms = state.hud_ms;
+            frame.audio_ms = state.audio_ms;
+            frame.fog_ms = state.fog_ms;
+
+            for (const platform::LiveTickCost& cost : state.live_session->tick_costs_after(state.perf_trace_tick)) {
+                state.perf_trace_tick = cost.tick;
+                ++frame.ticks;
+                frame.tick_ms += cost.total_ms;
+            }
             state.perf_trace->frame(frame);
-        }
-        // #82: selection and orders see the frame the view just drew.
-        // #848: the overview level the camera just took decides what the battle UI draws this frame.
-        if (!finished) state.sync_overview_ui();
-        if (!finished && state.battle && state.live_session && state.space_population) {
-            state.battle->frame(*state.live_session, *state.space_population, *state.space);
-            if (state.hud) state.hud->set_unit_cards(state.battle->card_layout(), state.battle->card_units());
-            if (state.hud) state.hud->set_ability_bar(state.battle->ability_bar());
-            state.sync_minimap();
         }
         // #447 --eawr-live-follow: the next frame looks at the unit where this one drew it.
         if (!finished && state.live_session && state.live_session->options().follow) {
@@ -2332,7 +2413,7 @@ std::optional<int> MapMode::process(const double delta) {
             static_cast<std::streamsize>(evidence.value().png_bytes.size()));
         if (!output) {
             state.completed = true;
-            state.failure = "cannot write fog paint evidence " + path.string();
+            state.failure = "cannot write fog paint evidence " + ViewerPath::utf8(path);
             state.release_particles();
             static_cast<void>(state.write_report());
             return 2;
@@ -2591,8 +2672,7 @@ void MapMode::input(const Ref<InputEvent>& event) {
         // #82: the live battle's world layer takes selection and order input ahead of the camera.
         if (state.battle && state.live_session && state.space_population
             && state.battle->input(event, *state.live_session, *state.space_population, *state.space)) {
-            if (state.hud) state.hud->set_unit_cards(state.battle->card_layout(), state.battle->card_units());
-            if (state.hud) state.hud->set_ability_bar(state.battle->ability_bar());
+            state.sync_cards();
             return;
         }
         // The same Godot event translation as the land camera; the space

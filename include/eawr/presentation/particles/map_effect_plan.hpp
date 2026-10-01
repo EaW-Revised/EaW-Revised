@@ -35,6 +35,11 @@ struct MapEffectPlacementInput final {
     // Per proxy ordinal: 1 when the state of the owning hardpoint hides it.
     // Empty (the land path) hides nothing.
     std::span<const std::uint8_t> hardpoint_hidden_proxies{};
+    // Per proxy ordinal: 1 when the unit's code shows its emitter type (an ion
+    // stun's, BP-43, space-damage IS-09). The authored hidden flag is the same
+    // flag the type switch clears, so such a proxy runs although authored
+    // hidden. Empty shows nothing.
+    std::span<const std::uint8_t> code_shown_proxies{};
 };
 
 enum class MapEffectStatus : std::uint8_t { admitted, hidden, unresolved, unsupported };

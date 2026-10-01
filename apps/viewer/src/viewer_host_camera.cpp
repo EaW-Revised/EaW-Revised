@@ -350,6 +350,14 @@ void ViewerHost::route_world_input(const Ref<InputEvent>& event) {
 
 void ViewerHost::_notification(const int what) {
     switch (what) {
+    case NOTIFICATION_PREDELETE:
+        // #961: Godot sends this to the extension before deleting the host's
+        // children. Map teardown stops and releases its audio players, which
+        // are those children; the extension destructor runs after their deletion.
+        // This also covers engine-driven quits such as --quit-after, which do
+        // not send a window close request.
+        map_mode_.reset();
+        return;
     case NOTIFICATION_WM_CLOSE_REQUEST:
         shutdown_trace::mark("window close requested");
         if (map_mode_) map_mode_->close_requested();

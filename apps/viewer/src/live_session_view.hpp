@@ -10,9 +10,12 @@
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/space/snapshot_index.hpp"
+#include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -110,6 +113,10 @@ public:
     // own input path at a presentation tick, so a test drives selection and orders as a player.
     // <tick>:<click|dclick|rclick|hover>:<unit=N|@x,y,z|screen=x,y>[+shift][+ctrl][+alt]
     // <tick>:<hover|click>:icon=N  (the pointer over squadron N's icon, #424)
+    // WR-15: <tick>:press:hud=r_RRCC, hover:@x,y,0, release:@x,y,0 drives a held pool drag.
+    // <tick>:<hover|click|rclick>:reticle=N:H  (#531: the pointer over the hardpoint reticle of
+    //     unit N's hardpoint H, an index in its type's HardPoints list, or `first` for the lowest
+    //     one drawn; the reticle must be drawn, so hover the unit first)
     // (hover moves the pointer there; unit=N of a squadron craft points at that craft)
     // <tick>:box:@x,y,z/@x,y,z[+shift]  (a left drag between two source points)
     // <tick>:box:screen=x,y/screen=x,y[+shift]  (the same between two viewport pixels)
@@ -139,6 +146,7 @@ public:
         std::array<double, 2> drag{};
         bool screen{};  // points are viewport pixels (x, y, 0), not source points
         bool icon{};    // `unit` is a squadron whose icon is the target (#424)
+        std::optional<std::uint32_t> reticle; // #531: `unit`'s hardpoint whose reticle is the target
         bool minimap{}; // points are minimap points (x, y, 0) (#455)
         bool offset{};  // #665: points[0] is an offset from `unit`'s position (unit=N+@dx,dy,dz)
         std::string key;
@@ -158,7 +166,8 @@ public:
         double yaw{}; // degrees, (-180, 180]
     };
     struct Options final {
-        std::string fixture;                                  // --eawr-live-session (m2|replay|melee)
+        std::string fixture;                                  // --eawr-live-session (m2|skirmish|replay|melee)
+        skirmish::FixtureOptions skirmish;                    // --eawr-skirmish-* (#908)
         std::filesystem::path replay_input;                   // --eawr-live-replay <file> (replay)
         // #601: --eawr-live-melee s|m|l and --eawr-live-melee-seed <n> (melee, skirmish/melee.hpp).
         std::optional<skirmish::MeleeSize> melee_size;
@@ -178,6 +187,13 @@ public:
         // so the buttons' looks can be seen before the simulation has ability state (#76).
         bool ability_demo{};
         bool shield_flash{};                                 // --eawr-live-shield-flash on|off (default off)
+        // --eawr-live-purchase-slots <N> (#530, test hook): purchase model slots per buyable type,
+        // 10 by default (space-purchasing PU-G25); a small N shows the reuse of a dead unit's slot
+        // without buying past ten squadrons.
+        std::uint32_t purchase_slots{10};
+        // --eawr-live-late-orders on (#530, test hook): an --eawr-live-order may name a unit the
+        // start does not hold (bought or launched later); it is given as the local player.
+        bool late_orders{};
         std::optional<sim::tactical::PlayerId> player;        // --eawr-live-player
         std::vector<ScheduledOrder> orders;                   // --eawr-live-order, repeatable
         std::vector<ScriptedInput> inputs;                    // --eawr-live-input, repeatable
@@ -195,6 +211,7 @@ public:
         std::optional<std::uint64_t> end_tick;                // --eawr-live-ticks
         double ticks_per_frame{0.5};                          // --eawr-live-step
         std::optional<std::size_t> workers;                   // --eawr-live-workers
+        std::optional<std::size_t> particle_workers;          // --eawr-live-particle-workers (#638)
         // --eawr-live-speed 0..4: the tactical speed setting (#459 TP-05, default 2).
         std::uint32_t speed_step{ui::default_speed_step};
         std::filesystem::path hashes_path;                    // --eawr-live-hashes <csv>
@@ -276,6 +293,7 @@ public:
     // The tick an order issued now is stamped for (UI-07 scheduler's open tick; the report's evidence).
     [[nodiscard]] std::uint64_t order_tick() const { return scheduler_ ? scheduler_->open_tick() : 0U; }
     [[nodiscard]] sim::tactical::PlayerId local_player() const noexcept { return player_; }
+    [[nodiscard]] const skirmish::SkirmishStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
     // The frames shown after the warm-up (scripted f<frame> gestures count these).
@@ -311,7 +329,7 @@ public:
         return fade_.opacity(entity).value_or(1.0F);
     }
     // Whether every entity the session holds is still standing (destroyed units leave it).
-    [[nodiscard]] const std::vector<sim::EntityId>& alive_units() const noexcept { return alive_; }
+    [[nodiscard]] const std::vector<sim::EntityId>& alive_units() const noexcept { return snapshot_index_.alive(); }
     // One presentation frame: poses the population's live ships and says whether to capture.
     // After a simulation failure it keeps the last poses and carries the error instead. A unit
     // the session destroyed is replaced by its death clone playing its death clip (#81).
@@ -353,6 +371,10 @@ public:
         // #494: the local player's fog cells after `latest`'s tick, or null in a battle without fog.
         std::shared_ptr<const platform::LiveFog> fog;
     };
+    void trace_frames(bool enabled) noexcept { trace_frames_ = enabled; }
+    [[nodiscard]] double bookkeeping_ms() const noexcept { return bookkeeping_ms_; }
+    [[nodiscard]] const space::SnapshotIndex& snapshot_index() const noexcept { return snapshot_index_; }
+    void set_pose_workers(const particles::StepExecutor* workers) noexcept { pose_workers_ = workers; }
     [[nodiscard]] const BattleFrame& battle_frame() const noexcept { return battle_frame_; }
     [[nodiscard]] std::optional<BattleEffects::UnitFrame> unit_frame(sim::EntityId entity) const;
     // The session's snapshot of `tick` while its history still holds it (#406: the unit emitters
@@ -362,6 +384,28 @@ public:
     // squadron a spawner launches registers when a snapshot first lists it, like the setup's; a
     // craft keeps its squadron for life.
     [[nodiscard]] const sim::tactical::Squadron* squadron_of(sim::EntityId craft) const noexcept;
+    // #530 (docs/behaviour/space-purchasing.md PU-60 to PU-68): the session's economy rules (empty
+    // in a battle without them), the local player's economy in the latest snapshot, and the
+    // command bar's buy, cancel and reinforce requests. They go through the order scheduler like any
+    // order, so they reach the simulation at a tick boundary and enter the replay.
+    [[nodiscard]] const sim::tactical::EconomyRules& economy() const noexcept { return economy_; }
+    [[nodiscard]] const sim::tactical::EconomyView* local_economy() const noexcept;
+    // The local player's faction ID in the setup (the station menus' key), or nothing.
+    [[nodiscard]] std::optional<sim::tactical::FactionId> local_faction_id() const noexcept;
+    bool buy(sim::EntityId station, sim::tactical::TypeId type);
+    bool cancel_build(sim::tactical::BuildQueue queue, std::uint32_t index);
+    bool reinforce(sim::tactical::TypeId type, const sim::math::Vec3& point);
+    [[nodiscard]] bool reinforcement_allowed() const noexcept;
+    [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const noexcept;
+    // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
+    void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
+    struct EconomyRequests final {
+        std::uint64_t buys{};
+        std::uint64_t cancels{};
+        std::uint64_t reinforcements{};
+        std::uint64_t refused{};
+    };
+    [[nodiscard]] const EconomyRequests& economy_requests() const noexcept { return economy_requests_; }
     // The unit and combat tables the session runs with (prepare() loaded them).
     [[nodiscard]] const units::UnitTables* tables() const noexcept { return tables_ ? &*tables_ : nullptr; }
     [[nodiscard]] const sim::tactical::CombatTable* combat() const noexcept { return content_ ? &content_->combat : nullptr; }
@@ -396,13 +440,15 @@ private:
     // #79: the FoC AI beside the world (m2 with the AI on), and the players it runs.
     std::shared_ptr<const platform::LiveScripts> ai_scripts_;
     std::vector<sim::tactical::PlayerId> ai_players_;
-    // --eawr-live-ai has no effect outside --eawr-live-session m2 (report row + warning).
+    // --eawr-live-ai has no effect outside the live m2/skirmish starts (report row + warning).
     bool ai_flag_ignored_{};
     std::optional<sim::tactical::TacticalSetup> setup_;
     std::optional<sim::tactical::TacticalReplay> replay_;
     std::optional<units::UnitTables> tables_;
     std::optional<skirmish::SessionContent> content_;
     sim::tactical::VictoryRules victory_; // #77: the start's victory rules
+    sim::tactical::EconomyRules economy_; // #530: the start's economy
+    EconomyRequests economy_requests_;
     // The session's command source reads the scheduler on the simulation thread: both are
     // declared before session_, which is stopped and destroyed first.
     std::unique_ptr<ui::CommandScheduler> scheduler_;
@@ -421,6 +467,22 @@ private:
         std::optional<std::size_t> clone;  // index in launch_clones_
     };
     std::vector<LaunchSlot> launch_slots_;
+    struct PlacementClone {
+        sim::tactical::TypeId type{};
+        std::size_t ship{};
+        sim::math::Vec3 offset{};
+        sim::math::Fixed layer_z{};
+    };
+    std::vector<PlacementClone> placement_clones_;
+    std::optional<sim::tactical::TypeId> preview_type_;
+    std::optional<sim::math::Vec3> preview_point_;
+    bool preview_valid_{};
+    std::array<std::array<float, 3>, 2> preview_colours_{};
+    std::uint64_t preview_frames_{};
+    std::uint64_t preview_queries_{};
+    std::optional<std::uint64_t> preview_checked_tick_;
+    std::vector<std::string> preview_rows_;
+    std::size_t slots_released_{};  // slots freed by a unit leaving the snapshot (report: slots_released)
     std::map<sim::EntityId, std::size_t> launched_ship_of_entity_;
     std::map<sim::EntityId, sim::tactical::PlayerId> owner_of_entity_;
     std::map<sim::EntityId, sim::EntityId> squadron_of_;
@@ -432,6 +494,21 @@ private:
     // the flash runs; how many flashes started.
     std::map<sim::EntityId, double> shield_flash_start_;
     std::uint64_t shield_flashes_{};
+    // #862 (space-abilities AB-63 to AB-65, space-damage IS-03): per frame's newest tick, each
+    // squadron container's ION_CANNON_SHOT switch-ons (first and last tick seen on) and each
+    // stunned unit's first stunned tick and most stun frames left seen, for the report.
+    struct IonShotRow final {
+        std::uint64_t switched_on{};
+        std::uint64_t first_on{};
+        std::uint64_t last_on{};
+        bool on{};
+    };
+    struct IonStunRow final {
+        std::uint64_t first{};
+        std::uint32_t max_frames{};
+    };
+    std::map<sim::EntityId, IonShotRow> ion_shot_rows_;
+    std::map<sim::EntityId, IonStunRow> ion_stun_rows_;
     BattleFrame battle_frame_;
     std::uint64_t reached_tick_{};
     // Ticks whose events the event log had dropped before a frame reached them (report rows).
@@ -441,7 +518,11 @@ private:
     std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint64_t> first_hits_;
     std::map<sim::tactical::PlayerId, sim::tactical::TeamId> team_of_player_;
     std::vector<VisibleUnit> visible_;
-    std::vector<sim::EntityId> alive_;
+    space::SnapshotIndex snapshot_index_;
+    std::vector<space::LiveUnitPose> poses_;
+    std::vector<SpacePopulation::LivePose> live_poses_;
+    std::vector<SpacePopulation::LiveClipPose> clip_poses_;
+    const particles::StepExecutor* pose_workers_{};
     // #535: the local player's per-unit fog fade (space-fog-presentation.md FW-16 to FW-18),
     // and the ticks it has already run through (frame() may see the same tick more than once
     // while paused).
@@ -513,6 +594,9 @@ private:
     [[nodiscard]] std::optional<DeathClone> prepare_death_clone(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                                 std::size_t source, std::uint64_t variant_key);
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog);
+    // A slot whose unit is no longer in the tactical snapshot, and whose death clone (if any) has
+    // left, is free for the next unit of its type (space-purchasing PU-G25).
+    void release_dead_slots(const sim::tactical::TacticalSnapshot& latest);
     // #424, #518: the squadron selects and orders as one unit, its team container, from the first
     // snapshot that lists it; its roster stays the one it had then.
     void register_squadron(const sim::tactical::Squadron& squadron, std::uint64_t tick);
@@ -543,10 +627,22 @@ private:
     // Clones frame() stopped drawing this frame; their ships are retired by retire_clones().
     std::vector<ActiveClone> retiring_clones_;
     std::vector<std::string> retired_clone_rows_;
+    bool trace_frames_{};
+    double bookkeeping_ms_{};
     std::map<sim::EntityId, SpacePopulation::LivePose> last_poses_;
     // Report rows: the clips each start unit type's model has, and each clone set up.
     std::vector<std::string> unit_clip_rows_;
     std::vector<std::string> death_clone_rows_;
+    // #530: the hyperspace arrivals seen (evidence for the report).
+    struct ArrivalRow final {
+        sim::tactical::PlayerId owner{};
+        sim::tactical::TypeId type{};
+        std::uint64_t first_tick{};
+        std::uint64_t visible_tick{};
+        std::uint64_t landed_tick{};
+        std::uint32_t last_frame{};
+    };
+    std::map<sim::EntityId, ArrivalRow> arrivals_;
     // #391: the breakoff props (map mode owns them); null without.
     DebrisProps* debris_{};
     // #447 report: each spin-away the frames reached (the ticks of its start and end events) and

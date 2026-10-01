@@ -192,10 +192,15 @@ struct Run {
 
 // The local player (1) gives UI-07 orders on some ticks; they are taken at the
 // tick boundary, as the live session's command source does.
-Run run_battle(const eawr::sim::PartitionExecutor& executor, std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr) {
+// #895: without the per-tick authoritative hash (the live session's mode), the combined hash is
+// asked for on request every `request_every` ticks and on the last; `hashes` holds only those.
+Run run_battle(const eawr::sim::PartitionExecutor& executor, std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr,
+    const bool authoritative_hash = true) {
+    constexpr int request_every = 7;
     auth::ScriptedTacticalSession battle = make_battle();
     const bool hashed_off_thread = hasher != nullptr;
     battle.set_state_hasher(std::move(hasher));
+    battle.set_authoritative_hash(authoritative_hash);
     ui::CommandScheduler local(1);
     Run run;
     std::vector<auth::ScriptCommand> previous_service;
@@ -235,11 +240,23 @@ Run run_battle(const eawr::sim::PartitionExecutor& executor, std::shared_ptr<eaw
         expect(result.scripts.diagnostics.empty(), "script diagnostics");
         // #637: off the stepping thread the hashes are only in state_hash; on it, in both.
         expect(hashed_off_thread ? result.state_sha256.empty() && result.world.state_sha256.empty()
-                                 : result.state_hash.get() == result.state_sha256
-                                     && result.world.state_hash.get() == result.world.state_sha256,
+                                 : result.world.state_hash.get() == result.world.state_sha256,
             "the tick's hashes are where the hashing mode puts them");
-        run.hashes.push_back(result.state_hash.get());
         run.world_hashes.push_back(result.world.state_hash.get());
+        if (authoritative_hash) {
+            expect(hashed_off_thread || result.state_hash.get() == result.state_sha256, "the combined hash in both fields");
+            run.hashes.push_back(result.state_hash.get());
+        } else {
+            expect(result.state_sha256.empty() && result.state_hash.get().empty(), "no combined hash unless asked");
+            if (index % request_every == 0 || index + 1 == total_ticks) {
+                auto script = battle.script_state_hash();
+                expect(script.has_value(), "the script hash on request");
+                if (script) {
+                    run.hashes.push_back(auth::authoritative_state_sha256(
+                        result.world.completed_tick, run.world_hashes.back(), script.value()));
+                }
+            }
+        }
     }
     expect(battle.pending_script_commands() == previous_service.size(), "the last service waits for the next tick");
     run.replay = battle.record();
@@ -401,6 +418,16 @@ void run_workers() {
         expect(live.hashes == reference.hashes && live.world_hashes == reference.world_hashes,
             std::to_string(workers) + " workers, by cost, hashed off thread: combined and world hashes");
         expect(live.replay == reference.replay, std::to_string(workers) + " workers, by cost: recorded replay");
+        // #895: the live session's mode skips the per-tick combined hash; the world is unchanged
+        // and the combined hash asked for on request is the one every tick would have had.
+        const Run on_request = run_battle(by_cost, std::make_shared<eawr::platform::ThreadStateHasher>(), false);
+        std::vector<std::string> sampled;
+        for (std::size_t index = 0; index < reference.hashes.size(); ++index) {
+            if (index % 7 == 0 || index + 1 == reference.hashes.size()) sampled.push_back(reference.hashes[index]);
+        }
+        expect(on_request.world_hashes == reference.world_hashes && on_request.replay == reference.replay,
+            std::to_string(workers) + " workers, no per-tick combined hash: world hashes and replay");
+        expect(on_request.hashes == sampled, std::to_string(workers) + " workers: the combined hash on request");
     }
 }
 

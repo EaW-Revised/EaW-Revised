@@ -48,6 +48,15 @@ add_test(
     NAME tactical_ability_contracts
     COMMAND tactical_ability_tests
 )
+# #530: skirmish purchasing (credits, build queues, hyperspace arrival).
+add_executable(tactical_economy_tests economy_tests.cpp)
+target_link_libraries(tactical_economy_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_economy_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_economy_tests)
+add_test(
+    NAME tactical_economy_contracts
+    COMMAND tactical_economy_tests
+)
 # #77: fixed-force victory and defeat.
 add_executable(tactical_victory_tests victory_tests.cpp)
 target_link_libraries(tactical_victory_tests PRIVATE eawr::sim eawr::platform)

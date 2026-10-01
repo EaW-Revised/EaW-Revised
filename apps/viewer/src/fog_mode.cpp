@@ -1,4 +1,5 @@
 #include "fog_mode.hpp"
+#include "viewer_path.hpp"
 
 #include "eawr/sim/replay.hpp"
 
@@ -25,7 +26,7 @@ std::optional<FogMode> FogMode::load(const std::vector<std::filesystem::path>& p
     for (const auto& path : paths) {
         std::ifstream file(path, std::ios::binary);
         if (!file) {
-            error = "cannot read fog grid: " + path.string();
+            error = "cannot read fog grid: " + ViewerPath::utf8(path);
             return std::nullopt;
         }
         // A canonical grid is bounded by the validated grid contract; refuse
@@ -34,18 +35,18 @@ std::optional<FogMode> FogMode::load(const std::vector<std::filesystem::path>& p
         const auto length = file.tellg();
         if (length < 0 || static_cast<std::uint64_t>(length)
                 > sim::fog::grid_header_size + sim::fog::max_collection_cells) {
-            error = "fog grid file exceeds the canonical limit: " + path.string();
+            error = "fog grid file exceeds the canonical limit: " + ViewerPath::utf8(path);
             return std::nullopt;
         }
         file.seekg(0);
         std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
         if (!file.read(reinterpret_cast<char*>(bytes.data()), length)) {
-            error = "cannot read full fog grid: " + path.string();
+            error = "cannot read full fog grid: " + ViewerPath::utf8(path);
             return std::nullopt;
         }
-        auto parsed = sim::fog::parse_fog_grid(bytes, path.string());
+        auto parsed = sim::fog::parse_fog_grid(bytes, ViewerPath::utf8(path));
         if (!parsed) {
-            error = "invalid fog grid " + path.string();
+            error = "invalid fog grid " + ViewerPath::utf8(path);
             return std::nullopt;
         }
         sources.push_back({path, sim::sha256_hex(bytes), parsed.value().team_id(),

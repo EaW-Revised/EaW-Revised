@@ -73,6 +73,13 @@ def package(build_dir: Path, platform: str, version: str, out: Path) -> list[Pat
                 continue  # another platform's extension, or build leftovers
             archive.write(path, f"{stem}-viewer/project/{relative}")
         add_docs(archive, f"{stem}-viewer")
+        for name in ("play-demo.cmd", "play-demo.sh", "demo.py"):
+            path = ROOT / "tools" / "release" / name
+            info = zipfile.ZipInfo.from_file(path, f"{stem}-viewer/{name}")
+            info.external_attr = (0o755 if name.endswith(".sh") else 0o644) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, path.read_bytes())
+        archive.write(ROOT / "tools/fonts/extract_eaw_fonts.py", f"{stem}-viewer/extract_eaw_fonts.py")
     return [tools_zip, viewer_zip]
 
 

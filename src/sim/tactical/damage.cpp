@@ -240,10 +240,10 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
             amount = q.mul(amount, factor.value());
         }
         // DG-26: the target's combat defense modifier (a craft out of combat: -1, twice the
-        // damage). Independent of DG-05's two gates above: FoC applies it unconditionally to every
-        // projectile hit.
+        // damage; #530 PU-38, an arriving unit -3 more). Independent of DG-05's two gates above:
+        // FoC applies it unconditionally to every projectile hit.
         if (hit.defense.raw() != 0) {
-            const auto defense = std::clamp(hit.defense, whole(-1), whole(1));
+            const auto defense = std::clamp(hit.defense, whole(-4), whole(1));
             amount = std::min(q.mul(amount, q.sub(whole(1), defense)),
                 Fixed::from_raw(max_durability_health * max_damage_multiplier * Fixed::scale));
         }

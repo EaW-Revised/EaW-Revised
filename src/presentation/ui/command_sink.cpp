@@ -29,7 +29,7 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         if (intent.target == sim::invalid_entity_id) {
             return Payload::failure(failure(diagnostic_codes::invalid_intent, "an attack needs a target unit"));
         }
-        return Payload::success(tactical::AttackPayload{intent.target});
+        return Payload::success(tactical::AttackPayload{intent.target, intent.hardpoint});
     case TacticalVerb::attack_move:
         return Payload::success(tactical::AttackMovePayload{intent.destination, intent.target});
     case TacticalVerb::guard:
@@ -53,6 +53,10 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         }
         return Payload::failure(failure(diagnostic_codes::unsupported_intent,
             "targeted special abilities have no tactical command yet"));
+    case TacticalVerb::buy: return Payload::success(tactical::BuyPayload{intent.type});
+    case TacticalVerb::cancel:
+        return Payload::success(tactical::CancelPayload{static_cast<std::uint32_t>(intent.queue), intent.index});
+    case TacticalVerb::reinforce: return Payload::success(tactical::ReinforcePayload{intent.type, intent.destination});
     }
     return Payload::failure(failure(diagnostic_codes::invalid_intent, "unknown order verb"));
 }
@@ -65,10 +69,19 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
     std::vector<sim::EntityId> units = intent.units;
     std::sort(units.begin(), units.end());
     units.erase(std::unique(units.begin(), units.end()), units.end());
-    if (units.empty()) {
+    // #530: a buy names its one station; a cancel or reinforce names no unit.
+    const bool economy = intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::cancel
+        || intent.verb == TacticalVerb::reinforce;
+    if (intent.verb == TacticalVerb::buy && units.size() != 1) {
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "a buy names one station"));
+    }
+    if (economy && intent.verb != TacticalVerb::buy && !units.empty()) {
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "a cancel or reinforce names no unit"));
+    }
+    if (units.empty() && !economy) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "an order needs at least one unit"));
     }
-    if (units.front() == sim::invalid_entity_id) {
+    if (!units.empty() && units.front() == sim::invalid_entity_id) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "an order lists unit ID zero"));
     }
     if (units.size() > tactical::max_units_per_command) {
@@ -160,6 +173,7 @@ core::Result<bool> OrderInput::world_command(const WorldPick& pick, const Comman
         if (hostile_unit) {
             intent.verb = TacticalVerb::attack;
             intent.target = pick.entity;
+            intent.hardpoint = pick.hardpoint;
             break;
         }
         intent.verb = mode == OrderMode::guard ? TacticalVerb::guard : TacticalVerb::attack_move;
@@ -174,6 +188,7 @@ core::Result<bool> OrderInput::world_command(const WorldPick& pick, const Comman
         if (!hostile_unit) return core::Result<bool>::success(false);
         intent.verb = TacticalVerb::attack;
         intent.target = pick.entity;
+        intent.hardpoint = pick.hardpoint;
         break;
     case OrderMode::move:
         intent.verb = TacticalVerb::move;
@@ -183,6 +198,7 @@ core::Result<bool> OrderInput::world_command(const WorldPick& pick, const Comman
         if (hostile_unit) {
             intent.verb = TacticalVerb::attack;
             intent.target = pick.entity;
+            intent.hardpoint = pick.hardpoint;
         } else {
             intent.verb = TacticalVerb::move;
             intent.destination = pick.point;
