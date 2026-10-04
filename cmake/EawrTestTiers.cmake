@@ -10,7 +10,7 @@
 # end of the root list file fails the configure when one does not.
 
 set(EAWR_SLOW_TESTS
-    python_presentation_acceptance_p1_04_lighting_triplet
+    
     python_presentation_godot_qualify_package_runtime
     python_presentation_p1_capture_compare
     python_presentation_p1_capture_migration_pair
