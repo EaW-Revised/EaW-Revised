@@ -15,7 +15,7 @@ set(EAWR_SLOW_TESTS
     python_presentation_p1_capture_compare
     python_presentation_p1_capture_migration_pair
     python_validation_p1_capture_build_manifest
-    python_validation_p1_capture_windows_prototype_capture
+
     fidelity_trace_comparator_contracts
     foc_ai_turn_668
     foc_burn_battle
