@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/publish_scan"))
 import doc_refs
 
+
 class ReferenceTests(unittest.TestCase):
     def test_tracking_groups_are_explicit_and_bare_numbers_keep_offsets(self):
         text = "Work (legacy #540, #984).\nBare #7 and #1234567."
@@ -59,6 +60,8 @@ class ReferenceTests(unittest.TestCase):
                                           'always_strip_blocks': ['maintainer']}), encoding='utf-8')
             (root / 'private').mkdir()
             (root / 'private/a.md').write_text('#1', encoding='utf-8')
+            (root / 'a.md').write_text('<!-- eawr-export: maintainer begin -->\n#2\n'
+                                      '<!-- eawr-export: maintainer end -->\n#3', encoding='utf-8')
             hits = doc_refs.scan(root)
             self.assertEqual(len(hits), 1)
             self.assertIn('a.md:4:', hits[0])
@@ -121,6 +124,8 @@ class ReferenceTests(unittest.TestCase):
             docs = root / 'docs/behaviour'
             docs.mkdir(parents=True)
             (docs / 'rules.md').write_text(
+                '<!-- eawr-export: private begin -->\n- **WSU-10** Picking.\n'
+                '<!-- eawr-export: private end -->\nWSU-10', encoding='utf-8')
             self.assertEqual(len(doc_refs.scan(root)), 1)
             self.assertIn('rules.md:4: WSU-10', doc_refs.scan(root)[0])
 
@@ -168,6 +173,7 @@ class ReferenceTests(unittest.TestCase):
             self.assertIn('unresolved decision anchor', doc_refs.scan(root)[0])
             readme.write_text('`[example](docs/architecture-decisions.md#adr-099-gone)`', encoding='utf-8')
             self.assertEqual(doc_refs.scan(root), [])
+
 
 if __name__ == '__main__':
     unittest.main()
