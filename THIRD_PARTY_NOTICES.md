@@ -59,18 +59,18 @@ derived from alo-viewer revision `9bb0053919cc5df8377610d4f91b11d956d6c2f4`,
 <https://github.com/AlamoEngine-Tools/alo-viewer>, specifically its MIT-licensed
 `src/Assets/MegaFile.*` and `src/Assets/Assets.*` implementations.
 
-The portable P0-06 ALO/ALA CPU readers in `src/assets/asset_internal.hpp`,
+The portable ALO/ALA CPU readers in `src/assets/asset_internal.hpp`,
 `src/assets/model.cpp`, and `src/assets/animation.cpp` use the same pinned
 revision's MIT-licensed `src/Assets/ChunkFile.*`, `Models.*`, `Animations.*`, and
 the required public record declarations in `src/General/GameTypes.h` as format
 reference evidence. The DDS/TGA readers are original implementations of their
 documented byte layouts and do not reuse alo-viewer graphics or image-decoder code.
 
-The P1-08 portable particle ALO reader, legacy-emitter conversion, plugin catalog,
+The portable particle ALO reader, legacy-emitter conversion, plugin catalog,
 and CPU behavior in `src/presentation/particles/` and
 `tools/particle_inventory.py` are derived from the same pinned revision's
 MIT-licensed `src/RenderEngine/Particles/*` and CPU update order in
-`src/RenderEngine/DirectX9/ParticleEmitterInstance.cpp`. The P1-08 particle quad
+`src/RenderEngine/DirectX9/ParticleEmitterInstance.cpp`. The particle quad
 builder in `src/presentation/particles/render.cpp` follows the same revision's
 MIT-licensed `src/RenderEngine/DirectX9/ParticleRenderers.cpp` for quad corner order,
 index order, texture-cell assignment, kite tail geometry and the legacy
@@ -78,7 +78,7 @@ renderer/selector table in `src/RenderEngine/Particles/ParticleSystem.cpp`; it i
 portable reimplementation, and no DirectX code, shader, or asset byte is copied or
 linked.
 
-The P1-04 spherical-harmonics lighting in `src/presentation/lighting/lighting.cpp`
+The spherical-harmonics lighting in `src/presentation/lighting/lighting.cpp`
 ports the same pinned revision's MIT-licensed `src/RenderEngine/SphericalHarmonics.cpp`
 (direction evaluation with the direction's Z negated, the Ramamoorthi-Hanrahan
 irradiance-matrix packing and the ambient term), uses the default environment of
@@ -153,11 +153,11 @@ The active patch-slot ordering and leaf-first multi-MODPATH evidence documented
 for the VFS were cross-checked against pg-starwarsgame-lsp revision
 `4461416d401b0f665bc1fe82aad60b90bd707fa9`,
 <https://github.com/AlamoEngine-Tools/pg-starwarsgame-lsp>. No library from that
-repository is linked into the runtime. The P0-05 variant-chain order, effective
+repository is linked into the runtime. The XML data model variant-chain order, effective
 value/provenance model, token append operation, and missing/cycle behavior in
 `src/data/xml.cpp` are derived from its MIT-licensed
 `PG.StarWarsGame.LSP.Core/Symbols/EffectiveObjectResolver.cs` and pinned tests.
-The P1-10 MTD layout and top-left coordinate convention in
+The MTD layout and top-left coordinate convention in
 `src/assets/mega_texture.cpp`, `tools/inventory/mtd_inventory.py`, and their
 synthetic tests are derived from the same pinned revision's MIT-licensed
 `PG.StarWarsGame.LSP.Assets.Tests/Icons/MegaTextureFixture.cs` and
@@ -188,7 +188,7 @@ SOFTWARE.
 
 ## PetroglyphTools
 
-The P1-10 MTD field meanings and 81-byte record size were cross-checked against
+The MTD field meanings and 81-byte record size were cross-checked against
 PetroglyphTools revision `3be4a58549897baa4c64aba8ffefc5eea574c495`,
 <https://github.com/AlamoEngine-Tools/PetroglyphTools>, specifically its
 MIT-licensed `PG.StarWarsGame.Files.MTD` reader and metadata declarations. No
@@ -218,8 +218,8 @@ SOFTWARE.
 
 ## eaw-schema
 
-The generated P0-05 XML classification table is derived at build time from the
-accepted P0-09 inventory made with eaw-schema revision
+The generated XML classification table is derived at build time from the
+accepted XML tag inventory made with eaw-schema revision
 `3e1b825a124fbc13b2293665f34a36dd4d4be80f`,
 <https://github.com/AlamoEngine-Tools/eaw-schema>. The checkout and its 130
 hashed schema files are not vendored into runtime code; the pinned revision,

@@ -1,13 +1,6 @@
-add_library(
-    eawr_assets STATIC
-    animation.cpp
-    map.cpp
-    map_decode.cpp
-    map_references.cpp
-    mega_texture.cpp
-    model.cpp
-    texture.cpp
-)
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+add_library(eawr_assets STATIC ${EAWR_ASSETS_SOURCES})
 add_library(eawr::assets ALIAS eawr_assets)
 
 target_include_directories(

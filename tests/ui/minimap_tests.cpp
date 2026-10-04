@@ -161,6 +161,18 @@ void test_blips() {
     settings.colorize_selected = false;
     const std::vector<ui::MinimapBlip> plain = ui::minimap_blips(units, looks, extents, settings);
     expect(plain.size() == 4 && plain[1].colour == red, "without Radar_Colorize_Selected_Units a selected unit keeps its colour");
+    units[5].owner_colour = blue;
+    const auto claimed = ui::minimap_blips(units, looks, extents, settings);
+    expect(claimed.size() == 4 && claimed[0].id == 6 && claimed[0].colour == blue,
+        "WBP-37 MM-07 a standing pad's blip takes its live captured owner colour");
+    units[1].in_nebula = true;
+    units[0].in_nebula = true;
+    const auto obscured = ui::minimap_blips(units, looks, extents, settings);
+    expect(obscured.size() == 3 && std::none_of(obscured.begin(), obscured.end(), [](const auto& blip) { return blip.id == 2; }),
+        "WHZ-70: nebula suppresses enemy blips while own units remain on radar");
+    types["Frigate"].hazard = true;
+    const auto hazards = ui::minimap_blips(units, looks, extents, settings);
+    expect(hazards.size() == 2, "WHZ-70: hazard types never produce ordinary blips");
 }
 
 // MM-09.
@@ -173,6 +185,65 @@ void test_guide() {
     const auto box = ui::minimap_guide(ground, extents, true);
     expect(near(box[0].x, -0.6) && near(box[0].y, 0.8) && near(box[2].x, 0.6) && near(box[2].y, -0.2),
            "a rectangle guide draws the points' bounding box");
+}
+
+// MM-16/17: the empty-name path is distinct from a missing name; point clipping and
+// conditional world scaling must stay independent of squadron member spread and camera zoom.
+void test_point_and_scale() {
+    test::ui::TempTree tree("radar-style");
+    test::ui::write_text(tree.root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>objects.xml</File></Game_Object_Files>");
+    test::ui::write_text(tree.root / "XML/objects.xml", R"xml(<Objects>
+<Container Name="Fixed"><Is_Visible_On_Radar>Yes</Is_Visible_On_Radar><Radar_Icon_Scale_Space>200</Radar_Icon_Scale_Space></Container>
+<Container Name="Point"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Icon_Name></Radar_Icon_Name><Radar_Blip_Size>2.9</Radar_Blip_Size></Container>
+<Container Name="Scaled"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Draw_To_Scale>Yes</Radar_Draw_To_Scale></Container>
+<Container Name="Bad"><Variant_Of_Existing_Type>Point</Variant_Of_Existing_Type><Radar_Blip_Size>NaN</Radar_Blip_Size></Container>
+</Objects>)xml");
+    const std::array mounts{vfs::MountSpec{"synthetic", tree.root, "data", {}}};
+    auto filesystem = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "radar style fixture mounts");
+    if (!filesystem) return;
+    auto loaded = data::load_catalog(filesystem.value(), data::Profile::foc);
+    expect(static_cast<bool>(loaded), "radar style fixture loads");
+    if (!loaded) return;
+    std::map<std::string, ui::MinimapTypeLooks, std::less<>> types;
+    for (const auto name : {"Fixed", "Point", "Scaled", "Bad"}) types[name] = ui::minimap_type_looks(name, &loaded.value().catalog);
+    expect(types["Fixed"].icon == "i_radar_default_blip.tga" && !types["Fixed"].draw_to_scale
+        && near(types["Fixed"].space_scale, 200), "MM-17: authored scale alone preserves default fixed icon size");
+    expect(types["Point"].icon.empty() && near(types["Point"].point_size, 2.9, 1e-6)
+        && near(types["Bad"].point_size, 2), "MM-16: explicit empty name plots points; invalid size keeps default");
+    const auto looks = [&](const std::string_view name) -> const ui::MinimapTypeLooks& { return types.find(name)->second; };
+    const auto extents = ui::minimap_extents(-1000, 1000, -1000, 1000);
+    ui::MinimapUnit unit{7, "Point", {12, 34, 56, 255}, false, true};
+    auto blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1 && blips.front().icon.empty() && blips.front().point_pixels == 2
+        && blips.front().colour == ui::MinimapSettings{}.selected, "MM-16: selected point survives ordinary admission");
+    if (blips.empty()) return;
+    auto point = blips.front();
+    expect(ui::minimap_point_pixels(point, 10, 8) == ui::MinimapPixelRect{5, 4, 2, 2}, "MM-16: centre is truncated in texture pixels");
+    point.centre = {0.99, -0.99};
+    expect(ui::minimap_point_pixels(point, 10, 8) == ui::MinimapPixelRect{9, 7, 1, 1}, "MM-16: final row and column clip extra texels");
+    point.centre = {-1, 1};
+    expect(ui::minimap_point_pixels(point, 10, 8) == ui::MinimapPixelRect{0, 0, 2, 2}, "MM-16: top and left edges remain admitted");
+    point.centre = {1, 0};
+    expect(!ui::minimap_point_pixels(point, 10, 8), "MM-16: right-edge centre is outside");
+    point.centre = {0, -1};
+    expect(!ui::minimap_point_pixels(point, 10, 8), "MM-16: bottom-edge centre is outside");
+    point.centre = {0, 0};
+    point.point_pixels = 3;
+    expect(ui::minimap_point_pixels(point, 10, 8) == ui::MinimapPixelRect{5, 4, 1, 1}, "MM-16: every other integer size writes one texel");
+    unit.type = "Scaled";
+    unit.team = true;
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1 && near(blips[0].half_size[0], 0.2) && near(blips[0].half_size[1], 0.2),
+        "MM-17: model-free team scale is a world extent, not a multiplier of icon size");
+    unit.team = false;
+    unit.world_half_size = {3, 5};
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1 && near(blips[0].half_size[0], 0.6) && near(blips[0].half_size[1], 1.0),
+        "MM-17: model bounds are multiplied by authored scale then projected");
+    unit.type = "Fixed";
+    blips = ui::minimap_blips(std::span(&unit, 1), looks, extents, {});
+    expect(blips.size() == 1 && near(blips[0].half_size[0], 0.05, 1e-6), "MM-17: fixed-size path ignores world bounds and space scale");
 }
 
 // MM-10, MM-04.
@@ -243,9 +314,42 @@ void test_fog_cells() {
 } // namespace
 
 int main() {
+    const std::array<ui::MinimapSquadronMember, 3> members{{{0, 0, 35, true},
+        {6, 3, 70, false}, {0, 0, 100, true}}};
+    const auto pose = ui::minimap_squadron_pose(members);
+    expect(pose && near(pose->x, 2) && near(pose->y, 1),
+        "MM-15: radar uses the member mean, including hidden members, rather than the box centre");
+    expect(pose && pose->yaw_degrees == 35,
+        "MM-15: facing comes from the first live member");
+    auto hidden_leader = members;
+    hidden_leader[0].visible = false;
+    expect(!ui::minimap_squadron_pose(hidden_leader), "MM-15: another seen member cannot bypass leader fog");
+    expect(!ui::minimap_squadron_pose({}), "MM-15: an empty or docked team has no identity");
+    const auto survivor = ui::minimap_squadron_pose(std::span(members).last(1));
+    expect(survivor && survivor->yaw_degrees == 100 && survivor->x == 0,
+        "MM-15: deleting members changes the centre and the first live member together");
+    if (const auto filesystem = test::ui::foc_corpus("hazard minimap")) {
+        const auto settings = ui::minimap_settings(*filesystem);
+        expect(settings.diagnostics.empty(), "WHZ-71/72: installed FoC hazard settings load without fallback diagnostics");
+        expect(settings.nebula == data::ui::Rgba8{255, 255, 255, 64}, "WHZ-71: installed nebula effect RGBA matches FoC");
+        expect(settings.field == data::ui::Rgba8{103, 130, 139, 127}, "WHZ-72: installed hazard fill RGBA matches FoC");
+        expect(settings.field_border == data::ui::Rgba8{174, 171, 200, 127}, "WHZ-72: installed hazard border RGBA matches FoC");
+    }
+    const auto extents = ui::minimap_extents(-1000, 1000, -1000, 1000);
+    const ui::MinimapHazard hazard{0, 0, 1000, 600};
+    const auto single = ui::minimap_hazards(std::span(&hazard, 1), extents, {}, 80, 80);
+    const std::array<ui::MinimapHazard, 2> overlap{hazard, hazard};
+    expect(single == ui::minimap_hazards(overlap, extents, {}, 80, 80), "WHZ-72: overlap forms one mask without additive colour");
+    expect(single.size() == 80 * 80 * 4 && single[(40 * 80 + 39) * 4 + 3] == 127,
+        "WHZ-72: the field interior has the authored fill alpha");
+    const auto clear = ui::minimap_hazards({}, extents, {}, 80, 80);
+    expect(std::all_of(clear.begin(), clear.end(), [](const auto value) { return value == 0; }),
+        "WHZ-72: rebuilding without registered hazards clears the map");
+    expect(ui::minimap_hazards(overlap, extents, {}, 0, 80).empty(), "WHZ-72: invalid drawable dimensions leave retry to the view");
     test_settings();
     test_mapping();
     test_blips();
+    test_point_and_scale();
     test_guide();
     test_clip();
     test_fog();

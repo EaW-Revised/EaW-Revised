@@ -1,4 +1,6 @@
-# P0-07 independent acceptance fixtures
+<a id="p0-07-independent-acceptance-fixtures"></a>
+
+# Lua host independent acceptance fixtures
 
 `test_p007_fixtures.py` writes small PGLua records from the approved fixed-width
 contract and independently walks them.  It intentionally does not import the

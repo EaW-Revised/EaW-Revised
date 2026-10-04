@@ -1,13 +1,15 @@
-# Mod HUD survey: how mods change the FoC HUD (EAWR-192)
+<a id="mod-hud-survey-how-mods-change-the-foc-hud-192"></a>
+
+# Mod HUD survey: how mods change the FoC HUD
 
 Status: research, 2026-09-26. It decides D2 (UI technology) and makes D3 (simple M2 HUD) and D4
 (retail HUD, aspect-correct, centred on ultrawide, never stretched) concrete. Design base:
-[ui-layer.md](ui-layer.md) (EAWR-155).
+[ui-layer.md](ui-layer.md).
 
 Method. Each mod was mounted through the repo VFS (`resolve_manifest_mount`, the mod over
 `corruption` over `GameData`) by a throwaway harness under ignored `out/`. The harness ran the
 merged loaders (UI-03 command bar and shell anchors, UI-04 layout model) and the UI-01/UI-02
-branches (text DB, `.rc` and `GUIDialogs.xml`) read-only. Vanilla FoC reproduces the EAWR-155 counts:
+branches (text DB, `.rc` and `GUIDialogs.xml`) read-only. Vanilla FoC reproduces the UI-layer inventory counts:
 846 components, 18 shells, 111 dialogs and 2,555 controls, 1,107 atlas entries and 19,224 text
 records. Only data facts and identifiers appear here. No mod or retail content is copied, and no
 mod file is committed.
@@ -168,7 +170,9 @@ only as shell meshes. Such dangling references must stay harmless.
 | C7 Script hooks | Lua and story calls that lock controls, hide the HUD in letterbox, fade, flash or highlight parts, show messages, objectives, story text and radar blips | all; mostly galactic and story |
 | C8 Engine support beyond FoC | None: every change runs on the FoC executable. It relies on FoC engine tolerance: malformed `.rc`, BMP-as-TGA pages, larger atlases, extra slots, absent components | all |
 
-## 4. Coverage by the EAWR-155 architecture and the loaders
+<a id="4-coverage-by-the-155-architecture-and-the-loaders"></a>
+
+## 4. Coverage by the UI-layer architecture and the loaders
 
 | Class | Covered now | Gap → fix |
 |---|---|---|
@@ -178,8 +182,8 @@ only as shell meshes. Such dangling references must stay harmless.
 | C4 | Components load | **G8** the HUD view-model must count families from data (contiguous `NN` from 00 that exist in the catalogue and the shell), not hard-code 24/12/26 |
 | C5 | Components load; `Group` is kept | **G9** a presentation event "component clicked or hovered (name)", and flash/force-click by name, as the future story bridge. The mechanism is in the script layer, not the renderer |
 | C6 | UI-02 parses the dialogs it accepts | **G1** the parser rejects the whole `.rc` on the first bad statement (Remake, FotR, RCW, 3229239424, 3689306867): recover per dialog with EAWR-UI-0201 and keep the rest. Missing dialogs and unresolved dialog ids must be diagnostics, not failures |
-| C7 | Not in §3 of EAWR-155 | **G10** a HUD state service fed by script: HUD hidden in letterbox or cinematic, control lock, message queue, objectives, story text box, radar blips, highlight/flash. M2 skirmish needs none of it; M4 campaign does |
-| C8 | n/a | **G4** mod chains: the VFS already takes ordered layers; profiles and viewer flags must accept a submod over its parent. **G11** shell animation: apply ALA translation and rotation to component anchors (help droid, hero frames; EAWR-UI-0312 today). **G12** HUD movies (`Movie_tactical`/`Movie_galactic`, `COMMANDBAR_MOVIE`) need video playback: resolution, player-side conversion and a Theora player are in [hud-movies.md](hud-movies.md) (EAWR-237); the shell binding is EAWR-83 |
+| C7 | Not in §3 of the UI-layer design | **G10** a HUD state service fed by script: HUD hidden in letterbox or cinematic, control lock, message queue, objectives, story text box, radar blips, highlight/flash. M2 skirmish needs none of it; M4 campaign does |
+| C8 | n/a | **G4** mod chains: the VFS already takes ordered layers; profiles and viewer flags must accept a submod over its parent. **G11** shell animation: apply ALA translation and rotation to component anchors (help droid, hero frames; EAWR-UI-0312 today). **G12** HUD movies (`Movie_tactical`/`Movie_galactic`, `COMMANDBAR_MOVIE`) need video playback: resolution, player-side conversion and a Theora player are in [hud-movies.md](hud-movies.md); the shell binding belongs to the tactical HUD |
 | Cursors | UI-09 planned | **G13** a pointer missing from a mod's `MousePointers.xml` falls back to the default pointer (FotR drops one) |
 | Tooltips and text | UI-T3 renders a missing key as its own text | none |
 
@@ -250,7 +254,7 @@ units: FoC ≈ 1078, Remake 1018, RaW ≈ 1051, 3689306867 1352.
   Owner decision OD-1 below.
 - Never stretch.
 
-UI-04b (EAWR-195) implements this with a centred 16:9 safe area instead of a centred extent box, so
+UI-04b implements this with a centred 16:9 safe area instead of a centred extent box, so
 the FoC HUD keeps its retail place on 16:9 screens (`ui-layer.md` §3.4).
 
 ## 6. Mod-compat test fixtures
@@ -270,7 +274,9 @@ or from tiny project-authored bytes. Real mods run only in opt-in corpus tests.
 | `pointers_removed_entry`, `text_missing_tooltip` | Synthetic XML and `.dat` | Fallbacks (G13, UI-T3) |
 | Opt-in corpus `EAWR_MOD_HUD_ROOTS` (`name=leaf[;parent]`, read-only, never committed) | RaW, Remake, FotR, 3689306867, RCW over Remake, 3229239424 over Remake | Per mod: component count, skirmish-shell anchors, family counts, MTD entries and page size, dialogs parsed and rejected, text records (§2 tables). Each mod covers a different class: RaW BMP page and card; Remake swap, `.rc` defects and filters; FotR new dialogs and components, BMP page and hooks; 3689306867 widescreen and 36 slots; the two submods chains and the 8K page |
 
-## 7. Owner decisions (to file under EAWR-128) and fidelity lines
+<a id="7-owner-decisions-to-file-under-128-and-fidelity-lines"></a>
+
+## 7. Owner decisions (to track in the owner-question list) and fidelity lines
 
 | ID | Question | Options (recommended first) | Pros | Cons |
 |---|---|---|---|---|

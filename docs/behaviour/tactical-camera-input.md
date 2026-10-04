@@ -4,8 +4,8 @@
 
 | Kind | Examples | Where the authority lives |
 |---|---|---|
-| Permitted XML facts | Distance/pitch/yaw/FOV ranges, splines, `Distance_Per_Mouse_Unit`, `Yaw_Per_Mouse_Unit`, tactical scroll speeds and edge regions | `data/xml/tacticalcameras.xml` and `gameconstants.xml` through `eawr::presentation::camera`, see P1-09 camera |
-| FoC code and runtime facts | The middle-button law: mouse units as screen fractions times 100, the x4/x1 Ctrl factor, translate by the camera distance, the click reset | The FoC debug build and RO-7 (EAWR-295); see [original camera facts](#original-camera-facts-foc-debug-build) |
+| Permitted XML facts | Distance/pitch/yaw/FOV ranges, splines, `Distance_Per_Mouse_Unit`, `Yaw_Per_Mouse_Unit`, tactical scroll speeds and edge regions | `data/xml/tacticalcameras.xml` and `gameconstants.xml` through `eawr::presentation::camera`, see the tactical camera contract |
+| FoC code and runtime facts | The middle-button law: mouse units as screen fractions times 100, the x4/x1 Ctrl factor, translate by the camera distance, the click reset | The FoC debug build and RO-7 (rotate-drag camera law); see [original camera facts](#original-camera-facts-foc-debug-build) |
 | Local project policy | Every other binding, chord, trigger kind, the free-camera toggle, free-flight speeds, look sensitivity, pitch limits, the transition and cancellation rules below | `apps/viewer/project/config/camera-bindings.json` (schema v2, `provenance: project-authored`) and this note |
 | Unresolved observations | Retail default bindings, input cadence, pan acceleration, spline and pan-speed fidelity, what the camera-lock flag blocks, whether the original has a comparable free camera | Open. Not implemented as fact anywhere. [Original camera facts](#original-camera-facts-foc-debug-build) lists what the debug build answers. |
 
@@ -15,7 +15,7 @@ collision policy. The free camera does not read it.
 ## Original camera facts (FoC debug build)
 
 Read in the FoC debug build for the [behaviour audit](debug-build-audit.md#tactical-camera-input)
-(EAWR-265) and measured by runtime check RO-7 (EAWR-295: FoC space and land, 1280 x 720 and
+(debug-build behaviour audit) and measured by runtime check RO-7 (rotate-drag camera law: FoC space and land, 1280 x 720 and
 1920 x 1080, the default mouse scheme). The map cameras implement the middle-button part
 as the [middle-button law](#middle-button-law-foc-pi-9) (PI-9); everything else below stays
 unimplemented.
@@ -45,7 +45,7 @@ unimplemented.
   and height as well. The wheel zooms and is ignored while the middle button is held.
 - **Free camera.** No free-flight mode was found in the tactical camera controller. That is not
   a claim that the original has none.
-- **Field of view (EAWR-515).** FoC's camera angle (`Fov_Default`, `Tactical_Overview_FOV`,
+- **Field of view (hardpoint reticle scaling).** FoC's camera angle (`Fov_Default`, `Tactical_Overview_FOV`,
   `Tactical_Overview_FOV2`) is the horizontal angle of a 4:3 screen: the projection scales x by
   1 / tan(angle / 2) and y by the screen's aspect times that. On a screen wider than 4:3 the
   tactical camera first widens the angle once, to the one whose half-angle tangent is 4/3 of the
@@ -53,11 +53,11 @@ unimplemented.
   one vertical angle, 2 * atan(0.75 * tan(27.5 degrees)) = 42.7 degrees for FoC's 55; 16:10 sees a
   little more vertically (46.9), 21:9 less, and a screen narrower than 4:3 keeps the horizontal
   angle (5:4: 45.2 vertically).
-- **Field of view, project rule (EAWR-515, EAWR-195).** The remake draws every tactical, overview and
+- **Field of view, project rule (hardpoint reticle scaling, aspect-correct UI layout).** The remake draws every tactical, overview and
   environment frame with the 4:3 vertical angle (`camera::vertical_fov_degrees`) on every aspect,
-  so a window resize keeps the vertical angle (EAWR-195) and 4:3 and 16:9 match FoC exactly; 16:10,
+  so a window resize keeps the vertical angle (aspect-correct UI layout) and 4:3 and 16:9 match FoC exactly; 16:10,
   21:9 and 5:4 differ from FoC's widening quirk (fidelity list). The pointer drag below measures
-  its frustum with the same angle. Before EAWR-515 the remake took 55 as the vertical angle, so every
+  its frustum with the same angle. Before the hardpoint reticle scaling work the remake took 55 as the vertical angle, so every
   unit, land and space, drew about 25 % smaller than FoC at the same distance, and the minimap's
   camera outline, traced through the viewport corners, covered too much.
 
@@ -200,7 +200,7 @@ presentation-only `float`, and does no I/O, reads no engine state and keeps no g
   - It keeps the entry FOV, clip planes and world up.
   - The tactical pose is not advanced.
 - **Exiting.** The host restores the saved pose, render camera and context exactly. Nothing is
-  clamped, because no valid typed map contract (EAWR-26) is available. Provisional TED fields are
+  clamped, because no valid typed map contract (TED map loading) is available. Provisional TED fields are
   never used to derive bounds or bindings.
 - **Cancellation.** All of the following cancel every held control, pending wheel, rotate or
   look delta, pointer sample and pressed request at once:
@@ -227,7 +227,9 @@ presentation-only `float`, and does no I/O, reads no engine state and keeps no g
 
   `bounds` stays `null`, with its stated reason.
 
-## Bounded land map loop (P1 EAWR-30 opt-in)
+<a id="bounded-land-map-loop-p1-30-opt-in"></a>
+
+## Bounded land map loop (P1 tactical camera controls opt-in)
 
 `--eawr-map-camera-config <path>` activates the land MapMode camera loop. The committed
 `apps/viewer/project/config/map-camera.xml` applies only to the synthetic scene fixture and
@@ -253,7 +255,9 @@ fixture; its explicit one-second pan step tests clamping independent of render c
 This is local policy. Bounds, speeds, bindings and input timing have no retail movement claim.
 Space MapMode and simulation remain outside this loop.
 
-## Bounded space map loop (P1 EAWR-30 opt-in)
+<a id="bounded-space-map-loop-p1-30-opt-in"></a>
+
+## Bounded space map loop (P1 tactical camera controls opt-in)
 
 `--eawr-map-camera-config <path>` on a kind-2 (space) `--eawr-map` activates the space tactical
 camera. It is a separate, strictly parsed schema, `eawr-space-map-camera` version 1, so a land
@@ -264,7 +268,7 @@ source ID, an initial target, height, zoom and yaw, and a version 1 binding tabl
 `space-map-camera-bindings.json`, whose every binding is in the `space` context.
 
 - **Bounds authority.** The rectangle in that config is the only bound. No TED extent, volume,
-  terrain footprint or pending EAWR-26 source-bounds ledger is read. The bridge converts source
+  terrain footprint or pending TED map loading source-bounds ledger is read. The bridge converts source
   `(x, y)` to render `(x, height, -y)` once, through the existing controller, and clamps the
   target. Identity and bound validity are checked before activation.
 - **Constants.** `camera::load_constants(..., Mode::space)` reads the `Space_Mode` definition
@@ -358,7 +362,7 @@ they move at these rates too. The free-flight fixture table and the host camera 
 ## Middle-button law (FoC, PI-9)
 
 The land and space map cameras follow the [original camera facts](#original-camera-facts-foc-debug-build)
-(debug build plus RO-7, EAWR-295). The rates come from the loaded `tacticalcameras.xml`; the
+(debug build plus RO-7, rotate-drag camera law). The rates come from the loaded `tacticalcameras.xml`; the
 factors 4, 1 and 100 and the click threshold are FoC UI and camera code constants. Both
 committed map tables bind:
 
@@ -431,9 +435,11 @@ and set `click_reset: true` and `screen_mouse_units: true`.
   tactical camera (`camera_input::advance_pose`) applies no tilt, translate or click reset.
   The free-flight look keeps its pixel units.
 
-## Project deviation (owner, EAWR-337/#348)
+<a id="project-deviation-owner-337348"></a>
 
-Two deliberate departures from FoC, decided by the owner after the EAWR-337 eye check. They are
+## Project deviation (owner, middle-button camera eye check/land tilt and space zoom defaults)
+
+Two deliberate departures from FoC, decided by the owner after the middle-button camera eye check. They are
 project features, not fidelity gaps.
 
 | Behaviour | FoC | Project |
@@ -450,7 +456,7 @@ project features, not fidelity gaps.
 - **Land pitch limits.** FoC has no land tilt limits to reuse (its range is pinned at 50), so
   land takes the space range -10..85 with the minimum raised to 5: the eye stays above the
   target, never looks up from under the terrain, and near-horizontal is as low as it goes.
-  This is the land range the earlier project controls (EAWR-93) already used. The terrain
+  This is the land range the earlier project controls (land camera speed and free orbit) already used. The terrain
   clearance still raises the pitch when the eye would go below `Min_Height_Above_Terrain`.
 - **Opening distance.** Owner: "I might put the standard zoom a bit further out." Both
   `coruscant-space-map-camera.xml` and `coruscant-live-session-camera.xml` open at 1200, 20%
@@ -459,7 +465,9 @@ project features, not fidelity gaps.
   Views without a map camera config (fixed captures, FoC comparisons) keep FoC's
   `Distance_Default`.
 
-## Project deviation (owner, EAWR-390): close zoom
+<a id="project-deviation-owner-390-close-zoom"></a>
+
+## Project deviation (owner, closer space-camera zoom): close zoom
 
 Owner: "for space battles the max zoom in level should be increased so i can get better detail
 on ships". Both Coruscant space configs carry a `constant_overrides` block (source
@@ -484,7 +492,7 @@ decision, `Pitch_Min` from -10 to -60 (see [depth floor](#depth-floor-owner-390-
   `Distance_Min` alone would raise the speed at every distance; overriding
   `Tactical_Min_Scroll_Speed` to 823.529412 (1000 - 3000/17) keeps FoC's exact line from 200 to
   1900 and extends it below.
-- **What stays FoC's.** `Distance_Max` 1900, the 1200 opening (EAWR-348, now zoom 0.611111),
+- **What stays FoC's.** `Distance_Max` 1900, the 1200 opening (land tilt and space zoom defaults, now zoom 0.611111),
   `Distance_Per_Mouse_Unit` 500 (the 100..200 band is one wheel detent), the pitch
   (`Space_Mode` has no zoom-linked pitch: `Pitch_Per_Zoom_Unit` 0 and
   `Pitch_Zoom_Begin_Fraction` -1, so it stays 50 at any distance), `Pitch_Max`, the field of
@@ -492,22 +500,26 @@ decision, `Pitch_Min` from -10 to -60 (see [depth floor](#depth-floor-owner-390-
   renderer has no distance LOD. Shots, particles, fog and picking are world-space and need no
   change. Views without a config keep FoC's range.
 
-### Depth floor (owner, EAWR-390): -60
+<a id="depth-floor-owner-390--60"></a>
+
+### Depth floor (owner, closer space-camera zoom): -60
 
 Owner, reporting "a floor level i can't go under" with the middle button, then deciding: "Allow
 about -60°". FoC's floor is `Space_Mode` `Pitch_Min` -10: the FoC debug build clamps the tilt
 to `Pitch_Min`..`Pitch_Max` in both the tilt handler and every per-frame state clamp, and its
 translate moves the camera location in the ground plane only, so a FoC eye sits at most
-distance x sin 10 degrees under the battle plane (208 at 1200). EAWR-328 had adopted that range;
+distance x sin 10 degrees under the battle plane (208 at 1200). Middle-button camera controls had adopted that range;
 before it the project allowed -89. Both Coruscant space configs now override `Pitch_Min` to -60,
 so a Ctrl + middle drag goes down to 60 degrees under the horizon: the eye sits at most distance
 x sin 60 under the plane (87 at 100, 1039 at 1200, 1645 at 1900). `Pitch_Max` stays 85 and a
 plain middle drag still translates only in the plane. The middle click and `Home` reset the
 tilt to `Pitch_Default` 50 as before. The land range (5..85) is unchanged. Views from below were
 checked at 100, 1200 and 1900 on the space map and in the live battle (hull faces, the sky and
-nebula, the planet, the live fog; eye check under EAWR-390).
+nebula, the planet, the live fog; eye check under closer space-camera zoom).
 
-## Map constant overrides and precedence (P1 EAWR-30 work item 1)
+<a id="map-constant-overrides-and-precedence-p1-30-work-item-1"></a>
+
+## Map constant overrides and precedence (P1 tactical camera controls work item 1)
 
 A land or space map camera config may end with one optional block after `<bindings>`:
 
@@ -520,10 +532,10 @@ A land or space map camera config may end with one optional block after `<bindin
 
 The block is self-versioned, so the root `version` of either config schema keeps its meaning.
 A config without the block parses and resolves exactly as before. The only committed configs
-that carry one are the two Coruscant space configs (EAWR-390 close zoom); the land, synthetic
+that carry one are the two Coruscant space configs (closer space-camera zoom close zoom); the land, synthetic
 space and free configs carry none, so their runs, reports and fixed-capture bytes do not change.
 
-**Precedence, lowest to highest.** This is project policy. EAWR-26 has not established any
+**Precedence, lowest to highest.** This is project policy. TED map loading has not established any
 retail per-map camera override format, so nothing here claims to be original precedence.
 
 1. Effective-VFS XML: `camera::load_constants` reads the selected `tacticalcameras.xml`

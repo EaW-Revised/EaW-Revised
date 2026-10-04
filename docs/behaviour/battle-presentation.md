@@ -1,4 +1,8 @@
-# Space battle presentation (P2-17, EAWR-80)
+<a id="space-battle-presentation-p2-17-80"></a>
+
+<a id="space-battle-presentation-p2-17"></a>
+
+# Space battle presentation
 
 ## Applicability
 
@@ -6,7 +10,7 @@ What FoC draws for a space battle's shots, hits, shield hits and deaths, so the 
 the authoritative tactical session (`--eawr-live-session`) the way the game does. Sources: the
 FoC debug build `corruption/StarWarsI.exe` read in GhidrAssist (evidence IDs PB-01 to PB-22,
 PB-30 to PB-35, PB-40 to PB-52 and PB-60 to PB-63, map private, `out/research`), retail FoC recordings on the rig
-(RC-391-01, EAWR-391; RC-427-01, EAWR-427), the public FoC shader source (`MeshShield.fx`, `Shield.fxh`), the model data
+(RC-391-01, hardpoint breakoff debris; RC-427-01, shield light flash and ability shell), the public FoC shader source (`MeshShield.fx`, `Shield.fxh`), the model data
 and the FoC XML (`PROJECTILES.XML`, `PARTICLES.XML`, `HARDPOINTS.XML`,
 the space unit files and `GAMECONSTANTS.XML` of the pinned `corruption` megs). Nothing here is
 simulation: the viewer reads the published `TacticalSnapshot` and never feeds back, so the
@@ -48,7 +52,9 @@ session's hashes are the same with or without it (UI-07).
 | BP-12 | "The shield took it whole": the shield stage took at least the damage it was given (FoC's absorbed flag). In the remake: the absorbed amount is positive and not below the shield-scaled damage (space-damage DG-06). PB-11. |
 | BP-13 | The armor multiplier is the one that scaled the damage reaching the hull stage; with nothing reaching it the multiplier counts as 1. PB-11. |
 
-### Shield hits (EAWR-415)
+<a id="shield-hits-415"></a>
+
+### Shield hits
 
 | ID | Rule |
 |---|---|
@@ -56,9 +62,11 @@ session's hashes are the same with or without it (UI-07).
 | BP-18 | The facing is built from the origin towards that direction: yaw `atan2(y, x)` in degrees in [0, 360) (0 when x and y are both 0), pitch the negated elevation (0 when z and x are both 0), roll 0. FoC then adds 90 degrees to the **pitch** (not the yaw), and the transform is Rz(yaw) Ry(pitch) Rx(0). The particle's local +Z therefore lies along the direction and its local +Y is horizontal. A particle with `Particle_Attach_To_Collision` (all three `Projectile_Shield_Absorb_*`) takes that transform at the contact as its offset from the hit bone, so no model turn applies. A free particle is placed like any object and gets the fixed +90 degree turn about its own +Z after the facing (R-ROT-01). PB-15, PB-16. |
 | BP-19 | While a unit's shield is above zero and neither depleted nor in an ion storm, its SHIELD sub-object is collidable, so a projectile meets the shield mesh before the hull. The mesh test runs on each triangle of the projectile's frame step: it is two-sided, the nearest hit past the step's start wins, and the normal is the hit triangle's face normal as wound (BP-17 turns it to face the shooter). The nearest hit among all collidable sub-objects gives the contact and the normal; the SHIELD mesh does not always enclose the hull (the Tartan's collidable `SHADOW` mesh reaches past its bubble). The remake's contact lies on the target type's collision box (space-damage DG-31). The viewer therefore casts the projectile's own frame step as FoC does: from the hit event's origin (the projectile's position at the start of the frame) along its flight (origin to contact), one frame step (the shot's `Max_Speed`) long. It uses the first triangle it meets among the target's collidable meshes and its SHIELD mesh, posed as the target is drawn that frame. A step that begins inside the SHIELD bubble therefore meets the bubble where the shot leaves it. When the step meets no triangle because the box stopped the shot first, the cast goes on from the same start past the whole mesh (`battle_effects.shield_hits.ahead`, against `in_step`); it never starts behind the step. The cast runs in the model's own space against triangles kept once per type (the segment is transformed, not the mesh; the 0.0001 determinant floor is rescaled so it still holds in world space), behind a bounding sphere and boxes over runs of 32 triangles (`shield_hits.casts`). The segment fraction of a hit lies in (0, 1): a surface exactly at either end of the step is not met. For a model without a SHIELD sub-object that only moves the particle. When the line meets no triangle, the particle stays at the event's contact and faces back along the flight (`battle_effects.shield_hits.mesh_missed`). Such a hit is one the box took and FoC's meshes would have let pass (about one in six in the duel). PB-17, PB-18. |
 | BP-20 | A hit the shield took whole also spawns one entry of the target type's `Shield_Hit_Particles`, drawn with the synchronized random generator, at the same position and facing as BP-18. No M2 unit names any (only the cinematic capital ships and the land bombing-run units do), so M2 shows none; the viewer draws the entry BP-63 and BP-64 pick for a type that names some. PB-15, PB-62. |
-| BP-21 | In the debug build, `Take_Damage -> COLOR_FLASH -> Set_Light_Scale` causes every hit whose damage the shield takes in part or whole (the shield stage's absorbed amount above zero; also any hit during an ion storm) to start a colour flash on the unit: the model's light scale RGB starts at `Shield_Flash_Scale` (1.0, 1.1, 1.25) and returns linearly to the normal scale over `Shield_Flash_Duration` (0.1 s); a new flash restarts a running one. The flash does not show or hide the SHIELD sub-object (BP-22). PB-19, PB-20. The owner sees no visible hull flash on retail shield hits (EAWR-438), only the small shield ripple, so the viewer leaves the flash off by default. `--eawr-live-shield-flash on` (EAWR-427, EAWR-438) starts it for each `projectile_hit` with `hit_outcome_shield_absorbed`, at the tick's start (as the hit's particles are born), as a per-instance light scale (`GodotRenderer::set_light_scale`, the `eawr_unit_light_scale` instance uniform) on the unit's own surfaces, multiplied into the bump-colorize and RSKIN adapters' LIGHT_SCALE.rgb terms (every M2 hull). A hit the shield takes only in part does not flash: the hit event carries only the whole-absorbed flag (fidelity list). The unit's hardpoints' attached models keep their own light scale (they are objects of their own; unverified). `live_session.shield_flashes` counts the flashes started. |
+| BP-21 | In the debug build, `Take_Damage -> COLOR_FLASH -> Set_Light_Scale` causes every hit whose damage the shield takes in part or whole (the shield stage's absorbed amount above zero; also any hit during an ion storm) to start a colour flash on the unit: the model's light scale RGB starts at `Shield_Flash_Scale` (1.0, 1.1, 1.25) and returns linearly to the normal scale over `Shield_Flash_Duration` (0.1 s); a new flash restarts a running one. The flash does not show or hide the SHIELD sub-object (BP-22). PB-19, PB-20. The owner sees no visible hull flash on retail shield hits (shield shell and hull-flash eye check), only the small shield ripple, so the viewer leaves the flash off by default. `--eawr-live-shield-flash on` (shield light flash and ability shell, shield shell and hull-flash eye check) starts it for each `projectile_hit` with `hit_outcome_shield_absorbed`, at the tick's start (as the hit's particles are born), as a per-instance light scale (`GodotRenderer::set_light_scale`, the `eawr_unit_light_scale` instance uniform) on the unit's own surfaces, multiplied into the bump-colorize and RSKIN adapters' LIGHT_SCALE.rgb terms (every M2 hull). A hit the shield takes only in part does not flash: the hit event carries only the whole-absorbed flag (fidelity list). The unit's hardpoints' attached models keep their own light scale (they are objects of their own; unverified). `live_session.shield_flashes` counts the flashes started. |
 
-### Model projectiles and hit particles (EAWR-456)
+<a id="model-projectiles-and-hit-particles-456"></a>
+
+### Model projectiles and hit particles
 
 | ID | Rule |
 |---|---|
@@ -67,25 +75,52 @@ session's hashes are the same with or without it (UI-07).
 | BP-62 | Remake rule: the viewer draws each model projectile on a placed ship from a pool of 32 per projectile type, set up with the population. A projectile keeps its slot for its whole flight; a slot its projectile left stays hidden for one frame before another takes it, so the trail it ran stops before the model shows elsewhere. A projectile that finds every slot taken is not drawn (`battle_effects.projectile_models.<type>.refused`). Model projectiles follow BP-09's visibility. The trail runs in `UnitEmitters`; a stall's catch-up sample poses the slot from that tick's snapshots. When the projectile's flight ends its proxies stop at once, as BP-44 stops a unit's; whether FoC's removal of the projectile lets the trail drain (particle-system-detach D-02) is unverified. `battle_effects.projectile_models_drawn` counts the drawn frames, `populate.live_units.projectile_slots_drawn` the slots composed. |
 | BP-63 | A hit the shield did not take whole spawns, after its detonation particle (BP-11), one entry of the target type's `Damage_Hit_Particles` at the contact: the entry's index is a uniform draw in [0, n - 1] from the synchronized random generator. A hit the shield took whole spawns, after its absorb particle, one entry of `Shield_Hit_Particles`, drawn the same way, at the same place and facing (BP-20). Both tags are lists of object types; the remake reads every such tag of the type and splits each on commas. Each entry attaches to the hit bone when it sets `Particle_Attach_To_Collision`, as the detonation does; the viewer places both free (fidelity list). No M2 unit type names either list. PB-60 to PB-62; XML. |
 | BP-64 | Remake rule: the viewer's draw for BP-63 never touches the simulation's random streams. It is a fixed 64-bit mix of the hit's projectile ID and the list (damage or shield), taken modulo the entry count (`presentation::space::hit_particle_pick`), so every run and viewer shows the same entry for the same projectile. The projectile is the one in flight at the end of the tick before the hit from the event's shooter and weapon whose position is the event's origin. When none matches (launched and spent within one tick, or that tick has left the snapshot history), a mix of the event's tick, shooter, weapon, target and origin stands in (`battle_effects.hit_picks.by_projectile`, `by_event`). FoC's draw also advances its synchronized stream; the remake's simulation does not model that draw, so a type that names these lists would shift FoC's later draws but not the remake's (fidelity list; none in M2). |
-| BP-66 (EAWR-862) | An ability shot is drawn as its own projectile type. While a Y-wing squadron's `ION_CANNON_SHOT` is on, each craft fires its team's `Projectile_Types_Override` (`Proj_Ion_Cannon_Medium_Laser_Blue`, the `pion_ioncannonshot.alo` model) instead of its hardpoint's projectile ([space abilities](space-abilities.md) AB-66), so that bolt flies, detonates and is absorbed with the override type's look (BP-01, BP-11, BP-60), never the craft's laser. Remake rule: the snapshot's projectile names only the shooter's weapon slot, so the live event log keeps each `weapon_fired` event that marks an ability shot (ordinary shots stay out of it) and the viewer takes it and gives the newest projectile of that shooter and weapon in the tick's snapshot the ability shot's look, for its flight and its hit. The report's `battle_effects` counts `ability_shots_fired` and `ability_shot_frames_drawn` by projectile type. |
+| BP-67 | A hardpoint's `Model_To_Attach` participates in the owner's emitter visibility switches: the debug build visits attached models recursively when showing or hiding an emitter type. Its proxy particle effects stand on the attached model's proxy bind frames, composed with the owner's `Attachment_Bone` bind frame and the live unit's pose. Attached effects follow the same engine, ability, fog and retirement rules as root-model effects (BP-41 to BP-45). Intact and damaged hardpoints retain their attached effects; destroying a hardpoint removes its attached model and its effects along with it (BP-30). Proxy identities include the attachment slot, so equal proxy names on separate hardpoints remain independent. The Underworld generator authors two visible proxies, `p_u_shieldgen_pulse` and `p_u_shieldgen`; these effects come from the attached model, rather than the root's shield behaviour. Evidence: authored hardpoint XML and models; debug build's recursive emitter visibility; owner playtest observation of the generator pulse. |
+| BP-68 | Remake projection rule: a bolt's drawn long axis follows the perspective projection of its actual flight at the bolt's current, interpolated position. The camera-plane tangent is the flight direction minus the eye-to-bolt ray multiplied by the ratio of the flight's view-depth change to the bolt's view depth; normalize that tangent to draw the axis. Removing only the global camera-forward component can rotate or reverse apparent flight away from the screen centre. Preserve BP-04's across-view length, width, atlas, colour and head/tail shape, and the simulation's scattered step and facing (BP-02, BP-61). A radial or zero projected motion has no screen tangent; retain the existing fallback axis. Evidence: owner footage observation that bolt axes differ from frame displacement; numerical perspective contracts over 2,160 moving samples. The renderer reports a separate point-projection comparison of the drawn head/tail with the flight step, including reversed heads. |
+| BP-66 (Y-wing ion-shot projectile presentation) | An ability shot is drawn as its own projectile type. While a Y-wing squadron's `ION_CANNON_SHOT` is on, each craft fires its team's `Projectile_Types_Override` (`Proj_Ion_Cannon_Medium_Laser_Blue`, the `pion_ioncannonshot.alo` model) instead of its hardpoint's projectile ([space abilities](space-abilities.md) AB-66), so that bolt flies, detonates and is absorbed with the override type's look (BP-01, BP-11, BP-60), never the craft's laser. Remake rule: the snapshot's projectile names only the shooter's weapon slot, so the live event log keeps each `weapon_fired` event that marks an ability shot (ordinary shots stay out of it) and the viewer takes it and gives the newest projectile of that shooter and weapon in the tick's snapshot the ability shot's look, for its flight and its hit. The report's `battle_effects` counts `ability_shots_fired` and `ability_shot_frames_drawn` by projectile type. |
 
-### Shield shell (EAWR-427)
+<a id="shield-shell-427"></a>
+
+### Shield shell
 
 | ID | Rule |
 |---|---|
 | BP-22 | A unit's SHIELD sub-object (the first named `SHIELD`, case ignored, BP-17) is hidden by its ALO: the four M2 ships' SHIELD meshes carry the hidden flag. The game shows it only while the unit's `DEFEND` ability runs: turning the ability on or off sets the sub-object's code-hidden state to the ability's inverse, and a loaded game restores it the same way. Nothing else shows it: no hit, no shield strength and no faction reaches it (the shield behaviour only switches its collision, BP-19, and starts BP-21's flash). PB-20, PB-21; model data. |
 | BP-23 | The SHIELD submesh draws with its authored material. On the Nebulon-B and the Acclamator that is `MeshShield.fx` t0/t0_p0: additive ONE/ONE, no depth write, depth test LESSEQUAL, no culling, no fog. Per vertex it forms three UV sets from the authored UV: Tex0 = BaseUVScale x UV, Tex1 = DistortUVScale x UV, Tex2 = WaveUVScale x UV, each scrolled along v by the effect clock times its own rate (BaseUVScrollRate, DistortUVScrollRate, WaveUVScrollRate). The diffuse is the vertex colour x saturate(N.z + EdgeBrightness) x Color (N the model-space normal), saturated as a colour output. Per pixel it samples the distortion texture at Tex2 and the energy texel (BaseTexture) at Tex0 + 0.25 x distortion.rg. It then multiplies that texel by the wave texel sampled at Tex1 and by the diffuse. The source crosses the wave and distortion sets (WaveUVScale drives the distortion lookup); the viewer keeps that. Nebulon-B: Color (1, 1, 1, 1), EdgeBrightness 0.1, BaseUVScale 16, WaveUVScale 1, DistortUVScale 1, rates -0.15, -0.15 and -0.25, textures `shield_color.tga`, `NB_ShieldWave.tga`, `NB_ShieldRipple.tga`. The Acclamator's are the same except EdgeBrightness 0.5. The colour comes from the textures, so both factions' shells are the same blue. The Corellian corvette's and the Tartan's SHIELD submeshes are `alDefault.fx`, and neither type has DEFEND. PB-22; shader source, model data. |
-| BP-24 | Of the M2 types the Nebulon-B and the MC80 have `DEFEND` (`Expiration_Seconds` 15, `Recharge_Seconds` 60 on the Nebulon-B and 40 on the MC80, `Supports_Autofire`). The MC80's model names `MeshShield.fx` with the Nebulon-B's shield textures (model data; its shell parameters are not listed in BP-23). A retail rig recording (RC-427-01, fog off, Highest) of a Tartan firing at a Nebulon-B shows the shell at +10.1, +12.7, +19.8 and +22.2 s into the duels. It also shows it in a still with no shot in view. It does not show it at +0.5 s, before any hit, or at +29.4 s, after 15 s of DEFEND. What makes the game fire DEFEND on its own is unverified. The remake's simulation has no ability state yet (EAWR-76). The viewer composes the shell for every live unit whose type has `DEFEND` (`populate.live_units.shield_shells`) and shows it while `LivePose::defend_active` is set. Until EAWR-76 feeds that flag, `--eawr-live-defend on` sets it for every unit; the default is off, the least visible choice. The shell's clock is the presentation clock in seconds (FoC's effect clock is not recovered; only the scroll phase depends on it). The shell is not part of a unit's pick box. |
+| BP-24 | Of the M2 types the Nebulon-B and the MC80 have `DEFEND` (`Expiration_Seconds` 15, `Recharge_Seconds` 60 on the Nebulon-B and 40 on the MC80, `Supports_Autofire`). The MC80's model names `MeshShield.fx` with the Nebulon-B's shield textures (model data; its shell parameters are not listed in BP-23). A retail rig recording (RC-427-01, fog off, Highest) of a Tartan firing at a Nebulon-B shows the shell at +10.1, +12.7, +19.8 and +22.2 s into the duels. It also shows it in a still with no shot in view. It does not show it at +0.5 s, before any hit, or at +29.4 s, after 15 s of DEFEND. What makes the game fire DEFEND on its own is unverified. The remake's simulation has no ability state yet (legacy EAWR-76). The viewer composes the shell for every live unit whose type has `DEFEND` (`populate.live_units.shield_shells`) and shows it while `LivePose::defend_active` is set. Until space ability implementation (legacy EAWR-76) feeds that flag, `--eawr-live-defend on` sets it for every unit; the default is off, the least visible choice. The shell's clock is the presentation clock in seconds (FoC's effect clock is not recovered; only the scroll phase depends on it). The shell is not part of a unit's pick box. |
+
+The remake shares FW-19 unit opacity across the hull, attachments and shield shell.
+Explicit-alpha mesh shaders apply it after their authored alpha. Partially faded models
+stop casting shadows, then restore the asset's original policy at full opacity; this is
+a project presentation choice. The native fog recording does not establish shadow or
+shield-shell fade ownership.
+
+BP-69: A rigid model sub-object follows the visibility of its connected skeleton bone,
+including the authored visibility in the bind pose and later animation visibility samples.
+The debug build evaluates the base or animated pose before applying that visibility to
+each sub-object. The Interdictor's additive `ss` mesh is authored visible, but its connected
+`ss` bone is authored hidden. Its deploy clip makes that bone visible after the first frame;
+its undeploy clip hides it at the final frame. An idle Interdictor therefore draws no `ss`
+stripes. Ion-stun particles are independent (IS-09). The renderer retains the geometry and
+collapses a hidden bone's rendered basis, then restores it when a visible sample arrives.
+The live simulation does not yet drive the Interdictor's deployment abilities. Evidence:
+debug-build pose/sub-object visibility, authored model and animation data, retail idle
+and active missile-field stills, paired lit GTX idle captures, and a live ion-stunned
+Interdictor capture. Retail gravity-well and ion-stun captures remain unverified; the gravity-well
+emitter rule is sourced independently. Positive deploy samples restore the stripe mesh;
+faction-symbol and construction-animation previews retain their visible geometry.
 
 ### Deaths
 
 | ID | Rule |
 |---|---|
-| BP-14 | A destroyed unit spawns its type's `Death_Explosions` particle at its last position and facing (`Large_Explosion_Space` on the Nebulon-B, `Large_Explosion_Space_Empire` on the Tartan). The breakup is the death clone's (EAWR-363). XML. |
+| BP-14 | A destroyed unit spawns its type's `Death_Explosions` particle at its last position and facing (`Large_Explosion_Space` on the Nebulon-B, `Large_Explosion_Space_Empire` on the Tartan). The breakup is the death clone's (unit clips and death clones). XML. |
 | BP-15 | A destroyed hardpoint spawns its `Death_Explosion_Particles` at the hardpoint's point on the unit (space-hardpoints), as an object of its own: facing the unit's facing, at that particle type's own `Scale_Factor` (1.0 for `Large_Explosion_Space`), not the unit's. The Nebulon-B's weapon and engine hardpoints all name `Large_Explosion_Space`, the same explosion as the unit's own death. XML, PB-46. |
 | BP-16 | A particle object lives `Particle_Lifetime_Frames` frames (30 for the large explosions); then its system detaches and its particles drain. XML. |
 
-### Unit emitters: engines and hardpoint damage (EAWR-394)
+<a id="unit-emitters-engines-and-hardpoint-damage-394"></a>
+
+### Unit emitters: engines and hardpoint damage
 
 A space unit's model carries particle proxies (sub-objects that run a particle ALO on a bone).
 FoC shows or hides them by two routes: the hardpoint states (PB-40, PB-41, the [hardpoint state
@@ -95,16 +130,16 @@ proxy-name prefixes (PB-42). The remake runs them in `UnitEmitters`
 
 | ID | Rule |
 |---|---|
-| BP-40 | Each admitted proxy of a unit the local player sees runs at its bone on the unit's drawn pose: the bone's bind frame composed with the unit's model transform, set every drawn frame. Particles already emitted keep their own world positions unless the particle system's translater links them to the emitter, so a moving emitter leaves its trail behind. A linked particle (the Emitter translater; every engine glow, as `pe_corvetteengines` and `pe_nebulonengines`) keeps its position in its emitter's frame: FoC's renderer places it with the emitter's transform as it is drawn, so it turns with the ship as well as moving with it and stays on its nozzle through a turn (FoC debug build, EAWR-433). Its velocity stays a world vector: FoC's position update rotates an object-space acceleration by the emitter's current transform once, adds it to that world velocity, and turns the velocity into the emitter's frame only to move the position (FoC debug build, EAWR-439). Admission is the static space map's (authored visibility, alternate and LOD tags, particle-system references). Remake rule for the moving frame; the admission is the attached plan's. |
+| BP-40 | Each admitted proxy of a unit the local player sees runs at its bone on the unit's drawn pose: the bone's bind frame composed with the unit's model transform, set every drawn frame. Particles already emitted keep their own world positions unless the particle system's translater links them to the emitter, so a moving emitter leaves its trail behind. A linked particle (the Emitter translater; every engine glow, as `pe_corvetteengines` and `pe_nebulonengines`) keeps its position in its emitter's frame: FoC's renderer places it with the emitter's transform as it is drawn, so it turns with the ship as well as moving with it and stays on its nozzle through a turn (FoC debug build, engine-glow attachment during turns). Its velocity stays a world vector: FoC's position update rotates an object-space acceleration by the emitter's current transform once, adds it to that world velocity, and turns the velocity into the emitter's frame only to move the position (FoC debug build, linked-particle moving frames). Admission is the static space map's (authored visibility, alternate and LOD tags, particle-system references). Remake rule for the moving frame; the admission is the attached plan's. |
 | BP-41 | A hardpoint's damage emitters are the proxies on its `Damage_Particles` bone and below it. They are hidden when the unit is created and shown when the hardpoint is destroyed; there is no health-fraction trigger (a damaged hardpoint looks intact, space-hardpoints HD-04 / G-H5). They loop until the unit dies. On the Nebulon-B each destroyed weapon hardpoint starts one `p_hp_stardestroyer_damage` (smoke and fire) at its `HP_*_EmitDamage` bone, the destroyed engines two at `HP_E_EmitDamage`. A destroyed hardpoint whose type sets `Engine_Death_Hide_Engine_Particles` also hides the proxies below its `Engine_Particles` bone (no FoC XML sets it). PB-40, PB-41. |
 | BP-42 | Engine emitters are the proxies whose names start with `pe` (compared case-insensitively over the prefix, in the model and its attached sub-models): the Nebulon-B's `pe_nebulonengines` on its `engines` bone, the Tartan's `pe_tartanengine_sml` and `pe_tartanengine_lrg`. Their particle systems are EnhancedMesh emitters: they emit from the surface of the first mesh on the proxy bone's parent (the Nebulon-B's `engines` mesh, the Tartan's `engines_small` and `engines_big`), bound as the static attached plan binds it, and that mesh's frame moves with the unit like the emitter's. The space locomotor shows them in every service while the unit's engines are online and hides them once the engines are permanently off-line (space-hardpoints HD-11: the last engine hardpoint destroyed). A destroyed Nebulon-B engine hardpoint therefore stops its engine particles and starts its two damage emitters, besides its `Large_Explosion_Space` (BP-15). PB-42, PB-44. |
-| BP-43 | The emitter types FoC hides when it creates an object stay hidden: turbo engines (`pte`), power to weapons (`pptw`) and missile shield (`pgw`). The turbo engines replace the engine emitters while `TURBO` or `SPOILER_LOCK` runs, and `pptw` shows while `POWER_TO_WEAPONS` runs ([space abilities](space-abilities.md) AB-31, AB-32, EAWR-76): the corvette's `PTE_Corvetteengines`. The Tartan's `Pte_tartanengine_sml` and `Pte_tartanengine_lrg` would show under `TURBO`, which its data does not give it. The other types keep their authored visibility until the code switches them. A proxy's authored hidden flag is the same code flag the type switch clears (debug build: the model loader sets it, the switch clears it by prefix), so an ion stun shows the Tartan's authored-hidden `pi_damage_elec_cap00` ([space damage](space-damage.md) IS-09); the remake does that for `pi`. The same holds for an authored-hidden `pptw`, `pte` or `pgw` proxy under its ability (the Tartan's `pptw_ptwsa`): not yet applied (fidelity list). PB-42, PB-43. |
-| BP-44 | A unit that is not drawn this frame (hidden from the local player, or gone from the session) runs no emitters: they stop at once, and restart when it is drawn again. Remake rule (U-07). |
+| BP-43 | The emitter types FoC hides when it creates an object stay hidden: turbo engines (`pte`), power to weapons (`pptw`) and missile shield (`pgw`). The turbo engines replace the engine emitters while `TURBO` or `SPOILER_LOCK` runs, and `pptw` shows while `POWER_TO_WEAPONS` runs ([space abilities](space-abilities.md) AB-31, AB-32, space ability implementation (legacy EAWR-76)): the corvette's `PTE_Corvetteengines`. The Tartan's `Pte_tartanengine_sml` and `Pte_tartanengine_lrg` would show under `TURBO`, which its data does not give it. The other types keep their authored visibility until the code switches them. A proxy's authored hidden flag is the same code flag the type switch clears (debug build: the model loader sets it, the switch clears it by prefix), so an ion stun shows the Tartan's authored-hidden `pi_damage_elec_cap00` ([space damage](space-damage.md) IS-09); the remake does that for `pi`, `pptw` and `pte` when their modes run. The Tartan's and Acclamator's authored-hidden `pptw_ptwsa` therefore draw the power-to-weapons red flare while the ability is active; when it ends the emitter stops emitting and drains its existing particles (BP-48). The same code flag applies to `pgw`, whose missile-shield ability is outside the M2 roster. PB-42, PB-43. |
+| BP-44 | A unit losing raw visibility keeps its already running emitters while its drawn ghost fades; their colour and alpha share the unit opacity (space-fog-presentation FW-19). Once fully hidden, or gone from the session, it runs no emitters: they stop at once and restart when it is drawn again. Remake rule (U-07); native shield-shell and smoke fade ownership remain unverified. |
 | BP-45 | While the engines are online FoC sets the engine emitters' brightness to 0.2 + 0.8 x speed / maximum speed, clamped to 0..1, every service, immediately (a stopped ship 0.2, one at full speed 1); a temporarily disabled engine flickers between 0 and 0.2. The particle renderer multiplies every particle vertex's RGBA by the brightness (b, b, b, b) as it sets the particle up for drawing, so a ship at rest shows dim engine glows and a moving one full ones, as the owner's retail recordings of a Nebulon-B and a Corellian corvette show (2026-09-27). The remake applies it to the engine emitters (`unit_emitters.engine_brightness` reports it); the 0..0.2 flicker is not modelled (M2 has no temporarily disabled engines). PB-44, PB-45, PB-48. |
-| BP-65 (EAWR-559) | **Engine boost fades out.** When the turbo swap ends (`TURBO` or `SPOILER_LOCK` switched off, AB-31) the turbo engine emitters (`pte`) are hidden and the normal ones (`pe`) show; the same swap runs the other way when the mode starts (**unverified** for the start direction and for fighters, whose engine glow drains when `SPOILER_LOCK` starts: only the corvette's switch-off was recorded, the rest follows from the same mechanism). A hidden engine emitter stops emitting, but the particles it already emitted are drawn until they are gone, whatever the particle system's leave-particles flag (the corvette's `pte` and `pe` systems clear it): after `TURBO` ends the big orange flame block gives way to the normal engine glow with a faint red trail of the old flame behind it for about a second (rig recording, still 1.2 s after the switch-off, 2026-09-29, retail image). Before this rule the flame vanished within three ticks. Only the swap drains: the engines going permanently off-line (BP-42) still stop their emitter at once (unverified, no recording); a ship that is not drawn stops at once (BP-44). A drain is released when it is empty, or after 10 s. The speed itself already ramps: AB-24. `unit_emitters.engine_drains` reports the started, finished and cut-short drains. Evidence: rig recording (stills); debug build for the drain of a hidden proxy (BP-48). The lifetime of the trail is the particle system's own; the recording gives only its look (**unverified**: its length to the frame). | rig recording; BP-48 |
+| BP-65 (ability audio and engine-boost fade) | **Engine boost fades out.** When the turbo swap ends (`TURBO` or `SPOILER_LOCK` switched off, AB-31) the turbo engine emitters (`pte`) are hidden and the normal ones (`pe`) show; the same swap runs the other way when the mode starts (**unverified** for the start direction and for fighters, whose engine glow drains when `SPOILER_LOCK` starts: only the corvette's switch-off was recorded, the rest follows from the same mechanism). A hidden engine emitter stops emitting, but the particles it already emitted are drawn until they are gone, whatever the particle system's leave-particles flag (the corvette's `pte` and `pe` systems clear it): after `TURBO` ends the big orange flame block gives way to the normal engine glow with a faint red trail of the old flame behind it for about a second (rig recording, still 1.2 s after the switch-off, 2026-09-29, retail image). Before this rule the flame vanished within three ticks. Only the swap drains: the engines going permanently off-line (BP-42) still stop their emitter at once (unverified, no recording); a ship that is not drawn stops at once (BP-44). A drain is released when it is empty, or after 10 s. The speed itself already ramps: AB-24. `unit_emitters.engine_drains` reports the started, finished and cut-short drains. Evidence: rig recording (stills); debug build for the drain of a hidden proxy (BP-48). The lifetime of the trail is the particle system's own; the recording gives only its look (**unverified**: its length to the frame). | rig recording; BP-48 |
 | BP-46 | A hardpoint's `Model_To_Attach` proxies are not run (none of the M2 attachments has one). A death clone runs its own model's proxies (BP-47 to BP-50). Remake scope (fidelity list). |
 
-Remake rule for unit emitters after a presentation stall (EAWR-406; not FoC behaviour, FoC steps and
+Remake rule for unit emitters after a presentation stall (live engine and damage emitters; not FoC behaviour, FoC steps and
 draws on one thread): a frame that reaches many ticks at once runs each 30 Hz sample it catches
 up on at its own presented tick, as a paced frame would have. The ship's pose and visibility come
 from the snapshots of that tick, and the hardpoint and engine states from its newer one. So a
@@ -118,7 +153,7 @@ no ship runs emitters over it (least visible, as BP-44), and they start again at
 sample the history holds, so a damage emitter born earlier is aged only from there
 (`unit_emitters.unknown_samples`, `start_log`).
 
-Remake rule for frames between samples (EAWR-433): the emitters advance on the 30 Hz clock, but the
+Remake rule for frames between samples (engine-glow attachment during turns): the emitters advance on the 30 Hz clock, but the
 viewer draws faster. A frame due no sample draws every running unit emitter again at its own
 drawn pose, camera and brightness without advancing it: the linked particles (BP-40) follow the
 emitter to that frame, and the streams are built again (`EffectRegistry::present`,
@@ -126,7 +161,9 @@ emitter to that frame, and the streams are built again (`EffectRegistry::present
 posed one frame on, a jitter on every moving thruster. Death clone proxies, battle effects and
 breakoff props still draw only on samples (fidelity list).
 
-### Death clone emitters (EAWR-421)
+<a id="death-clone-emitters-421"></a>
+
+### Death clone emitters
 
 A death clone (unit-animation UA-07) is a model like any other: its proxies are sub-objects on its
 bones, and its death clip moves and hides those bones. That is where a capital ship's burning
@@ -140,15 +177,15 @@ runs them in `UnitEmitters` as well.
 | BP-49 | A proxy whose hidden flag is set in the ALO is created hidden and never shown; one whose name carries `_ALT`/`_LOD` follows the alternate and LOD selection. No M2 clone proxy has either. PB-52. |
 | BP-50 | The M2 clones' proxies and their bone visibility in the `DIE_00` clips (30 fps; the clone model's data): the corvette's `rv_corvette_d` (86 frames) carries four `p_rebelsmokedeath` (smoke and fire) and one `p_debris01` (a fragment cloud), shown from frame 0 to the last frame their piece is visible (74, 80 and 83), and three `p_explosion_big00`, each shown only in that last frame of its piece. The Tartan's `ev_tartancruiser_d` (86 frames): four `p_imperial_midshipsmoke` and one `p_debris01` to frame 74 to 83, three `p_imperial_explosion_big00` in their pieces' last frames. The Nebulon-B's `rv_nebulonb_d` (152 frames): ten `p_rebelsmokedeath` and two `p_debris01` to frame 129 to 147, and `p_explosion_big00` in three of its pieces' last frames (a fourth is never shown). The Acclamator's `ev_acclamator_d` (151 frames): eight `p_imperial_midshipsmoke` and one `p_debris01` to frame 129 to 148, three `p_imperial_explosion_big00` shown from frame 129, 139 and 148 to the end. The stations' `rb_station_01_break` (1051 frames) and `eb_station_break_break_01` (1001 frames) run fire billows, electrical damage and chains of explosions over some 30 s and a huge explosion as each section goes. ALO/ALA data. |
 
-Remake rules for death clone emitters (EAWR-421):
+Remake rules for death clone emitters (death-clone fire trails):
 
 - Each proxy runs one `particles::AttachmentLifecycle` (reset policy, BP-48: a piece that shows
-  again drops its old drain and starts afresh, EAWR-429) at its bone's frame in the
+  again drops its old drain and starts afresh, animated death-clone emitters) at its bone's frame in the
   clone's drawn death pose (the clip frame and 0.5 s blend of UA-08) composed with the clone's
   model transform, one step per 30 Hz sample of the emitter clock, with the bone's visibility in
   that pose. A stall's catch-up samples pose the clone at each sample's own tick, as the unit
   emitters do, a clone that fades within the stall included: its ship is retired only after the
-  frame's emitters ran the samples it still stood in (EAWR-429).
+  frame's emitters ran the samples it still stood in (animated death-clone emitters).
 - A hidden proxy's drain keeps reading its bone's frame (V-06).
 - When the clone leaves (UA-08's fade, or its clip could not start), what still runs stops
   emitting and drains where it last stood; FoC's removal detaches the groups the same way
@@ -156,12 +193,14 @@ Remake rules for death clone emitters (EAWR-421):
 - A proxy whose system emits from a mesh (EnhancedMesh: the stations' fire billows, explosion
   chains and electrical damage) emits from the first mesh on its bone's parent, bound as the engine
   emitters bind theirs (BP-42), with that mesh posed by the clip like the proxy.
-- The particle lifetimes are the renderer's (the V1 age randomizer is on the fidelity list, EAWR-406),
+- The particle lifetimes are the renderer's (the V1 age randomizer is on the fidelity list, live engine and damage emitters),
   so the drains may last somewhat longer than FoC's.
 - `unit_emitters.death_clones` reports the clones planned, the instances started and hidden per
   proxy, the proxies not run with the reason, and a start log.
 
-### Death debris sprites (EAWR-434)
+<a id="death-debris-sprites-434"></a>
+
+### Death debris sprites
 
 The small pieces that fly off a dying unit are particles, not models. ALO and XML data; the cell
 rule is from the FoC debug build (rendering.md, "V1 particle size and bump lighting").
@@ -173,10 +212,12 @@ rule is from the FoC debug build (rendering.md, "V1 particle size and bump light
 | BP-53 | Stations: `Huge_Explosion_Space` (`p_explosion_huge00`) bursts 20 of cell 7 at size 10 and `Huge_Explosion_Space_Empire` (`p_explosion_empire_huge00`) 20 at size 15; the break clones' explosion chains add cell 7 at size 7 and cell 5 at size 11 (`p_explosion_chain`, `_chain4`, `_chain5_e`) or both at size 7 (`_chain3`, `_chain3_e`, `_chain_e`). Fighters: `Small_Explosion_Space` (X-wing, Y-wing; `p_explosion_small00`) bursts 15 of cell 7 at size 7 and `Small_Explosion_Space_Empire` (TIE interceptor; `p_explosion_empire_small00`) 20 at size 5, both for 1 s. |
 | BP-54 | A particle's cell is the integer part of its UV track at its relative age; the `debre` tracks (7, then 2 at the end, mode 2) hold cell 7 all their life. So the sprites differ by faction and size class, not by ship: rebel capital deaths shed chunks and fragment clusters, imperial ones fewer chunks with girders, all with the same fragment art. |
 
-The remake draws these emitters as the data gives them (EAWR-434 compared texture, cell, size and
-tint with the owner's corvette video and the EAWR-81 rig stills; they match).
+The remake draws these emitters as the data gives them (ship-type death debris sprites compared texture, cell, size and
+tint with the owner's corvette video and the tactical unit animation rig stills; they match).
 
-### Breakoff props (EAWR-391)
+<a id="breakoff-props-391"></a>
+
+### Breakoff props
 
 A hardpoint can throw a piece of the ship off when it is destroyed. The piece is an ordinary game
 object with a debris behaviour, not a particle.
@@ -197,14 +238,14 @@ Remake rules for breakoff props (not FoC behaviour):
   not change. A prop spawns when the local player saw its ship at the tick of the hardpoint's
   death. It starts from that tick's snapshot pose. When that snapshot has left the history (a
   presentation stall longer than 64 ticks), what the player saw at that tick is unknown and no
-  piece is thrown: the least visible choice, never a later frame's visibility (EAWR-401). Its clock
+  piece is thrown: the least visible choice, never a later frame's visibility (destroyed-hardpoint breakoff props). Its clock
   starts like the other events' (born at presented tick t - 1), and the pieces' effect clock
   starts at the first frame or at the birth of the oldest tick that frame reaches, as the
   battle effects' does. A fire or explosion whose particle lifetime is over by the frame that
-  reaches its birth is not started (EAWR-401).
+  reaches its birth is not started (destroyed-hardpoint breakoff props).
 - A frame that reaches many ticks at once handles their breakoff events oldest first; the pieces
   whose lifetime ran out before an event's birth end (with their explosions) before that event
-  is handled (EAWR-401).
+  is handled (destroyed-hardpoint breakoff props).
 - The lifetime draw is keyed on the event (unit, hardpoint, tick) instead of the synchronized
   random generator, so every run shows the same lifetime.
 - The attachment point is the unit tables' attachment bone in its bind frame (the same point the
@@ -253,13 +294,20 @@ ticks at once. These are remake rules, not FoC behaviour:
   (`battle_effects.expired`) rather than spawned. A death after a stall shows at the unit's last
   drawn pose.
 
+For close missile eye checks, `--eawr-live-follow-projectile <shooter unit ID>` follows the
+first homing projectile that unit fires, using the same snapshot pair and BP-61 interpolation
+as its model. The camera holds its last focus after impact; later volleys do not steal it.
+Combine with `--eawr-live-follow <shooter unit ID>` to follow the launch platform until that
+first projectile exists. This opt-in capture hook changes camera focus only, not flight,
+homing, impact, visibility or simulation state.
+
 ## Unknowns
 
 - U-01 (answered 2026-09-27): `B1 -> B2` points against the flight (BP-02), from the debug build
   and the owner's FoC play; the beam's pill is point-symmetric, so only the kite shows it.
 - U-02: FoC hides a projectile by the fog at its own position; the remake has no fog grid in the
   live session (space-visibility, fidelity list) and uses the shooter's or target's visibility.
-- U-03 (answered 2026-09-27, EAWR-415): the rule for models with a SHIELD sub-object is BP-17 to BP-19. The
+- U-03 (answered 2026-09-27, incoming-projectile shield-hit orientation): the rule for models with a SHIELD sub-object is BP-17 to BP-19. The
   M2 ships all have one; the earlier reading turned the facing's yaw by 90 degrees, but the debug
   build turns its pitch (BP-18).
 - U-04: a debris object has `Tactical_Health` 100 and `Is_Decoration` No. Whether FoC's shots hit
@@ -271,11 +319,12 @@ ticks at once. These are remake rules, not FoC behaviour:
 - U-06 (answered 2026-09-27): the engine brightness (BP-45) reaches the particles in the renderer's
   per-particle set-up, which multiplies the vertex colour by it (PB-48), as the retail recordings show.
 - U-07: what FoC does with a unit's running emitters when it dies (the death clone takes over) or
-  when the fog hides it: the remake stops them at once (BP-44), the least visible choice.
+  when the fog hides it: the remake shares its drawn opacity during the ghost's fade, then
+  stops them once fully hidden or removed (BP-44). Native fade ownership remains unverified.
 - Not drawn yet: detonation and
   shield-absorb particles following their target (`Particle_Attach_To_Collision`),
   `Explosion_Jitter_Factor`, sounds.
-- U-08 (EAWR-427): what makes the game fire a unit's `DEFEND` on its own (`Supports_Autofire`), and
+- U-08 (shield light flash and ability shell): what makes the game fire a unit's `DEFEND` on its own (`Supports_Autofire`), and
   so when the shield shell shows in a real battle, is unverified. The viewer draws the shell only
   on request (BP-24).
 - A hit the shield took only in part draws its detonation at the event's contact on the collision

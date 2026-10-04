@@ -1,6 +1,49 @@
 #include "renderer_internal.hpp"
+#include "eawr/presentation/skin_pose.hpp"
 
 namespace eawr::presentation::godot_backend {
+
+void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const sim::EntityId target,
+                                            const float light_factor) {
+    if (source == target) return;
+    const auto pose = skin_poses_.find(source);
+    if (pose == skin_poses_.end()) clear_skin_pose(target);
+    else {
+        const PendingPose saved = pose->second;
+        skin_poses_[target] = saved;
+        const auto instance = instances_.find(target);
+        if (instance != instances_.end() && instance->second.asset_id == saved.asset_id) {
+            if (auto* rendering = RenderingServer::get_singleton()) {
+                static_cast<void>(apply_skin_pose(*rendering, instance->second, saved));
+            }
+        }
+    }
+    const auto light = light_scales_.find(source);
+    auto rgb = light == light_scales_.end() ? std::array<float, 3>{1, 1, 1} : light->second;
+    for (auto& channel : rgb) channel *= light_factor;
+    set_light_scale(target, rgb);
+    // FW-30: mutable capture colour is independent of the mesh upload.
+    const auto color = colorizations_.find(source);
+    if (color != colorizations_.end()) set_unit_colorization(target, color->second);
+    else {
+        colorizations_.erase(target);
+        const auto instance = instances_.find(target);
+        if (instance != instances_.end()) {
+            if (auto* rendering = RenderingServer::get_singleton()) {
+                rendering->instance_geometry_set_shader_parameter(instance->second.rid,
+                    StringName("eawr_unit_colorization"), Vector4(0, 0, 0, -1.0F));
+            }
+        }
+    }
+    set_unit_opacity(target, 1.0F);
+}
+
+void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
+    clear_skin_pose(entity_id);
+    light_scales_.erase(entity_id);
+    colorizations_.erase(entity_id);
+    opacities_.erase(entity_id);
+}
 
 [[nodiscard]] core::Result<void> GodotRenderer::Impl::set_skin_pose(
     const sim::EntityId entity_id,
@@ -15,26 +58,25 @@ namespace eawr::presentation::godot_backend {
         return failure(diagnostic_codes::invalid_skin_pose,
             "skin pose bone count does not match the uploaded skinned asset");
     }
-    PendingPose pose{.asset_id = asset_id};
-    pose.palette.reserve(bones.size());
-    pose.model_transforms.reserve(bones.size());
-    for (const animation::BonePose& bone : bones) {
-        if (!std::all_of(bone.skin_asset.begin(), bone.skin_asset.end(),
-                [](const float value) { return std::isfinite(value); })
-            || !std::all_of(bone.model_asset.begin(), bone.model_asset.end(),
-                [](const float value) { return std::isfinite(value); })) {
-            return failure(diagnostic_codes::invalid_skin_pose,
-                "skin pose contains a non-finite palette matrix");
-        }
-        pose.palette.push_back(animation::Player::asset_to_render_transform(bone.skin_asset));
-        pose.model_transforms.push_back(transform_from(
-            animation::Player::asset_to_render_transform(bone.model_asset)));
+    if (!cache_skin_pose(skin_poses_, entity_id, asset_id, bones,
+            [](const animation::Matrix& matrix) { return transform_from(matrix); }, &skin_changes_)) {
+        return failure(diagnostic_codes::invalid_skin_pose,
+            "skin pose contains a non-finite palette matrix");
     }
-    skin_poses_[entity_id] = std::move(pose);
+    const PendingPose& pose = skin_poses_.at(entity_id);
     const auto instance = instances_.find(entity_id);
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (instance != instances_.end() && instance->second.asset_id == asset_id && rendering) {
-        if (!apply_skin_pose(*rendering, instance->second, skin_poses_.at(entity_id))) {
+        if (resource->second.billboard_modes.empty()
+            && !filter_skin_palette_changes(skin_changes_, resource->second.skin_used_bones)) {
+            return failure(diagnostic_codes::invalid_skin_pose, "skin palette usage does not match the skeleton");
+        }
+        // A billboard refresh may have replaced the base palette: restore it
+        // completely before that refresh. Ordinary skeletons retain unchanged
+        // bones, so only byte-different palette matrices cross the engine API.
+        const auto changes = resource->second.billboard_modes.empty()
+            ? std::span<const std::uint8_t>(skin_changes_) : std::span<const std::uint8_t>{};
+        if (!apply_skin_pose(*rendering, instance->second, pose, changes)) {
             return failure(diagnostic_codes::invalid_skin_pose,
                 "Godot skeleton palette binding failed");
         }
@@ -64,12 +106,28 @@ void GodotRenderer::Impl::apply_light_scale(
         instance.rid, StringName("eawr_unit_light_scale"), Vector3(rgb[0], rgb[1], rgb[2]));
 }
 
-// #535: the fog fade's alpha (space-fog-presentation.md FW-16 to FW-18): the unit's own opacity, an
-// instance shader parameter the ship hull adapters dither with (the same surfaces the unit light
-// scale reaches; a shader without the uniform is unchanged). Godot's per-instance geometry
-// transparency is not used: it sends the instance through the transparent pass, where the sky's
-// transparent layers (drawn later, with no depth to test against) paint over a hull seen against
-// open space.
+void GodotRenderer::Impl::set_unit_colorization(const sim::EntityId entity_id, const std::array<float, 3>& rgb) {
+    const auto current = colorizations_.find(entity_id);
+    if (current != colorizations_.end() && current->second == rgb) return;
+    colorizations_.insert_or_assign(entity_id, rgb);
+    const auto instance = instances_.find(entity_id);
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    if (instance != instances_.end() && rendering) apply_unit_colorization(*rendering, entity_id, instance->second);
+}
+
+void GodotRenderer::Impl::apply_unit_colorization(
+    RenderingServer& rendering, const sim::EntityId entity_id, const Instance& instance) const {
+    const auto colour = colorizations_.find(entity_id);
+    if (colour == colorizations_.end()) return;
+    const auto& rgb = colour->second;
+    rendering.instance_geometry_set_shader_parameter(
+        instance.rid, StringName("eawr_unit_colorization"), Vector4(rgb[0], rgb[1], rgb[2], 1.0F));
+}
+
+// #535: the fog fade's alpha (space-fog-presentation.md FW-16 to FW-19).
+// Geometry transparency supplies alpha to opaque/shield shaders; explicit-alpha
+// mesh adapters use the same instance parameter instead of overriding the fade.
+// Environment transparents draw first (FW-19), so the backdrop cannot paint over a fading hull.
 void GodotRenderer::Impl::set_unit_opacity(const sim::EntityId entity_id, const float alpha) {
     const bool opaque = alpha >= 1.0F;
     const auto current = opacities_.find(entity_id);
@@ -85,7 +143,28 @@ void GodotRenderer::Impl::apply_unit_opacity(
     RenderingServer& rendering, const sim::EntityId entity_id, const Instance& instance) const {
     const auto opacity = opacities_.find(entity_id);
     const float alpha = opacity == opacities_.end() ? 1.0F : opacity->second;
-    rendering.instance_geometry_set_shader_parameter(instance.rid, StringName("eawr_unit_opacity"), alpha);
+    const float clamped = std::clamp(alpha, 0.0F, 1.0F);
+    rendering.instance_geometry_set_transparency(instance.rid, 1.0F - clamped);
+    rendering.instance_geometry_set_shader_parameter(instance.rid, StringName("eawr_unit_opacity"), clamped);
+    // Geometry transparency does not attenuate a shadow. Suppress the opaque
+    // silhouette while fading, then restore this asset's original policy.
+    rendering.instance_geometry_set_cast_shadows_setting(instance.rid,
+        clamped < 1.0F || non_casting_.contains(instance.asset_id)
+            ? RenderingServer::SHADOW_CASTING_SETTING_OFF : RenderingServer::SHADOW_CASTING_SETTING_ON);
+}
+
+core::Result<void> GodotRenderer::Impl::set_material_priority(const sim::AssetId asset_id, const std::int32_t priority) {
+    const auto resource = resources_.find(asset_id);
+    if (resource == resources_.end()) return failure(diagnostic_codes::missing_asset, "cannot order a missing renderer asset");
+    if (priority < -128 || priority > 127) return failure(diagnostic_codes::invalid_material, "material priority exceeds the renderer range");
+    RenderingServer* rendering = RenderingServer::get_singleton();
+    if (!rendering) return failure(diagnostic_codes::backend_unavailable, "RenderingServer is unavailable");
+    resource->second.priority = priority;
+    rendering->material_set_render_priority(resource->second.material, priority);
+    const auto consumer = fog_consumers_.find(asset_id);
+    if (consumer != fog_consumers_.end() && consumer->second.material.is_valid())
+        rendering->material_set_render_priority(consumer->second.material, priority);
+    return core::Result<void>::success();
 }
 
 void GodotRenderer::Impl::clear_skin_pose(const sim::EntityId entity_id) {
@@ -277,7 +356,8 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
                     rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
             }
             instance = instances_.emplace(
-                source.entity_id, Instance{source.asset_id, rid, {}}).first;
+                source.entity_id, Instance{.asset_id = source.asset_id, .rid = rid,
+                    .skeleton = {}, .object_transform = {}, .placement = {}}).first;
             const auto pending = skin_poses_.find(source.entity_id);
             bind_instance_skin(*rendering, instance->second, *resource,
                 pending == skin_poses_.end() ? nullptr : &pending->second);
@@ -287,6 +367,7 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             if (opacities_.contains(source.entity_id)) {
                 apply_unit_opacity(*rendering, source.entity_id, instance->second);
             }
+            apply_unit_colorization(*rendering, source.entity_id, instance->second);
         } else if (transition == detail::InstanceTransition::replace) {
             if (instance->second.skeleton.is_valid()) {
                 rendering->free_rid(instance->second.skeleton);
@@ -341,9 +422,12 @@ GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(
 }
 
 [[nodiscard]] bool GodotRenderer::Impl::apply_skin_pose(
-    RenderingServer& rendering, const Instance& instance, const PendingPose& pose) {
+    RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
+    const std::span<const std::uint8_t> changes) {
     if (!instance.skeleton.is_valid()) return false;
+    if (!changes.empty() && changes.size() != pose.palette.size()) return false;
     for (std::size_t index = 0; index < pose.palette.size(); ++index) {
+        if (!changes.empty() && changes[index] == 0) continue;
         rendering.skeleton_bone_set_transform(instance.skeleton,
             static_cast<std::int32_t>(index), transform_from(pose.palette[index]));
     }
@@ -358,11 +442,11 @@ void GodotRenderer::Impl::refresh_billboards(RenderingServer& rendering, const s
     const auto pending = skin_poses_.find(entity);
     const PendingPose* pose = pending != skin_poses_.end() && pending->second.asset_id == instance.asset_id
         ? &pending->second : nullptr;
-    std::vector<Transform3D> models = pose ? pose->model_transforms : resource.bind_models;
-    std::vector<Transform3D> palettes(resource.bone_count);
-    for (std::size_t bone = 0; bone < resource.bone_count; ++bone) {
-        palettes[bone] = pose ? transform_from(pose->palette[bone]) : Transform3D();
-    }
+    billboard_pose_.reset(pose ? pose->model_transforms : resource.bind_models,
+        pose ? std::span<const animation::Matrix>(pose->palette) : std::span<const animation::Matrix>{},
+        Transform3D(), [](const animation::Matrix& matrix) { return transform_from(matrix); });
+    auto& models = billboard_pose_.models;
+    auto& palettes = billboard_pose_.palettes;
     const Basis object_inverse = instance.object_transform.basis.inverse();
     const Vector3 eye = instance.object_transform.affine_inverse().xform(view_transform_.origin);
     const Vector3 view_up = object_inverse.xform(view_transform_.basis.get_column(1)).normalized();
@@ -405,16 +489,10 @@ void GodotRenderer::Impl::refresh_billboards(RenderingServer& rendering, const s
         const Transform3D delta = desired * current.affine_inverse();
         // The palette is animated absolute * inverse bind. Move children
         // with the billboard parent, including rigid particle attachments.
-        for (std::size_t child = 0; child < resource.bone_count; ++child) {
-            std::int32_t ancestor = static_cast<std::int32_t>(child);
-            while (ancestor >= 0 && ancestor != static_cast<std::int32_t>(bone)) {
-                ancestor = resource.bone_parents[static_cast<std::size_t>(ancestor)];
-            }
-            if (ancestor == static_cast<std::int32_t>(bone)) {
-                palettes[child] = delta * palettes[child];
-                models[child] = delta * models[child];
-            }
-        }
+        static_cast<void>(visit_skin_descendants(resource.bone_parents, bone, [&](const std::size_t child) {
+            palettes[child] = delta * palettes[child];
+            models[child] = delta * models[child];
+        }));
     }
     for (std::size_t bone = 0; bone < resource.bone_count; ++bone) {
         rendering.skeleton_bone_set_transform(instance.skeleton,

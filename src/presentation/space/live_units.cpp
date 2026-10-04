@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <string_view>
 
 namespace eawr::presentation::space {
 namespace {
@@ -114,6 +115,35 @@ struct Angles {
 }
 
 } // namespace
+
+bool map_prop_fog_bound(const std::span<const std::string> behavior,
+                        const std::span<const std::string> space_behavior) noexcept {
+    const auto fog_bound = [](const std::string& entry) {
+        const auto matches = [&](const std::string_view expected) {
+            return entry.size() == expected.size() && std::equal(entry.begin(), entry.end(), expected.begin(),
+                [](const char a, const char b) { return (a >= 'a' && a <= 'z' ? a - 'a' + 'A' : a) == b; });
+        };
+        return matches("HIDE_WHEN_FOGGED") || matches("TEAM");
+    };
+    return std::any_of(behavior.begin(), behavior.end(), fog_bound)
+        || std::any_of(space_behavior.begin(), space_behavior.end(), fog_bound);
+}
+
+void map_prop_draw_visibility(const std::span<const sim::EntityId> visible,
+                              const std::span<const sim::EntityId> alive,
+                              const std::span<const sim::EntityId> unfogged_props,
+                              std::vector<sim::EntityId>& output) {
+    output.clear();
+    output.reserve(visible.size() + unfogged_props.size());
+    auto next = visible.begin();
+    for (const sim::EntityId prop : unfogged_props) {
+        if (!std::binary_search(alive.begin(), alive.end(), prop)) continue;
+        while (next != visible.end() && *next < prop) output.push_back(*next++);
+        output.push_back(prop);
+        if (next != visible.end() && *next == prop) ++next;
+    }
+    output.insert(output.end(), next, visible.end());
+}
 
 double instance_yaw_degrees(const sim::math::Mat3x4& transform) noexcept {
     const double x = to_double(transform.rows[0][0]);

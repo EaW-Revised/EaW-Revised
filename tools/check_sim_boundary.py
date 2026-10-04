@@ -24,7 +24,7 @@ from boundary_cache import BoundaryCache  # noqa: E402
 
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc", ".ipp", ".tpp"}
-METADATA_NAMES = {"CMakeLists.txt", "README.md"}
+METADATA_NAMES = {"CMakeLists.txt", "sources.cmake", "README.md"}
 FLOATING_TYPE = re.compile(r"(?:^|[^A-Za-z_])(long double|double|float|__float128)(?:[^A-Za-z_]|$)")
 INCLUDE_DIRECTIVE = re.compile(r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]", re.MULTILINE)
 FORBIDDEN_INCLUDE = re.compile(
@@ -361,6 +361,12 @@ def main() -> int:
     # A standalone checker must also work before CMake has generated the XML schema.
     with tempfile.TemporaryDirectory(prefix="eawr-boundary-") as temporary:
         generated = Path(temporary)
+        # The immutable roster policy uses the same build-independent contract
+        # as the XML schema: materialize it for this standalone compiler check.
+        roster_generator = root / "tools/inventory/roster_gate.py"
+        if roster_generator.is_file():
+            subprocess.run([sys.executable, str(roster_generator), "--header",
+                            str(generated / "roster_gate_data.hpp")], check=True)
         if any(path.name == "xml_registry.cpp" for path in files):
             subprocess.run([sys.executable, str(root / "src/data/generate_schema_contract.py"),
                             "--input", str(root / "plan/inventories/xml-tags.json"),

@@ -304,16 +304,22 @@ int main(const int argc, char** argv) {
     expect(!external_doctype && external_doctype.error().code == diagnostic_codes::manifest_invalid,
            "document types are rejected without external entity or network resolution");
 
-#ifndef _WIN32
     const auto collision = fixture.root / "collision";
     std::filesystem::create_directories(collision);
     write_text(collision / "Case.XML", "a");
-    write_text(collision / "case.xml", "b");
-    const std::array collision_mounts{MountSpec{"collision", collision, "data", {}}};
-    auto collision_result = Vfs::mount(collision_mounts);
-    expect(!collision_result && collision_result.error().code == diagnostic_codes::loose_case_collision,
-           "same-layer loose case collision fails deterministically");
-#endif
+    expect(std::filesystem::is_regular_file(collision / "Case.XML"), "case-sensitivity probe file exists");
+    std::error_code probe_error;
+    const bool case_insensitive = std::filesystem::exists(collision / "case.xml", probe_error);
+    expect(!probe_error, "case-sensitivity probe succeeds");
+    if (case_insensitive) {
+        std::cout << "SKIP: same-layer loose case collision requires a case-sensitive filesystem\n";
+    } else if (!probe_error) {
+        write_text(collision / "case.xml", "b");
+        const std::array collision_mounts{MountSpec{"collision", collision, "data", {}}};
+        auto collision_result = Vfs::mount(collision_mounts);
+        expect(!collision_result && collision_result.error().code == diagnostic_codes::loose_case_collision,
+               "same-layer loose case collision fails deterministically");
+    }
 
     vfs_mod_chain();
 

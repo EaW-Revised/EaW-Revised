@@ -31,7 +31,8 @@ namespace tactical = sim::tactical;
 
 [[nodiscard]] bool is_weapon(const HardpointType type) noexcept {
     return type == HardpointType::weapon_laser || type == HardpointType::weapon_missile
-        || type == HardpointType::weapon_torpedo || type == HardpointType::weapon_ion_cannon;
+        || type == HardpointType::weapon_torpedo || type == HardpointType::weapon_ion_cannon
+        || type == HardpointType::weapon_mass_driver || type == HardpointType::weapon_special;
 }
 
 // trunc(value x factor) as a whole number, clamped at zero. The authored decimal is the value:
@@ -79,6 +80,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         if (!projectile.max_speed || projectile.max_speed->raw() <= 0) return ShotResult::success(std::nullopt);
         tactical::ShotProfile shot;
         shot.damage = weapon.damage && weapon.damage->raw() > 0 ? *weapon.damage : projectile.damage.value_or(Fixed{});
+        shot.blast = projectile.blast; // WAD-02/36: independent of instance direct damage
         shot.damage_type = types.damage(!weapon.damage_type.empty() ? weapon.damage_type : projectile.damage_type);
         shot.speed = *projectile.max_speed;
         shot.max_travel = hardpoint && weapon.range && weapon.range->raw() > 0
@@ -87,6 +89,16 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         shot.shield_damage = projectile.does_shield_damage;
         shot.hitpoint_damage = projectile.does_hitpoint_damage;
         shot.energy_damage = projectile.does_energy_damage; // EN-07
+        if (projectile.disables_engines_when_power_drained) {
+            // EN-08: reject unsupported negative (indefinite) durations instead of inventing a timeout.
+            const auto seconds = projectile.disable_engines_duration;
+            if (!seconds || seconds->raw() < 0 || seconds->raw() > 3600 * Fixed::scale) {
+                return ShotResult::failure(failure("projectile '" + projectile.id + "' has an invalid engine-disable duration (EN-08)"));
+            }
+            auto frames = whole(*seconds, 30, projectile.id + " Projectile_Disable_Engines_Duration");
+            if (!frames) return ShotResult::failure(frames.error());
+            shot.disable_engines_frames = frames.value();
+        }
         // IS-01: a stun on detonation. IS-08: a stun with a radius is not modelled (no M2
         // projectile authors one); the loader refuses it rather than stun only the unit hit.
         if (projectile.ion_stun) {
@@ -109,6 +121,25 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         // MS-01: a MISSILE-category projectile homes, turning at its Max_Rate_Of_Turn.
         shot.homing = same_name(projectile.category, "MISSILE");
         if (shot.homing) shot.turn_rate = projectile.max_rate_of_turn.value_or(Fixed{});
+        const bool rocket = same_name(projectile.category, "ROCKET");
+        if (rocket || projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)) {
+            tactical::FlightProfile flight;
+            flight.kind = rocket ? tactical::FlightKind::rocket : same_name(projectile.category, "DEFAULT")
+                ? tactical::FlightKind::default_projectile : tactical::FlightKind::ordinary;
+            flight.target_radius = projectile.explode_at_target_radius.value_or(false);
+            flight.lifetime = projectile.max_lifetime;
+            flight.authored_distance = projectile.max_flight_distance.value_or(Fixed{});
+            if (rocket) {
+                if (!projectile.rocket_curve_distance || !projectile.rocket_curve_offset || !projectile.rocket_straight_distance) {
+                    return ShotResult::failure(failure("projectile '" + projectile.id + "' lacks authored rocket path inputs (RFL-02/03)"));
+                }
+                flight.curve_distance = *projectile.rocket_curve_distance;
+                flight.curve_offset = *projectile.rocket_curve_offset;
+                flight.straight_distance = *projectile.rocket_straight_distance;
+            }
+            shot.flight = flight;
+        }
+        shot.appearance_delay_frames = weapon.appearance_delay_frames.value_or(0);
         for (const auto& row : weapon.inaccuracy) {
             auto bits = category_bits({row.category});
             if (!bits) return ShotResult::failure(bits.error());
@@ -131,11 +162,18 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
     }
 
     tactical::CombatTable table;
+    table.pad_neutral_factions = tables.pad_neutral_factions;
     std::map<std::uint32_t, std::uint32_t> set_index; // unit tables' set index -> combat table's
     for (std::size_t unit_index = 0; unit_index < tables.units.size(); ++unit_index) {
         const auto& unit = tables.units[unit_index];
         if (unit.kind == UnitKind::squadron) continue; // squadrons act through their craft (#75)
         const auto override_projectile = ion_override.find(unit_index);
+        std::optional<std::uint32_t> barrage_projectile;
+        for (const auto& ability : unit.abilities) {
+            if (same_name(ability.type, "BARRAGE") && ability.projectile_index != no_index) {
+                barrage_projectile = ability.projectile_index;
+            }
+        }
         const auto scale = unit.scale_factor.value_or(Fixed::from_raw(Fixed::scale));
         // A model point in the unit's frame: scaled by Scale_Factor, then turned by FoC's fixed
         // +90 degrees about Z (R-ROT-01, R-ROT-04: ship noses lie on model -Y, the unit faces +X),
@@ -149,8 +187,13 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         };
         tactical::CombatProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
+        profile.living_projectile_collision = unit.living_projectile_collision;
+        profile.capture_point = unit.capture_point;
         profile.category_bits = unit.category_bits;
+        profile.hero = unit.named_hero || unit.generic_hero;
+        profile.redirect_damage_to_teammates = unit.redirect_damage_to_teammates;
         profile.max_attack_distance = unit.targeting_max_attack_distance;
+        profile.min_attack_distance = unit.targeting_min_attack_distance.value_or(Fixed{});
         if (unit.targeting_priority_set_index != no_index) {
             const auto [entry, inserted] =
                 set_index.emplace(unit.targeting_priority_set_index, static_cast<std::uint32_t>(set_index.size()));
@@ -198,6 +241,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         }
         for (std::uint32_t index = 0; index < unit.hardpoints.size(); ++index) {
             const auto& hardpoint = unit.hardpoints[index];
+            profile.hardpoint_meshes.push_back(hardpoint.collision_mesh);
             if (hardpoint.attachment.position) {
                 auto position = place(*hardpoint.attachment.position);
                 if (!position) return Result::failure(position.error());
@@ -210,6 +254,60 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             entry.value().range = weapon.range.value_or(Fixed{});
             entry.value().cone_width = weapon.cone_width_degrees.value_or(Fixed{});
             entry.value().cone_height = weapon.cone_height_degrees.value_or(Fixed{});
+            entry.value().special = hardpoint.type == HardpointType::weapon_special;
+            entry.value().requires_manual_target = hardpoint.requires_manual_target;
+            if (hardpoint.requires_manual_target) {
+                entry.value().manual_turret_required = hardpoint.manual_is_turret;
+                const auto seconds = hardpoint.manual_cooldown_seconds.value_or(Fixed{});
+                auto frames = sim::math::multiply(seconds, Fixed::from_raw(30 * Fixed::scale));
+                if (!frames || frames.value().raw() < 0 || frames.value().raw() > 108000LL * Fixed::scale) {
+                    return Result::failure(failure(unit.id + " manual cooldown out of range"));
+                }
+                // WAD-39: the player clock stores nearest whole frames, independently of weapon recharge.
+                entry.value().manual_cooldown_frames = static_cast<std::uint32_t>(
+                    (frames.value().raw() + Fixed::scale / 2) / Fixed::scale);
+                if (hardpoint.manual_is_turret && hardpoint.manual_turret.position && hardpoint.manual_turret.axes
+                    && hardpoint.attachment.position && hardpoint.attachment.axes) {
+                    tactical::ManualTurretProfile turret;
+                    auto pivot = place(*hardpoint.manual_turret.position);
+                    if (!pivot) return Result::failure(pivot.error());
+                    turret.pivot = pivot.value();
+                    auto coordinate_pivot = place(*hardpoint.attachment.position);
+                    if (!coordinate_pivot) return Result::failure(coordinate_pivot.error());
+                    turret.coordinate_pivot = coordinate_pivot.value();
+                    bool usable = true;
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        const auto& value = (*hardpoint.attachment.axes)[axis];
+                        auto turned = sim::math::normalize(Vec3{Fixed::from_raw(-value.y.raw()), value.x, value.z});
+                        if (!turned) { usable = false; break; }
+                        turret.coordinate_axes[axis] = turned.value();
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        const auto& value = (*hardpoint.manual_turret.axes)[axis];
+                        auto turned = sim::math::normalize(Vec3{Fixed::from_raw(-value.y.raw()), value.x, value.z});
+                        if (!turned) { usable = false; break; }
+                        turret.axes[axis] = turned.value();
+                    }
+                    turret.rest = hardpoint.manual_rest;
+                    turret.offset = hardpoint.manual_offset;
+                    turret.speed = hardpoint.manual_rotate_speed.value_or(Fixed{});
+                    turret.yaw_extent = hardpoint.manual_yaw_extent.value_or(Fixed{});
+                    turret.pitch_extent = hardpoint.manual_pitch_extent.value_or(Fixed{});
+                    turret.barrel = hardpoint.manual_barrel.position.has_value() && hardpoint.manual_barrel.axes.has_value();
+                    if (turret.barrel) {
+                        auto barrel_pivot = place(*hardpoint.manual_barrel.position);
+                        if (!barrel_pivot) return Result::failure(barrel_pivot.error());
+                        turret.barrel_pivot = barrel_pivot.value();
+                        for (std::size_t axis = 0; axis < 3; ++axis) {
+                            const auto& value = (*hardpoint.manual_barrel.axes)[axis];
+                            auto turned = sim::math::normalize(Vec3{Fixed::from_raw(-value.y.raw()), value.x, value.z});
+                            if (!turned) { usable = false; break; }
+                            turret.barrel_axes[axis] = turned.value();
+                        }
+                    }
+                    if (usable) entry.value().manual_turret = turret;
+                }
+            }
             if (power_sum.raw() > 0 && unit.ai_combat_power) {
                 auto share = sim::math::divide(projectile_power(hardpoint), power_sum);
                 auto power = share ? sim::math::multiply(share.value(), *unit.ai_combat_power) : share;
@@ -220,6 +318,13 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             auto shot = shot_profile(weapon, true);
             if (!shot) return Result::failure(shot.error());
             entry.value().shot = std::move(shot).value();
+            if (barrage_projectile) {
+                auto swapped = weapon;
+                swapped.projectile_index = *barrage_projectile;
+                auto barrage_shot = shot_profile(swapped, true);
+                if (!barrage_shot) return Result::failure(barrage_shot.error());
+                entry.value().barrage_shot = std::move(barrage_shot).value();
+            }
             if (override_projectile != ion_override.end()) {
                 // The override keeps the hardpoint's damage type and range (DG-12, DG-23).
                 auto swapped = weapon;
@@ -271,6 +376,13 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
             auto shot = shot_profile(*unit.weapon, false);
             if (!shot) return Result::failure(shot.error());
             entry.value().shot = std::move(shot).value();
+            if (barrage_projectile) {
+                auto swapped = *unit.weapon;
+                swapped.projectile_index = *barrage_projectile;
+                auto barrage_shot = shot_profile(swapped, false);
+                if (!barrage_shot) return Result::failure(barrage_shot.error());
+                entry.value().barrage_shot = std::move(barrage_shot).value();
+            }
             profile.weapons.push_back(entry.value());
         }
         if (unit.collision) {

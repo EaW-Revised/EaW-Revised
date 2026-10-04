@@ -35,6 +35,19 @@ std::string_view to_string(const OrderKind kind) noexcept {
         return "cancel";
     case OrderKind::reinforce:
         return "reinforce";
+    case OrderKind::pad_build:
+        return "pad_build";
+    case OrderKind::pad_sell:
+        return "pad_sell";
+    case OrderKind::credit_grant:
+        return "credit_grant";
+    case OrderKind::intentional_quit: return "intentional_quit";
+    case OrderKind::area_ability:
+        return "area_ability";
+    case OrderKind::manual_target:
+        return "manual_target";
+    case OrderKind::reveal_all:
+        return "reveal_all";
     }
     return "unknown";
 }
@@ -57,6 +70,16 @@ std::string_view to_string(const EventKind kind) noexcept {
         return "spin_away_ended";
     case EventKind::reinforcement_unloaded:
         return "reinforcement_unloaded";
+    case EventKind::station_replaced:
+        return "station_replaced";
+    case EventKind::pad_captured: return "pad_captured";
+    case EventKind::pad_construction_started: return "pad_construction_started";
+    case EventKind::pad_construction_completed: return "pad_construction_completed";
+    case EventKind::player_quit: return "player_quit";
+    case EventKind::pad_structure_sold: return "pad_structure_sold";
+    case EventKind::ability_cancelled: return "ability_cancelled";
+    case EventKind::ability_ready: return "ability_ready";
+    case EventKind::manual_target_timeout: return "manual_target_timeout";
     }
     return "unknown";
 }
@@ -130,6 +153,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case 1:
         return 0;
     case 2:
+    case opcode_hazard_move:
         return 24;
     case 3:
         return 8;
@@ -143,18 +167,36 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case 8:
         return 8;
     case opcode_attack_hardpoint:
+    case opcode_manual_target:
         return 16;
     case 9:  // #530 buy: type
+    case opcode_reveal_all: // V-20: player ID and zero reserved word
+    case opcode_pad_build: // WBP-09: UC type
+    case opcode_credit_grant: // SAE-07: Q24 credits
     case 10: // #530 cancel: queue, index
         return 8;
     case 11: // #530 reinforce: type, position
+    case opcode_area_ability: // ability kind, reserved word, world point
         return 32;
+    case opcode_reserved_reinforce: // SAE-11: type, position, purchase token
+        return 40;
     default:
         return 0;
     }
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<RevealAllPayload>(command.payload)) return opcode_reveal_all;
+    if (const auto* move = std::get_if<MovePayload>(&command.payload);
+        move != nullptr && move->through_hazards) return opcode_hazard_move;
+    if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
+        reinforce != nullptr && reinforce->pool_token != 0) return opcode_reserved_reinforce;
+    if (std::holds_alternative<QuitPayload>(command.payload)) return opcode_intentional_quit;
+    if (std::holds_alternative<PadSellPayload>(command.payload)) return opcode_pad_sell;
+    if (std::holds_alternative<AreaAbilityPayload>(command.payload)) return opcode_area_ability;
+    if (std::holds_alternative<ManualTargetPayload>(command.payload)) return opcode_manual_target;
+    if (std::holds_alternative<CreditGrantPayload>(command.payload)) return opcode_credit_grant;
+    if (std::holds_alternative<PadBuildPayload>(command.payload)) return opcode_pad_build;
     // #531: an attack on one hardpoint has its own opcode, so attacks on a unit keep opcode 3 and their bytes.
     if (const auto* attack = std::get_if<AttackPayload>(&command.payload);
         attack != nullptr && attack->hardpoint != attack_hull) {
@@ -166,7 +208,7 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
 std::size_t command_body_size(const PlayerCommand& command) noexcept {
     // A targeted ability command (#561) appends its uint64 target.
     const auto* ability = std::get_if<AbilityPayload>(&command.payload);
-    const std::size_t target = ability != nullptr && ability->target != invalid_entity_id ? 8U : 0U;
+    const std::size_t target = ability != nullptr ? (ability->position ? 24U : ability->target != invalid_entity_id ? 8U : 0U) : 0U;
     return command_common_size
         + payload_prefix_size(command_opcode(command)) + target
         + unit_list_header_size + 8U * command.units.size();
@@ -213,7 +255,20 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* move = std::get_if<MovePayload>(&command.payload)) {
+    if (const auto* reveal = std::get_if<RevealAllPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, reveal->player);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* manual = std::get_if<ManualTargetPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, manual->target);
+        sim::detail::append_u32(bytes, manual->hardpoint);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* area = std::get_if<AreaAbilityPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(area->ability));
+        sim::detail::append_u32(bytes, 0);
+        sim::detail::append_i64(bytes, area->point.x.raw());
+        sim::detail::append_i64(bytes, area->point.y.raw());
+        sim::detail::append_i64(bytes, area->point.z.raw());
+    } else if (const auto* move = std::get_if<MovePayload>(&command.payload)) {
         sim::detail::append_i64(bytes, move->destination.x.raw());
         sim::detail::append_i64(bytes, move->destination.y.raw());
         sim::detail::append_i64(bytes, move->destination.z.raw());
@@ -247,11 +302,20 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         const bool targeted = ability->target != invalid_entity_id;
         bytes.push_back(static_cast<std::uint8_t>(ability->ability));
         bytes.push_back(static_cast<std::uint8_t>(ability->action));
-        sim::detail::append_u16(bytes, targeted ? 1U : 0U);
+        sim::detail::append_u16(bytes, ability->position ? 2U : targeted ? 1U : 0U);
         sim::detail::append_u32(bytes, targeted ? ability->target_hardpoint : 0U);
         if (targeted) sim::detail::append_u64(bytes, ability->target);
+        if (ability->position) {
+            sim::detail::append_i64(bytes, ability->position->x.raw());
+            sim::detail::append_i64(bytes, ability->position->y.raw());
+            sim::detail::append_i64(bytes, ability->position->z.raw());
+        }
     } else if (const auto* buy = std::get_if<BuyPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, buy->type);
+    } else if (const auto* grant = std::get_if<CreditGrantPayload>(&command.payload)) {
+        sim::detail::append_i64(bytes, grant->amount.raw());
+    } else if (const auto* pad = std::get_if<PadBuildPayload>(&command.payload)) {
+        sim::detail::append_u64(bytes, pad->type);
     } else if (const auto* cancel = std::get_if<CancelPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, cancel->queue);
         sim::detail::append_u32(bytes, cancel->index);
@@ -260,6 +324,7 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_i64(bytes, reinforce->position.x.raw());
         sim::detail::append_i64(bytes, reinforce->position.y.raw());
         sim::detail::append_i64(bytes, reinforce->position.z.raw());
+        if (reinforce->pool_token != 0) sim::detail::append_u64(bytes, reinforce->pool_token);
     }
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
     sim::detail::append_u32(bytes, 0);
@@ -299,17 +364,21 @@ core::Result<void> validate_command_shape(
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
     // #530: a buy lists exactly its station; a cancel or reinforce lists no unit.
-    if (std::holds_alternative<BuyPayload>(command.payload) && command.units.size() != 1) {
+    if ((std::holds_alternative<BuyPayload>(command.payload) || std::holds_alternative<PadBuildPayload>(command.payload)
+            || std::holds_alternative<PadSellPayload>(command.payload))
+        && command.units.size() != 1) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": a buy lists exactly one station", logical_path));
     }
     if ((std::holds_alternative<CancelPayload>(command.payload)
-            || std::holds_alternative<ReinforcePayload>(command.payload))
+            || std::holds_alternative<ReinforcePayload>(command.payload) || std::holds_alternative<CreditGrantPayload>(command.payload)
+            || std::holds_alternative<QuitPayload>(command.payload) || std::holds_alternative<RevealAllPayload>(command.payload))
         && !command.units.empty()) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": a cancel or reinforce lists no unit", logical_path));
     }
-    if (command.units.empty() && !economy_command(command.payload)) {
+    if (command.units.empty() && !economy_command(command.payload) && !std::holds_alternative<QuitPayload>(command.payload)
+        && !std::holds_alternative<RevealAllPayload>(command.payload)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": unit list is empty", logical_path));
     }
@@ -317,6 +386,12 @@ core::Result<void> validate_command_shape(
         cancel != nullptr && cancel->queue >= build_queue_count) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": cancel names no build queue", logical_path));
+    }
+    if (const auto* reveal = std::get_if<RevealAllPayload>(&command.payload);
+        reveal != nullptr && std::none_of(players.begin(), players.end(),
+            [&](const Player& player) { return player.player_id == reveal->player; })) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": reveal recipient is not a declared player", logical_path));
     }
     for (std::size_t index = 0; index < command.units.size(); ++index) {
         if (command.units[index] == invalid_entity_id
@@ -332,27 +407,55 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": attack target is entity ID zero", logical_path));
     }
+    if (const auto* manual = std::get_if<ManualTargetPayload>(&command.payload);
+        manual != nullptr && (manual->target == invalid_entity_id || manual->hardpoint >= 255)) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": manual target requires a nonzero entity and hardpoint below 255", logical_path));
+    }
     if (const auto* damage = std::get_if<DamagePayload>(&command.payload);
         damage != nullptr && damage->amount.raw() < 0) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": damage amount is negative", logical_path));
     }
+    if (const auto* grant = std::get_if<CreditGrantPayload>(&command.payload);
+        grant != nullptr && grant->amount.raw() <= 0) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": credit grant must be positive", logical_path));
+    }
     if (const auto* ability = std::get_if<AbilityPayload>(&command.payload)) {
         const auto kind = static_cast<std::uint8_t>(ability->ability);
         const auto action = static_cast<std::uint8_t>(ability->action);
-        if (kind == 0 || kind > static_cast<std::uint8_t>(AbilityKind::ion_cannon_shot) || action == 0
+        if (kind == 0 || to_string(ability->ability) == "NONE" || action == 0
             || action > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
                 std::string(context) + ": unknown ability or ability action", logical_path));
         }
         // AB-61: only switching ION_CANNON_SHOT on takes a target, and it always does.
-        const bool aims = ability->ability == AbilityKind::ion_cannon_shot && ability->action == AbilityAction::activate;
+        const bool aims = (ability->ability == AbilityKind::ion_cannon_shot
+            || ability->ability == AbilityKind::concentrate_fire || ability->ability == AbilityKind::energy_weapon
+            || ability->ability == AbilityKind::tractor_beam) && ability->action == AbilityAction::activate;
         if (aims != (ability->target != invalid_entity_id)
             || (ability->target == invalid_entity_id && ability->target_hardpoint != 0xffffffffU)) {
             return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
-                std::string(context) + ": an ability target is required exactly when ION_CANNON_SHOT switches on",
+                std::string(context) + ": an ability target is required exactly when a targeted ability switches on",
                 logical_path));
         }
+        const bool positioned = ability->ability == AbilityKind::weaken_enemy && ability->action == AbilityAction::activate;
+        if (positioned != ability->position.has_value())
+            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                std::string(context) + ": a position is required exactly for weaken activation", logical_path));
+        if (ability->position) {
+            constexpr auto limit = std::int64_t{1} << 42; // existing Q24 command coordinate bound
+            for (const auto value : {ability->position->x, ability->position->y, ability->position->z})
+                if (value.raw() < -limit || value.raw() > limit)
+                    return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                        std::string(context) + ": ability position outside the command coordinate bound", logical_path));
+        }
+    }
+    if (const auto* area = std::get_if<AreaAbilityPayload>(&command.payload);
+        area != nullptr && area->ability != AbilityKind::barrage) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": area ability requires BARRAGE", logical_path));
     }
     return core::Result<void>::success();
 }

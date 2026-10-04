@@ -1,4 +1,6 @@
-# FoC ability buttons in the tactical command bar (EAWR-454)
+<a id="foc-ability-buttons-in-the-tactical-command-bar-454"></a>
+
+# FoC ability buttons in the tactical command bar (ability buttons and recharge dials)
 
 ## Applicability
 
@@ -15,7 +17,7 @@ FoC `CommandBarComponents.xml`.
 The remake implements it in `presentation/ui/ability_buttons.hpp` (buttons, card marks, hotkeys,
 clicks), `presentation/ui/hud_shell.hpp` (the button components), the Godot `EawrAbilityButtons`
 control and the viewer's battle input. It is presentation only until the simulation has ability
-state (EAWR-76): see "Interface to the simulation" below.
+state (space ability implementation): see "Interface to the simulation" below.
 
 ## Interface
 
@@ -29,7 +31,10 @@ request for the units of one ability group.
 - AB-01 (ABE-1). Each ability group of the cards (docs/behaviour/foc-unit-cards.md L-5) gets one
   button, `special_button_<first column + last column>`, centred under its border. A group whose
   units have a second ability gets a second button, the next component, and both are shifted 14
-  shell units left.
+  shell units left. A squadron with an authored team container uses that container's
+  ability pair, rather than the purchase squadron's default pair (WHE-63; EHR-104/105).
+  Vader's container authors `REPLENISH_WINGMEN`; the purchase squadron's `HUNT` does not
+  replace it. Readiness and commands still act through the craft that owns the ability.
 - AB-02 (ABE-2). A group with ability none gets no button. A button is hidden when a unit of its
   group has no state for the ability; it is disabled (the `Disabled_Texture_Name` art) when every unit
   of the group has it disabled.
@@ -50,6 +55,8 @@ request for the units of one ability group.
   shrinks it again (debug build: the ability countdown's service and expiration timer, and the card
   update that shows the icon and dial for the countdown's completion). An untimed ability that is on
   (S-foils, `SPOILER_LOCK`) draws no dial. The card's dial (AB-08) reads the same completion.
+  Our final active snapshot retains the expiration duration at zero remaining frames, so its
+  dial reaches zero completion before the next snapshot starts the recharge dial (legacy EAWR-642).
 - AB-06 (ABE-2, ABE-5). When every unit of the group has the ability on autofire, the button's
   upper effect cycles through its `Icon_Alternate_Texture_Name` frames (`sa_ami_outline_00` to `_09`)
   at `Anim_FPS` (5), looping; otherwise it has no upper effect.
@@ -80,19 +87,21 @@ request for the units of one ability group.
   FULL_SALVO Shift+F, DEPLOY_SQUAD Shift+Q, POWER_TO_WEAPONS Ctrl+B, MAXIMUM_FIREPOWER Ctrl+M,
   SPREAD_OUT Ctrl+Z, INVULNERABILITY Alt+], CONCENTRATE_FIRE Alt+; and the land and hero keys.
 
-- AB-11 (EAWR-561). Targeting. A left release (or the hotkey) on a targeted ability's button that
+- AB-11 (ion weapons, energy drain and stun). Targeting. A left release (or the hotkey) on a targeted ability's button that
   would switch it on waits for a target instead of sending the request: the next left click on an
   enemy unit sends it with that unit (a squadron: the craft clicked) and acknowledges it like an
   attack; a left click on empty space or on an own or neutral unit, a right click or Esc cancels
   it and orders nothing. The selection does not change. FoC changes the mouse pointer while it
   waits (its `POINTER_TARGET_SPECIAL_ABILITY_TO_ENEMY_OBJECT` pointers); the remake has no pointer
-  art yet (EAWR-578). The report's `battle_input.ability_bar` counts `targeted` requests and
+  art yet (battle pointer set). The report's `battle_input.ability_bar` counts `targeted` requests and
   `target_cancels`, and says whether one is `targeting`.
 
-## Interface to the simulation (EAWR-76)
+<a id="interface-to-the-simulation-76"></a>
+
+## Interface to the simulation
 
 The buttons read and write abilities only through two interfaces in
-`include/eawr/presentation/ui/ability_buttons.hpp`; EAWR-76 implements them and hands them to
+`include/eawr/presentation/ui/ability_buttons.hpp`; space ability implementation implements them and hands them to
 `BattleInput::set_abilities(state, commands)`.
 
 - `AbilityState::state(unit, ability) -> std::optional<UnitAbilityState>`: for a card unit (a unit,
@@ -103,7 +112,7 @@ The buttons read and write abilities only through two interfaces in
   autofire_off), `ability`, `units` (the group's card units in card order) and `targeted` (an
   activation that first takes a target, AB-09). The simulation decides which units can act.
 
-Since EAWR-76 the live view hands `LiveSessionView::Abilities` to both. It reads the latest snapshot's
+Since space ability implementation the live view hands `LiveSessionView::Abilities` to both. It reads the latest snapshot's
 ability status ([space abilities](space-abilities.md) AB-50; a squadron's container stands for its
 craft). A unit that is on is active; one that recharges shows the least-recharged holder's dial; one
 held by its gate (a depleted shield, lost engines) is disabled; a cut ability (`HUNT`, AB-03) is
@@ -119,7 +128,7 @@ states so they can be looked at; its requests only add a report line.
 
 - The retail look of a cut ability's button (`HUNT`) is its normal one; the remake shows it disabled
   because it cannot act (space-abilities AB-03).
-- The targeting pointer of AB-11 (EAWR-578, battle cursors), the activation and deactivation sounds, the
+- The targeting pointer of AB-11 (battle pointer set, battle cursors), the activation and deactivation sounds, the
   tooltip and the hero and land key bindings are not implemented.
 - Whether FoC's targeting also ends on a click on a friendly unit, or keeps waiting, is not traced;
   the remake cancels (the least visible choice: nothing is ordered).

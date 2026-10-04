@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "eawr/platform/live_session.hpp"
 
 #include "eawr/platform/live_scripts.hpp"
@@ -10,6 +11,7 @@
 #include <deque>
 #include <exception>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -22,43 +24,60 @@ namespace {
 namespace tactical = sim::tactical;
 using Clock = std::chrono::steady_clock;
 
-// TM-02: the wait between two logical frames is 1000 / target whole milliseconds.
-[[nodiscard]] Clock::duration tick_interval(const std::uint32_t target_rate) {
-    const std::uint32_t rate = std::clamp<std::uint32_t>(target_rate, 1U, 1000U);
-    return std::chrono::duration_cast<Clock::duration>(std::chrono::milliseconds(1000U / rate));
-}
-
 } // namespace
+
+std::chrono::milliseconds LiveSession::tick_interval(const std::uint32_t target_rate) noexcept {
+    const std::uint32_t rate = std::clamp<std::uint32_t>(target_rate, 1U, 1000U);
+    return std::chrono::milliseconds(1000U / rate);
+}
 
 LiveEventLog::LiveEventLog(const Bounds bounds) noexcept : bounds_(bounds) {}
 
 bool LiveEventLog::presented(const tactical::Event& event) noexcept {
     return event.kind == tactical::EventKind::unit_destroyed || event.kind == tactical::EventKind::hardpoint_destroyed
         || event.kind == tactical::EventKind::spin_away_started || event.kind == tactical::EventKind::spin_away_ended
-        || event.kind == tactical::EventKind::reinforcement_unloaded;
+        || event.kind == tactical::EventKind::reinforcement_unloaded || event.kind == tactical::EventKind::station_replaced;
 }
 
 bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
-    // #862: a shot fired as a weapon's ability shot (space-abilities AB-66) too, so the view draws
-    // its projectile with that shot's look; ordinary shots and acquisitions stay out.
+    // AB-66/WAD-38: retain override shots so the view associates their projectile look;
+    // ordinary shots and acquisitions stay out.
     return event.kind == tactical::CombatEventKind::projectile_hit
-        || (event.kind == tactical::CombatEventKind::weapon_fired && (event.outcome & tactical::fired_ability_shot) != 0U);
+        || (event.kind == tactical::CombatEventKind::weapon_fired
+            && (event.outcome & (tactical::fired_ability_shot | tactical::fired_barrage_shot)) != 0U);
 }
 
 std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
     return sizeof(LiveTickEvents) + record.events.size() * sizeof(tactical::Event)
-        + record.combat_events.size() * sizeof(tactical::CombatEvent);
+        + record.combat_events.size() * sizeof(tactical::CombatEvent)
+        + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact);
 }
 
-void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot) {
-    LiveTickEvents kept{snapshot.completed_tick(), {}, {}};
+void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std::span<const tactical::AsteroidImpact> asteroid_impacts) {
+    LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}};
+    bool ability_input = false;
     for (const tactical::Event& event : snapshot.events()) {
         if (presented(event)) kept.events.push_back(event);
+        ability_input = ability_input || (event.kind == tactical::EventKind::order_accepted
+            && event.order == tactical::OrderKind::ability);
     }
     for (const tactical::CombatEvent& event : snapshot.combat_events()) {
         if (presented(event)) kept.combat_events.push_back(event);
     }
-    if (!kept.events.empty() || !kept.combat_events.empty()) {
+    // WHE-61/62: a countdown can expire without a combat event. Remember its sparse
+    // presentation frame while the metadata is alive; bomb metadata may vanish on expiry.
+    const auto tick = snapshot.completed_tick();
+    for (const auto& spawn : snapshot.ability_spawns()) {
+        if (spawn.detonated || spawn.due < tick || spawn.due == std::numeric_limits<std::uint64_t>::max()
+            || spawn.due - tick >= bounds_.ticks) continue;
+        const auto due = spawn.due + 1;
+        if (!ability_due_ticks_.contains(due)) ability_due_ticks_.insert(due);
+    }
+    const bool ability_due = ability_due_ticks_.contains(tick);
+    ability_due_ticks_.erase(ability_due_ticks_.begin(), ability_due_ticks_.upper_bound(tick));
+    // WHE-63: accepted instant commands likewise need their frame retained, without
+    // adding an authoritative event or scanning every unit for presentation state.
+    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty()) {
         if (record_bytes(kept) > bounds_.bytes) {
             // Larger than the whole bound: dropped at once, the older ticks kept.
             if (!dropped_from_) dropped_from_ = kept.tick;
@@ -66,6 +85,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot) {
         } else {
             kept.events.shrink_to_fit();
             kept.combat_events.shrink_to_fit();
+            kept.asteroid_impacts.shrink_to_fit();
             bytes_ += record_bytes(kept);
             records_.push_back(std::move(kept));
         }
@@ -113,6 +133,11 @@ public:
             scripted_->set_state_hasher(std::move(hasher));
             // #895: the live tick reads only the world's hash; the script hash is on request.
             scripted_->set_authoritative_hash(false);
+            // #957: the AI step and the Lua service are timed apart (cost phases "ai" and "lua").
+            scripted_->set_step_clock([] {
+                return static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+            });
         }
         options_.event_history = std::max(options_.event_history, options_.history);
         const auto zero = world().snapshot();
@@ -120,6 +145,7 @@ public:
         if (auto fog = capture_fog()) fog_history_.push_front(std::move(fog));
         frame_ = {zero, zero, Clock::now()};
         interval_ = tick_interval(options_.target_rate);
+        paused_ = options_.initially_paused;
         if (options_.pacing == Pacing::driven) target_ = world().completed_tick();
         thread_ = std::thread([this] { run(); });
     }
@@ -260,6 +286,11 @@ public:
     tactical::TacticalReplay record() const {
         const std::lock_guard lock(session_mutex_);
         return scripted_ ? scripted_->record() : session_->record();
+    }
+
+    tactical::ProductionCounts production_counts(const tactical::PlayerId player, const tactical::TypeId type) const {
+        const std::lock_guard lock(session_mutex_);
+        return world().production_counts(player, type);
     }
 
     std::optional<bool> reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
@@ -481,15 +512,27 @@ private:
             } else {
                 rejected_.insert(rejected_.end(), tick.value().diagnostics.begin(), tick.value().diagnostics.end());
                 frame_ = {frame_.latest, tick.value().snapshot, Clock::now()};
+                if (const auto& outcome = tick.value().snapshot->outcome();
+                    outcome && outcome->condition == tactical::VictoryCondition::intentional_quit) {
+                    // WBF-43/48: departure results are immediate. Halt while publishing,
+                    // before another tick can run while presentation catches up.
+                    halt_ = halt_ ? std::min(*halt_, outcome->end_tick) : outcome->end_tick;
+                }
                 history_.push_front(tick.value().snapshot);
                 if (history_.size() > options_.history) history_.pop_back();
                 if (fog) {
                     fog_history_.push_front(std::move(fog));
                     if (fog_history_.size() > options_.history) fog_history_.pop_back();
                 }
-                event_log_.record(*tick.value().snapshot);
+                event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts);
                 // #558: presentation-only wall-clock cost, never read by the simulation.
-                costs_.push_back({tick.value().completed_tick, step_ms + fog_ms, {{"step", step_ms}, {"fog", fog_ms}}});
+                // #957: a scripted tick's AI step and Lua service are their own phases; "step" is the rest.
+                LiveTickCost cost{tick.value().completed_tick, step_ms + fog_ms, {{"step", step_ms}, {"fog", fog_ms}}};
+                if (scripted_) {
+                    cost.phases = {{"step", std::max(0.0, step_ms - ai_ms_ - lua_ms_)}, {"ai", ai_ms_}, {"lua", lua_ms_},
+                        {"fog", fog_ms}};
+                }
+                costs_.push_back(std::move(cost));
                 if (costs_.size() > tick_cost_history) costs_.pop_front();
             }
         }
@@ -507,6 +550,8 @@ private:
         if (!stepped) return core::Result<tactical::TacticalTick>::failure(stepped.error());
         auto& result = stepped.value();
         hashes_.push_back(result.world.state_hash);
+        ai_ms_ = static_cast<double>(result.timing.engine_ns) / 1.0e6;
+        lua_ms_ = static_cast<double>(result.timing.service_ns) / 1.0e6;
         refusals = std::move(result.refused_input);
         for (const auto& routed : result.script_input) {
             if (!routed.submitted) {
@@ -535,6 +580,8 @@ private:
     // Scripted mode: the commands for the next step, submitted by it; the scripts' report.
     std::vector<tactical::PlayerCommand> input_;
     LiveScriptReport script_report_;
+    double ai_ms_{}; // #957: the last scripted step's AI step and Lua service, for the cost phases
+    double lua_ms_{};
     std::set<std::string> seen_diagnostics_;
     Options options_;
     // Guards session_ and hashes_ against record() and tick_hashes() from other threads.
@@ -596,6 +643,7 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
         setup, sensors, durability, motion, fog, combat, victory, abilities, economy);
     if (!session) return StartResult::failure(session.error());
     if (options.scripts && options.scripts->wrap) {
+        core::load_profile::Scope lua_scope(core::load_profile::Phase::lua);
         auto scripted = options.scripts->wrap(std::move(session).value());
         if (!scripted) return StartResult::failure(scripted.error());
         return StartResult::success(std::unique_ptr<LiveSession>(new LiveSession(std::make_unique<Impl>(std::nullopt,
@@ -644,6 +692,10 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
 std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
     const sim::math::Vec3& point) const { return impl_->reinforcement_point(player, type, point); }
+
+tactical::ProductionCounts LiveSession::production_counts(const tactical::PlayerId player, const tactical::TypeId type) const {
+    return impl_->production_counts(player, type);
+}
 std::shared_ptr<const tactical::TacticalSnapshot> LiveSession::snapshot_at(const std::uint64_t tick) const {
     return impl_->snapshot_at(tick);
 }

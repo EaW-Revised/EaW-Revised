@@ -77,7 +77,8 @@ struct Object final {
 };
 
 [[nodiscard]] std::optional<Object> resolve(const data::Catalog& catalog, std::string_view id,
-                                            std::string_view owner, std::string_view field, Report& report);
+                                            data::Category category, std::string_view owner,
+                                            std::string_view field, Report& report);
 
 // Bone-name lookup, ASCII case-insensitive, first match in bone order.
 [[nodiscard]] std::optional<std::size_t> bone_index(const assets::Model& model, std::string_view bone);

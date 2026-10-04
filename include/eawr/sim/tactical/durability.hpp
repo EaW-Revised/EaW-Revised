@@ -53,6 +53,10 @@ struct DamageRules {
     // Zero frames: no unit has a pool, as before #361.
     std::uint32_t energy_recharge_frames{};
     math::Fixed energy_to_shield{};
+    math::Fixed asteroid_damage{}; // WHZ-11/12: raw damage and probability per serviced logical frame
+    math::Fixed asteroid_rate{};
+    std::uint32_t asteroid_damage_type{no_type_index}; // ordinary Damage_Default armor route
+    math::Fixed ion_storm_disable_seconds{}; // WHZ-31, Ion_Storm_Shield_Disable_Time
     friend bool operator==(const DamageRules&, const DamageRules&) = default;
 };
 
@@ -138,11 +142,20 @@ struct DurabilityState {
     math::Fixed energy{};
     std::uint64_t next_shield_frame{};
     std::uint64_t next_energy_frame{};
+    // WPR-52: disabled is independent of health (a restored hardpoint has 0.1 health).
+    std::vector<bool> disabled;
+    std::vector<std::vector<PlayerId>> repairing_players;
+    std::optional<std::uint64_t> engines_disabled_until{}; // EN-08; independent of engine hardpoint health
+    std::optional<std::uint64_t> ion_storm_contact{};
     friend bool operator==(const DurabilityState&, const DurabilityState&) = default;
 };
 
 // Every unit starts at full hull, hardpoint health, shield and energy (HD-01, DG-13, EN-01).
 [[nodiscard]] DurabilityState full_durability(const DurabilityProfile& profile);
+
+// WPR-52 step 2: carry repairing/disabled hardpoints by index into a full new station.
+void carry_station_hardpoints(const DurabilityProfile& previous_profile, const DurabilityState& previous,
+    DurabilityState& replacement);
 
 // Presentation state of one hardpoint (the #136 hook): destroyed at zero health, damaged while
 // alive below damaged_fraction of its maximum, intact otherwise. A hardpoint that is not
@@ -151,6 +164,7 @@ enum class HardpointState : std::uint8_t { intact = 0, damaged = 1, destroyed = 
 
 [[nodiscard]] bool hardpoint_destroyed(
     const DurabilityProfile& profile, const DurabilityState& state, std::size_t index) noexcept;
+[[nodiscard]] bool hardpoint_disabled(const DurabilityState& state, std::size_t index) noexcept;
 [[nodiscard]] HardpointState hardpoint_state(const DurabilityProfile& profile, const DurabilityRules& rules,
     const DurabilityState& state, std::size_t index) noexcept;
 
@@ -162,6 +176,9 @@ enum class HardpointState : std::uint8_t { intact = 0, damaged = 1, destroyed = 
 [[nodiscard]] bool weapon_enabled(
     const DurabilityProfile& profile, const DurabilityState& state, std::size_t index) noexcept;
 [[nodiscard]] bool engines_online(const DurabilityProfile& profile, const DurabilityState& state) noexcept;
+// EN-08: repeated drains keep the later deadline; permanent engine loss is never restored.
+void disable_engines(DurabilityState& state, std::uint32_t frames, std::uint64_t frame) noexcept;
+[[nodiscard]] bool service_disabled_engines(DurabilityState& state, std::uint64_t frame) noexcept;
 [[nodiscard]] bool shields_online(const DurabilityProfile& profile, const DurabilityState& state) noexcept;
 [[nodiscard]] bool launch_ready(const DurabilityProfile& profile, const DurabilityState& state) noexcept;
 // 1 while the engines are online, Engines_Disabled_Speed_Modifier afterwards.

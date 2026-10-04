@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "asset_internal.hpp"
 
 #include <algorithm>
@@ -257,6 +258,7 @@ core::Result<Model> load_model(const std::span<const std::byte> bytes, Source so
 }
 
 core::Result<Model> load_model(const vfs::Vfs& filesystem, const std::string_view path) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::model);
     auto record=filesystem.stat(path);if(!record)return core::Result<Model>::failure(record.error());auto bytes=filesystem.open(path);if(!bytes)return core::Result<Model>::failure(bytes.error());return load_model(bytes.value(),source_from(record.value()));
 }
 } // namespace eawr::assets

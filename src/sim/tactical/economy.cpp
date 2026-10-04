@@ -92,6 +92,12 @@ const IncomeProfile* EconomyRules::stream(const TypeId source) const noexcept {
     return found != income.end() && found->source == source ? &*found : nullptr;
 }
 
+const PadSaleProfile* EconomyRules::pad_sale(const TypeId type) const noexcept {
+    const auto found = std::lower_bound(pad_sales.begin(), pad_sales.end(), type,
+        [](const PadSaleProfile& entry, const TypeId value) { return entry.type < value; });
+    return found != pad_sales.end() && found->type == type ? &*found : nullptr;
+}
+
 const PreventionProfile* EconomyRules::prevention_of(const TypeId type) const noexcept {
     const auto found = std::lower_bound(prevention.begin(), prevention.end(), type,
         [](const PreventionProfile& entry, const TypeId value) { return entry.type < value; });
@@ -104,8 +110,64 @@ const FootprintProfile* EconomyRules::footprint_of(const TypeId type) const noex
     return found != footprints.end() && found->type == type ? &*found : nullptr;
 }
 
+const UpgradeProfile* EconomyRules::upgrade(const TypeId type) const noexcept {
+    const auto found = std::lower_bound(upgrades.begin(), upgrades.end(), type,
+        [](const UpgradeProfile& entry, const TypeId value) { return entry.type < value; });
+    return found != upgrades.end() && found->type == type ? &*found : nullptr;
+}
+
 core::Result<void> validate_economy(const EconomyRules& rules, const std::span<const Player> players) {
+    for (std::size_t index = 0; index < rules.command_bonuses.size(); ++index) {
+        const auto& profile = rules.command_bonuses[index];
+        if (profile.type == 0 || (index != 0 && std::pair{rules.command_bonuses[index - 1].type,
+            rules.command_bonuses[index - 1].slot} >= std::pair{profile.type, profile.slot}))
+            return invalid("command sources must be nonzero and strictly increasing");
+        const auto& targets = profile.bonus.applicable;
+        if (!std::is_sorted(targets.begin(), targets.end()) || std::adjacent_find(targets.begin(), targets.end()) != targets.end())
+            return invalid("command recipients must be strictly increasing");
+        for (const auto value : profile.bonus.percentages)
+            if (value.raw() < -8 * math::Fixed::scale || value.raw() > 8 * math::Fixed::scale)
+                return invalid("command bonus outside supported bounds");
+    }
+    for (std::size_t index = 0; index < rules.heroes.size(); ++index) {
+        const auto& hero = rules.heroes[index];
+        if (hero.purchase == 0 || hero.deployed == 0 || (index != 0 && rules.heroes[index - 1].purchase >= hero.purchase))
+            return invalid("hero purchases must be nonzero and strictly increasing");
+        for (const auto& rider : hero.riders)
+            if (rider.type == 0 || (!rider.named && !rider.generic)) return invalid("carried object must have a hero identity");
+    }
+    if (!std::is_sorted(rules.disabled_types.begin(), rules.disabled_types.end()) ||
+        std::adjacent_find(rules.disabled_types.begin(), rules.disabled_types.end()) != rules.disabled_types.end()) {
+        return invalid("disabled types are not strictly increasing");
+    }
     const auto amount = [](const math::Fixed value) { return value.raw() >= 0 && value.raw() <= max_credits_raw; };
+    if (!rules.pads.capture.empty()) {
+        if (std::none_of(players.begin(), players.end(), [&](const Player& player) { return player.player_id == rules.pads.neutral; })) {
+            return invalid("capture requires a declared neutral player");
+        }
+        for (std::size_t index = 0; index < rules.pads.capture.size(); ++index) {
+            const auto& point = rules.pads.capture[index];
+            if ((index != 0 && point.type <= rules.pads.capture[index - 1].type)
+                || point.radius.raw() < 0 || point.radius.raw() > max_motion_coordinate * math::Fixed::scale
+                || point.transition_seconds.raw() < 0 || point.transition_seconds.raw() > 86400 * math::Fixed::scale
+                || !std::is_sorted(point.affiliation.begin(), point.affiliation.end())) return invalid("invalid capture profile");
+        }
+    }
+    for (std::size_t index = 0; index < rules.pads.construction.size(); ++index) {
+        const auto& child = rules.pads.construction[index];
+        if ((index != 0 && child.type <= rules.pads.construction[index - 1].type)
+            || child.constructed == 0 || child.seconds == 0 || child.ai_seconds == 0
+            || child.seconds > 86400 || child.ai_seconds > 86400 || !amount(child.price)) return invalid("invalid construction profile");
+    }
+    for (std::size_t index = 1; index < rules.pads.influence.size(); ++index) {
+        if (rules.pads.influence[index].type <= rules.pads.influence[index - 1].type) return invalid("capture influence is not ordered");
+    }
+    for (std::size_t index = 0; index < rules.pads.respawn.size(); ++index) {
+        const auto& profile = rules.pads.respawn[index];
+        if (profile.frames > 86400U * 30U || (index != 0 && profile.type <= rules.pads.respawn[index - 1].type)) {
+            return invalid("invalid tactical respawn profile");
+        }
+    }
     for (std::size_t index = 0; index < rules.players.size(); ++index) {
         const auto& entry = rules.players[index];
         if (index != 0 && entry.player <= rules.players[index - 1].player) return invalid("players are not strictly increasing");
@@ -113,6 +175,7 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
             return invalid("player " + std::to_string(entry.player) + " is not declared");
         }
         if (!amount(entry.credits)) return invalid("player " + std::to_string(entry.player) + " credits out of range");
+        if (entry.start_tech > entry.max_tech) return invalid("starting tech exceeds maximum");
     }
     for (std::size_t index = 0; index < rules.menus.size(); ++index) {
         const auto& menu = rules.menus[index];
@@ -122,13 +185,20 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
         }
         for (const auto& option : menu.options) {
             if (!amount(option.price)) return invalid("a price is out of range");
-            if (option.available && (option.price.raw() <= 0 || option.build_frames == 0 || option.ai_build_frames == 0)) {
+            if (option.available && ((option.price.raw() == 0 && option.kind != BuildKind::structure)
+                || option.build_frames == 0 || option.ai_build_frames == 0)) {
                 return invalid("an available option has no price or build time");
             }
             if (static_cast<std::uint32_t>(option.queue) >= build_queue_count) return invalid("an option names no queue");
             if (static_cast<std::uint32_t>(option.kind) > static_cast<std::uint32_t>(BuildKind::structure)) {
                 return invalid("an option names no build kind");
             }
+        }
+    }
+    for (std::size_t index = 0; index < rules.pad_sales.size(); ++index) {
+        const auto& sale = rules.pad_sales[index];
+        if (sale.type == 0 || (index != 0 && sale.type <= rules.pad_sales[index - 1].type)) {
+            return invalid("pad sale types are not strictly increasing");
         }
     }
     for (std::size_t index = 0; index < rules.income.size(); ++index) {
@@ -162,6 +232,27 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
         }
     }
     if (rules.max_queue == 0) return invalid("the queue length is zero");
+    for (std::size_t index = 0; index < rules.upgrades.size(); ++index) {
+        const auto& upgrade = rules.upgrades[index];
+        if (upgrade.type == 0 || (index != 0 && rules.upgrades[index - 1].type >= upgrade.type)) {
+            return invalid("upgrade types are not strictly increasing and nonzero");
+        }
+        for (const auto& modifier : upgrade.income_modifiers) {
+            const auto* stream = rules.stream(modifier.target_source);
+            if (stream == nullptr || !amount(stream->base_value) || stream->interval_seconds.raw() <= 0) {
+                return invalid("an income modifier requires an authored target stream value and interval");
+            }
+        }
+        for (const auto& bonus : upgrade.bonuses) {
+            if (!std::is_sorted(bonus.applicable.begin(), bonus.applicable.end())
+                || std::adjacent_find(bonus.applicable.begin(), bonus.applicable.end()) != bonus.applicable.end()) {
+                return invalid("upgrade targets are not strictly increasing");
+            }
+            for (const auto value : bonus.percentages) {
+                if (value.raw() < 0 || value.raw() > 8 * math::Fixed::scale) return invalid("upgrade bonus outside supported bounds");
+            }
+        }
+    }
     if (rules.collision_distance.raw() < 0 || rules.collision_distance.raw() > max_motion_coordinate * math::Fixed::scale) {
         return invalid("the reinforcement collision distance is out of range");
     }
@@ -177,6 +268,9 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
 
 RejectReason queue_build(PlayerEconomy& state, const EconomyPlayer& player, const EconomyRules& rules,
     const BuildOption& option, const EntityId station, const std::uint64_t frame) {
+    if (!option.available || rules.disabled_types.contains(option.type)) {
+        return RejectReason::cannot_produce;
+    }
     auto& queue = state.queues[static_cast<std::size_t>(option.queue)];
     if (!player.ai && queue.size() >= rules.max_queue) return RejectReason::queue_full;
     if (state.credits < option.price) return RejectReason::insufficient_credits;
@@ -232,6 +326,62 @@ core::Result<math::Vec3> planar_direction(const math::Fixed yaw_degrees) {
     const auto turns = math::divide(yaw_degrees, math::Fixed::from_raw(360 * math::Fixed::scale));
     if (!turns) return core::Result<math::Vec3>::failure(turns.error());
     return core::Result<math::Vec3>::success(math::Vec3{math::cos_turn(turns.value()), math::sin_turn(turns.value()), {}});
+}
+
+std::vector<IncomeCategory> initial_income_categories(const EconomyRules& rules, const std::size_t partitions) {
+    std::vector<std::uint32_t> keys;
+    for (const auto& upgrade : rules.upgrades) {
+        for (const auto& modifier : upgrade.income_modifiers) keys.push_back(modifier.stacking_category);
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    std::vector<IncomeCategory> result;
+    result.reserve(partitions * keys.size());
+    for (std::size_t partition = 0; partition < partitions; ++partition) {
+        for (const auto category : keys) result.push_back({category, {}});
+    }
+    return result;
+}
+
+void reduce_income_modifier(const IncomeModifier& modifier, const std::span<IncomeCategory> categories) {
+    const auto found = std::lower_bound(categories.begin(), categories.end(), modifier.stacking_category,
+        [](const IncomeCategory& entry, const std::uint32_t category) { return entry.category < category; });
+    if (found == categories.end() || found->category != modifier.stacking_category) return;
+    const std::array values{modifier.percentage, modifier.additive, modifier.interval_percentage};
+    for (std::size_t slot = 0; slot < values.size(); ++slot) {
+        if (values[slot].raw() == 0) continue;
+        auto& winner = found->winners[slot];
+        if (!winner || values[slot] > *winner) winner = values[slot];
+    }
+}
+
+core::Result<math::Fixed> modified_income_per_frame(const math::Fixed base_value,
+    const math::Fixed base_interval, const std::span<const IncomeCategory> categories) {
+    using Result = core::Result<math::Fixed>;
+    std::array<math::Fixed, 3> totals{};
+    for (const auto& category : categories) {
+        for (std::size_t slot = 0; slot < totals.size(); ++slot) {
+            if (!category.winners[slot]) continue;
+            const auto sum = math::add(totals[slot], *category.winners[slot]);
+            if (!sum) return Result::failure(sum.error());
+            totals[slot] = sum.value();
+        }
+    }
+    const auto one = math::Fixed::from_raw(math::Fixed::scale);
+    const auto percentage_factor = math::add(one, totals[0]);
+    const auto interval_factor = math::add(one, totals[2]);
+    if (!percentage_factor || !interval_factor) return Result::failure(
+        !percentage_factor ? percentage_factor.error() : interval_factor.error());
+    const auto scaled_value = math::multiply(base_value, percentage_factor.value());
+    const auto scaled_interval = math::multiply(base_interval, interval_factor.value());
+    if (!scaled_value || !scaled_interval) return Result::failure(
+        !scaled_value ? scaled_value.error() : scaled_interval.error());
+    const auto value = math::add(scaled_value.value(), totals[1]);
+    if (!value) return Result::failure(value.error());
+    const auto frames = math::multiply(std::max(one, scaled_interval.value()),
+        math::Fixed::from_raw(30 * math::Fixed::scale));
+    if (!frames) return Result::failure(frames.error());
+    return math::divide(value.value(), frames.value());
 }
 
 } // namespace eawr::sim::tactical

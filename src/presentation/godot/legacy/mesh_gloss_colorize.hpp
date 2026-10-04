@@ -39,6 +39,7 @@ uniform vec3 eawr_emissive = vec3(0.0);
 uniform vec3 eawr_diffuse = vec3(1.0);
 uniform vec3 eawr_specular = vec3(1.0);
 uniform vec3 eawr_colorization = vec3(0.0, 1.0, 0.0);
+instance uniform vec4 eawr_unit_colorization = vec4(0.0, 0.0, 0.0, -1.0);
 uniform mat4 eawr_sph_r;
 uniform mat4 eawr_sph_g;
 uniform mat4 eawr_sph_b;
@@ -88,7 +89,9 @@ void fragment() {
     // MeshGloss adapter's texture alpha.
     float gloss = texture(GlossTexture, UV).r;
     vec3 base_linear_rgb = eawr_srgb_to_linear(base_sample.rgb);
-    vec3 surface = mix(base_linear_rgb, eawr_colorization * base_linear_rgb, base_sample.a);
+    vec3 colorization = eawr_unit_colorization.a < 0.0 ? eawr_colorization
+        : eawr_srgb_to_linear(eawr_unit_colorization.rgb);
+    vec3 surface = mix(base_linear_rgb, colorization * base_linear_rgb, base_sample.a);
     vec3 eawr_linear_rgb = 2.0 * eawr_vertex_diffuse.rgb * surface + eawr_vertex_specular * gloss;
     ALBEDO = eawr_linear_to_srgb(eawr_linear_rgb);
 }

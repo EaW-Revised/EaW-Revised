@@ -118,6 +118,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         "${EAWR_ROOT}/src/presentation/animation/animation.cpp"
         "${EAWR_ROOT}/src/presentation/animation/shot_readiness.cpp")
     add_executable(animation_shot_readiness_probe shot_readiness_probe.cpp
+    shot_readiness_cases.cpp
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
         "${EAWR_ROOT}/src/core/sha256.cpp"
         "${EAWR_ROOT}/src/vfs/vfs.cpp"
@@ -251,7 +252,8 @@ else()
     add_executable(animation_deformation_probe_tests deformation_probe_tests.cpp)
     add_executable(animation_deformation_probe deformation_probe.cpp)
     add_executable(animation_shot_readiness_tests shot_readiness_tests.cpp)
-    add_executable(animation_shot_readiness_probe shot_readiness_probe.cpp)
+    add_executable(animation_shot_readiness_probe shot_readiness_probe.cpp
+    shot_readiness_cases.cpp)
     add_executable(animation_corpus_source_versions_tests corpus_source_versions_tests.cpp)
     add_executable(animation_corpus_source_versions corpus_source_versions.cpp)
     add_executable(animation_corpus_structural_discovery_tests corpus_structural_discovery_tests.cpp)
@@ -290,6 +292,7 @@ if(TARGET animation_corpus_declarations)
         "tests/presentation/animation/corpus_declarations.cpp"
         "tests/presentation/animation/corpus_declarations.hpp"
         "tests/presentation/animation/corpus_declarations_land.hpp"
+        "tests/presentation/animation/corpus_declarations_land_checks.hpp"
         "tests/presentation/animation/corpus_declarations_other.hpp"
         "tests/presentation/animation/corpus_declarations_space.hpp"
         "tests/presentation/animation/corpus_declaration_pairs.tsv"
@@ -337,6 +340,7 @@ if(TARGET animation_corpus_structural_declaration)
         "tests/presentation/animation/corpus_structural_declaration.hpp"
         "tests/presentation/animation/corpus_declarations.hpp"
         "tests/presentation/animation/corpus_declarations_land.hpp"
+        "tests/presentation/animation/corpus_declarations_land_checks.hpp"
         "tests/presentation/animation/corpus_declarations_other.hpp"
         "tests/presentation/animation/corpus_declarations_space.hpp"
         "tests/presentation/animation/corpus_associations.hpp"

@@ -36,7 +36,7 @@ else:
 ROOT = Path(__file__).resolve().parents[2]
 # The load trace (data/tag_trace.hpp) covers the headless M2 start: the unit tables and the skirmish start.
 TRACED_PARSE = ("src/units/", "src/skirmish/")
-LOADER_FILES = ("src/units/unit_tables.cpp", "src/data/", "src/vfs/")
+LOADER_FILES = ("src/units/unit_tables", "src/data/", "src/vfs/")
 
 # The unit tables loader (src/units/unit_tables.cpp) reads one object per definition and fills these records; a
 # sink's first identifier says which classes a parse site serves.
@@ -105,29 +105,29 @@ OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("spaceprop", "scale_factor"): {**applied("src/units/unit_motion.cpp#scale_factor",
                                               note="the map-object footprint loader reads it under an unrecorded trace"),
                                     "trace": "unrecorded"},
-    ("*", "projectile_types_override"): applied("src/units/unit_tables.cpp#Projectile_Types_Override",
+    ("*", "projectile_types_override"): applied("src/units/unit_tables_profiles.cpp#Projectile_Types_Override",
                                                 note="a team ability's projectile list, read by load_team"),
-    ("*", "sfxevent_gui_unit_ability_activated"): applied("apps/viewer/src/battle_audio.cpp#ability_voices"),
-    ("*", "sfxevent_gui_unit_ability_deactivated"): applied("apps/viewer/src/battle_audio.cpp#ability_voices"),
+    ("*", "sfxevent_gui_unit_ability_activated"): applied("apps/viewer/src/battle_audio_prepare.cpp#ability_voices"),
+    ("*", "sfxevent_gui_unit_ability_deactivated"): applied("apps/viewer/src/battle_audio_prepare.cpp#ability_voices"),
     ("*", "variant_of_existing_type"): applied("src/data/xml_merge.cpp#Variant_Of_Existing_Type",
                                                rules=["R-08", "R-11"]),
-    ("*", "music_event_list_battle"): applied("apps/viewer/src/battle_audio.cpp#battle"),
-    ("*", "sfxevent_gui_enemy_toggle_non_hero_ability_off"): applied("apps/viewer/src/battle_audio.cpp#Toggle"),
-    ("*", "sfxevent_gui_enemy_toggle_non_hero_ability_on"): applied("apps/viewer/src/battle_audio.cpp#Toggle"),
-    ("*", "sfxevent_gui_toggle_non_hero_ability_off"): applied("apps/viewer/src/battle_audio.cpp#Toggle"),
+    ("*", "music_event_list_battle"): applied("apps/viewer/src/battle_audio_prepare.cpp#battle"),
+    ("*", "sfxevent_gui_enemy_toggle_non_hero_ability_off"): applied("apps/viewer/src/battle_audio_events.cpp#Toggle"),
+    ("*", "sfxevent_gui_enemy_toggle_non_hero_ability_on"): applied("apps/viewer/src/battle_audio_events.cpp#Toggle"),
+    ("*", "sfxevent_gui_toggle_non_hero_ability_off"): applied("apps/viewer/src/battle_audio_events.cpp#Toggle"),
     ("*", "space_skirmish_ai_default_forces"): applied("src/skirmish/inputs.cpp#Space_Skirmish_AI_Default_Forces"),
     ("*", "marker_for_specific_object_type"): applied("src/skirmish/inputs.cpp#Marker_For_Specific_Object_Type"),
     ("functionset", "function"): applied("src/script/foc/ai_data.cpp#GoalFunction"),
     ("functionset", "goal"): applied("src/script/foc/ai_data.cpp#GoalFunction"),
     ("aiplayertype", "goalproposalfunctionsets"): applied("src/script/foc/ai_data.cpp#function_sets"),
     ("aiplayertype", "space"): applied("src/script/foc/ai_data.cpp#space_templates"),
-    ("aiplayertype", "normal"): applied("src/script/foc/ai_engine.cpp#difficulty"),
+    ("aiplayertype", "normal"): applied("src/script/foc/ai_service.cpp#difficulty"),
     ("aiplayertype", "easy"): todo("only the Normal difficulty adjustments are read (walk 6 G-07)", 735, "ai"),
     ("aiplayertype", "hard"): todo("only the Normal difficulty adjustments are read (walk 6 G-07)", 735, "ai"),
     ("goals", "aigoalapplicationflags"): applied("src/script/foc/ai_data.cpp#AIGoalApplicationFlags"),
     ("gameconstants", "damage_to_armor_mod"): applied("src/units/unit_support.cpp#damage_to_armor"),
     ("gameconstants", "auto_rotate_for_space_targeting"): todo(
-        "loaded into the combat constants, never read; the sim hard-codes FoC's false (src/sim/tactical/combat.cpp)", 844),
+        "loaded into the combat constants, never read; the sim hard-codes FoC's false (src/sim/tactical/combat_algorithms.hpp)", 844),
     ("gameconstants", "bombing_run_reduction_per_squadron_percent"): todo(
         "loaded into the combat constants, never read; 0 in the shipped data", 844),
     ("gameconstants", "hardpoint_recharge_cutoff_for_opportunity_fire"): todo(
@@ -140,21 +140,41 @@ OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("gameconstants", "win_lose_message_font_size"): applied("src/presentation/ui/battle_messages.cpp#fallback"),
     ("tacticalcamera", "space_tactical_camera_locked"): todo(
         "the camera constants loader rejects an override of it; nothing applies the value", 653),
-    ("*", "death_fade_time"): applied("apps/viewer/src/live_session_view.cpp#seconds_tag"),
-    ("*", "death_persistence_duration"): applied("apps/viewer/src/live_session_view.cpp#seconds_tag"),
-    ("*", "specific_death_anim_type"): applied("apps/viewer/src/live_session_view.cpp#death_anim_type"),
-    ("hardpoint", "death_explosion_particles"): applied("apps/viewer/src/battle_effects.cpp#hardpoint_explosions"),
-    ("hardpoint", "fire_inaccuracy_distance"): applied("src/units/unit_tables.cpp#inaccuracy"),
+    ("*", "death_fade_time"): applied("apps/viewer/src/live_session_death.cpp#seconds_tag"),
+    ("*", "death_persistence_duration"): applied("apps/viewer/src/live_session_death.cpp#seconds_tag"),
+    ("*", "specific_death_anim_type"): applied("apps/viewer/src/live_session_death.cpp#death_anim_type"),
+    ("hardpoint", "death_explosion_particles"): applied("apps/viewer/src/battle_effects_prepare.cpp#hardpoint_explosions"),
+    ("hardpoint", "fire_inaccuracy_distance"): applied("src/units/unit_tables_decode.cpp#inaccuracy"),
     **{(unit_class, "fire_inaccuracy_distance"): {"status": "foc-ignores", "evidence": "DG-24", "area": "combat"}
        for unit_class in ("spacebuildable", "spaceunit", "specialstructure", "transportunit", "uniqueunit")},
     ("lensflares", "radius"): todo("no loader reads it (the scan's match is an unrelated particle property)", 653),
     ("lightsource", "radius"): todo("no loader reads it (the scan's match is an unrelated particle property)", 653),
     ("lightningeffect", "radius"): todo("no loader reads it (the scan's match is an unrelated particle property)", 653),
     ("projectile", "categorymask"): todo("the projectile loader does not read it", 650),
-    ("*", "projectile_sfxevent_detonate"): applied("apps/viewer/src/battle_audio.cpp#detonate"),
-    ("*", "projectile_sfxevent_detonate_reduced_by_armor"): applied("apps/viewer/src/battle_audio.cpp#detonate_armor"),
+    **{(unit_class, "collidable_by_projectile_living"): {
+        "status": "partial", "basis": "reviewed", "area": "combat", "ticket": 649,
+        "applied": [{"code": "src/sim/tactical/blast.cpp#living_projectile_collision",
+                     "rules": ["WAD-14"], "types": ["craft", "ship", "station"]}],
+        "missing_types": ["objects outside the simulated unit closure"],
+        "note": "Every loaded tactical unit reads and applies the flag; unsimulated map props and projectile objects remain outside unit combat profiles"}
+        for unit_class in ("genericherounit", "herounit", "marker", "miscobject", "mobile_defense_unit",
+            "projectile", "spaceprop", "spaceunit", "starbase", "transportunit", "uniqueunit",
+            "secondarystructure", "spacebuildable", "specialstructure")},
+    ("spacestructure", "collidable_by_projectile_living"): todo(
+        "WAD-14: map-only space structures are outside the simulated tactical unit closure", 649),
+    **{("projectile", tag): applied("src/sim/tactical/blast.cpp#" + location,
+        rules=rules, note="WAD blast service with a temporary secondary hull route; positive distance delay is U-04 project policy")
+        for tag, location, rules in (
+            ("projectile_blast_area_damage", "primary_damage", ["WAD-01", "WAD-02"]),
+            ("projectile_blast_area_range", "prepare_blast", ["WAD-01", "WAD-10", "WAD-12"]),
+            ("projectile_blast_area_dropoff", "blast_factor", ["WAD-15", "WAD-16"]),
+            ("projectile_blast_area_dropoff_tiers", "blast_factor", ["WAD-16"]),
+            ("projectile_blast_area_immune_faction", "immune_faction", ["WAD-09"]),
+            ("max_secs_for_ae_delayed_damage", "max_delay", ["WAD-17"]))},
+    ("*", "projectile_sfxevent_detonate"): applied("apps/viewer/src/battle_audio_prepare.cpp#detonate"),
+    ("*", "projectile_sfxevent_detonate_reduced_by_armor"): applied("apps/viewer/src/battle_audio_prepare.cpp#detonate_armor"),
     ("sfxevent", "use_preset"): applied("src/presentation/audio/sfx.cpp#Use_Preset"),
-    ("*", "fires_forward"): applied("src/units/unit_tables.cpp#cone_width_degrees"),
+    ("*", "fires_forward"): applied("src/units/unit_tables_profiles.cpp#cone_width_degrees"),
     ("enumdefinition", "*"): applied("src/units/unit_support.cpp#enum_number"),
     ("priority_set", "attack_priorities"): applied("src/units/unit_priority.cpp#attack_priorities"),
     ("priority_set", "unit_exclusions"): applied("src/units/unit_priority.cpp#unit_exclusions"),
@@ -288,8 +308,18 @@ FILE_CLASSES: dict[str, set[str]] = {
                                    "difficulty_adjustment", "gameconstants"},
     "src/script/foc/ai_perception.cpp": set(),
     "src/script/foc/tactical_ai.cpp": set(),
+    "src/script/foc/tactical_ai_bindings.cpp": set(),
+    "src/script/foc/tactical_ai_orders.cpp": set(),
+    "src/script/foc/tactical_ai_loading.cpp": set(),
     "apps/viewer/src/ui_gallery_mode.cpp": set(),
+    "apps/viewer/src/ui_gallery_controls.cpp": set(),
+    "apps/viewer/src/ui_gallery_report.cpp": set(),
+    "apps/viewer/src/ui_gallery_internal.hpp": set(),
     "apps/viewer/src/camera_binding_config.cpp": set(),
+    "apps/viewer/src/camera_binding_tokens.cpp": set(),
+    "apps/viewer/src/camera_binding_values.cpp": set(),
+    "apps/viewer/src/camera_binding_table.cpp": set(),
+    "apps/viewer/src/camera_binding_config_internal.hpp": set(),
 }
 
 
@@ -317,7 +347,7 @@ def site_serves(site: dict[str, Any], object_class: str) -> bool:
             return ascii_fold(object_class) in classes
     if ascii_fold(object_class) in ISOLATED:
         return False
-    if site["file"] != "src/units/unit_tables.cpp" or not site.get("sink"):
+    if not site["file"].startswith("src/units/unit_tables") or not site.get("sink"):
         return True
     root = re.split(r"\.|->", site["sink"])[0]
     classes = SINK_ROOT_CLASSES.get(root)
@@ -443,7 +473,7 @@ class Builder:
             best = max(applying, key=lambda s: (bool(s.get("uses")), s.get("use_lines", s.get("local_uses", 0))))
             entry.update(self.applied_entry(best_use(best), leaf))
             entry["applied"][0]["types"] = []
-            if folded_class == "spaceprop" and best["file"] == "src/units/unit_tables.cpp":
+            if folded_class == "spaceprop" and best["file"].startswith("src/units/unit_tables"):
                 entry["trace"] = "unrecorded"  # map objects load through the obstacle loader, off the trace
             return entry
         if sites and any(v is None for _s, v in verdicts):

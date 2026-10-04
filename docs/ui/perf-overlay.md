@@ -1,6 +1,6 @@
 # Performance overlay
 
-A dev tool of the production viewer (EAWR-558): FPS, the frame-time graph and the simulation's cost per
+A dev tool of the production viewer: FPS, the frame-time graph and the simulation's cost per
 tick, drawn over the view. It is not part of FoC's look; clarity comes first. It is presentation only:
 it reads wall-clock timers, never a command, a snapshot, the replay or a hash, so a run with it shows
 the same tick hashes as a run without it.
@@ -39,7 +39,7 @@ face from the font cache (the engine font without one).
 `platform::LiveSession` times each tick on the simulation thread (`LiveTickCost`: a total and named
 `LivePhaseCost` parts) and keeps the newest 4096 ticks; `tick_costs_after(tick)` hands them out under the
 session's existing lock. The overlay takes whatever phases a tick carries, so another sim phase timing
-(for example the order tick's path work of EAWR-520) appears by appending a `LivePhaseCost` to the tick it
+(for example the order tick's path-search work) appears by appending a `LivePhaseCost` to the tick it
 belongs to; nothing in the overlay names a phase. The timers sit beside `TacticalSession::step`, never
 inside it.
 

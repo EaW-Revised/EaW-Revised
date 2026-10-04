@@ -1,4 +1,5 @@
 #pragma once
+#include <utility>
 
 #include "map_camera.hpp"
 
@@ -30,6 +31,7 @@ namespace eawr::presentation::godot_backend {
 
 class FogMode;
 class GodotRenderer;
+class GodotShaderCache;
 
 // #32 hook for the populated space scene. The default environment view calls
 // it once, after its own uploads and before the first frame. The hook uploads
@@ -118,6 +120,7 @@ public:
         bool semantic_complete{};
         std::string profile;
         std::vector<std::string> layers;
+        std::shared_ptr<GodotShaderCache> shaders;
         std::filesystem::path report_path;
         std::filesystem::path capture_path;
         std::uint32_t warmup_frames{30};
@@ -208,6 +211,7 @@ public:
     // interactive space map camera moves), the tactical overview key, and the
     // overview level ("off", "overview", "map" or "unavailable").
     [[nodiscard]] std::optional<presentation::camera::TacticalFrame> live_camera_frame() const;
+    [[nodiscard]] std::pair<bool, bool> live_camera_pointer_mode(bool ctrl) const;
     void live_camera_focus(float source_x, float source_y);
     // #455: the space map camera's target bounds (source X/Y), which the minimap spans; nothing
     // without the populated view's map camera.

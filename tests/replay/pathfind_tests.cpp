@@ -508,7 +508,9 @@ void test_session() {
         recorder.calls.clear();
         expect(static_cast<bool>(session.step(recorder)), "phase map step");
         for (const auto& [name, partitions] : recorder.calls) {
-            expect(!name.empty() && partitions == eawr::sim::tick_partition_count, "phase " + name + " is named and partitioned");
+            const auto expected_partitions = name == "gather" ? 1U : eawr::sim::tick_partition_count;
+            expect(!name.empty() && partitions == expected_partitions,
+                "phase " + name + " uses its deterministic partition count");
             if (name == "tracking") (tick == 30 ? tracked_on_order : tracked_elsewhere) = true;
         }
     }
@@ -641,7 +643,596 @@ void test_clipped_fixture(const std::optional<std::filesystem::path>& fixtures, 
     expect(rows == read_rows(hashes_path), "clipped: state hashes match the golden");
 }
 
+void test_asteroid_service() {
+    auto motion = foc_table();
+    auto& ship = motion.footprints[1];
+    ship.asteroid_damage = true;
+    ship.locomotor = false; // WHZ-10: without a locomotor, translation is not required
+    auto& field = motion.footprints[2];
+    field.asteroid_field = true;
+    field.radius = units(100);
+    tactical::DurabilityTable health;
+    health.rules = {units(1), decimal("0.3"), decimal("0.5")};
+    tactical::DurabilityProfile profile;
+    profile.type_id = frigate_type;
+    profile.max_hull = units(1000);
+    health.profiles = {profile};
+    tactical::DamageRules rules;
+    rules.shield_recharge_frames = 30;
+    rules.asteroid_damage = units(20);
+    rules.asteroid_rate = units(1);
+    health.damage = rules;
+    tactical::CombatTable combat;
+    tactical::CombatProfile combat_profile;
+    combat_profile.type_id = frigate_type;
+    combat.profiles = {combat_profile};
+    const auto source = setup({
+        {1, frigate_type, 1, at(100, 0, -300), yaw(0), {}},
+        {2, frigate_type, 1, at(101, 0, 0), yaw(0), {}},
+        {3, frigate_type, 1, at(0, 0, 8000), yaw(0), {}},
+        {4, frigate_type, 1, at(70, 70, 0), yaw(0), {}},
+        {5, frigate_type, 1, at(100, 100, 0), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 5000), yaw(0), {}},
+        {11, pad_type, 1, at(0, 0, -5000), yaw(0), {}}});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat);
+        expect(static_cast<bool>(created), "WHZ-10/14: asteroid session binds immutable content");
+        if (!created) { std::cerr << created.error().message << '\n'; continue; }
+        auto session = std::move(created).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned frame = 0; frame < 4; ++frame) {
+            auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WHZ-02/12: asteroid service runs every logical frame");
+            if (!stepped) { std::cerr << stepped.error().message << '\n'; break; }
+            hashes.push_back(stepped.value().state_sha256);
+            // WHZ-13: the cached frame belongs to consensus state, while the public
+            // snapshot exposes contact presence. Check the versioned wire records independently.
+            std::vector<std::uint8_t> contact_header{'A', 'S', 'T', 'D', 1, 0, 0, 0,
+                0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0};
+            auto contact_state = contact_header;
+            auto contact_snapshot = contact_header;
+            const auto append_wire_u64 = [](auto& bytes, const std::uint64_t value) {
+                for (unsigned byte = 0; byte < 8; ++byte) {
+                    bytes.push_back(static_cast<std::uint8_t>((value >> (byte * 8)) & 0xff));
+                }
+            };
+            for (const std::uint64_t id : {1ULL, 3ULL, 4ULL}) {
+                append_wire_u64(contact_state, id);
+                append_wire_u64(contact_state, frame);
+                append_wire_u64(contact_snapshot, id);
+            }
+            const auto state_wire = session.canonical_state_bytes();
+            const auto snapshot_wire = stepped.value().snapshot->canonical_bytes();
+            expect(state_wire.size() >= contact_state.size()
+                && std::equal(contact_state.rbegin(), contact_state.rend(), state_wire.rbegin()),
+                "WHZ-13: canonical contact block stores ascending IDs and this frame");
+            expect(snapshot_wire.size() >= contact_snapshot.size()
+                && std::equal(contact_snapshot.rbegin(), contact_snapshot.rend(), snapshot_wire.rbegin()),
+                "WHZ-13: snapshot contact block stores ascending IDs without cached frames");
+            expect(stepped.value().asteroid_queries == 5 && stepped.value().asteroid_candidates == 6,
+                "WHZ-11: bounded field broad phase examines center contacts only");
+            expect(stepped.value().asteroid_impacts.size() == 6, "WHZ-12: overlapping fields damage independently");
+            for (const auto& instance : stepped.value().snapshot->instances()) {
+                if (instance.type_id != frigate_type) continue;
+                const bool inside = instance.entity_id == 1 || instance.entity_id == 3 || instance.entity_id == 4;
+                expect(instance.in_asteroid_field == inside, "WHZ-11/13: inclusive circle, center XY, no height gate");
+                expect(instance.durability && instance.durability->hull == units(inside ? 1000 - 40 * (frame + 1) : 1000),
+                    "WHZ-11/12: hull-overlap and square corners do not cause asteroid hits");
+            }
+            for (std::size_t index = 0; index < stepped.value().asteroid_impacts.size(); ++index) {
+                const auto& impact = stepped.value().asteroid_impacts[index];
+                expect(impact.hit.kind == tactical::HitKind::asteroid && !impact.hit.projectile
+                    && impact.hit.source == (index % 2 == 0 ? 10U : 11U) && impact.hit.hardpoint == tactical::hull_target,
+                    "WHZ-14: field source and ASTEROID kind survive the ordinary hull route");
+            }
+            session.scramble_storage_for_testing();
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WHZ-12: asteroid hashes agree for 1/2/4/8 workers and storage order");
+    }
+    // WHZ-14/WBF-35: the ordinary destruction notification counts an asteroid
+    // kill when it removes the enemy's last relevant unit.
+    auto lethal_health = health;
+    lethal_health.profiles.front().max_hull = units(1);
+    auto last_enemy = setup({
+        {1, frigate_type, 1, at(300, 0, 0), yaw(0), {}},
+        {2, frigate_type, 2, at(0, 0, 8000), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(0), {}}});
+    last_enemy.players.push_back({2, 2, 2, tactical::player_flag_commandable});
+    tactical::VictoryRules victory;
+    victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+    victory.contenders = victory.humans = victory.controlled_players = victory.installed_players = {1, 2};
+    victory.relevant_types = {frigate_type};
+    std::optional<std::string> lethal_hash;
+    std::optional<std::vector<std::uint8_t>> lethal_snapshot;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(last_enemy, {}, lethal_health, motion,
+            std::nullopt, combat, victory);
+        expect(static_cast<bool>(created), "WHZ-14/WBF-35: asteroid all-unit victory content validates");
+        if (!created) { std::cerr << created.error().message << '\n'; continue; }
+        auto session = std::move(created).value();
+        if (workers != 1) session.scramble_storage_for_testing();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto result = session.step(executor);
+        expect(static_cast<bool>(result), "WHZ-14/WBF-35: lethal asteroid service completes");
+        if (!result) { std::cerr << result.error().message << '\n'; continue; }
+        expect(result.value().asteroid_impacts.size() == 1
+            && result.value().asteroid_impacts.front().target == 2
+            && result.value().asteroid_impacts.front().outcome.damage.unit_destroyed,
+            "WHZ-14: the field destroys only the last enemy unit");
+        expect(session.outcome() && session.outcome()->winner == 1
+            && session.outcome()->deciding_unit == 2 && session.outcome()->decided_tick == 0,
+            "WBF-35: asteroid destruction updates the count and awards victory in the same frame");
+        expect(result.value().snapshot->outcome() == session.outcome(),
+            "WBF-35: the snapshot publishes the asteroid victory outcome");
+        const auto bytes = result.value().snapshot->canonical_bytes();
+        if (workers == 1) { lethal_hash = result.value().state_sha256; lethal_snapshot = bytes; }
+        else expect(lethal_hash == result.value().state_sha256 && lethal_snapshot == bytes,
+            "WHZ-14/WBF-35: lethal asteroid state and snapshot agree for 1/2/4/8 workers");
+    }
+    // Failed rolls still contact, and each field advances the same keyed stream independently.
+    health.damage->asteroid_rate = decimal("0.20");
+    auto probability = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat);
+    expect(static_cast<bool>(probability), "WHZ-12: probability content validates");
+    if (probability) {
+        eawr::sim::InlineExecutor executor;
+        auto result = probability.value().step(executor);
+        expect(static_cast<bool>(result), "WHZ-12: probability service completes");
+        if (result) {
+            std::vector<std::pair<eawr::sim::EntityId, eawr::sim::EntityId>> expected;
+            for (const auto id : {1U, 3U, 4U}) {
+                tactical::CombatRandom random(source.seed, 0, id, tactical::asteroid_service_slot);
+                for (const auto field_id : {10U, 11U}) {
+                    if (random.uniform(0, static_cast<std::uint32_t>(Fixed::scale))
+                        <= static_cast<std::uint32_t>(health.damage->asteroid_rate.raw())) expected.emplace_back(id, field_id);
+                }
+            }
+            std::vector<std::pair<eawr::sim::EntityId, eawr::sim::EntityId>> actual;
+            for (const auto& impact : result.value().asteroid_impacts) actual.emplace_back(impact.target, impact.hit.source);
+            expect(actual == expected, "WHZ-12: per-field draws retain static query order");
+            for (const auto& instance : result.value().snapshot->instances()) {
+                if (instance.entity_id == 1 || instance.entity_id == 3 || instance.entity_id == 4) {
+                    expect(instance.in_asteroid_field, "WHZ-13: failed probability draws still record contact");
+                }
+            }
+        }
+    }
+    for (const auto layer : {tactical::SpaceLayer::corvette, tactical::SpaceLayer::none}) {
+        motion.footprints[1].layer = layer;
+        auto excluded = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat);
+        expect(static_cast<bool>(excluded), "WHZ-10: excluded layer content validates");
+        if (excluded) {
+            eawr::sim::InlineExecutor executor;
+            const auto result = excluded.value().step(executor);
+            expect(result && result.value().asteroid_queries == 0, "WHZ-10: corvette and fighter/no-layer units fail admission");
+        }
+    }
+    motion.footprints[1].layer = tactical::SpaceLayer::frigate;
+    motion.footprints[1].locomotor = true;
+    auto held = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat);
+    if (held) {
+        eawr::sim::InlineExecutor executor;
+        const auto result = held.value().step(executor);
+        expect(result && result.value().asteroid_queries == 0, "WHZ-10: a stationary locomotor does not service fields");
+    }
+    motion.footprints[1].locomotor = false;
+    for (const bool zero_rate : {false, true}) {
+        auto disabled_health = health;
+        if (zero_rate) disabled_health.damage->asteroid_rate = Fixed{};
+        else disabled_health.damage->asteroid_damage = Fixed{};
+        auto disabled = tactical::TacticalSession::create(source, {}, disabled_health, motion, std::nullopt, combat);
+        expect(static_cast<bool>(disabled), "WHZ-11: zero environmental scalars validate");
+        if (disabled) {
+            const PhaseRecorder executor;
+            const auto result = disabled.value().step(executor);
+            expect(result && result.value().asteroid_queries == 0 && result.value().asteroid_impacts.empty(),
+                "WHZ-11: either zero scalar skips queries and damage");
+            expect(std::none_of(executor.calls.begin(), executor.calls.end(), [](const auto& call) {
+                return call.first == "asteroid-inputs";
+            }), "WHZ-11: disabled scalars skip geometry preparation");
+        }
+    }
+    // A real translating unit enters, then either leaves or stops with its cached contact intact.
+    auto moving_health = health;
+    moving_health.profiles[0].max_hull = units(100000);
+    moving_health.damage->asteroid_rate = units(1);
+    auto moving_motion = motion;
+    moving_motion.footprints[1].locomotor = true;
+    const auto crossing_setup = setup({
+        {1, frigate_type, 1, at(0, 0, 0), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(0), {}}});
+    for (const bool stop_inside : {false, true}) {
+        auto crossing = tactical::TacticalSession::create(crossing_setup, {}, moving_health, moving_motion, std::nullopt, combat);
+        expect(static_cast<bool>(crossing), "WHZ-10/13: crossing session validates");
+        if (!crossing) continue;
+        auto& session = crossing.value();
+        expect(static_cast<bool>(session.submit(command(0, 0, 1, tactical::MovePayload{at(600, 0, 0)}))),
+            "WHZ-10: translation order submits");
+        bool entered = false;
+        bool left = false;
+        bool stopped_contact = false;
+        eawr::sim::InlineExecutor executor;
+        for (std::uint64_t frame = 0; frame < 500; ++frame) {
+            const auto result = session.step(executor);
+            expect(static_cast<bool>(result), "WHZ-13: crossing contact frame completes");
+            if (!result) break;
+            const auto instances = result.value().snapshot->instances();
+            const auto found = std::find_if(instances.begin(), instances.end(), [](const auto& value) { return value.entity_id == 1; });
+            if (found == instances.end()) break;
+            if (!entered && found->in_asteroid_field) {
+                entered = true;
+                if (stop_inside) expect(static_cast<bool>(session.submit(command(frame + 1, 1, 1, tactical::StopPayload{}))),
+                    "WHZ-13: stop during contact submits");
+            } else if (entered && stop_inside && frame > 30 && result.value().asteroid_queries == 0) {
+                stopped_contact = found->in_asteroid_field;
+                break;
+            } else if (entered && !stop_inside && !found->in_asteroid_field && result.value().asteroid_queries == 1) {
+                left = true;
+                break;
+            }
+        }
+        expect(entered, "WHZ-10: a translating frigate enters a field");
+        expect(stop_inside ? stopped_contact : left,
+            stop_inside ? "WHZ-13: stopped locomotor retains cached contact" : "WHZ-13: eligible empty query clears contact after exit");
+    }
+    // The environmental kind uses combat armor/defense but no projectile diminish or energy drain.
+    auto armored = profile;
+    armored.max_shields = units(10);
+    armored.max_energy = units(100);
+    armored.powered = true;
+    armored.armor_type = 0;
+    armored.shield_armor_type = 1;
+    auto armored_rules = rules;
+    armored_rules.energy_recharge_frames = 30;
+    armored_rules.damage_types = 1;
+    armored_rules.armor_types = 2;
+    armored_rules.armor_mods = {decimal("0.5"), units(2)};
+    armored_rules.diminishing = {{Fixed{}, decimal("0.1")}};
+    auto armored_state = tactical::full_durability(armored);
+    armored_state.last_hit_frame = 2;
+    tactical::Hit asteroid;
+    asteroid.amount = units(20);
+    asteroid.damage_type = 0;
+    asteroid.kind = tactical::HitKind::asteroid;
+    asteroid.defense = decimal("0.5");
+    asteroid.energy_damage = true;
+    const auto hit = tactical::apply_hit(armored, armored_rules, armored_state, asteroid, 3);
+    expect(hit && hit.value().absorbed == units(10) && armored_state.hull == decimal("997.5")
+        && armored_state.energy == units(100) && armored_state.last_hit_frame == 2,
+        "WHZ-14: defense, shield armor and hull armor route asteroid damage without projectile side effects");
+    // WHZ-14: scan starts in the complete list, wraps, skips dead/indestructible points and routes by mesh name.
+    profile.hardpoints = {{tactical::HardpointRole::other, false, {}},
+        {tactical::HardpointRole::weapon, true, units(100)}, {tactical::HardpointRole::engine, true, units(100)}};
+    auto state = tactical::full_durability(profile);
+    state.hardpoints[1] = Fixed{};
+    tactical::CombatRandom random(3, 4, 5, tactical::asteroid_service_slot);
+    expect(tactical::random_destroyable_hardpoint(profile, state, random) == 2,
+        "WHZ-14: ordinary selection finds the remaining live destroyable hardpoint");
+    expect(tactical::damage_mesh_route(std::vector<std::string>{"hull", "ENGINE", "engine"}, 2) == 1,
+        "WHZ-14: mesh selectors route to the first case-insensitive authored name");
+    state.hardpoints[2] = Fixed{};
+    expect(tactical::random_destroyable_hardpoint(profile, state, random) == tactical::hull_target,
+        "WHZ-14: without a live destroyable hardpoint, choose hull");
+}
+
 } // namespace
+
+void test_context_filter() {
+    // WHZ-08a: the original endpoint's centre, not its hull or formation slot,
+    // decides which static hazard bits the move ignores.
+    auto table = foc_table();
+    auto footprint = table.footprints[1];
+    footprint.asteroid_damage = true;
+    std::vector<tactical::TrackedLeaf> statics{
+        {10, at2(0, 0), at2(0, 0), at2(1, 0), {}, {}, units(300), tactical::collision_field},
+        {11, at2(0, 1500), at2(0, 1500), at2(1, 0), {}, {}, units(300), tactical::collision_nebula},
+        {12, at2(0, -1500), at2(0, -1500), at2(1, 0), {}, {}, units(300), tactical::collision_storm},
+    };
+    tactical::CollisionWorld world;
+    world.statics = &statics;
+    const auto filter = [&](const Vec3 start, const Vec3 end, const bool through = false) {
+        return tactical::movement_collision_filter(world, footprint, 1, 0, start, end, through).value();
+    };
+    expect(filter(at(-1800, 0, 0), at(1800, 0, 0)) == tactical::collision_all,
+        "WHZ-08a: affected ship with clear endpoints avoids hazards");
+    expect((filter(at(-1800, 0, 0), at(0, 0, 500)) & tactical::collision_field) == 0,
+        "WHZ-08a: destination inside the field ignores it regardless of height");
+    expect((filter(at(0, 0, 500), at(1800, 0, 0)) & tactical::collision_field) == 0,
+        "WHZ-08a: a ship inside the field can leave");
+    expect((filter(at(-1800, 0, 0), at(400, 0, 0)) & tactical::collision_field) != 0,
+        "WHZ-08a: hull overlap alone does not exempt the field");
+    expect((filter(at(0, 1500, 0), at(0, -1500, 0))
+        & (tactical::collision_nebula | tactical::collision_storm)) == 0,
+        "WHZ-08a: both endpoints contribute their hazard types");
+    constexpr auto solids = tactical::collision_moving | tactical::collision_static | tactical::collision_impassable;
+    statics.push_back({13, at2(0, 0), at2(0, 0), at2(1, 0), {}, {}, units(300), solids});
+    expect((filter(at(-1800, 0, 0), at(0, 0, 0), true) & solids) == solids,
+        "WHZ-08a: even an occupied endpoint and double click retain ordinary and solid blockers");
+    expect(filter(at(-1800, 0, 0), at(1800, 0, 0), true) == solids,
+        "WHZ-08a: double click removes all three hazard filters");
+    statics.pop_back();
+    const auto mapped = tactical::plan_space_move(table, frigate(), footprint, world, 1, 0,
+        at(-1800, 0, -90), units(0), units(0), at(800, 0, 0), nullptr,
+        tactical::PathSearchMode::bounded, false, at(0, 0, 0));
+    expect(mapped && mapped.value().kind == tactical::MotionKind::path,
+        "WHZ-08a: mapped destination can leave its original field endpoint");
+    bool entered = false;
+    if (mapped) {
+        for (unsigned tick = 0; tick < 1400; ++tick) {
+            const auto sample = tactical::sample_motion(mapped.value(), tick, at(-1800, 0, -90), units(0));
+            if (sample) entered = entered || math::length(Vec2{sample.value().position.x, sample.value().position.y}).value() <= units(300);
+        }
+    }
+    expect(entered, "WHZ-08a: a shifted slot retains the original endpoint's field exemption");
+    tactical::SlicedPathSearch sliced(table, frigate(), footprint, world, 1, 0,
+        at(-1800, 0, -90), units(0), units(0), at(800, 0, 0), false, at(0, 0, 0));
+    while (!sliced.ended()) static_cast<void>(sliced.run(32));
+    const auto sliced_result = sliced.result();
+    expect(mapped && sliced_result && mapped.value() == sliced_result.value(),
+        "WHZ-08a: sliced planning retains the same original endpoint context");
+    footprint.asteroid_damage = false;
+    expect((filter(at(-1800, 0, 0), at(1800, 0, 0)) & tactical::collision_field) == 0,
+        "WHZ-08a: missing damage behavior exempts fields, independent of ship category");
+}
+
+void test_field_traversal() {
+    // WHZ-06/07/10, WMV-04: immunity is independent of path filtering. A move
+    // issued within a field can leave it; ordinary orders still avoid distant fields.
+    for (const auto layer : {tactical::SpaceLayer::corvette, tactical::SpaceLayer::frigate,
+            tactical::SpaceLayer::capital}) {
+        auto motion = foc_table();
+        const auto type = layer == tactical::SpaceLayer::corvette ? corvette_type : frigate_type;
+        auto& mover = motion.footprints[type == corvette_type ? 0 : 1];
+        mover.layer = layer;
+        mover.asteroid_damage = layer != tactical::SpaceLayer::corvette;
+        mover.locomotor = true;
+        auto& field = motion.footprints[2];
+        field.asteroid_field = true;
+        field.radius = units(300);
+        tactical::DurabilityTable health;
+        health.rules = {units(1), decimal("0.3"), decimal("0.5")};
+        tactical::DurabilityProfile profile;
+        profile.type_id = type;
+        profile.max_hull = units(100000);
+        health.profiles = {profile};
+        tactical::DamageRules damage;
+        damage.shield_recharge_frames = 30;
+        damage.asteroid_damage = units(20);
+        damage.asteroid_rate = units(1);
+        health.damage = damage;
+        tactical::CombatTable combat;
+        tactical::CombatProfile fighter;
+        fighter.type_id = type;
+        combat.profiles = {fighter};
+        for (const unsigned mode : {0U, 1U, 2U}) {
+            const bool inside = mode == 1;
+            const bool forced = mode == 2;
+            const auto origin = inside ? at(-50, 0, -90) : at(-1800, 0, -90);
+            const auto target = inside ? at(800, 0, 0) : at(1800, 0, 0);
+            const auto start = setup({{1, type, 1, origin, yaw(0), {}},
+                {10, pad_type, 1, at(0, 0, 0), yaw(0), {}}});
+            std::vector<std::string> reference;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                auto made = tactical::TacticalSession::create(start, {}, health, motion, std::nullopt, combat);
+                expect(static_cast<bool>(made), "WHZ-06/10: class traversal session validates");
+                if (!made) continue;
+                auto session = std::move(made).value();
+                expect(static_cast<bool>(session.submit(command(0, 0, 1, tactical::MovePayload{target, forced}))),
+                    "WHZ-06: ordinary direct positional move submits");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                bool entered = false;
+                std::size_t impacts = 0;
+                for (std::uint64_t tick = 0; tick < 2000; ++tick) {
+                    const auto result = session.step(executor);
+                    expect(static_cast<bool>(result), "WHZ-06/10: traversal frame completes");
+                    if (!result) break;
+                    if (workers == 1) reference.push_back(result.value().state_sha256);
+                    else expect(tick < reference.size() && result.value().state_sha256 == reference[tick],
+                        "WHZ-06/10: field transit hashes agree on 1/2/4/8 workers");
+                    const auto state = session.units();
+                    const auto* unit = unit_of(state, 1);
+                    if (!unit) break;
+                    entered = entered || math::length(Vec2{unit->position.x, unit->position.y}).value() <= field.radius;
+                    impacts += result.value().asteroid_impacts.size();
+                }
+                const auto final = session.units();
+                const auto* unit = unit_of(final, 1);
+                expect(unit && near(unit->position.x, target.x, one / 32)
+                    && near(unit->position.y, target.y, one / 32), "WHZ-06/07: all ship layers reach the ordered far side");
+                expect(entered == (inside || forced || layer == tactical::SpaceLayer::corvette),
+                    "WHZ-08a: corvettes/explicit transit cross; ordinary affected ships avoid a distant field");
+                const bool affected = (inside || forced) && layer != tactical::SpaceLayer::corvette;
+                expect((impacts > 0) == affected, "WHZ-10: moving frigates/capitals take damage; corvettes remain exempt");
+                const auto hull = session.durability_state(1);
+                expect(hull && (hull->hull < profile.max_hull) == affected,
+                    "WHZ-14: transit damage reaches health through the ordinary damage route");
+            }
+        }
+    }
+}
+
+void test_nebula_service() {
+    auto motion = foc_table();
+    motion.nebula_service_types = {frigate_type};
+    motion.nebula_disable_seconds = units(5);
+    auto& volume = motion.footprints[2];
+    volume.nebula = true;
+    volume.radius = units(100);
+    volume.x_extent = units(20);
+    volume.y_extent = units(120);
+    // The environment contract exercises deliberate crossings, independently of avoidance.
+    std::erase_if(motion.footprints, [](const tactical::Footprint& footprint) { return footprint.type_id == frigate_type; });
+    tactical::CombatTable combat;
+    tactical::CombatProfile profile;
+    profile.type_id = frigate_type;
+    combat.profiles = {profile};
+    tactical::AbilityTable abilities;
+    tactical::AbilityProfile turbo;
+    turbo.kind = tactical::AbilityKind::turbo;
+    turbo.expiration_frames = 1000;
+    abilities.profiles = {{frigate_type, {turbo}, false}};
+    const auto source = setup({
+        {1, frigate_type, 1, at(0, 0, 5000), yaw(0), {}},
+        {2, frigate_type, 1, at(70, 70, 0), yaw(0), {}},
+        {3, frigate_type, 1, at(101, 0, 0), yaw(0), {}},
+        {4, corvette_type, 1, at(110, 0, 8000), yaw(0), {}},
+        {5, corvette_type, 1, at(0, 70, 0), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(90), {}},
+        {11, pad_type, 1, at(0, 0, 0), yaw(90), {}}});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(source, {}, {}, motion, std::nullopt, combat, {}, abilities);
+        expect(static_cast<bool>(created), "WHZ-20: nebula content validates");
+        if (!created) continue;
+        auto& session = created.value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto first = session.step(executor);
+        expect(static_cast<bool>(first), "WHZ-22: first nebula service completes");
+        if (!first) continue;
+        const auto instances = first.value().snapshot->instances();
+        const auto inside = [&](const eawr::sim::EntityId id) {
+            const auto found = std::find_if(instances.begin(), instances.end(), [id](const auto& unit) { return unit.entity_id == id; });
+            return found != instances.end() && found->in_nebula;
+        };
+        expect(inside(1) && inside(2) && !inside(3), "WHZ-22: center XY circle and height independence");
+        expect(inside(4) && !inside(5), "WHZ-25: no-behavior fallback uses the rotated hard box, without a soft-radius cache");
+        expect(!instances.front().abilities.front().ready, "WHZ-25: environmental gate disables an otherwise ready primary ability");
+        expect(static_cast<bool>(session.submit(command(1, 0, 1, tactical::MovePayload{at(600, 0, 5000)}))),
+            "WHZ-21: movement out of the volume submits");
+        std::vector<std::string> hashes{first.value().state_sha256};
+        for (std::uint64_t frame = 1; frame <= 150; ++frame) {
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "WHZ-21: cache-window frame completes");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            const auto snapshot = stepped.value().snapshot->instances();
+            expect(snapshot.front().in_nebula == (frame < 150), "WHZ-21: five seconds is a strict contact-age recheck window");
+            const auto events = stepped.value().snapshot->events();
+            const auto restored = std::count_if(events.begin(), events.end(), [](const tactical::Event& event) {
+                return event.kind == tactical::EventKind::ability_ready && event.unit == 1;
+            });
+            expect(restored == (frame == 150 ? 1 : 0), "WHZ-24: exit signals each enabled primary slot once despite overlapping volumes");
+            if (frame == 150) expect(!snapshot.front().abilities.front().active && snapshot.front().abilities.front().ready,
+                "WHZ-24: restoration never automatically activates the ability");
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "WHZ-21/25: nebula hashes agree on 1/2/4/8 workers");
+    }
+    tactical::AbilityGate gate;
+    gate.in_nebula = true;
+    auto slot = tactical::AbilitySlot{};
+    expect(!tactical::activate_ability(turbo, slot, gate, 0).changed, "WHZ-25: direct activation refuses a cached nebula");
+    auto invalid = motion;
+    invalid.nebula_disable_seconds = units(-1);
+    expect(!tactical::validate_motion(invalid), "WHZ-21: negative disable time is rejected");
+    const auto crossing = setup({
+        {1, frigate_type, 1, at(-150, 0, 0), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(0), {}},
+        {11, pad_type, 1, at(0, 0, 0), yaw(0), {}}});
+    auto created = tactical::TacticalSession::create(crossing, {}, {}, motion, std::nullopt, combat, {}, abilities);
+    expect(static_cast<bool>(created), "WHZ-23: active-ability crossing validates");
+    if (created) {
+        auto& session = created.value();
+        auto activation = command(0, 0, 1, tactical::StopPayload{});
+        activation.payload = tactical::AbilityPayload{tactical::AbilityKind::turbo, tactical::AbilityAction::activate};
+        expect(static_cast<bool>(session.submit(activation)), "WHZ-23: ability activation before entry submits");
+        expect(static_cast<bool>(session.submit(command(1, 1, 1, tactical::MovePayload{at(600, 0, 0)}))),
+            "WHZ-23: crossing movement submits");
+        eawr::sim::InlineExecutor executor;
+        int cancelled = 0;
+        for (std::uint64_t frame = 0; frame < 300; ++frame) {
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "WHZ-23: active-ability crossing completes");
+            if (!step) break;
+            for (const auto& event : step.value().snapshot->events()) {
+                if (event.kind != tactical::EventKind::ability_cancelled || event.unit != 1) continue;
+                ++cancelled;
+                expect(event.sequence == static_cast<std::uint64_t>(tactical::AbilityKind::turbo),
+                    "WHZ-23: cancellation identifies the affected ability");
+                expect(!step.value().snapshot->instances().front().abilities.front().active,
+                    "WHZ-23: entry forcibly switches the ability off");
+            }
+        }
+        expect(cancelled == 1, "WHZ-22/23: overlap and successful cached rechecks never repeat entry cancellation");
+    }
+}
+
+void test_ion_storm_service() {
+    auto motion = foc_table();
+    auto& storm = motion.footprints[2];
+    storm.ion_storm = true;
+    storm.radius = units(100);
+    std::erase_if(motion.footprints, [](const tactical::Footprint& footprint) { return footprint.type_id == frigate_type; });
+    tactical::DurabilityTable health;
+    health.rules = {units(1), decimal("0.3"), decimal("0.5")};
+    tactical::DurabilityProfile profile;
+    profile.type_id = frigate_type;
+    profile.max_hull = units(1000);
+    profile.max_shields = units(100);
+    profile.shield_refresh = units(5);
+    health.profiles = {profile};
+    health.damage = tactical::DamageRules{};
+    health.damage->shield_recharge_frames = 1;
+    health.damage->ion_storm_disable_seconds = units(5);
+    tactical::CombatTable combat;
+    tactical::CombatProfile combat_profile;
+    combat_profile.type_id = frigate_type;
+    combat.profiles = {combat_profile};
+    tactical::AbilityTable abilities;
+    tactical::AbilityProfile defend;
+    defend.kind = tactical::AbilityKind::defend;
+    defend.expiration_frames = 1000;
+    abilities.profiles = {{frigate_type, {defend}, false}};
+    const auto source = setup({
+        {1, frigate_type, 1, at(0, 0, 8000), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(0), {}},
+        {11, pad_type, 1, at(0, 0, 0), yaw(0), {}}});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat, {}, abilities);
+        expect(created.has_value(), "WHZ-30: pure-storm service content validates");
+        if (!created) continue;
+        auto& session = created.value();
+        auto activation = command(0, 0, 1, tactical::StopPayload{});
+        activation.payload = tactical::AbilityPayload{tactical::AbilityKind::defend, tactical::AbilityAction::activate};
+        expect(session.submit(activation).has_value(), "WHZ-32: DEFEND command before the first storm service submits");
+        auto damage = command(2, 1, 1, tactical::StopPayload{});
+        damage.payload = tactical::DamagePayload{units(50), tactical::hull_target};
+        expect(session.submit(damage).has_value(), "WHZ-32: damage command in storm submits");
+        expect(session.submit(command(3, 2, 1, tactical::MovePayload{at(600, 0, 8000)})).has_value(),
+            "WHZ-31: storm exit movement submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool left = false;
+        for (std::uint64_t frame = 0; frame < 180; ++frame) {
+            const auto step = session.step(executor);
+            expect(step.has_value(), "WHZ-30: shield service frame completes");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            const auto& instance = step.value().snapshot->instances().front();
+            expect(instance.durability && instance.durability->shields == std::optional(units(100)),
+                "WHZ-30/32: storm contact and damage preserve the shield pool");
+            if (frame == 0) expect(!instance.in_ion_storm && instance.abilities.front().active,
+                "WHZ-30: DEFEND postpones the first shield service until the next frame");
+            if (frame == 1) expect(instance.in_ion_storm && instance.abilities.front().active && !instance.abilities.front().ready,
+                "WHZ-32: contact refuses new DEFEND activation without cancelling an active one");
+            if (frame == 2) expect(instance.durability->hull == units(950) && !instance.abilities.front().active,
+                "WHZ-32: the storm damage branch bypasses shields and switches DEFEND off");
+            const auto x = instance.fixed_transform.rows[0][3];
+            const bool physical = x.raw() >= -100 * Fixed::scale && x.raw() <= 100 * Fixed::scale;
+            if (frame > 0) expect(instance.in_ion_storm == physical, "WHZ-31: every service refreshes/clears contact, without a universal five-second exit tail");
+            left = left || !physical;
+        }
+        expect(left, "WHZ-31: the contract actually exits the storm");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WHZ-30..32: storm state agrees across 1/2/4/8 workers");
+    }
+    tactical::AbilityGate gate;
+    gate.shielded = gate.shields_online = gate.in_ion_storm = true;
+    expect(!tactical::ability_ready(defend, {}, gate, 0), "WHZ-32: DEFEND gate rejects a storm with a positive online shield");
+}
 
 int main(const int argc, char** argv) {
     const bool regenerate = argc == 3 && std::string_view(argv[2]) == "--regenerate";
@@ -650,7 +1241,57 @@ int main(const int argc, char** argv) {
         return 2;
     }
     const auto fixtures = argc >= 2 ? std::optional<std::filesystem::path>(argv[1]) : std::nullopt;
+    {
+        tactical::Footprint footprint;
+        footprint.obstacle = true;
+        footprint.radius = units(600); // already scaled; the raw offset stays 20,10
+        footprint.obstacle_offset = at2(20, 10);
+        footprint.asteroid_field = footprint.ion_storm = footprint.nebula = footprint.impassable_asteroid = true;
+        const auto zero = tactical::tracking_leaf(41, footprint, {at(100, 200, 90), units(0)}, {at(100, 200, 90), units(0)});
+        const auto quarter = tactical::tracking_leaf(41, footprint, {at(100, 200, -90), units(90)}, {at(100, 200, -90), units(90)});
+        expect(zero && zero.value().start == at2(120, 210), "WHZ-05: raw tracking offset at yaw zero");
+        expect(quarter && near(quarter.value().start.x, units(90), 10)
+            && near(quarter.value().start.y, units(220), 10), "WHZ-05: yaw rotates the offset without scale or height");
+        expect(zero && zero.value().x_extent == units(600) && zero.value().y_extent == units(600)
+            && zero.value().facing == at2(1, 0), "WHZ-03: obstacles use soft-radius extents facing +X");
+        for (unsigned flags = 0; flags < 16; ++flags) {
+            footprint.asteroid_field = (flags & 1U) != 0;
+            footprint.ion_storm = (flags & 2U) != 0;
+            footprint.nebula = (flags & 4U) != 0;
+            footprint.impassable_asteroid = (flags & 8U) != 0;
+            const auto expected = footprint.asteroid_field ? tactical::collision_field
+                : footprint.ion_storm ? tactical::collision_storm
+                : footprint.nebula ? tactical::collision_nebula
+                : footprint.impassable_asteroid ? tactical::collision_impassable : tactical::collision_static;
+            const auto before = footprint;
+            const auto category = tactical::tracking_category(footprint, false);
+            expect(category == expected && footprint == before,
+                "WHZ-04: one precedence category preserves all independent effect flags");
+        }
+        footprint.asteroid_field = true;
+        const auto circle = tactical::tracking_leaf(42, footprint, {at(0, 0, 0), units(0)}, {at(0, 0, 0), units(0)});
+        if (circle) {
+            const std::vector<tactical::TrackedLeaf> leaves{circle.value()};
+            tactical::LinearQuery query;
+            query.start = query.end = at2(620, 10);
+            query.facing = at2(1, 0);
+            const auto edge = tactical::find_static_collision(leaves, query);
+            expect(edge && edge.value() == tactical::collision_field, "WHZ-03: zero-extent contact includes the circle boundary");
+            query.start = query.end = at2(620, 610);
+            const auto corner = tactical::find_static_collision(leaves, query);
+            expect(corner && corner.value() == 0, "WHZ-03: square broad bounds do not substitute for circular contact");
+            query.start = query.end = at2(620, 10);
+            query.ignore = 42;
+            const auto ignored = tactical::find_static_collision(leaves, query);
+            expect(ignored && ignored.value() == 0, "WHZ-03: current-frame contact ignores the querying entity");
+        }
+    }
     test_validation();
+    test_asteroid_service();
+    test_field_traversal();
+    test_context_filter();
+    test_nebula_service();
+    test_ion_storm_service();
     test_collision();
     test_open_space();
     test_static_layer();

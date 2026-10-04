@@ -10,6 +10,7 @@
 #include <span>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -47,10 +48,13 @@ public:
 
     void raw(const std::span<const std::byte> value) {
         size(value.size());
-        for (const std::byte item : value) bytes_.push_back(static_cast<std::uint8_t>(item));
+        if (value.empty()) return;
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(value.data());
+        bytes_.insert(bytes_.end(), begin, begin + value.size());
     }
 
     [[nodiscard]] UploadIdentity digest() const { return core::sha256(bytes_); }
+    [[nodiscard]] std::vector<std::uint8_t> take() && { return std::move(bytes_); }
 
 private:
     std::vector<std::uint8_t> bytes_;
@@ -72,7 +76,7 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
 
 // `binding_textures` are appended after the material, so an upload without
 // any keeps the identity it had before per-binding textures existed.
-[[nodiscard]] inline UploadIdentity upload_identity(
+[[nodiscard]] inline std::vector<std::uint8_t> upload_identity_bytes(
     const assets::Model& model,
     const assets::Texture& texture,
     const MaterialDescription& material,
@@ -137,7 +141,15 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
             if (item.texture != nullptr) write_texture(out, *item.texture);
         }
     }
-    return out.digest();
+    return std::move(out).take();
+}
+
+[[nodiscard]] inline UploadIdentity upload_identity(
+    const assets::Model& model,
+    const assets::Texture& texture,
+    const MaterialDescription& material,
+    const std::span<const NamedTexture> binding_textures = {}) {
+    return core::sha256(upload_identity_bytes(model, texture, material, binding_textures));
 }
 
 } // namespace eawr::presentation::godot_backend::detail

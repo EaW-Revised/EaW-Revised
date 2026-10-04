@@ -130,7 +130,11 @@ void test_surfaces_and_billboards() {
     expect(space::environment_family(quad_model("planet.FX", 0)) == space::EnvironmentFamily::planet,
            "Planet.fx is a planet, case-insensitively");
     expect(space::scene_surfaces(quad_model("MeshShadowVolume.fx", 0))[0].route == space::SceneRoute::unsupported,
-           "an unrouted shader is listed as unsupported");
+             "an unrouted shader is listed as unsupported");
+    const auto companion = space::scene_surfaces(quad_model("MeshAlpha.fx", 0));
+    expect(companion.size() == 1 && companion[0].problem.empty()
+            && companion[0].route == space::SceneRoute::legacy_mesh,
+        "a planet's alpha ring remains in the environment model with its ordinary scene selector");
 
     const assets::Model glow = quad_model("MeshAdditive.fx", 6);
     surfaces = space::scene_surfaces(glow);

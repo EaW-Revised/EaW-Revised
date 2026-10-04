@@ -200,6 +200,44 @@ void framing() {
 // --- Version variants and M1, M2, M3 root/body views ------------------------
 void header_views() {
     using namespace eawr::assets;
+    {
+        std::vector<std::byte> root;
+        mini(root, 0, integer(0x0201)); mini(root, 1, integer(2));
+        mini(root, 2, integer(9)); mini(root, 3, integer(5));
+        mini(root, 5, integer(2)); mini(root, 6, integer(7));
+        mini(root, 10, wide(u"CUSTOM_MODE"));
+        mini(root, 11, {std::byte{1}}); mini(root, 18, {std::byte{1}});
+        std::vector<std::byte> points;
+        u32(points, 3);
+        for (int i = 0; i < 3; ++i) { f32(points, static_cast<float>(i * 20)); f32(points, -25.0F); }
+        const auto read = [&](const std::vector<std::byte>& payload, bool group = false) {
+            return load_bytes(file_from(root, chunk(3, payload, group)));
+        };
+        auto authored = read(points);
+        expect(authored && authored.value().lobby.capacity == 9U && authored.value().lobby.levels == 5U
+            && authored.value().lobby.owner == 2U && authored.value().lobby.terrain == 7U
+            && authored.value().lobby.custom == true && authored.value().lobby.new_markers == true
+            && authored.value().lobby.game_types == "CUSTOM_MODE", "WSS-05: lobby header fields decode independently");
+        expect(authored && authored.value().lobby.start_positions && authored.value().lobby.start_positions->size() == 3
+            && authored.value().lobby.start_positions->at(2).x == 40.0F
+            && authored.value().lobby.start_positions->at(2).y == -25.0F, "nine players and three source XY starts remain distinct");
+        auto invalid = points; invalid.pop_back();
+        expect(read(invalid) && !read(invalid).value().lobby.start_positions, "short start array has no semantic value");
+        invalid = points; u8(invalid, 0);
+        expect(read(invalid) && !read(invalid).value().lobby.start_positions, "overlong start array has no semantic value");
+        invalid.clear(); u32(invalid, 0xFFFFFFFFU);
+        expect(read(invalid) && !read(invalid).value().lobby.start_positions, "hostile start count is bounded before allocation");
+        invalid.clear(); u32(invalid, 1); f32(invalid, std::numeric_limits<float>::infinity()); f32(invalid, 0.0F);
+        expect(read(invalid) && !read(invalid).value().lobby.start_positions, "nonfinite start array has no semantic value");
+        auto duplicate = load_bytes(file_from(root, chunk(3, points)));
+        auto body = chunk(3, points); add(body, chunk(3, points));
+        duplicate = load_bytes(file_from(root, body));
+        expect(duplicate && !duplicate.value().lobby.start_positions, "duplicate start chunks select no winner");
+        mini(root, 2, integer(4)); mini(root, 11, {std::byte{0}});
+        duplicate = read(points);
+        expect(duplicate && !duplicate.value().lobby.capacity && !duplicate.value().lobby.custom,
+            "duplicate lobby fields select no winner");
+    }
     auto old_header = load(Fixture{});
     expect(old_header && !old_header.value().context_name && !old_header.value().declared_extents,
            "an old header without 0x09/0x10/0x11 stays valid and invents nothing");

@@ -46,6 +46,7 @@ class AttachedFixtureContract(unittest.TestCase):
 
     def test_idle_owner_is_opt_in_and_owned_by_map_mode(self):
         source = mode_source("map_mode")
+        physical = (ROOT / "apps/viewer/src/map_mode_particles.cpp").read_text(encoding="utf-8")
         self.assertIn('"--eawr-map-effect-animation"', source)
         self.assertIn("EffectAnimation effect_animation{EffectAnimation::none}",
                       (ROOT / "apps/viewer/src/map_mode.hpp").read_text(encoding="utf-8"))
@@ -56,7 +57,8 @@ class AttachedFixtureContract(unittest.TestCase):
         self.assertIn("OwnerProbeBackend probe(", source)
         self.assertIn("particles::map_owner_sample(*clip.player, sample)", source)
         # Owners release before any static handle and before the registry.
-        release = source[source.index("void MapParticleProvider::release()"):]
+        release = (ROOT / "apps/viewer/src/map_mode_particles.cpp").read_text(encoding="utf-8")
+        release = release[release.index("void MapParticleProvider::release()"):]
         self.assertLess(release.index("owned.owner.release_all()"),
                         release.index("registry_->release(placement.handle)"))
 

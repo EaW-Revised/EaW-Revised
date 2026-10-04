@@ -81,6 +81,7 @@ void fragment() {
 
 inline constexpr std::string_view meshgloss_shader_alpha = R"GODOT(
 shader_type spatial;
+instance uniform float eawr_unit_opacity = 1.0;
 render_mode unshaded, fog_disabled, blend_mix, depth_draw_always, depth_test_default, cull_back;
 
 uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
@@ -137,6 +138,7 @@ void fragment() {
         + eawr_vertex_specular * base_sample.a;
     ALBEDO = eawr_linear_to_srgb(eawr_linear_rgb);
     ALPHA = eawr_vertex_diffuse.a;
+    ALPHA *= eawr_unit_opacity;
 }
 )GODOT";
 
@@ -153,14 +155,13 @@ uniform vec4 Diffuse = vec4(1.0);
 uniform vec4 Specular = vec4(1.0);
 uniform float Shininess = 32.0;
 uniform vec4 Colorization = vec4(0.0, 1.0, 0.0, 1.0);
+instance uniform vec4 eawr_unit_colorization = vec4(0.0, 0.0, 0.0, -1.0);
 uniform mat4 eawr_sph_r;
 uniform mat4 eawr_sph_g;
 uniform mat4 eawr_sph_b;
 uniform vec4 eawr_light_scale = vec4(1.0);
 // The unit's own light scale (GodotRenderer::set_light_scale), e.g. the shield flash.
 instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
-// The unit's own opacity (GodotRenderer::set_unit_opacity, #535): a screen-door fade of the opaque pass.
-instance uniform float eawr_unit_opacity = 1.0;
 uniform vec3 eawr_eye_position = vec3(0.0, 420.0, 1050.0);
 uniform vec3 eawr_light_direction = vec3(0.0, 1.0, 0.0);
 uniform vec3 eawr_light_specular = vec3(2.0, 1.88, 1.72);
@@ -198,13 +199,11 @@ void vertex() {
 }
 
 void fragment() {
-    if (eawr_unit_opacity < 1.0) {
-        float eawr_dither = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
-        if (eawr_dither >= eawr_unit_opacity) discard;
-    }
     vec4 base_sample = texture(BaseTexture, UV);
     vec3 base_linear_rgb = eawr_srgb_to_linear(base_sample.rgb);
-    vec3 colorized = mix(base_linear_rgb, Colorization.rgb, base_sample.a);
+    vec3 colorization = eawr_unit_colorization.a < 0.0 ? Colorization.rgb
+        : eawr_srgb_to_linear(eawr_unit_colorization.rgb);
+    vec3 colorized = mix(base_linear_rgb, colorization, base_sample.a);
     vec3 eawr_linear_rgb = 2.0 * eawr_vertex_diffuse * colorized
         + eawr_vertex_specular * base_sample.a;
     ALBEDO = eawr_linear_to_srgb(eawr_linear_rgb);
@@ -444,6 +443,7 @@ void fragment() {
 
 inline constexpr std::string_view fixed_mesh_shader_alpha = R"GODOT(
 shader_type spatial;
+instance uniform float eawr_unit_opacity = 1.0;
 render_mode unshaded, fog_disabled, blend_mix, depth_draw_never, depth_test_default, cull_back;
 
 uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
@@ -487,6 +487,7 @@ void fragment() {
     vec3 eawr_linear_rgb = 2.0 * eawr_vertex_diffuse.rgb * base_linear_rgb;
     ALBEDO = eawr_linear_to_srgb(eawr_linear_rgb);
     ALPHA = base_sample.a * eawr_vertex_diffuse.a;
+    ALPHA *= eawr_unit_opacity;
 }
 )GODOT";
 
@@ -496,6 +497,7 @@ void fragment() {
 // neither texture alpha nor interpolated material alpha is attenuated.
 inline constexpr std::string_view fixed_mesh_shader_alpha_fog = R"GODOT(
 shader_type spatial;
+instance uniform float eawr_unit_opacity = 1.0;
 render_mode unshaded, fog_disabled, blend_mix, depth_draw_never, depth_test_default, cull_back;
 
 uniform sampler2D BaseTexture : filter_linear_mipmap, repeat_enable;
@@ -558,6 +560,7 @@ void fragment() {
     eawr_linear_rgb *= eawr_fog_attenuation();
     ALBEDO = eawr_linear_to_srgb(eawr_linear_rgb);
     ALPHA = base_sample.a * eawr_vertex_diffuse.a;
+    ALPHA *= eawr_unit_opacity;
 }
 )GODOT";
 

@@ -1,7 +1,7 @@
 # Behaviour traces and scenarios
 
 A trace records what a player could see of a short scenario, once per logical frame, so
-the original game and the remake can be compared row by row (EAWR-43). The original-game
+the original game and the remake can be compared row by row. The original-game
 recorder is research tooling and lives outside this repository; the formats, the scenario
 files (`tests/fidelity/`), the comparer (`tools/compare_traces.py`) and
 `sim_headless --trace-out` and `--scenario` are here.
@@ -82,11 +82,17 @@ ignored `out/`.
   type and owner. Slots bind in declaration order, with creation order breaking ties, and
   never rebind after death. Their position/facing are placeholders, not staging commands.
   This records the first carrier launch without synthesizing it or recording replenishments.
+  `apply_initial_pose: true` opts an observed tick-zero squadron member into using its recorded
+  world `position` and `facing_degrees` before session creation. Its label must match the staged
+  member, with the same type and owner. Later launches cannot use this option. The pose enters
+  replay setup; it does not seed an unrecorded velocity, reload timer or pursuit state.
+  This option alone accepts finite fractional source coordinates and yaw; ordinary staging
+  positions/headings and event destinations keep their integer requirements.
 - `events`: `{tick, action, unit}`, ascending, after tick 0 and before
   `duration_ticks`. A recording covers ticks 0 to `duration_ticks` - 1. Actions are `spawn`,
   `remove`, `move` / `face` (with integer xyz `position`), `stop`, `attack` (with a `target`
   scenario unit label), `ability` (with the XML
-  `ability` name, and for a targeted one such as `ION_CANNON_SHOT` a `target` unit label, EAWR-561), `ability_probe` (same name; read-only status in the private game log), or `damage` (nonnegative integer `amount` and named `hardpoint`). Orders
+  `ability` name, and for a targeted one such as `ION_CANNON_SHOT` a `target` unit label), `ability_probe` (same name; read-only status in the private game log), or `damage` (nonnegative integer `amount` and named `hardpoint`). Orders
   apply to the objects returned by that unit's spawn, through the game's public Lua API.
 - `record_only: true` explicitly permits an empty `expect` list. This still validates the
   complete trace, compares every field that is not ignored and checks the `fire_windows`.
@@ -146,7 +152,7 @@ in each trace on its own, after the headers and before the rows, so it rejects a
 which no weapon fires, or a weapon fires where none may, even when both traces agree. It
 does not compare fire times, so random recharge draws do not matter.
 
-S-22 to S-27 (EAWR-392) use three kinds, read from their retail recordings:
+S-22 to S-27 use three kinds, read from their retail recordings:
 
 - *Silent*, `0..0`, where retail never fires: every hardpoint of S-22 and S-24 and those
   away from the quarter in S-23 (three) and S-25 (two), over the whole run; before the
@@ -166,7 +172,7 @@ S-22 to S-27 (EAWR-392) use three kinds, read from their retail recordings:
   7-pulse lasers. Retail holds 10 to 20 shots per sustained window.
 
 The fixture recordings pass every window. The remake passes every window that closes before
-either ship dies, S-26/S-27's onset and sustained windows included (the combat turn, EAWR-361).
+either ship dies, S-26/S-27's onset and sustained windows included (the combat turn).
 The runner does not yet apply the target's `hold_fire`/`invulnerable` flags, so a ship dies
 early and the windows after that fail: S-23 and S-27 the last (the shooter dies at tick
 1511), S-25 the last two (its target dies at 1397), S-26 the last three (the shooter dies at
@@ -194,7 +200,7 @@ trace and simulate only the behaviour under test.
 ## Remake traces of a scenario
 
 `sim_headless --scenario S-NN.json --game-root <install> --trace-out <file.csv>
-[--hash-out <file>] [--replay-out <file>] [--workers <1|2|4>]` (EAWR-70) stages a scenario in a
+[--hash-out <file>] [--replay-out <file>] [--workers <1|2|4>]` stages a scenario in a
 tactical session bound to the FoC unit tables (sensor, durability and motion tables) and
 writes the remake's trace of it, all outputs or none:
 
@@ -203,10 +209,10 @@ writes the remake's trace of it, all outputs or none:
   checked.
 - The unit tables are the pinned M2 fleet; a scenario unit type outside it (the TIE Defender
   of S-01 to S-03) is loaded on top, which changes the setup's content identity only for such
-  scenarios. The session also binds the combat table (EAWR-73). With `staging.fog` `revealed`, as
+  scenarios. The session also binds the combat table. With `staging.fog` `revealed`, as
   every recording is staged, each scenario unit type gets a sensor covering the map instead of
-  the tables' sensor table, so fog hides nothing (lone craft have no sensor of their own since
-  EAWR-271).
+  the tables' sensor table, so fog hides nothing (lone craft have no sensor of their own under
+  squadron fog reveal).
 - Players get IDs 1, 2, ... in scenario order. A `start` unit gets the next stable ID, its
   type's TED CRC, its scenario position plus its type's `Layer_Z_Adjust` (the recordings put the
   corvette at z = -20), and a rotation facing a point 10,000 units along `facing_degrees` at the
@@ -214,26 +220,26 @@ writes the remake's trace of it, all outputs or none:
   way at its `spawn` event; `observed` units are refused. A squadron type must spawn at the
   start: it is staged as its team container and its craft, each on its `Squadron_Offsets` slot
   turned by the company's yaw, labelled `<label>.1` ... in member order, as the skirmish start
-  places them (EAWR-536). The session gives the container no durability, so its `hull` row is its
-  authored `Tactical_Health` and its `shield` row its authored `Shield_Points`, when its type
-  authors them (EAWR-561). A container whose type authors none (the fighter squadrons) writes the sums
-  over its live craft (EAWR-457, project rule: the trace stays complete for every unit). FoC records
-  150 hull for the Y-wing container; the remake writes 270, the sum of its three Y-wings' hull
-  (and 90 shield), so a comparison with that recording differs on that row. A squadron's craft types get the revealed
+  places them. The session gives the container no durability, so its `hull` row is its
+  resolved team type's `Tactical_Health` (default 100), scaled by
+  `Object_Max_Health_Multiplier_Space`, and its `shield` row its authored `Shield_Points`
+  (default zero; WSQ-60). All five M2 containers therefore report 150 hull and zero shields; craft health
+  and shields are never summed into the container's fields. This trace metadata leaves
+  combat durability and replay identity unchanged. A squadron's craft types get the revealed
   sensor too.
-- Of the staging flags only `hold_fire` is modelled (EAWR-536): the held type's weapons reach
+- Of the staging flags only `hold_fire` is modelled: the held type's weapons reach
   nothing and may fire at no category, so every unit of that type in the scenario must hold
   fire. `hold_position` needs nothing (a unit without an order does not move) and
   `invulnerable` is not modelled.
-- A `move` may list further unit labels in `with` (EAWR-599): one command then moves them all, a
+- A `move` may list further unit labels in `with`: one command then moves them all, a
   player's group move (space-fighters FO-07 to FO-11). The retail recorder's Lua orders move one
   object each and never reach FoC's group formation, so such a scenario is `record_only` for the
   remake and its retail reference is a player's capture.
 - `move`, `face`, `stop` and `attack` become commands at their tick; an `ability` event becomes an
-  ability command, with its `target` when it names one (EAWR-561), and a cut ability is skipped with a
+  ability command, with its `target` when it names one, and a cut ability is skipped with a
   warning (space-abilities AB-03); `ability_probe` is ignored. An order is submitted once its
   tick's spawns are staged, so it can name a unit or an attack target spawned at or before
-  its tick (EAWR-392). `spawn` and `remove` are staged between
+  its tick. `spawn` and `remove` are staged between
   ticks (`TacticalSession::stage_spawn` and `stage_remove`), so the unit is alive, or gone, from
   the event's tick on, as in the recordings; a replay does not record them, so `--replay-out` is
   refused for such a scenario. Other actions are refused.
@@ -243,10 +249,10 @@ writes the remake's trace of it, all outputs or none:
 - The trace has every scenario unit on every tick 0 to `duration_ticks` - 1, fields `alive`,
   `fwd.*` (the rotation's X axis), `hull` (durable units), `pos.*` and `shield`, and every
   hardpoint under test on every tick its unit is alive. The session
-  has no shield model yet (EAWR-74), so `shield` is the type's full `Shield_Points`. The header
+  has no shield model yet, so `shield` is the type's full `Shield_Points`. The header
   carries the scenario's content identity and SHA-256, so `compare_traces.py --scenario`
   compares it with an original recording directly.
-- `--combat-out <file.csv>` (EAWR-536) adds a combat log for time-to-kill measurements, header
+- `--combat-out <file.csv>` adds a combat log for time-to-kill measurements, header
   `tick,kind,object,part,other,value`, rows in tick order: `fired` (shooter, weapon hardpoint
   or `object`, target, 1), `hit` (the unit reached, the hardpoint it damaged or `hull`,
   `<shooter>/<weapon>`, the hit outcome bits), `health` (unit, `hull`, `shield` or a hardpoint

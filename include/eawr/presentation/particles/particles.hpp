@@ -2,6 +2,7 @@
 
 #include "eawr/core/result.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -106,6 +107,9 @@ struct EmitterDefinition final {
     // Killer and modifier parameters used by the CPU port.
     float lifetime{1.0F};
     float lifetime_variation{};
+    // PL-01: raw V1 sampler values; post-load replaces nonconstant bounds.
+    struct LifetimeRange { float minimum{}, maximum{}; bool constant_mode{}; };
+    std::optional<LifetimeRange> lifetime_range;
     float inward_speed{};
     Vec3 acceleration{};
     bool acceleration_local{};
@@ -132,16 +136,33 @@ struct EmitterDefinition final {
     std::string color_texture;
     std::string normal_texture;
     bool disable_depth_test{};
+    bool depth_sort{};
+    // PS-31: serialized V1 primitive selector, preserved for fail-closed planning.
+    std::uint32_t primitive_mode{1}; // 0 triangle, 1 quad
     bool world_oriented{};
     float tail_size{50.0F};
+    bool legacy_kite_motion{}; // MD-07: V1 motion-based kite geometry.
+    bool inherit_emitter_motion{};
     // V1 parent spawn relation. Each parent particle owns a child emitter instance.
     static constexpr std::uint32_t no_parent = 0xffffffffU;
     std::uint32_t parent_emitter{no_parent};
     bool spawn_on_parent_death{};
+    // PS-35: the every-vertex draw-mask exemption excludes weather emitters.
+    bool weather{};
 
     bool cpu_ready{true};
     std::string unsupported_reason;
 };
+
+// PL-01, PS-47: allocation replaces and sorts age bounds, preserving a true
+// constant sampler's mode and saved default. Raw decoded definitions stay intact.
+[[nodiscard]] inline EmitterDefinition::LifetimeRange postload_lifetime_range(
+    const EmitterDefinition& emitter) {
+    if (emitter.lifetime_range && emitter.lifetime_range->constant_mode)
+        return {emitter.lifetime_range->minimum, emitter.lifetime_range->minimum, true};
+    const float low = std::max(0.0F, emitter.lifetime - emitter.lifetime * emitter.lifetime_variation);
+    return {std::min(low, emitter.lifetime), std::max(low, emitter.lifetime), false};
+}
 
 enum class AloParticleVersion : std::uint8_t { legacy_v1, plugin_v2 };
 struct SystemDefinition final {
@@ -162,11 +183,24 @@ inline constexpr std::string_view invalid_value = "EAWR-PARTICLE-0005";
     std::span<const std::byte> bytes, std::string logical_path = {}
 );
 
+// PS-34..PS-37: global draw quality and group-local emission LOD are independent.
+// Heat is a separate graphics setting; changing a draw mask never scales births.
+struct ParticleDetail final {
+    float global{1.0F};
+    float local{1.0F};
+    bool heat{true};
+    friend bool operator==(const ParticleDetail&, const ParticleDetail&) = default;
+};
+
 struct Particle final {
     std::uint64_t id{}; // stable across packed storage moves
+    std::size_t draw_slot{}; // emitter-local, stable while this particle lives
+    bool draw_eligible{true};
     std::size_t emitter_index{};
     Vec3 position{};
     Vec3 velocity{};
+    Vec3 motion_velocity{}; // MD-07: movement including inherited emitter motion.
+    float inherited_speed_limit{};
     Vec3 acceleration{};
     Vec4 texcoords{0.0F, 0.0F, 1.0F, 1.0F};
     Color color{0.1F, 1.0F, 0.5F, 1.0F};
@@ -181,6 +215,7 @@ struct Particle final {
 };
 
 struct AdvanceStats final {
+    std::size_t requested{};
     std::size_t spawned{};
     std::size_t killed{};
     std::size_t dropped_at_capacity{};
@@ -188,6 +223,12 @@ struct AdvanceStats final {
     std::size_t child_instances_detached{};
     std::size_t death_bursts{};
     std::size_t instances_dropped_at_capacity{};
+};
+
+struct EmitterCapacity final {
+    std::size_t native_requested{};
+    std::size_t requested{}; // includes the documented presentation scheduling allowance
+    std::size_t reserved{};  // independent share of the caller's host safety budget
 };
 
 class CpuSystem final {
@@ -199,11 +240,15 @@ public:
     void set_origin(Vec3 origin);
     void set_basis(Basis3 basis);
     void set_wind(Vec3 acceleration);
+    [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
+    [[nodiscard]] ParticleDetail detail() const noexcept { return detail_; }
+    [[nodiscard]] bool emitter_enabled(std::size_t index) const noexcept;
     [[nodiscard]] core::Result<void> set_mesh_frame(const MeshFrame& frame);
-    // The first valid advance first pre-simulates every emitter with a skip
-    // time in fixed preroll_step increments, under the origin, basis and wind
-    // set before it, then rebases all times so presentation time restarts at
-    // zero. Pre-roll counts are included in that first advance's stats.
+    // PS-07, PS-08: the first valid advance checks freeze before pre-simulating
+    // admitted emitters in preroll_step increments while elapsed <= skip time.
+    // Pre-roll uses the origin, basis and wind set before it and bypasses the
+    // ordinary freeze check, then rebases presentation time to zero. Counts
+    // are included in the first advance; a strict freeze crossing latches frozen.
     [[nodiscard]] AdvanceStats advance(float delta_seconds);
     // BP-40: a linked particle (the Emitter translater, 26) keeps its position in its
     // emitter's frame, and FoC's renderer places it with the emitter's transform as it is
@@ -212,12 +257,16 @@ public:
     // frame drawn between advances shows them where the emitter stands. The next advance then
     // moves them only by what the frame changes after this call.
     void follow_emitter();
-    static constexpr float preroll_step = 1.0F / 30.0F;
+    static constexpr float preroll_step = 0.1F;
+    // Bounded-work project policy, separate from the native prewarm loop.
     static constexpr float max_skip_seconds = 300.0F;
 
     [[nodiscard]] float presentation_time() const { return time_; }
     [[nodiscard]] std::span<const Particle> particles() const { return particles_; }
     [[nodiscard]] std::size_t capacity() const { return max_particles_; }
+    [[nodiscard]] std::span<const EmitterCapacity> emitter_capacities() const { return capacities_; }
+    // Reserved vector payload, excluding immutable definitions/mesh and allocator overhead.
+    [[nodiscard]] std::size_t reserved_memory_bytes() const;
     [[nodiscard]] std::size_t total_dropped() const { return total_dropped_; }
     [[nodiscard]] std::size_t live_child_instances() const;
 
@@ -237,7 +286,16 @@ public:
     }
 
 private:
-    struct EmitterState final { float next_spawn{}; bool active{true}; std::size_t submesh{}, vertex{}; };
+    struct EmitterState final {
+        float next_spawn{};
+        bool active{true};
+        std::size_t submesh{}, vertex{};
+        float elapsed{};
+        bool frozen{};
+        std::size_t next_slot{};
+        std::size_t live{};
+        std::vector<std::size_t> free_slots{};
+    };
     struct ChildInstance final {
         std::uint64_t id{};
         std::size_t emitter_index{};
@@ -260,7 +318,8 @@ private:
                      AdvanceStats& stats, std::vector<ParentEvent>& events);
     void process_events(std::vector<ParentEvent>& events, AdvanceStats& stats);
     void step(float delta_seconds, AdvanceStats& stats);
-    void step_segment(float delta_seconds, AdvanceStats& stats);
+    void step_segment(float delta_seconds, AdvanceStats& stats, bool prewarming = false);
+    void freeze_crossing(float delta_seconds);
     // The emitter's rigid motion since previous_origin_/previous_basis_, applied to a particle
     // of the Emitter translater (26).
     struct EmitterMotion final {
@@ -270,17 +329,23 @@ private:
     [[nodiscard]] EmitterMotion emitter_motion() const;
     void follow(Particle& particle, const EmitterMotion& motion) const;
     void preroll(AdvanceStats& stats);
-    [[nodiscard]] bool frozen(std::size_t emitter_index, float at_time) const;
+    [[nodiscard]] bool frozen(std::size_t emitter_index) const;
+    [[nodiscard]] bool draw_eligible(const Particle& particle) const noexcept;
 
     SystemDefinition definition_;
+    ParticleDetail detail_;
+    std::vector<std::uint8_t> enabled_;
     std::vector<EmitterState> emitters_;
     std::vector<std::vector<std::size_t>> children_;
     std::vector<Particle> particles_;
+    std::vector<EmitterCapacity> capacities_;
+    std::vector<ParentEvent> events_;
     std::vector<ChildInstance> child_instances_;
     std::uint64_t next_particle_id_{1};
     std::uint64_t next_instance_id_{1};
     std::uint32_t random_state_{};
     std::size_t max_particles_{};
+    std::size_t max_child_instances_{};
     std::size_t total_dropped_{};
     float time_{};
     bool detached_{};
@@ -290,6 +355,10 @@ private:
     std::vector<float> emitter_start_;
     Vec3 origin_{};
     Vec3 previous_origin_{};
+    Vec3 sampled_origin_{};
+    Vec3 emitter_velocity_{};
+    float inherited_speed_limit_{};
+    bool origin_set_{};
     Basis3 basis_{};
     Basis3 previous_basis_{};
     Vec3 wind_{};

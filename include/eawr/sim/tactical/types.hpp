@@ -4,6 +4,7 @@
 #include "eawr/sim/math/geometry.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -28,6 +29,19 @@ using PlayerId = std::uint32_t;
 using TeamId = std::uint32_t;
 using FactionId = std::uint64_t;
 using TypeId = std::uint64_t;
+
+// WSS-27..30: the four applied match switches that bind replay purchase content.
+struct SkirmishMatchPolicy {
+    bool allow_heroes{true};
+    bool allow_superweapons{true};
+    bool free_starting_units{true};
+    bool pre_built_base{true};
+    [[nodiscard]] constexpr std::uint32_t disabled_flags() const noexcept {
+        return (allow_heroes ? 0U : 1U) | (allow_superweapons ? 0U : 2U)
+            | (free_starting_units ? 0U : 4U) | (pre_built_base ? 0U : 8U);
+    }
+    friend constexpr bool operator==(const SkirmishMatchPolicy&, const SkirmishMatchPolicy&) noexcept = default;
+};
 
 inline constexpr std::uint32_t player_flag_commandable = 1U;
 
@@ -67,6 +81,13 @@ enum class OrderKind : std::uint8_t {
     buy = 9,        // PU-10 to PU-15: queue a type at a station
     cancel = 10,    // PU-17: cancel a queue entry
     reinforce = 11, // PU-30 to PU-34: bring a pooled unit in at a point
+    pad_build = 12, // WBP-09/10: replay opcode 13, separate from order kind
+    credit_grant = 13, // SAE-07: replay opcode 14
+    pad_sell = 14, // coordinator-reserved: WBP-30, replay opcode 15
+    intentional_quit = 15, // coordinator-reserved: replay opcode 16, WBF-43/48
+    area_ability = 16, // WAD-38: coordinator-reserved, replay opcode 17
+    manual_target = 17, // WAD-39: coordinator-reserved, replay opcode 18
+    reveal_all = 18, // coordinator-reserved: V-20, replay opcode 21
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -79,7 +100,21 @@ struct Order {
     // An attack on one of the target's hardpoints (#531, space-orders OR-20): its index in the
     // target type's HardPoints list, or attack_hull for an attack on the unit.
     std::uint32_t hardpoint{attack_hull};
+    bool through_hazards{}; // WHZ-08a: double-click move, conditional MVHZ state
     friend constexpr bool operator==(const Order&, const Order&) noexcept = default;
+};
+
+// WHE-06/07: contained identities are outside independent spatial/weapon services.
+struct CarriedObject {
+    EntityId entity_id{};
+    TypeId type_id{};
+    EntityId parent{};
+    bool named_hero{}, generic_hero{};
+    bool limbo{true};
+    bool model_visible{}, collidable{}, selected{}, movement_coordinated{};
+    bool combat_preserved{};
+    std::vector<CarriedObject> members;
+    friend bool operator==(const CarriedObject&, const CarriedObject&) = default;
 };
 
 struct UnitState {
@@ -89,8 +124,32 @@ struct UnitState {
     math::Vec3 position{};
     math::Quat rotation{math::identity_quat()};
     Order order{};
+    TypeId purchase_type{}; // WHE-02/40: zero means the ordinary deployed identity
+    std::vector<CarriedObject> contained{};
+    std::uint64_t purchase_token{}; // SAE-11: admitted reserved purchase, zero for ordinary units
+    EntityId barrage_source{}; // WAD-38: proxy owner entity; zero for ordinary units
     friend constexpr bool operator==(const UnitState&, const UnitState&) noexcept = default;
 };
+
+[[nodiscard]] constexpr TypeId purchase_identity(const UnitState& unit) noexcept {
+    return unit.purchase_type != 0 ? unit.purchase_type : unit.type_id;
+}
+
+// WHE-06: reject reuse before touching the carrier; setup visits team members first.
+[[nodiscard]] inline bool contain_object(UnitState& carrier, CarriedObject& rider, const bool preserve_combat) {
+    if (carrier.entity_id == invalid_entity_id || rider.entity_id == invalid_entity_id
+        || rider.entity_id == carrier.entity_id || rider.parent != invalid_entity_id) return false;
+    const auto setup = [&](auto&& self, CarriedObject& object, const EntityId parent) -> void {
+        for (auto& member : object.members) self(self, member, object.entity_id);
+        object.parent = parent;
+        object.limbo = true;
+        object.model_visible = object.collidable = object.selected = object.movement_coordinated = false;
+        object.combat_preserved = preserve_combat;
+    };
+    setup(setup, rider, carrier.entity_id);
+    carrier.contained.push_back(rider);
+    return true;
+}
 
 struct StopPayload {
     friend constexpr bool operator==(const StopPayload&, const StopPayload&) noexcept = default;
@@ -98,6 +157,7 @@ struct StopPayload {
 
 struct MovePayload {
     math::Vec3 destination{};
+    bool through_hazards{}; // coordinator-reserved opcode 20 when true; ordinary move stays 2
     friend constexpr bool operator==(const MovePayload&, const MovePayload&) noexcept = default;
 };
 
@@ -149,6 +209,14 @@ enum class AbilityKind : std::uint8_t {
     power_to_weapons = 3,
     spoiler_lock = 4,
     ion_cannon_shot = 5,
+    barrage = 6, // coordinator-reserved, WAD-38
+    invulnerability = 7, // coordinator-reserved, WHE-22
+    concentrate_fire = 8, // coordinator-reserved, WHE-24/25
+    energy_weapon = 9, // coordinator-reserved, WHE-26/57/59
+    tractor_beam = 10, // coordinator-reserved, WHE-27/58/60
+    harmonic_bomb = 11, // coordinator-reserved, WHE-29/61
+    weaken_enemy = 12, // coordinator-reserved, WHE-28/61
+    replenish_wingmen = 13, // coordinator-reserved, WHE-30/63
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -170,7 +238,22 @@ struct AbilityPayload {
     AbilityAction action{AbilityAction::activate};
     EntityId target{};
     std::uint32_t target_hardpoint{0xffffffffU}; // no_hardpoint
+    std::optional<math::Vec3> position{}; // WHE-61: WEAKEN_ENEMY; wire extension flag 2
     friend constexpr bool operator==(const AbilityPayload&, const AbilityPayload&) noexcept = default;
+};
+
+// WAD-38: activate an ability at a world point. Existing entity-target bytes stay unchanged.
+struct AreaAbilityPayload {
+    AbilityKind ability{AbilityKind::none};
+    math::Vec3 point{};
+    friend constexpr bool operator==(const AreaAbilityPayload&, const AreaAbilityPayload&) noexcept = default;
+};
+
+// WAD-39: assign an enemy object to one manual weapon hardpoint. The issuer is retained.
+struct ManualTargetPayload {
+    EntityId target{};
+    std::uint32_t hardpoint{};
+    friend constexpr bool operator==(const ManualTargetPayload&, const ManualTargetPayload&) noexcept = default;
 };
 
 // Buy (#530, PU-10 to PU-15): queue `type` at the command's one listed unit, the station.
@@ -192,16 +275,48 @@ struct CancelPayload {
 struct ReinforcePayload {
     TypeId type{};
     math::Vec3 position{};
+    std::uint64_t pool_token{}; // SAE-11: zero keeps ordinary type-based admission
     friend constexpr bool operator==(const ReinforcePayload&, const ReinforcePayload&) noexcept = default;
 };
 
+struct PadBuildPayload {
+    TypeId type{};
+    friend constexpr bool operator==(const PadBuildPayload&, const PadBuildPayload&) noexcept = default;
+};
+struct CreditGrantPayload {
+    math::Fixed amount{};
+    friend constexpr bool operator==(const CreditGrantPayload&, const CreditGrantPayload&) = default;
+};
+
+struct QuitPayload {
+    friend constexpr bool operator==(const QuitPayload&, const QuitPayload&) noexcept = default;
+};
+
+struct PlayerQuit {
+    PlayerId player{};
+    std::uint64_t tick{};
+    friend constexpr bool operator==(const PlayerQuit&, const PlayerQuit&) noexcept = default;
+};
+
+struct PadSellPayload {
+    friend constexpr bool operator==(const PadSellPayload&, const PadSellPayload&) noexcept = default;
+};
+
+// V-20: persistent whole-map reveal for this player alone; no unit list.
+struct RevealAllPayload {
+    PlayerId player{};
+    friend constexpr bool operator==(const RevealAllPayload&, const RevealAllPayload&) noexcept = default;
+};
+
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
-    AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload>;
+    AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
+    CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
     return std::holds_alternative<BuyPayload>(payload) || std::holds_alternative<CancelPayload>(payload)
-        || std::holds_alternative<ReinforcePayload>(payload);
+        || std::holds_alternative<ReinforcePayload>(payload) || std::holds_alternative<PadBuildPayload>(payload)
+        || std::holds_alternative<CreditGrantPayload>(payload) || std::holds_alternative<PadSellPayload>(payload);
 }
 
 // key.player_id is the issuer. Units are nonzero and strictly increasing; a buy lists exactly its
@@ -214,6 +329,10 @@ struct PlayerCommand {
 };
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<RevealAllPayload>(payload)) return OrderKind::reveal_all;
+    if (std::holds_alternative<QuitPayload>(payload)) return OrderKind::intentional_quit;
+    if (std::holds_alternative<AreaAbilityPayload>(payload)) return OrderKind::area_ability;
+    if (std::holds_alternative<ManualTargetPayload>(payload)) return OrderKind::manual_target;
     return static_cast<OrderKind>(payload.index() + 1U);
 }
 
@@ -228,6 +347,15 @@ enum class EventKind : std::uint8_t {
     spin_away_started = 6,
     spin_away_ended = 7,
     reinforcement_unloaded = 8, // WR-40: reserved by coordinator; arrival completed for `unit`
+    station_replaced = 9, // WPR-52: coordinator-reserved; unit=old station, sequence=new station
+    pad_captured = 10, // coordinator-reserved: includes transitions to neutral
+    pad_construction_started = 11,
+    pad_construction_completed = 12,
+    pad_structure_sold = 13, // coordinator-reserved: WBP-32, unit=sold child, sequence=parent
+    player_quit = 14, // coordinator-reserved: intentional departure, WBF-48
+    manual_target_timeout = 15, // WAD-39: feedback belongs to the requesting player only
+    ability_cancelled = 16, // coordinator-reserved, WHZ-23; sequence carries AbilityKind
+    ability_ready = 17, // coordinator-reserved, WHZ-24; sequence carries AbilityKind
 };
 
 enum class RejectReason : std::uint8_t {

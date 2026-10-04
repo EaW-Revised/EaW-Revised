@@ -33,7 +33,7 @@ are available and all three are knowledge sources, not code sources:
   structure. A few older adapters were adapted closely from the published `.fx` files
   (the bump-colorize, DX8 mesh, gloss-colorize, additive-offset and solid-colour legacy
   families and the viewer's shield shell); they are published as adapted translations (owner
-  decision EAWR-864) and are candidates for re-derivation from behaviour notes.
+  decision on shader provenance) and are candidates for re-derivation from behaviour notes.
 - If an implementation cannot be written from the note alone, the note is incomplete.
   That is the check.
 

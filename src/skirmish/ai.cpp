@@ -1,4 +1,5 @@
 #include "eawr/skirmish/ai.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 
 #include "eawr/script/numeric/q24_boundary.hpp"
 
@@ -34,24 +35,31 @@ numeric_value lua_float(std::uint32_t bits) {
 script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables) {
     script::foc::AiSetup setup;
     setup.seed = start.setup.seed;
+    setup.perception.campaign_game = false; // SAE-01
     for (const auto& category : tables.categories) setup.content.categories.emplace(upper(category.name), category.value);
     for (const auto& property : tables.properties) setup.content.properties.emplace(upper(property.name), property.value);
     for (const auto& unit : tables.units) {
+        if (roster_disabled_types().contains(type_id(unit.id))) continue;
         script::foc::AiType type;
         type.type_id = type_id(unit.id);
         type.name = upper(unit.id);
         type.category_bits = unit.category_bits;
         type.property_bits = unit.property_bits;
-        for (const auto& ability : unit.abilities) type.abilities.push_back(upper(ability.type));
+        for (const auto& ability : unit.abilities) {
+            if (roster_ability_reason(unit.id, ability.type).empty()) type.abilities.push_back(upper(ability.type));
+        }
         type.projectile_types = unit.weapon ? 1U : 0U;
         // BEHAVIOR_LOCO: ships that move and squadrons; stations and craft (members) do not
         // enter the freestore on their own.
         type.locomotor = (unit.kind == units::UnitKind::ship && unit.movement.max_speed.has_value()) ||
             unit.kind == units::UnitKind::squadron;
         type.star_base = unit.kind == units::UnitKind::station;
+        type.capture_point = unit.capture_point;
+        type.build_pad = unit.build_pad;
         // #449 goal system and perception inputs.
         type.space_evaluator = unit.has_space_evaluator;
         type.tech_level = unit.tech_level;
+        type.base_level = unit.base_level;
         if (unit.ai_combat_power) type.combat_power = lua(*unit.ai_combat_power);
         if (unit.targeting_max_attack_distance) type.max_attack_distance = lua(*unit.targeting_max_attack_distance);
         if (unit.movement.max_speed) type.max_speed = lua(*unit.movement.max_speed);
@@ -120,14 +128,14 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         script::foc::AiPlayer entry;
         entry.player = player.player.player_id;
         entry.faction = upper(player.faction);
-        for (const auto& faction : inputs.factions) {
-            if (upper(faction.name) == entry.faction) entry.neutral = faction.neutral;
-        }
         entry.ai = player.lobby && !player.human;
-        // AI-11: the lobby AI's player type by faction.
-        if (entry.ai) {
-            if (entry.faction == "EMPIRE") entry.player_type = "BasicEmpire";
-            if (entry.faction == "REBEL") entry.player_type = "BasicRebel";
+        entry.human = player.lobby && player.human;
+        for (const auto& faction : inputs.factions) {
+            if (upper(faction.name) != entry.faction) continue;
+            entry.neutral = faction.neutral;
+            // WSS-35, AI-11: every lobby AI uses its faction's authored Basic_AI.
+            if (entry.ai) entry.player_type = faction.basic_ai;
+            break;
         }
         setup.players.push_back(std::move(entry));
     }

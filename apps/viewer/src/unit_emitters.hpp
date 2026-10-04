@@ -40,7 +40,7 @@ namespace eawr::presentation::godot_backend {
 // - Turbo engine ("pte"), power-to-weapons ("pptw") and missile-shield ("pgw") emitters are
 //   hidden when the object is created. While TURBO or SPOILER_LOCK runs the turbo engines
 //   replace the engine emitters, and POWER_TO_WEAPONS shows its effect (#76, AB-31, AB-32); a
-//   proxy the model authors hidden stays hidden.
+//   proxy the model authors hidden is shown by the same emitter-type switch (BP-43).
 // - Ion-stun ("pi") emitters run while the unit is ion stunned (space-damage IS-09), authored
 //   hidden or not: FoC loads the authored flag into the code flag the stun clears. When the stun
 //   ends they stop emitting and their particles drain.
@@ -84,10 +84,14 @@ public:
         bool turbo{};
         bool power_to_weapons{};
         bool ion_stunned{};  // IS-09: the stun shows the ion-stun ("pi") emitters
+        bool invulnerability{}; // WHE-52: the active Falcon mode shows "pem" emitters
         friend bool operator==(const Modes&, const Modes&) = default;
     };
 
     using SnapshotAt = std::function<std::shared_ptr<const sim::tactical::TacticalSnapshot>(std::uint64_t)>;
+    // R-LIT-01/R-LIT-04: live bump particles use the same scene sun and fill
+    // as static map particles, including map hazards admitted to the session.
+    void follow_lighting(const GodotRenderer& renderer);
     // #421: a death clone as it is drawn at a presented tick: its model transform and its death
     // clip's pose (bones in the model's order, with their visibility).
     struct ClonePose final {
@@ -116,10 +120,21 @@ public:
                              const sim::tactical::TacticalSnapshot& previous,
                              const sim::tactical::TacticalSnapshot& latest, const ClonePoseAt& clone_pose_at,
                              const ProjectilePoseAt& projectile_pose_at, const FixedCamera& camera,
-                             double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {});
+                             double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {},
+                             std::span<const sim::EntityId> unfogged_props = {});
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
+        return registry_->set_detail(detail);
+    }
+    void measure_preparation(bool enabled) noexcept {
+        measure_preparation_ = enabled;
+        emitter_prepare_ms_ = clone_prepare_ms_ = 0.0;
+    }
+    [[nodiscard]] double emitter_prepare_ms() const noexcept { return emitter_prepare_ms_; }
+    [[nodiscard]] double clone_prepare_ms() const noexcept { return clone_prepare_ms_; }
+    [[nodiscard]] double* clone_prepare_timer() noexcept { return measure_preparation_ ? &clone_prepare_ms_ : nullptr; }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "unit_emitters" member, followed by ",\n".
@@ -128,6 +143,9 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    bool measure_preparation_{};
+    double emitter_prepare_ms_{};
+    double clone_prepare_ms_{};
     // One admitted proxy of a ship: its effect and its frame in the ship's model space.
     struct Wanted final {
         std::size_t proxy{};
@@ -143,6 +161,8 @@ private:
         bool failed{};  // could not start; reported once per plan, not retried
         bool engine{};  // an engine emitter (BP-42): drawn at the ship's engine brightness
         bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
+        bool power_to_weapons{};  // AB-32: drains when the ability hides it (BP-48)
+        bool invulnerability{};
     };
     struct Running final {
         std::size_t proxy{};
@@ -151,7 +171,9 @@ private:
         std::optional<sim::math::Mat3x4> mesh_local;
         bool engine{};
         bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
+        bool power_to_weapons{};
         std::uint64_t born{};  // the clock sample it was started for
+        bool invulnerability{};
         std::size_t log{};     // its start_log_ row, or start_log_limit
         // An engine emitter an ability swap hid (BP-65): it no longer emits, its residual
         // particles are drawn until they are gone, then it is released.
@@ -182,6 +204,8 @@ private:
         // clip like the proxy: that bone, and the mesh frame of the last sample.
         std::optional<std::size_t> mesh_bone;
         std::optional<particles::MeshFrame> last_mesh;
+        // Moves with the proxy until its CPU batch has joined and its owner completes it.
+        std::optional<particles::PreparedAttachmentStep> pending{};
     };
     // A clone emitter's start: the unit, the proxy, and the session tick and clock sample of the
     // sample that started it.
@@ -192,6 +216,15 @@ private:
         std::uint64_t born{};
     };
     struct Ship final {
+        sim::EntityId entity{};
+        struct AttachedModel final {
+            std::size_t hardpoint{};
+            std::size_t proxy_base{};
+            scene::Placement placement;
+            sim::math::Mat3x4 local{};
+        };
+        bool attachments_planned{};
+        std::vector<AttachedModel> attachments;
         bool planned{};
         std::vector<scene::HardpointState> states;  // the states the plan was made for
         Modes modes;                                // and the engines' and abilities' modes
@@ -218,7 +251,13 @@ private:
     [[nodiscard]] const ModelFrames* model_frames(const scene::Placement& placement, const assets::Model*& model);
     void plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
               std::span<const scene::HardpointState> states, Modes modes);
+    void plan_model(Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
+                    const scene::Placement& placement, const sim::math::Mat3x4& attachment,
+                    std::size_t proxy_base, std::span<const scene::HardpointAttachment> hardpoints,
+                    std::span<const scene::HardpointState> states, Modes modes);
     void stop_all(Ship& ship, const char* reason);
+    using Emitting = std::map<sim::EntityId, std::map<std::string, std::uint64_t>>;
+    [[nodiscard]] Emitting emitting_units() const;
     // Replans a ship whose hardpoint states or engines changed, stops what the plan no longer
     // admits and starts what it newly admits, born at clock sample `born` for session tick `tick`.
     void update(Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
@@ -238,7 +277,7 @@ private:
                     const std::optional<ClonePose>& pose, std::uint64_t tick, std::uint64_t born);
     // A clone's proxies that are still live go on draining where they last stood.
     void orphan_clone(Ship& ship);
-    // One sample of a clone proxy's lifecycle; false after it failed (reported, then released).
+    // Prepares a clone sample; advance_sample batches and completes it in owner order.
     bool step_clone_proxy(CloneProxy& proxy, bool visible, const particles::EmitterFrame& frame,
                           const particles::MeshFrame* mesh, sim::EntityId entity, std::uint64_t tick,
                           std::uint64_t born);
@@ -251,6 +290,7 @@ private:
     std::unique_ptr<particles::EffectRegistry> registry_;
     // #638: the handles of one batched advance or present and their statistics, reused.
     std::vector<particles::EffectHandle> batch_handles_;
+    std::vector<float> batch_deltas_;
     std::vector<particles::EffectFrameStats> batch_stats_;
     std::map<std::string, ModelFrames> frames_;
     std::map<std::string, EffectSystem> systems_;
@@ -263,6 +303,7 @@ private:
     std::uint64_t max_running_{};
     std::uint64_t plans_{};
     std::map<std::string, std::uint64_t> started_;        // proxy -> effect starts
+    Emitting emitting_at_release_;
     std::map<std::string, std::uint64_t> stopped_;        // reason -> effect stops
     std::map<std::string, std::uint64_t> not_admitted_;   // proxy: cause -> ships
     std::map<std::string, std::uint64_t> start_failed_;   // effect: cause -> count
@@ -287,11 +328,20 @@ private:
     std::uint64_t ion_stun_drains_started_{};
     std::uint64_t ion_stun_drains_finished_{};
     std::uint64_t ion_stun_drains_cut_short_{};
+    std::uint64_t ion_stun_max_particles_{};
+    std::uint64_t ion_stun_dropped_at_capacity_{};
+    std::uint64_t power_to_weapons_drains_started_{};
+    std::uint64_t power_to_weapons_drains_finished_{};
+    std::uint64_t power_to_weapons_drains_cut_short_{};
+    std::uint64_t invulnerability_drains_started_{};
+    std::uint64_t invulnerability_drains_finished_{};
+    std::uint64_t invulnerability_drains_cut_short_{};
     std::uint64_t clone_drains_released_{};
     std::uint64_t clone_drains_cut_short_{};
     std::uint64_t clone_drains_reset_{};
     std::uint64_t clone_particles_now_{};
     std::uint64_t clone_max_particles_{};
+    std::uint64_t clone_dropped_at_capacity_{};
     std::uint64_t clone_max_live_{};
     std::vector<CloneStartRow> clone_log_;
     // BP-45: FoC's engine emitter brightness, 0.2 + 0.8 x speed / maximum speed, per unit (last

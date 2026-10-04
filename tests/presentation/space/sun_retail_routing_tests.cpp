@@ -352,12 +352,13 @@ void test_admission_closed() {
         (root / "src/presentation/space/sun_retail.cpp").lexically_normal(),
         (root / "include/eawr/presentation/space/environment_scene.hpp").lexically_normal(),
         (root / "src/presentation/space/environment_scene.cpp").lexically_normal(),
-        (root / "src/presentation/CMakeLists.txt").lexically_normal(),
+        (root / "src/presentation/sources.cmake").lexically_normal(),
         (root / "apps/viewer/CMakeLists.txt").lexically_normal()};
     for (const auto& file : owned) expect(std::filesystem::is_regular_file(file), "owned file exists: " + file.string());
     const std::vector<std::string_view> tokens{"sun_retail", "eawr-sun-mode7-retail"};
     std::size_t scanned = 0;
     std::set<std::string> required{"src/presentation/CMakeLists.txt", "src/presentation/space/space.cpp",
+                                   "src/presentation/sources.cmake",
                                    "src/presentation/godot/renderer.cpp", "apps/viewer/CMakeLists.txt",
                                    "apps/viewer/src/space_environment.cpp", "apps/sky_scan/main.cpp"};
     // Build outputs copied into the tree (the viewer's GDExtension and its debug symbols under

@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "vfs_internal.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -508,6 +509,7 @@ Vfs& Vfs::operator=(Vfs&&) noexcept = default;
 Vfs::Vfs(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::vfs);
     if (ordered_layers.empty()) {
         return core::Result<Vfs>::failure(error(diagnostic_codes::mount_invalid, "at least one layer is required"));
     }

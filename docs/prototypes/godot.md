@@ -1,6 +1,6 @@
 # Godot RenderingServer prototype B
 
-ADR-011 selected this route. The prototype uses a Godot 4.7.2 GDExtension and direct `RenderingServer` RIDs for the frozen Hangar scene. `prototypes/godot/dependencies.json` pins Godot `4.7.2-stable` and godot-cpp `10.0.0-stable`. The scene has one bootstrap `Node3D`; simulation entities are represented by immutable Q24 snapshots, not scene-tree nodes.
+[Godot presentation decision](../architecture-decisions.md#adr-011-godot-presentation) selected this route. The prototype uses a Godot 4.7.2 GDExtension and direct `RenderingServer` RIDs for the frozen Hangar scene. `prototypes/godot/dependencies.json` pins Godot `4.7.2-stable` and godot-cpp `10.0.0-stable`. The scene has one bootstrap `Node3D`; simulation entities are represented by immutable Q24 snapshots, not scene-tree nodes.
 
 ## Build and run
 

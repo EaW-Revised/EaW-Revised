@@ -7,6 +7,8 @@
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/lighting/lighting.hpp"
+#include "eawr/presentation/space/population_index.hpp"
+#include "eawr/presentation/space/unit_fade.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
 #include "eawr/sim/snapshot.hpp"
@@ -16,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -96,6 +99,7 @@ public:
             bool placement_preview{}; // WR-12: a visual clone, with attached particle emitters hidden
             // #456: a model slot for a projectile in flight (BattleEffects' pools; counted apart).
             bool projectile_slot{};
+            bool construction{};
             // #427: its type has a DEFEND ability, so its SHIELD sub-object is composed as the
             // shield shell pose_live() shows while LivePose::defend_active (BP-22).
             bool defend_shell{};
@@ -125,6 +129,10 @@ public:
                                const FixedCamera& camera, std::span<const std::uint32_t> environment_records,
                                sim::AssetId first_asset, sim::EntityId first_entity);
     void pose_units(GodotRenderer& renderer, std::uint32_t sample);
+    // Live frames first capture a disappearing model's last submitted palette,
+    // then consume this same idle sample once before current live posing.
+    void defer_unit_sample(std::uint32_t sample) noexcept { pending_unit_sample_ = sample; }
+    void pose_pending_units(GodotRenderer& renderer);
 
     // #80: where a live-session unit is drawn this frame. `ship` indexes
     // Options::placed_ships; position (source units), the facing yaw and
@@ -142,11 +150,20 @@ public:
         std::vector<scene::HardpointState> hardpoints{};
         // #427: the unit's DEFEND ability runs, so its shield shell shows (BP-22).
         bool defend_active{};
+        std::optional<double> construction_hull{};
+        // Reusable launch slots bind to the simulation unit currently occupying them.
+        sim::EntityId entity{};
     };
     // Moves every live ship's pieces to its pose and hides the live ships
     // `poses` does not list, then refreshes instances(). False (failure()
     // set) when a transform leaves the Q24 range.
-    [[nodiscard]] bool pose_live(std::span<const LivePose> poses);
+    [[nodiscard]] bool pose_live(std::span<const LivePose> poses, const particles::StepExecutor* workers = nullptr);
+    void trace_frames(bool enabled) noexcept { trace_frames_ = enabled; }
+    [[nodiscard]] double compose_ms() const noexcept { return compose_ms_; }
+    [[nodiscard]] double refresh_ms() const noexcept { return refresh_ms_; }
+    [[nodiscard]] double idle_frame_ms() const noexcept { return idle_frame_ms_; }
+    [[nodiscard]] double idle_sample_ms() const noexcept { return idle_sample_ms_; }
+    [[nodiscard]] double idle_upload_ms() const noexcept { return idle_upload_ms_; }
     // #81: the clip a live ship with PlacedShip::clip bound at compose; null
     // when it has none or it did not bind (the report says why).
     [[nodiscard]] const animation::Player* live_clip(std::size_t ship, bool alternate = false) const noexcept;
@@ -200,11 +217,24 @@ public:
     // #427: the entities of a live ship's own model surfaces (hull, engine and damage-decal
     // surfaces), without its hardpoints' attached models and its shield shell: what its
     // light scale reaches (BP-21).
-    [[nodiscard]] std::vector<sim::EntityId> live_hull_entities(std::size_t ship) const;
+    [[nodiscard]] std::span<const sim::EntityId> live_hull_entities(std::size_t ship) const;
+    // Borrowed entity spans remain valid until composition, retirement or release.
     // #535: every entity of a live ship's composed pieces: its hull surfaces, its hardpoints'
     // attached models and its shield shell alike, the set the fog fade's opacity is offered to
     // (space-fog-presentation.md FW-19); each piece's adapter decides whether it dithers.
-    [[nodiscard]] std::vector<sim::EntityId> live_ship_entities(std::size_t ship) const;
+    [[nodiscard]] std::span<const sim::EntityId> live_ship_entities(std::size_t ship) const;
+    // FW-19: propagate only changed ship opacity, including currently gated pieces.
+    void set_live_opacity(GodotRenderer& renderer, std::size_t ship, float opacity);
+    // One reusable lookup for a frame containing fog transitions.
+    void prepare_fog_model_capture();
+    // FW-26: independent non-shield pieces, retained uploads and frozen skin
+    // palettes. These copies never enter picking, bars or emitter providers.
+    [[nodiscard]] bool remember_fog_model(GodotRenderer& renderer, sim::EntityId entity, std::size_t ship,
+        std::span<const animation::BonePose> neutral_pose = {},
+        std::optional<std::array<float, 3>> neutral_colour = {});
+    void draw_fog_models(GodotRenderer& renderer, const space::FogGhosts& memory,
+                         std::vector<sim::RenderInstance>& output);
+    [[nodiscard]] std::size_t fog_model_pieces(sim::EntityId entity) const noexcept;
     // #427: the shield shells' effect clock (seconds).
     void set_shield_time(GodotRenderer& renderer, float seconds);
     void release(GodotRenderer& renderer);
@@ -257,6 +287,17 @@ public:
     void write_report(std::ostream& output) const;
 
 private:
+    struct SurfaceUpload;
+    [[nodiscard]] std::optional<SurfaceUpload> upload_surface(
+        GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
+        std::map<std::string, assets::Texture>& textures, sim::AssetId& next_asset,
+        const assets::Model& model, std::uint32_t mesh_index, std::uint32_t submesh_index,
+        const scene::LegacySelector& selector, const std::string& texture_path,
+        const std::optional<std::array<std::uint8_t, 3>>& colour, const std::string& identity);
+    [[nodiscard]] std::optional<SurfaceUpload> upload_shell(
+        GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
+        sim::AssetId& next_asset, const assets::Model& model, std::uint32_t mesh_index,
+        std::uint32_t submesh_index, std::string& status);
     // A piece of hardpoint art: shown by the state of hardpoint `hardpoint`
     // of decisions_[decision].
     struct HardpointGate final {
@@ -273,19 +314,43 @@ private:
         sim::math::Mat3x4 local{sim::math::identity_matrix()};
         // #427: its ship's shield shell, drawn while the ship's DEFEND runs.
         bool shield{};
+        std::optional<std::uint32_t> alternate{};
     };
+    void rebuild_piece_index();
     void refresh_instances();
     [[nodiscard]] std::size_t hidden_decals(std::size_t decision) const;
 
     Options options_;
+    bool trace_frames_{};
+    double compose_ms_{};
+    double refresh_ms_{};
+    double idle_frame_ms_{};
+    double idle_sample_ms_{};
+    double idle_upload_ms_{};
     std::optional<scene::Scene> scene_;
     std::vector<scene::SpacePlacementDecision> decisions_;
     // Every composed piece, and those the hardpoint states show.
     std::vector<GatedInstance> pieces_;
+    std::vector<std::uint32_t> live_alternates_;
+    std::vector<std::uint32_t> live_alternate_counts_;
+    space::PopulationIndex piece_index_;
+    space::AttachmentMarks attachment_marks_;
+    std::vector<std::uint8_t> compose_errors_;
     std::vector<sim::RenderInstance> instances_;
+    struct FogPiece {
+        sim::EntityId source{};
+        sim::RenderInstance instance;
+    };
+    std::map<sim::EntityId, std::vector<FogPiece>> fog_models_;
+    std::vector<sim::EntityId> fog_drawn_entities_;
+    std::optional<std::uint32_t> pending_unit_sample_;
+    sim::EntityId next_fog_piece_{std::numeric_limits<sim::EntityId>::max() / 16U};
     // Aligned with decisions_, then with each decision's hardpoints.
     std::vector<std::vector<scene::HardpointState>> hardpoint_states_;
     std::vector<sim::AssetId> uploaded_;
+    // AVC-02: only animated additive materials, never static placement transforms.
+    std::vector<sim::AssetId> effect_clock_assets_;
+    std::optional<std::uint32_t> effect_sample_;
     std::map<sim::AssetId, RenderPass> passes_;
     // "<model> surface <n> shader <name>: <diagnostic>" per failed upload.
     std::vector<std::string> upload_failures_;

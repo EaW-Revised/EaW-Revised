@@ -32,6 +32,9 @@ enum class TacticalVerb : std::uint8_t {
     buy = 7,
     cancel = 8,
     reinforce = 9,
+    pad_build = 10, // WBP-09/10
+    pad_sell = 11, // WBP-30
+    intentional_quit = 12, // WBF-43/48
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -63,6 +66,7 @@ struct TacticalIntent {
     sim::tactical::TypeId type{};
     sim::tactical::BuildQueue queue{sim::tactical::BuildQueue::units};
     std::uint32_t index{};
+    bool through_hazards{}; // WHZ-08a: explicit double-click movement
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 
@@ -157,6 +161,7 @@ struct WorldPick {
 struct OrderModifiers {
     bool ctrl{};
     bool alt{};
+    bool through_hazards{};
 };
 
 class OrderInput final {

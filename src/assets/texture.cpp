@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "asset_internal.hpp"
 
 #include <algorithm>
@@ -128,5 +129,6 @@ core::Result<Texture> load_tga(const std::span<const std::byte> bytes, Source so
 } // namespace
 
 core::Result<Texture> load_texture(const std::span<const std::byte> bytes, Source source){if(bytes.size()>detail::max_file_size)return core::Result<Texture>::failure(detail::error(source,diagnostic_codes::limit,"texture exceeds 512 MiB safety limit"));if(source.stored_size!=0&&source.stored_size!=bytes.size())return core::Result<Texture>::failure(detail::error(source,diagnostic_codes::source_mismatch,"provenance size does not match supplied texture bytes"));const auto ext=extension(source.logical_path);if(bytes.size()>=2&&bytes[0]==std::byte{'B'}&&bytes[1]==std::byte{'M'})return load_bmp(bytes,std::move(source));if(bytes.size()>=4&&bytes[0]==std::byte{'D'}&&bytes[1]==std::byte{'D'}&&bytes[2]==std::byte{'S'}&&bytes[3]==std::byte{' '})return load_dds(bytes,std::move(source));if(bytes.size()>=18){const auto image_type=std::to_integer<unsigned>(bytes[2]);const auto depth=std::to_integer<unsigned>(bytes[16]);if((image_type==2U||image_type==3U||image_type==10U||image_type==11U)&&(depth==8U||depth==24U||depth==32U))return load_tga(bytes,std::move(source));}return fail<Texture>(source,"texture bytes are not supported BMP, DDS or TGA (extension "+ext+")",0,diagnostic_codes::texture_format);}
-core::Result<Texture> load_texture(const vfs::Vfs& filesystem,const std::string_view path){auto record=filesystem.stat(path);if(!record)return core::Result<Texture>::failure(record.error());auto bytes=filesystem.open(path);if(!bytes)return core::Result<Texture>::failure(bytes.error());return load_texture(bytes.value(),source_from(record.value()));}
+core::Result<Texture> load_texture(const vfs::Vfs& filesystem,const std::string_view path){
+    core::load_profile::Scope load_scope(core::load_profile::Phase::texture);auto record=filesystem.stat(path);if(!record)return core::Result<Texture>::failure(record.error());auto bytes=filesystem.open(path);if(!bytes)return core::Result<Texture>::failure(bytes.error());return load_texture(bytes.value(),source_from(record.value()));}
 } // namespace eawr::assets

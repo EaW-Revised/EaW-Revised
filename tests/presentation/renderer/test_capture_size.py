@@ -155,11 +155,14 @@ class CaptureSizeStructure(unittest.TestCase):
 
     def test_host_pins_a_capture_before_any_mode_starts(self):
         text = mode_source("viewer_host")
-        ready = text[text.index("void ViewerHost::_ready()"):text.index("bool ViewerHost::start_renderer_runtime_exercise()")]
+        physical = (ROOT / "apps/viewer/src/viewer_host_ready.cpp").read_text(encoding="utf-8")
+        start = physical.index("void ViewerHost::_ready()")
+        ready = physical[start:physical.index("\n}\n", start)]
         pin = ready.index("pin_capture_viewport(")
         for mode in ("UnitMode::requested()", "EffectMode::requested()", "map_mode_ = std::make_unique<MapMode>"):
             self.assertLess(pin, ready.index(mode), mode)
-        self.assertIn('"--eawr-window-resize-test"', ready)
+        cli = (ROOT / "apps/viewer/src/viewer_host_config.cpp").read_text(encoding="utf-8")
+        self.assertIn('"--eawr-window-resize-test"', cli)
 
 
 @unittest.skipUnless(RUNTIME, "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical capture size checks")

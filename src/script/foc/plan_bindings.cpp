@@ -7,6 +7,7 @@
 #include "ai_engine.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace eawr::script::foc::detail {
 namespace {
@@ -14,6 +15,8 @@ namespace {
 using ai::Engine;
 using ai::Real;
 using HostPtr = std::shared_ptr<Host>;
+
+std::uint64_t names_to_bits(const Host& host, const std::string& text, bool& ok);
 
 const ai::TaskForce* taskforce_of(const Host& host, const Value& value) {
     const Handle* found = as_handle(value, ai::handle_taskforce);
@@ -97,7 +100,9 @@ Binding taskforce_move(HostPtr host, std::string kind, bool position_only) {
         if (arguments.size() < 2) return fail("TaskForce order: no destination");
         Value destination;
         const ViewUnit* object = nullptr;
-        if (const ai::Target* target = target_of(*host, arguments[1])) {
+        if (as_handle(arguments[1], ai::handle_ai_target) != nullptr) {
+            const ai::Target* target = target_of(*host, arguments[1]);
+            if (target == nullptr) return none(); // EX-32: an expired target returns nil
             if (target->object != 0) {
                 object = host->view->find(target->object);
                 if (object == nullptr) return none(); // the target is already dead
@@ -107,10 +112,28 @@ Binding taskforce_move(HostPtr host, std::string kind, bool position_only) {
         } else if (as_handle(arguments[1], handle_game_object) != nullptr) {
             object = live_object(*host, arguments[1]);
             if (object == nullptr) return none();
-        } else if (const auto position = extract_position(*host, arguments[1])) {
+        } else if (kind == "guard" && taskforce_of(*host, arguments[1]) != nullptr) {
+            // EX-32: guard follows a random member, rather than the force's centroid.
+            const auto* guarded = taskforce_of(*host, arguments[1]);
+            if (guarded->units.empty()) return none();
+            const auto index = context.random().next_below(guarded->units.size());
+            object = host->view->find(guarded->units[static_cast<std::size_t>(index)]);
+            if (object == nullptr) return none();
+        } else if (const auto position = (kind == "guard" || kind == "attack") ? std::optional<math::Vec3>{}
+                : extract_position(*host, arguments[1])) {
             destination = position_value(*position);
         } else {
-            return fail("TaskForce order: parameter 1 is not a valid destination");
+            std::string description = "nil";
+            if (const auto* value = std::get_if<Handle>(&arguments[1].data)) {
+                description = "handle kind=" + std::to_string(value->kind) + " id=" + std::to_string(value->id);
+            } else if (std::holds_alternative<std::vector<Value>>(arguments[1].data)) description = "position/table";
+            else if (std::holds_alternative<LuaNumber>(arguments[1].data)) description = "number";
+            else if (std::holds_alternative<std::string>(arguments[1].data)) description = "string";
+            else if (std::holds_alternative<bool>(arguments[1].data)) description = "boolean";
+            const auto* plan = host->engine->plan_of_instance(context.instance());
+            if (plan != nullptr && plan->definition < host->engine->plans().size())
+                description += " plan=" + host->engine->plans()[plan->definition].name;
+            return fail("TaskForce order: parameter 1 is not a valid destination (" + description + ")");
         }
         if (object != nullptr) {
             destination = position_only ? position_value(object->position) : handle(handle_game_object, object->id);
@@ -135,6 +158,31 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
     });
     method("Attack_Move", taskforce_move(host, "attack_move", false));
+    method("Build_All", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        if (taskforce == nullptr) return none();
+        const auto sequence = context.command_sequence();
+        stage(context, "produce", {handle(ai::handle_taskforce, taskforce->id)});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    });
+    method("Get_Reserved_Build_Pads", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        const auto* plan = taskforce != nullptr && host->engine != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
+        std::vector<Value> pads;
+        if (plan != nullptr) for (const auto pad : plan->reserved_pads) pads.push_back(handle(handle_game_object, pad));
+        return one(Value{std::move(pads)});
+    });
+    method("Build", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        const auto* plan = taskforce != nullptr && host->engine != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
+        if (plan == nullptr || arguments.size() != 3 || as_text(arguments[1]) == nullptr) return none();
+        const auto type = host->types_by_name.find(upper(*as_text(arguments[1])));
+        const auto* pad = as_handle(arguments[2], handle_game_object);
+        if (type == host->types_by_name.end() || pad == nullptr
+            || std::find(plan->reserved_pads.begin(), plan->reserved_pads.end(), pad->id) == plan->reserved_pads.end()) return none();
+        context.issue_command(std::string(verb_pad_build), {number(LuaNumber(plan->player)), arguments[2], handle(handle_type, type->second->type_id)});
+        return none();
+    });
     method("Attack_Target", taskforce_move(host, "attack", false));
     method("Move_To", taskforce_move(host, "move", true));
     method("Guard_Target", taskforce_move(host, "guard", false));
@@ -177,8 +225,19 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
                                      number(LuaNumber(offset)), number(ai::to_single(*distance)), number(ai::to_single(*tolerance))});
         return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
     });
-    // Reinforcement blocks: every M2 unit starts on the map, so there is nothing to bring in.
-    method("Reinforce", [](BindingContext&, const ValueList&) { return none(); });
+    // SAE-03: reserve members stay pooled until their plan asks for reinforcement.
+    method("Reinforce", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        if (taskforce == nullptr || arguments.size() < 2) return none();
+        const auto* plan = host->engine->plan(taskforce->plan);
+        // SAE-03: a fixed-force session without an economy has no reinforcement pool.
+        if (plan == nullptr || host->economy(plan->player) == nullptr) return none();
+        const auto position = extract_position(*host, arguments[1]);
+        if (!position) return none();
+        const auto sequence = context.command_sequence();
+        stage(context, "reinforce", {handle(ai::handle_taskforce, taskforce->id), position_value(*position)});
+        return one(handle(ai::handle_block, ai::block_id(context.instance(), sequence)));
+    });
     method("Get_Stage", [](BindingContext&, const ValueList&) { return none(); });
     method("Form_Units", [](BindingContext&, const ValueList&) { return none(); });
     method("Withdraw_Units", [](BindingContext&, const ValueList&) { return none(); });
@@ -250,16 +309,32 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         return none();
     });
     method("Collect_All_Free_Units", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() != 1 && arguments.size() != 2)
+            return fail("Collect_All_Free_Units expects zero or one category argument");
         const ai::TaskForce* taskforce = taskforce_of(*host, arguments[0]);
         if (taskforce == nullptr) return none();
-        stage(context, "collect", {handle(ai::handle_taskforce, taskforce->id)});
+        std::uint64_t mask = std::numeric_limits<std::uint64_t>::max();
+        if (arguments.size() == 2) {
+            const auto* category = as_text(arguments[1]);
+            if (category == nullptr) return fail("Collect_All_Free_Units expects a category string");
+            bool valid = false;
+            mask = names_to_bits(*host, *category, valid);
+            if (!valid || ai::split_names(*category, "|").empty())
+                return fail("Collect_All_Free_Units has an unrecognized category");
+        }
+        // EX-12: preserve all 64 category bits across the staged command.
+        stage(context, "collect", {handle(ai::handle_taskforce, taskforce->id), Value::text(std::to_string(mask))});
         return none();
     });
     method("Block_Goal_Proposal", [](BindingContext& context, const ValueList&) -> core::Result<ValueList> {
         stage(context, "block_proposal", {});
         return none();
     });
-    method("Are_All_Units_On_Free_Store", [](BindingContext&, const ValueList&) { return one(boolean(true)); });
+    method("Are_All_Units_On_Free_Store", [host](BindingContext&, const ValueList& arguments) {
+        const auto* taskforce = taskforce_of(*host, arguments[0]);
+        const auto* plan = taskforce != nullptr && host->engine != nullptr ? host->engine->plan(taskforce->plan) : nullptr;
+        return one(boolean(plan != nullptr && !plan->requires_production));
+    });
     // FH-24 (#76): Activate_Ability(name, on) asks each of the TaskForce's units in turn, as the
     // unit call does (AB-44). Retail returns a block that finishes as the units' abilities do;
     // the M2 plans never block on it, so the remake returns nil.
@@ -441,8 +516,9 @@ core::Result<ValueList> find_target(const Host& host, BindingContext& context, c
     for (const std::uint64_t id : *targets) {
         const ai::Target* target = host.engine->target(id);
         if (!host.engine->target_matches(player, flags, target)) continue;
-        const auto score = host.engine->evaluate(*function, player, target);
-        if (!score) continue;
+        // The distance test comes before the scoring (#957): a target out of reach is dropped
+        // either way, and scoring is the expensive part (a search over every tactical location
+        // took tens of milliseconds); the answer is the same.
         if (taskforce != nullptr && Real{} < max_distance) {
             const auto position = extract_position(host, handle(ai::handle_ai_target, target->id));
             if (!position) continue;
@@ -451,6 +527,8 @@ core::Result<ValueList> find_target(const Host& host, BindingContext& context, c
             const Real dz = numeric::from_fixed(origin.z) - numeric::from_fixed(position->z);
             if (max_distance < ai::to_single(dx * dx + dy * dy + dz * dz)) continue;
         }
+        const auto score = host.engine->evaluate(*function, player, target);
+        if (!score) continue;
         candidates.push_back(target);
         scores.push_back(*score);
     }
@@ -581,6 +659,34 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
 }
 
 } // namespace
+
+const ViewUnit* destination_object(const Host& host, const Value& value) {
+    if (const auto* target = target_of(host, value))
+        return target->object == 0 ? nullptr : host.view->find(target->object);
+    return live_object(host, value);
+}
+
+std::optional<UnitDestination> unit_destination(const Host& host, const ViewUnit& mover,
+    const Value& value, bool follow_object, bool guard) {
+    const auto position = extract_position(host, value);
+    if (!position) return std::nullopt;
+    UnitDestination destination{0, *position};
+    if (!follow_object) return destination;
+    const ViewUnit* object = destination_object(host, value);
+    // FH-41: unit guard chooses the first member other than itself or its parent.
+    if (guard) {
+        if (const auto* force = taskforce_of(host, value)) {
+            for (const auto member : force->units) {
+                if (member == mover.id || (mover.squadron != 0 && member == mover.squadron)) continue;
+                object = host.view->find(member);
+                break;
+            }
+        }
+    }
+    if (object != nullptr && object->id != mover.id && (mover.squadron == 0 || object->id != mover.squadron))
+        destination.object = object->id;
+    return destination;
+}
 
 void register_plan_bindings(ScriptScheduler& scripts, const std::shared_ptr<Host>& host, std::vector<core::Diagnostic>& errors) {
     register_taskforce(scripts, host, errors);

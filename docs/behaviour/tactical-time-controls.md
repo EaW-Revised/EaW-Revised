@@ -4,8 +4,8 @@
 
 - Product: Star Wars Empire at War: Forces of Corruption, a tactical battle in skirmish or single
   player. The claims come from the FoC debug build, read on 2026-09-28 under the
-  [clean-room rule](../clean-room.md); the private evidence map (IDs TE-01 to TE-12) is under
-  the ignored `out/research/`. Data claims name the file. EAWR-459, gap 10 of the Phase 2 plan.
+  [clean-room rule](../clean-room.md); the private evidence map (IDs TE-01 to TE-12, with the (legacy EAWR-617) flash/final-pose reread) is under
+  the ignored `out/research/`. Data claims name the file. Pause and speed controls, gap 10 of the Phase 2 plan.
 - Bounded question: what the time panel's pause and fast-forward buttons and the game-speed
   setting do, which keys drive them, and what still works while the battle is paused.
 - Source tags: **research** (debug build), **data** (a FoC file), **project** (a remake choice)
@@ -38,7 +38,7 @@
 | TM-09 | Pausing shows the pause banner: the `pause_shell` shell (`i_attack_mode.alo`) with the text `TEXT_GAME_PAUSED` ("Game Paused") in `Battle_Pending_Message_Color` (255, 32, 32, 240, `GameConstants.xml`) and a button reading `TEXT_BUTTON_RESUME_GAME` ("Resume Game") that plays again. In a tactical battle the banner's show animation jumps to its end. Playing hides it. | research TE-04, TE-09; data |
 | TM-10 | Orders given while paused are accepted and wait: no order path looks at the pause, and a command waits in the command queue for the next frame that runs (one tactical action, selling a structure, is refused while paused). | research TE-10 |
 | TM-11 | While paused the tactical camera's smoothed distance, field of view, height and spline position jump straight to their targets instead of easing towards them. | research TE-11 |
-| TM-12 | No key drives pause, play or fast forward: the default key map has no time command, and only the two buttons (and restoring a saved game) call them. The Escape menu has a pause of its own (the in-game menu, P2-20e). | research TE-12 |
+| TM-12 | No key drives pause, play or fast forward: the default key map has no time command, and only the two buttons (and restoring a saved game) call them. The Escape menu has a pause of its own (the in-game menu, battle dialogs). | research TE-12 |
 | TM-13 | Pausing also pauses movies, positional and looping sound, speech and weather audio; playing resumes them. | research TE-04 |
 
 ### Project choices
@@ -51,7 +51,7 @@
 | TP-04 | Each change is recorded in a time track: the tick the next step would run and the new state and target. The live session report lists it (`live_session.time`), and `--eawr-live-replay-out <file>` writes it beside the replay as `<file>.time.csv` (`tick,state,ticks_per_second`). The replay file itself is unchanged. |
 | TP-05 | `--eawr-live-speed 0..4` sets the tactical speed setting (default 2), since the remake has no profile options page. |
 | TP-06 | A driven capture run advances its presentation tick by `--eawr-live-step` times target / 30 per frame, and not at all while paused, so a scripted pause or fast forward shows the same ticks on every host. |
-| TP-07 | The pause banner is drawn as its two texts only (the pause text and the Resume Game button), centred at the top of the view, until an original capture pins the shell's pose (fidelity list). |
+| TP-07 | The mounted pause shell is held at the final `IDLE_00` pose at the top centre, with the text at its authored bone and Resume Game in its authored button mesh. The additional Quit Game caption underneath remains project policy ((legacy EAWR-952)). Missing shell/clip data retains the diagnostic text fallback. |
 
 ## Cases
 
@@ -68,14 +68,14 @@
 
 | ID | Unknown | Effect |
 |---|---|---|
-| TM-U1 | How the pause button's flash looks (its period and which state art it alternates). | The remake shows the pressed art steadily while paused. |
-| TM-U2 | The pause banner shell's final pose after its show animation (TP-07). | The banner's frame is not drawn; its texts are. |
+| TM-U1 | Resolved by the (legacy EAWR-617) debug reread and (legacy EAWR-514) bright/dim captures: an additive `Flash_Texture_Name` quad, falling back to selected art, fades from full brightness to zero every 0.5 seconds on UI time while the base button keeps its normal/hover state. | Implemented by the presentation clock; play removes the flash. |
+| TM-U2 | Resolved by the (legacy EAWR-617) debug reread, mounted `i_attack_mode_idle_00.ala` and (legacy EAWR-514) stills: tactical pause holds the final clip pose. | Native frame, text bone, button bounds, rollover art and 7-point component fonts are drawn. |
 | TM-U3 | Whether a paused frame freezes the particle and animation clocks as well as the simulation. | The remake freezes everything the presented tick drives (effects, death clips) with the simulation. |
 
 ## Fidelity list
 
-- The pause button's flash (TM-U1) and the banner shell (TM-U2), awaiting the owner capture (EAWR-311).
-- Audio pause and resume (TM-13) waits for the battle audio (EAWR-443).
+- TM-U1/TM-U2 are resolved by (legacy EAWR-617); lit remake captures are compared beside (legacy EAWR-514) retail stills.
+- Audio pause and resume (TM-13) waits for the battle audio (battle audio foundation).
 - The camera's smoothing snap while paused (TM-11): the remake's camera keeps easing its distance
   while paused.
 - Multiplayer refusal (TM-04) is not modelled: the remake has no network game.

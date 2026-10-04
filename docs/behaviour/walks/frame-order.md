@@ -1,0 +1,193 @@
+# Space tactical logical-frame order
+
+Walk date: 2026-10-01. Remake audited at `21d997cf3b0e496c96d185965f1335d6e00dc3f0`.
+This is a docs-only walk of the running space battle, from command execution to logical-frame
+completion. Loading, subsystem internals and independent rendering remain interfaces.
+
+Sources are fresh, read-only **debug build** queries, keyed by opaque EFO evidence IDs;
+effective **XML data**; and the sourced rules in the linked subsystem walks. The evidence map
+and raw queries stay in ignored `out/research/`. No recording was made for this walk.
+An **unverified** result stays unverified even when the remake chooses a deterministic order.
+
+The original services objects in **most recent service-registration first** order, then each
+object's periodic behaviours in **attachment order**. Ordinary construction attaches
+`Behavior` before `SpaceBehavior`, preserving each list's authored order. Consequently there
+is no universal movement/weapons/shields/hazards phase order shared by all types. Commands
+precede mode service; fog decay precedes objects; income follows objects; each player's AI
+precedes that player's build queue. These boundaries can be preserved by partitioned work
+with ordered commits; they do not require a serial per-unit simulation.
+
+## Ordered rules
+
+Rows WFO-12 to WFO-24 are nested inside WFO-11 for **each** object, rather than global sweeps.
+Attachment in WFO-15 explains that nested order; it is initialization work, not repeated each
+frame. Cadences belong to the linked subsystem rules. Optional interfaces run only when
+present. Campaign-only work, land bombardment and the map editor are outside this space case.
+
+| ID | Ordered rule, branches and interface | Source |
+|---|---|---|
+| WFO-01 | Before logical admission, the outer loop services outgoing and scheduled events. An active standalone battle outside playback can execute queued events at the current frame here, even without a newly admitted logical frame. Input/UI work also occurs outside the logical gate. A paused world therefore does not establish that all command execution waits. | debug build EFO-15; WBF-12/13 |
+| WFO-02 | An admitted logical frame begins synchronization, obtains its current frame and executes scheduled commands before tree maintenance or battle-mode service. Foreground/network/synchronization gates can prevent admission; a synchronization error separately prevents mode service. | debug build EFO-15, EFO-22; WBF-14 |
+| WFO-03 | Normal queued execution scans players, then queued entries from head to next for that player. Scheduled events resolve an execution frame; multiplayer requires the resolved frame to be due, whereas standalone execution has a bypass. Executed entries are removed, optionally recorded, executed and released. Playback consumes its recorded event stream separately. Queue insertion and a same-player tie's correspondence to incoming sequence numbers remain UFO-01. | debug build EFO-27 |
+| WFO-04 | Global collection-tree service precedes mode service. Object boxes can subsequently change during their owners' services; this is not a promise that all targeting sees one immutable set of final positions. | debug build EFO-15; CO-04/05/07/11 |
+| WFO-05 | Mode management reevaluates a matured detail-change countdown, then, with an active mode and no synchronization error, services scoring, the active mode, game votes, voting progress and pending battles, in that order. | debug build EFO-22; WBF-15 |
+| WFO-06 | Space mode services an active cinematic, battlefield modifiers and space pathfinding refresh, then attack/announcement counters and enemy-leader victory tests, before entering shared mode service. Battlefield modifiers are a system boundary distinct from per-object combat-modifier cleanup. | debug build EFO-01; WBF-16/17 |
+| WFO-07 | Shared mode first refreshes speed/type dependencies and requested music/briefing/odds interfaces. Requested ambient reevaluation is suppressed while results are active. It then reaches fog. | debug build EFO-02; WBF-18 |
+| WFO-08 | With fog support, grids present and setup inactive, service the grids for players whose ID modulo **16** equals the current frame modulo **16** (code). Service fogged models after those grids. This is decay/ghost maintenance; revealer circles are updated later by object behaviours, and may change coverage in the same frame. | debug build EFO-02; V-12/15/17, WSU-01 |
+| WFO-09 | Object tracking runs next, when available, followed by scene pre-service flush. Tracking's predictions and targeting's collection trees are separate interfaces. | debug build EFO-02; WBF-19, AV-02/03 |
+| WFO-10 | Before objects, each player's previous current-income accumulator becomes last-frame income, then current income and maintenance paid are cleared. This accounting reset does not pay income. | debug build EFO-02; WBF-20 |
+| WFO-11 | Shared mode services the synchronized object manager completely, then the presentation object manager completely. A manager traverses its service list while gameplay is enabled. It does not scan the object hash table or sort by object ID. | debug build EFO-02/03 |
+| WFO-12 | First service registration inserts an object at the **front** of the manager's service list. The iterator starts at the front and follows next links. Existing objects therefore run in reverse service-registration order. Registration normally occurs on the first periodic behaviour attachment, or when special abilities require service. Creation order is only equivalent when registration follows creation without later removal/re-registration; it is not a general ID contract. | debug build EFO-07/11/12/21/24/25/26/28/29 |
+| WFO-13 | Within an ordinary object service, locomotor history/disabled-engine recovery precedes combat-modifier cleanup. Positive modifier duration uses current gameplay frame + trunc(seconds x logical FPS + **0.5**); duration **-1** uses unsigned final-frame sentinel **4294967295**, other nonpositive durations use final frame **0** (code constants). Cleanup removes a modifier only when its final frame is **strictly less** than the current gameplay frame; equality retains it. Cleanup covers defense, damage, health, shield, energy, movement, fire rate, reveal range, fire range, ability recharge and tactical build time. The traced total calculator does not perform another expiry sweep. | debug build EFO-04/09/18/23/30 |
+| WFO-14 | Delayed damage follows modifier cleanup and precedes periodic behaviours. Positive remaining-frame counters decrement; damage becomes due when the decrement reaches zero and enters the ordinary damage interface immediately. A counter already below 1 is skipped by this service. Ordinary projectile impacts instead apply in the projectile object's service (WCC-01); hero direct damage applies in its handler. There is no single end-of-frame damage batch. | debug build EFO-04; WCC-01, WHE-26 |
+| WFO-15 | Ordinary construction applies the general `Behavior` list first, then the list for the active mode (`SpaceBehavior` here), each from first authored entry to last. Periodic behaviours are inserted at the front of the serviced prefix; nonperiodic ones append outside it. Reverse traversal of that prefix thus preserves **attachment order**, not reverse XML order. Runtime attachment preserves its own insertion semantics; duplicate behaviour declarations are not resolved by this walk. | debug build EFO-07/12/16 |
+| WFO-16 | For each behaviour in that serviced prefix, invoke it only when its next-service frame is **<= current frame** and its service is enabled. Its handler owns its interval and next deadline; this loop supplies no universal per-system cadence or catch-up loop. A cinematic animation whose type requests `Pause_During_Cinematic_Anim` skips the ordinary pre-animation services; the special-ability/Lua tail has its own gates. | debug build EFO-04/10/14; WHE-09 |
+| WFO-17 | Generic ability countdown, locomotion and hyperspace arrival run at their respective positions in the object's attached periodic list. An ability activated by the pre-mode command execution can therefore reach its countdown in that same admitted frame. Arrival's reveal-disable/enable and unloaded notification occur inside locomotion, not in a global reinforcement sweep. The code arrival milestones **35**, **120**, **150** are WR-37/39/40; those do not identify global frame numbers. | debug build EFO-04/15; WAB-11/12, WR-35..40 |
+| WFO-18 | Power/shield recharge, object targeting, reveal and hide-when-fogged likewise run at their authored periodic positions, when due/enabled. A type with power/shields in general `Behavior` can recharge before its space movement; a type listing them after locomotion in `SpaceBehavior` does the reverse. Object targeting can see changes made by earlier serviced objects. Weapon hardpoints run later under WFO-24. | debug build EFO-04/07/12/16; XML data; WCC-02/20, V-12, WSU-03 |
+| WFO-19 | Asteroid and nebula services occupy their authored per-object positions and use code interval **1** logical frame; capture points use code interval **4**, with a per-behaviour due test rather than an established global absolute-frame-modulo sweep. Their contacts, ownership changes and damage/events occur at those positions; WHZ owns the conditions and constants inside. | debug build EFO-04/10; WHZ-02/10/20/40 |
+| WFO-20 | After periodic behaviours, apply a dirty transform and selection-box refresh, then model/attachment visibility, animation and animation-triggered audio support. These calls are inside object service; the independent render frame still has its own services. | debug build EFO-04 |
+| WFO-21 | The object's special-ability manager runs after that behaviour/model work and before object Lua. It visits declared handlers with the WHE-09 due/enabled/owner gates. A per-frame hero beam/status can therefore damage another object before or after that recipient's turn, depending on service-list position. Modifier expiry is WFO-13, not a post-hero global phase. | debug build EFO-04; WHE-09/26/34/35 |
+| WFO-22 | An attached object Lua script is pumped only when the object is not deletion-pending and its `ServiceRate` is present. When `LastService` is present, elapsed gameplay seconds must be **strictly greater** than `ServiceRate`. Finished scripts detach; otherwise the service records the next reference time, with an initial randomized offset when no previous value exists. This service follows special abilities. | debug build EFO-04; WAB-31, WTA-02 |
+| WFO-23 | After object Lua, a live object with eligible destroyable hardpoints applies its hull cap, then services hardpoints in their own list order. Hardpoint weapon/turret/repair work is WCC-03's interface. A projectile or direct handler can already have changed that hull/hardpoint state earlier in the frame. Dynamic importance decays afterward; converted-object attrition has a later object-tail placement. | debug build EFO-04; WCC-03/30/31 |
+| WFO-24 | Damage/death notifications can occur inside these calls; queued memory deletion is later. This object service has no universal entry gate saying that every dead or deletion-pending object skips every behaviour. Lua and hardpoints have explicit gates, and each damage/behaviour handler owns its own eligibility. Do not confuse deferred deletion with permission to fire or take damage. | debug build EFO-04/19; WCC-03/40/61, WHE-08 |
+| WFO-25 | After a manager's object traversal and camera-alignment refresh, scan its delayed-creation vector from **last entry to first**. Create entries whose due frame is **<= current synchronization frame**, apply requested fade-in support and erase them. New objects from this tail pass have missed that manager's object traversal and receive ordinary service on a subsequent traversal. Due-vector order is established, not the order in which every subsystem enqueues requests (UFO-03). | debug build EFO-03 |
+| WFO-26 | At the manager tail, process queued deletions from first entry onward. Objects allowed to delete detach from both synchronized and presentation managers; the loop rereads queue size as it proceeds, then clears the queue. Disallowed deletion is not performed here. This flush follows delayed creation and precedes return to shared mode; it is not a global end-frame flush. | debug build EFO-03/19 |
+| WFO-27 | After both managers, service the timeline, collision system and movement coordinator, in that order. Object locomotion and projectile collision can already have run; these system interfaces must not be relabelled as all movement or all damage. | debug build EFO-02; WBF-22 |
+| WFO-28 | Then service setup support, retreat outside the editor, and victory countdown outside the editor. Deciding destruction registers pending victory earlier, inside the destruction interface (WBF-31/37, WCC-40). Countdown placement does not authorize later same-frame damage while pending. | debug build EFO-02; WBF-22/31/37 |
+| WFO-29 | Tactical income-stream service follows countdown, outside the editor. Multiplayer-style tactical credit balancing and pending domination follow it. Income therefore observes the object changes/deletions already made; it precedes the later player AI/build-queue pass. Human pre-mode purchases cannot spend income paid later in that same frame. | debug build EFO-02/05/15; WPR-10..13/30, WBF-23 |
+| WFO-30 | Shared mode then handles matured victory/end transitions and presentation tails. Returning from mode management still leaves outer logical-frame work: the end callback is not proof of an immediate abort of the entire outer iteration. | debug build EFO-02/15; WBF-24 |
+| WFO-31 | After mode management and eligible minicinematics (skipped while the load dialog is active), service players in **ascending player ID**. For each player, service a valid AI first, then that player's tactical build queue. Queue validity and completion see the prior object service; an AI decision precedes its own queue completion, while a later player's AI runs after earlier players' queues. The AI's internal perception/goal/plan cadence remains WTA-01. | debug build EFO-05/15/17; WPR-20..23, WTA-01 |
+| WFO-32 | Global gameplay scripts follow the player pass; story elapsed/era hooks and tutorial follow them. The generic outer Lua engine/debug-server pump is a different, earlier outer-loop interface (WFO-01), not this global gameplay-script pass. | debug build EFO-15; WBF-25 |
+| WFO-33 | Campaign-only win checks are gated separately. Mode frame advance then precedes end-frame synchronization, followed by quitting-player processing. Timers in these preceding calls read the frame being serviced, not a universally preincremented next frame. | debug build EFO-15; WBF-25 |
+| WFO-34 | Independent render admission places space fighter-cell layout **after space camera setup and before shared mode render service**, including the active-cinematic camera branch. It is not a logical-frame service. The layout visits occupied cells and feeds icon positions to the command bar; later shared object rendering updates grippers and command-bar rendering rebuilds icons/bars. | debug build EFO-08/13/15; WBF-26, WSU-34/36 |
+
+### Two stock attachment examples
+
+The effective `Tartan_Patrol_Cruiser` general list places `ABILITY_COUNTDOWN`, `POWERED` and
+`SHIELDED` before space locomotion and targeting. Its space list places `REVEAL` before
+`HIDE_WHEN_FOGGED`. `Calamari_Cruiser` instead places countdown, locomotion, power, shields,
+targeting, hide, reveal, unit AI, asteroid damage, damage tracking, ion effect and nebula in
+that order in its space list. Nonperiodic entries still attach but are not periodic services.
+These are data examples, not a prescribed phase schedule for every type or an inference that
+two handlers due at different intervals run together. Sources: XML data in
+`spaceunitscorvettes.xml` / `spaceunitscapital.xml`; debug build EFO-04/07/12/16.
+
+## Deferral and same-frame visibility
+
+| Trigger | Established boundary | Limit / source |
+|---|---|---|
+| Reinforcement created during pre-mode command execution | Registers before object traversal, so can receive ordinary service that frame; repeated requests observe population charged by earlier successful creations. | WFO-02/03/12/17; WR-02/05/30..32. Incoming equal-player queue ordering remains UFO-01. |
+| Object immediately created while its manager is traversing | Front insertion puts it before the current iterator; that traversal's subsequent next links do not visit it. It waits for a subsequent traversal of that manager. | WFO-12; debug build EFO-24/25/26/29. A different manager whose pass has not begun is a separate case. |
+| Object created by manager delayed-creation tail | Ordinary periodic service waits for the next traversal, even though creation notifications can run immediately. | WFO-25; creation notifications WHE-07/08. |
+| Upgrade created by a player's completed build | Player pass is after both object managers; ordinary service waits for the next manager traversal. Normal unit completion adds to the pool rather than deploying. | WFO-31; WPR-22/51/52. |
+| Arrival reaches local counter 120 | Reveal enables inside locomotion. Its later due reveal behaviour can mark cells that same frame; earlier objects' targeting has already run. Global fog decay/ghost service ran before the arrival. This does **not** imply a universal wait for the next 16-frame grid service before fresh cells are marked. | WFO-08/12/15/17/18; WR-39; V-11/12/15/17. |
+| Arrival reaches local counter 150 | Position restore, movement release, unloaded signal and forced hide reevaluation happen in locomotion before later behaviours/special services on that object. Earlier objects already consumed their inputs. | WFO-17/18/21; WR-40. Arrival firing/order eligibility remains reinforcements U-1. |
+| Station killed on its scheduled queue-completion frame | Object service/deletion precedes player-queue validity/completion. WPR-20's invalid-station sweep is reached before WPR-21 completion, so the due time alone cannot produce from the removed station. | WFO-26/31; WPR-20/21. This ordering already matches the remake's late production pass. |
+| Timed combat modifier at its final frame | Cleanup retains equality and removes it on a later gameplay frame. Whether an earlier external damage caller reaches a still-uncleaned recipient depends on service order; compare each consumer, not generic ability expiration. | WFO-12/13/14/21; UFO-02. |
+| Event raised during a service | Its immediate notification can affect later consumers; a newly scheduled command is constrained by scheduled-queue traversal and admission. There is no established universal rule deferring every event to the next frame. | WFO-03/17/24/32; UFO-01/02. |
+
+## Amendments to the five subsystem questions
+
+| Walk / U-item | Resolution | Remaining evidence |
+|---|---|---|
+| [Production](production.md) U-1 | **Settled schedule:** commands -> objects/deletions -> income -> per-player AI -> that player's build queue (WFO-02/26/29/31). Income is a mode system, not an income pass nested in each player service. Station death precedes queue completion. | Any particular AI purchase callback's queue insertion follows that AI walk's interface; UFO-01 applies only to input/event tie ordering. |
+| [Heroes](heroes.md) U-01 | **Settled schedule:** service registration determines recipient/source turns; combat cleanup and delayed damage precede behaviours, special handlers follow them, Lua/hardpoints follow special handlers (WFO-12..24). There is no global post-damage modifier expiry. | Exact source-death/recipient-refresh/beam collision for a chosen handler remains UFO-02; schedule settlement does not invent the handler's callbacks. |
+| [Hazards](hazards.md) U-01 | **Settled schedule and attachment:** general then space lists, authored order of periodic attachment, newest service registration first; fog first and each object's movement/shield/environment services at its own due positions (WFO-08/12/15..19). | Exceptional duplicate/runtime detach/reattach cases are UFO-04. Shield-mesh entry/exit remains hazards U-02. |
+| [Reinforcements](reinforcements.md) U-4 | **Partly settled:** fog-grid decay precedes arrivals; arrival enabling can feed a later same-object revealer in the same frame; commands charge population before the object pass; deletion precedes late queues (WFO-02/08/12/17/18/26/31). | Same-player competing event insertion and the exact population-unregistration callback remain UFO-01/05. A kill later in object service is not available population for an earlier pre-mode command. |
+| [Sensors/UI](sensors-ui.md) U-04 | **Settled with correction:** fighter-cell layout is in render service, after the camera and before shared object rendering; it is absent from the logical object-services sequence (WFO-34). | No capture is needed to establish this caller placement. Retail layout/slide comparisons remain that walk's separate questions. |
+
+Four scheduling questions are settled; reinforcement U-4 retains explicitly bounded races.
+The same findings correct capital-combat WCC-02's reverse-XML wording and settle the
+pre-mode-command branch of abilities WAB-12: an ordinary admitted-frame activation can
+count its first frame during that frame's later countdown service. Object-script activation
+after the countdown, late AI execution, playback and paused input require their actual call
+positions rather than that human-command shortcut.
+
+## Comparison with the remake tick
+
+All simulation rows below refer to `src/sim/tactical/session_step.cpp`, `TacticalSession::step`,
+unless another file is named. Status is **same**, **differs**, or **missing** for the recorded
+boundary; a difference in internal organization is not proof of a visible failure. The
+comparison preserves [EnTT storage decision](../../architecture-decisions.md#adr-009-entt-storage-and-stable-simulation-ids)'s copied inputs, disjoint staging and ordered commit contract.
+
+| Rules | Remake phase / interface | Verdict and observability |
+|---|---|---|
+| WFO-01 | `src/platform/live_session.cpp`, pause/pacing and queued player input | **differs**: commands are held for a world step. Exact paused mutation is unverified; UFO-01, no new implementation ticket. |
+| WFO-02 | commands at the late canonical `(tick, player, sequence)` pass | **differs, observable**: movement, targeting/fire and projectile damage precede commands. A newly activated fire mode or changed target cannot affect firing already emitted in that tick; original pre-mode commands can affect later eligible services. Reuse observable frame-order review (legacy EAWR-949). |
+| WFO-03 | pending-command key order; `src/script/authoritative/tactical_bridge.cpp` queues scripts for the next world step | **differs**: explicit canonical keys versus original per-player queue traversal/playback. Whether equal-player ordering differs in a visible case is UFO-01. |
+| WFO-04 | collection-box rebuild/service after movement, before targeting | **differs**: CO-11 deliberately uses one moved immutable view. Target ties/range/obstruction can differ at a crossing boundary; a concrete case requires UFO-04, reuse global review (legacy EAWR-949). |
+| WFO-05 | world step has no original scoring/mode-vote/pending-battle pass | **missing**: lifecycle/scoring interface, owned by battle-flow/results work (legacy EAWR-953, EAWR-616). No frame-order-only ticket. |
+| WFO-06 | motion/path planning and effects are separate interfaces | **differs**: no corresponding system prefix. Stock outcomes depend on active modifiers/cinematics; keep interiors with battle-flow/hero walks, no proven new visible mismatch here. |
+| WFO-07 | host presentation and loaded tables | **differs**: dependency/music prefix has no matched world boundary; battle-flow owns these presentation gates. |
+| WFO-08 | fog decay/circles/flashes in late visibility after economy/hangars | **differs**: per-player decay cadence agrees, but position and coverage consumption are reorganized. A revealer processed earlier in retail can expose a target before a later shooter's same-frame service, whereas remake targeting reads the previous snapshot. This is an observable contact/fire boundary; reuse global review (legacy EAWR-949). |
+| WFO-09 | tracking/planning after movement/targeting/abilities, with copied inputs | **differs**: input age differs; no additional observable failure established beyond the crossing case above. |
+| WFO-10 | late ledgers/income, no paired original income accumulator rollover | **missing**: the accounting interface, owned by production; missing counters alone do not prove a battle outcome difference. |
+| WFO-11 | partitioned movement, targeting, projectiles, abilities, unit systems | **differs**: system sweeps replace nested object services. Implementation organization is allowed; the observable dependency cases below matter. |
+| WFO-12 | ascending entity-ID staged/commit order; projectile IDs ascending | **differs, observable**: reverse service registration differs from ascending ID. An existing later-registered projectile can kill/disable a ship before its retail weapon service; the remake emits all due targeting/fire before applying existing projectile hits. It can emit an extra shot on that boundary. Reuse global review (legacy EAWR-949); pending-victory protection remains separate (legacy EAWR-779, EAWR-703). |
+| WFO-13 | timed arrival vulnerability cleared in movement; ion expiry in abilities; generic hero modifiers absent | **differs**: no common per-recipient modifier-cleanup position. The traced final-frame predicate is inclusive; the arrival-specific endpoint comparison is UFO-02 until normalized. Generic modifier state is hero ownership work (legacy EAWR-937). |
+| WFO-14 | partitioned projectile flight followed by ordered damage commit; no generic delayed-damage queue | **differs, observable**: projectile effects are batched after fire, as WFO-12's lethal-hit case establishes. Delayed damage is a missing combat feature owned by its walk, not a reason to implement an inferred schedule. |
+| WFO-15 | typed tables/explicit phases, no retained periodic attachment scheduler | **differs**: universal phase placement loses general-versus-space order. Compare WFO-17/18's stat/expiry cases; do not introduce a serial per-entity loop to copy the container. |
+| WFO-16 | per-feature deadlines/phase gates | **same interface**: due services/gates are represented by feature state. It does not reproduce every original behaviour type or exceptional cinematic gate; those are subsystem/lifecycle gaps. |
+| WFO-17 | movement/arrival before targeting; abilities after targeting/projectile flight staging, before command execution | **differs, observable**: authored countdown-before-targeting types can stop a timed fire-rate mode before the final eligible weapon service; remake targeting reads its active slot before `expire_abilities` clears it. Similarly pre-mode activation and reveal hooks differ. Reuse global review (legacy EAWR-949); arrival permission itself remains its walk. |
+| WFO-18 | energy/shield recharge in late unit-systems, after firing/hit commit | **differs, observable**: a due pre-weapon recharge can fund or absorb a same-frame shot in the original; the remake first fires/applies hits and recharges afterward. Tartan/MC80 attachment demonstrates which local order applies. Reuse global review (legacy EAWR-949). |
+| WFO-19 | no asteroid/nebula/capture service in this audited tick | **missing**: already owned by hazard simulation/capture work (legacy EAWR-924, EAWR-925, EAWR-926, EAWR-927). Apply their sourced per-object interfaces when implemented; no new ordering bug inferred from absence. |
+| WFO-20 | unit-system transforms and snapshot publication; host animation/audio | **differs**: presentation is detached from the logic object's tail. No extra visible fault established by this walk. |
+| WFO-21 | generic special-handler service absent | **missing**: heroes handler work (legacy EAWR-936, EAWR-940, EAWR-945, EAWR-946); preserve WFO-13/17/23 consumer ordering in those implementations. |
+| WFO-22 | native DEFEND stand-in in abilities; authoritative script host after world | **differs**: native script check precedes hit commit, while original object Lua follows its behaviours/special service. Rate-window phase remains abilities' capture question; no newly verified same-frame damage-rate trigger. |
+| WFO-23 | hardpoint fire in targeting, hull cap/destruction in unit-systems | **differs, observable**: a damage-limited hull can fire before the cap/destruction service that retail runs before its hardpoint weapons. Reuse global review (legacy EAWR-949) and capital-combat's existing boundary (WCC-02). |
+| WFO-24 | hit commit removes killed targets immediately; systems remove destroyed survivors | **differs**: logical removal and snapshot deletion are distinct from the original manager deletion tail. Immediate pending-victory gating is already tracked (legacy EAWR-779, EAWR-703); never copy deferred deletion as a damage permission. |
+| WFO-25 | no generic manager delayed-creation/respawn vector | **missing**: respawn work already exists (legacy EAWR-928). Reverse due-vector traversal is sourced; producer insertion ties remain UFO-03. |
+| WFO-26 | removals committed before late economy validity | **same boundary** for removed-station queue checks; memory/container organization differs but is not observable by itself. |
+| WFO-27 | collision flight/commit and motion/plans embedded in preceding phases | **differs**: system calls do not map one-to-one. Object-service arbitration is covered by WFO-12/14, not a new global collision rule. |
+| WFO-28 | victory after visibility, destruction events processed at end | **differs**: pending registration/countdown age and later same-frame damage are existing victory work (legacy EAWR-779, EAWR-703); this walk confirms their placement rather than duplicating them. |
+| WFO-29 | late income followed by production, commands earlier | **same boundary** for object loss before income and human purchases before income. AI spending timing differs through WFO-31; income does not fund a pre-mode human purchase that already ran. |
+| WFO-30 | host sees published outcome and opens results | **differs**: no original nested end callback. Battle-flow owns results/pause/teardown (legacy EAWR-616). |
+| WFO-31 | economy queues finish inside world before `ScriptedTacticalSession::step` services AI/scripts | **differs**: AI sees a pool after this frame's completions and its generated commands wait for the next world step; original AI precedes its own queue. Purchase-capable AI is incomplete at this snapshot, so a new visible purchase race is unverified; reuse global review (legacy EAWR-949). |
+| WFO-32 | script bridge services global scripts after world and AI, retains generated commands | **same broad boundary**: scripts follow world/AI. Individual script/command latency is WFO-03's separate question. |
+| WFO-33 | completed tick advances during publication, then host/script processing | **differs**: clock convention differs; normalize creation/frame labels before declaring an endpoint bug (UFO-02). |
+| WFO-34 | `apps/viewer/src/map_mode_hud.cpp`, icon layout/render from snapshots | **same boundary**: layout is presentation work outside logical simulation. Original layout/slide geometry still differs under sensors/UI's own gaps. |
+
+Counts by WFO rule: **5 same**, **24 differs**, **5 missing**. The observable differences
+form six dependency groups: command-before-consumers; revealer-before-later targeting;
+existing-projectile-before-ship fire; countdown-before-weapon expiry; recharge-before-weapon
+or damage; hull cap-before-hardpoint fire. They are executable/data consequences, not claimed
+retail captures. All six already fall within the existing global frame-order review; reuse it
+instead of filing duplicate implementation bugs. Tracking: Tactical frame order (legacy EAWR-1041).
+The linked global review retains its existing battle-flow parent (legacy EAWR-953).
+
+## Existing notes and ownership
+
+| Note / rules | Comparison |
+|---|---|
+| [Battle flow](battle-flow.md) WBF-12..26 | **same** nesting/placement; **missing there** exact service-list insertion, authored attachment, modifier endpoint and creation-tail order. |
+| [Capital combat](capital-combat.md) WCC-01/02/03 | **same** interleaved projectile/hardpoint interfaces; **differs** WCC-02's claim of reverse authored order: reverse storage traversal preserves attachment order (WFO-15). Object service order is now WFO-12. |
+| [Targeting](../space-targeting.md) CO-11, G-01 | **same** project ordered update distinction; **missing there** retail reverse registration. This settles the generic service-list unknown, not duplicate/reattachment or float/model-box questions. |
+| [Visibility](../space-visibility.md) V-12/15/17/19 | **same** early grid decay/later reveal; **missing there** precise per-object interleaving and render-cell placement. |
+| [Abilities](abilities.md) WAB-12 U-01 | **same** countdown arithmetic; **settled** pre-mode admitted-frame command reaches a later countdown. Other activation contexts remain caller-specific. |
+| [Production](production.md), [heroes](heroes.md), [hazards](hazards.md), [reinforcements](reinforcements.md), [sensors/UI](sensors-ui.md) | Schedule amendments are explicit above and in each walk. Their subsystem interiors and non-frame-order gaps remain with those walks. |
+
+The scheduling code reads no XML tag selecting a universal service phase. The relevant
+direct inputs are `Behavior`, `SpaceBehavior` and `Pause_During_Cinematic_Anim`; their
+stock applicability/examples are described above. `GalacticBehavior` / `LandBehavior`
+are alternative-mode interfaces, not space ordering inputs. Registry inspection finds
+`Behavior` still **todo** for SpacePrimarySkydome, SpaceSecondarySkydome and SpecialEffect
+movement coverage (legacy EAWR-649). `Pause_During_Cinematic_Anim` has **presentation-later**
+cinematic rows and **land-or-galactic** GroundInfantry / Props_Story rows; the registry has no
+ordinary space-unit row for this tag. Ordinary
+space `Behavior` / `SpaceBehavior` rows are marked applied, which proves existing readers,
+not a faithful periodic schedule. This docs-only walk adds no reader and changes no registry
+status. Hazard/hero/economy/visibility tag inventories remain in their subsystem walks.
+
+## Unverified reads and captures
+
+| ID | Still unverified | Minimal evidence that settles it |
+|---|---|---|
+| UFO-01 | Incoming same-player tie order, events enqueued during execution, and which paused orders mutate immediately | Read enqueue/remap/playback callers and queue insertion. With the existing debugger harness, step two competing requests from one player and two players, record accept order/pool/credits/population, then repeat paused and in playback. State fog mode; do not introduce a log-scraping probe. |
+| UFO-02 | Exact timed-modifier versus generic ability endpoints after clock normalization, and source death/recipient refresh/direct beam races | Read each chosen stat getter/damage caller and refresh/removal callback; normalize command execution frame, creation frame and first service. Single-step a timed vulnerability through final-1/final/final+1 with a fixed damage source; separately kill a bonus source before/after recipient service and activate a beam/status on that frame. Observe health/shields/modifier state through the debugger harness. |
+| UFO-03 | Producer insertion ties and exceptional destruction/respawn creation routes | Read delayed-creation enqueue and the chosen destroy route. Destroy two pads/docks with equal delays, step through their due frame, observe creation/ownership/first ordinary service, preserving reverse due-vector processing. |
+| UFO-04 | Service-list re-registration, duplicate attached behaviours, save/load reconstruction and consumer outcomes at crossing boundaries | Read detach/reinsert and save/load paths. Stage two moving/revealing ships in both creation orders, step a cell/range/nebula/storm boundary with fog on, record service-visible position, shield/ability/contact and first shot. Ordinary registration and attachment are already settled. |
+| UFO-05 | Exact population-unregistration timing on every destruction route, combined with competing arrivals | Read share-removal callback from a chosen ordinary death versus direct detach. With population at cap, queue two arrivals and kill one registered craft/ship in that frame; step commands, destruction, delete flush and next-frame acceptance, recording remaining shares and accepted request. Reinforcements U-4 retains this race. |
+
+These follow-ups are evidence work, not new asserted original behaviours. No implementation
+ticket is filed solely because an internal phase differs or because an unverified race might
+be observable.

@@ -166,6 +166,14 @@ void write_catalog(const std::filesystem::path& root) {
   <Land_Model_Name>eawr_scene_plain.alo</Land_Model_Name>
   <Scale_Factor>-1</Scale_Factor>
 </GroundBuildable>
+<SpaceProp Name="EAWR_SCENE_BACKGROUND">
+  <Model_Name>eawr_scene_plain.alo</Model_Name>
+  <Layer_Z_Adjust>-2500</Layer_Z_Adjust>
+</SpaceProp>
+<SpaceProp Name="EAWR_SCENE_BAD_HEIGHT">
+  <Model_Name>eawr_scene_plain.alo</Model_Name>
+  <Layer_Z_Adjust>invalid</Layer_Z_Adjust>
+</SpaceProp>
 </Objects>)xml");
 }
 

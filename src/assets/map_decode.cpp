@@ -329,9 +329,8 @@ void classify_orientation(Map& map, Placement& placement, const Chunk& payload) 
     } else if (placement.orientation_degrees->x == 0.0F && placement.orientation_degrees->y == 0.0F) {
         placement.orientation_status = OrientationStatus::yaw_only;
     } else {
-        placement.orientation_status = OrientationStatus::unsupported_three_axis_order;
-        issue(map, MapIssue::orientation_three_axis, "1/258/1/1100/1113/1200", payload.header_offset, size,
-              "placement retains nonzero roll/pitch; Euler composition order is unresolved", ordinal, 5);
+        // R-ROT-01..03: finite roll/pitch use the sourced placement composition.
+        placement.orientation_status = OrientationStatus::three_axis;
     }
 }
 
@@ -532,7 +531,7 @@ core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source
             }
             continue;
         }
-        const bool semantic = mini.type == 9 || mini.type == 0x10 || mini.type == 0x11;
+        const bool semantic = (mini.type >= 2 && mini.type <= 11) || (mini.type >= 0x10 && mini.type <= 0x12);
         if (semantic && duplicated) {
             if (!std::exchange(reported[mini.type], true)) {
                 issue(map, MapIssue::duplicate_root_field, "root", mini.offset, mini.payload.size(),
@@ -541,7 +540,21 @@ core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source
             continue;
         }
         float extent{};
-        if (mini.type == 9) map.context_name = std::move(text);
+        if (mini.type >= 2 && mini.type <= 6 && mini.type != 4 && read_u32(mini, value)
+            && value <= static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+            if (mini.type == 2) map.lobby.capacity = value;
+            else if (mini.type == 3) map.lobby.levels = value;
+            else if (mini.type == 5) map.lobby.owner = value;
+            else if (mini.type == 6) map.lobby.terrain = value;
+        }
+        if ((mini.type == 11 || mini.type == 18) && mini.payload.size() == 1) {
+            const bool flag = mini.payload.front() != std::byte{0};
+            if (mini.type == 11) map.lobby.custom = flag;
+            else map.lobby.new_markers = flag;
+        }
+        if (mini.type == 8) map.display_name_key = std::move(text);
+        else if (mini.type == 9) map.context_name = std::move(text);
+        else if (mini.type == 10) map.lobby.game_types = std::move(text);
         else if (mini.type == 0x10) { if (read_f32(mini, extent) && std::isfinite(extent)) { first_extent = extent; first_extent_offset = mini.offset; } else extents_malformed = true; }
         else if (mini.type == 0x11) { if (read_f32(mini, extent) && std::isfinite(extent)) { second_extent = extent; second_extent_offset = mini.offset; } else extents_malformed = true; }
     }
@@ -555,6 +568,27 @@ core::Result<Map> load_map(const std::span<const std::byte> bytes, Source source
               "root extent pair 0x10/0x11 is incomplete, malformed or nonfinite; body bounds apply");
     }
     for (const auto& chunk : chunks.value()) map.chunks.push_back(raw_chunk(chunk));
+    // WSS-05: capacity and team starts are separate authored quantities.
+    const auto starts = std::count_if(chunks.value().begin(), chunks.value().end(),
+        [](const Chunk& chunk) { return chunk.type == 3; });
+    if (starts == 1) {
+        const auto& chunk = *std::find_if(chunks.value().begin(), chunks.value().end(),
+            [](const Chunk& item) { return item.type == 3; });
+        Reader reader(chunk.payload);
+        std::uint32_t count{};
+        if (!chunk.group && reader.u32(count) && count <= reader.remaining() / 8
+            && reader.remaining() == static_cast<std::size_t>(count) * 8) {
+            std::vector<Vec2f> positions;
+            bool valid = true;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                Vec2f point;
+                if (!reader.f32(point.x) || !reader.f32(point.y)
+                    || !std::isfinite(point.x) || !std::isfinite(point.y)) { valid = false; break; }
+                positions.push_back(point);
+            }
+            if (valid) map.lobby.start_positions = std::move(positions);
+        }
+    }
     std::set<std::string> seen_paths;
     walk_schema(map, chunks.value(), {}, seen_paths);
     const auto main = std::find_if(chunks.value().begin(), chunks.value().end(), [](const Chunk& item) { return item.type == 1 && item.group; });

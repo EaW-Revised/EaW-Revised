@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the packaged M2 battle using the player's own installation and fonts."""
+"""Start the packaged skirmish setup (or, with --m2, the fixed M2 battle) using the player's own installation and fonts."""
 
 import argparse
 import json
@@ -104,12 +104,21 @@ def choose(explicit, candidates, validate, prompt, option):
             print(error, file=sys.stderr)
 
 
+def look_args(cache):
+    """The owner's look shared by the setup screen and the fixed battle."""
+    return ["--eawr-map-effects", "on", "--eawr-lighting", "sh", "--eawr-environment", "map",
+            "--eawr-shadows", "on", "--eawr-live-ai", "on", "--eawr-hud", "tactical",
+            "--eawr-audio", "on", "--eawr-font-cache", str(cache)]
+
+
+def setup_args(game, cache):
+    # The setup screen picks the map and builds its camera from it; no fixed map or config path.
+    return ["--eawr-game-root", str(game), "--eawr-skirmish-setup"] + look_args(cache)
+
+
 def battle_args(root, game, cache):
     return ["--eawr-game-root", str(game), "--eawr-map", "data/art/maps/_mp_space_coruscant.ted",
-            "--eawr-populate", "--eawr-map-effects", "on", "--eawr-lighting", "sh",
-            "--eawr-environment", "map", "--eawr-shadows", "on", "--eawr-camera-interactive",
-            "--eawr-live-session", "m2", "--eawr-live-ai", "on", "--eawr-hud", "tactical",
-            "--eawr-audio", "on", "--eawr-font-cache", str(cache),
+            "--eawr-populate", "--eawr-camera-interactive", "--eawr-live-session", "m2"] + look_args(cache) + [
             "--eawr-map-camera-config", str(root / "project/config/coruscant-live-session-camera.xml")]
 
 
@@ -119,6 +128,8 @@ def main(argv=None):
     parser.add_argument("--godot", help="path to the standard Godot 4.7.2 executable")
     parser.add_argument("--allow-unknown-build", action="store_true", help="validate fonts from an unpinned FoC executable")
     parser.add_argument("--godot-quit-after", type=int, help="quit after N frames (smoke checks)")
+    parser.add_argument("--m2", action="store_true",
+                        help="skip the skirmish setup screen and start the fixed M2 Coruscant battle")
     args, extra = parser.parse_known_args(argv)
     if extra[:1] == ["--"]:
         extra = extra[1:]
@@ -143,8 +154,13 @@ def main(argv=None):
         engine_args = [str(godot), "--path", str(ROOT / "project")]
         if args.godot_quit_after is not None:
             engine_args += ["--quit-after", str(args.godot_quit_after)]
-        print("Starting the space battle. Close the window to quit.", flush=True)
-        return subprocess.call(engine_args + ["--"] + battle_args(ROOT, game, cache) + extra, cwd=ROOT)
+        if args.m2:
+            print("Starting the space battle. Close the window to quit.", flush=True)
+            viewer_args = battle_args(ROOT, game, cache)
+        else:
+            print("Starting the skirmish setup. Close the window to quit.", flush=True)
+            viewer_args = setup_args(game, cache)
+        return subprocess.call(engine_args + ["--"] + viewer_args + extra, cwd=ROOT)
     except (OSError, ValueError, EOFError, fonts.ExtractionError, subprocess.SubprocessError) as error:
         print("play-demo: " + str(error), file=sys.stderr)
         return 2

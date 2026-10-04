@@ -84,6 +84,8 @@ class P010IndependentAcceptance(unittest.TestCase):
     def blocker(self, message: str) -> None:
         self.blockers.append(message)
 
+    @unittest.skipUnless(ARCHIVE.is_file() and GLSLANG.is_file() and SPIRV_VAL.is_file(),
+                         "requires the private shader archive and optional pinned shader tools")
     def test_archive_and_pinned_tool_identity(self) -> None:
         self.assertTrue(ARCHIVE.is_file())
         self.assertEqual(ARCHIVE_SHA256, digest(ARCHIVE))
@@ -202,6 +204,8 @@ class P010IndependentAcceptance(unittest.TestCase):
             fixed_function_ir(Pass("bad", {"ColorOp[0]": "UNSUPPORTED_MAGIC"}, None, None, 9))
         self.assertEqual("SHD_UNSUPPORTED_TEXTURE_OP", raised.exception.code)
 
+    @unittest.skipUnless(ARCHIVE.is_file() and GLSLANG.is_file() and SPIRV_VAL.is_file(),
+                         "requires the private shader archive and optional pinned shader tools")
     def test_private_five_effect_translation_and_metadata(self) -> None:
         self.assertTrue(ARCHIVE.is_file())
         self.assertTrue(GLSLANG.is_file() and SPIRV_VAL.is_file())

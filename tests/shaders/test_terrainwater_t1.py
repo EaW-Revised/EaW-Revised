@@ -390,7 +390,7 @@ class CorpusContractTests(unittest.TestCase):
                          [(item["technique"], item["kind"]) for item in water["translation"]["unsupported_constructs"]])
 
     def test_default_translator_does_not_route_through_the_t1_path(self):
-        for name in ("translate.py", "corpus.py"):
+        for name in ("translate.py", "translate_toolchain.py", "translate_state.py", "translate_compile.py", "corpus.py"):
             text = (ROOT / "tools" / "shaders" / name).read_text(encoding="utf-8")
             self.assertNotIn("terrainwater_t1", text)
             self.assertNotIn("ps11", text)

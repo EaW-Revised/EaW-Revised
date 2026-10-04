@@ -177,7 +177,9 @@ def applying(uses: Iterable[tuple[str, int]], parse_files: set[str],
             continue
         if "/tests/" in relative or relative.startswith("tests/"):
             continue
-        if relative in parse_files and relative.startswith(("src/units/", "src/data/", "src/script/foc/ai_data")):
+        same_unit_loader = relative.startswith("src/units/unit_tables") and any(
+            path.startswith("src/units/unit_tables") for path in parse_files)
+        if (relative in parse_files or same_unit_loader) and relative.startswith(("src/units/", "src/data/", "src/script/foc/ai_data")):
             continue
         found.append((relative, line))
     return found

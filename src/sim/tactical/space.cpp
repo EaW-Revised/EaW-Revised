@@ -60,6 +60,21 @@ bool within_range(
     return math::detail::compare(squared, math::detail::multiply_u64(limit, limit)) <= 0;
 }
 
+bool strictly_within_range(const math::Vec3& from, const math::Vec3& to,
+    const math::Fixed radius, const RangeMetric metric) noexcept {
+    if (radius.raw() <= 0) return false;
+    const auto dx = distance_along(from.x.raw(), to.x.raw());
+    const auto dy = distance_along(from.y.raw(), to.y.raw());
+    auto squared = math::detail::multiply_u64(dx, dx);
+    static_cast<void>(math::detail::add_magnitude(squared, math::detail::multiply_u64(dy, dy)));
+    if (metric == RangeMetric::spatial) {
+        const auto dz = distance_along(from.z.raw(), to.z.raw());
+        static_cast<void>(math::detail::add_magnitude(squared, math::detail::multiply_u64(dz, dz)));
+    }
+    const auto limit = static_cast<std::uint64_t>(radius.raw());
+    return math::detail::compare(squared, math::detail::multiply_u64(limit, limit)) < 0;
+}
+
 bool within_box(const math::Vec3& centre, const math::Vec3& half_extent, const math::Vec3& to) noexcept {
     if (half_extent.x.raw() < 0 || half_extent.y.raw() < 0 || half_extent.z.raw() < 0) {
         return false;
@@ -101,6 +116,27 @@ const SpaceBody* SpaceIndex::find(const EntityId entity_id) const noexcept {
     const auto found = std::lower_bound(bodies_.begin(), bodies_.end(), entity_id,
         [](const SpaceBody& body, const EntityId id) { return body.entity_id < id; });
     return found != bodies_.end() && found->entity_id == entity_id ? &*found : nullptr;
+}
+
+core::Result<void> SpaceIndex::rebuild_sorted(const std::span<const SpaceBody> bodies) {
+    if (bodies.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::resource_limit, "space index exceeds the index limit"));
+    }
+    for (std::size_t slot = 0; slot < bodies.size(); ++slot) {
+        if (bodies[slot].entity_id == invalid_entity_id
+            || (slot != 0 && bodies[slot - 1].entity_id >= bodies[slot].entity_id)) {
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::order, "space index IDs must be ascending and unique"));
+        }
+    }
+    bodies_.assign(bodies.begin(), bodies.end());
+    cells_.resize(bodies.size());
+    for (std::size_t slot = 0; slot < bodies.size(); ++slot) {
+        cells_[slot] = {cell_of(bodies[slot].position.y), cell_of(bodies[slot].position.x), static_cast<std::uint32_t>(slot)};
+    }
+    std::sort(cells_.begin(), cells_.end(), [](const CellEntry& left, const CellEntry& right) {
+        return std::tie(left.y, left.x, left.body) < std::tie(right.y, right.x, right.body);
+    });
+    return core::Result<void>::success();
 }
 
 template <typename Match>
@@ -158,7 +194,8 @@ std::vector<EntityId> SpaceIndex::box(
 }
 
 void SpaceIndex::box_positions(
-    const math::Vec3& centre, const math::Vec3& half_extent, std::vector<std::uint32_t>& out) const {
+    const math::Vec3& centre, const math::Vec3& half_extent, std::vector<std::uint32_t>& out,
+    std::uint64_t* inspected) const {
     out.clear();
     if (half_extent.x.raw() < 0 || half_extent.y.raw() < 0 || half_extent.z.raw() < 0) {
         return;
@@ -169,8 +206,9 @@ void SpaceIndex::box_positions(
     const auto y_high = cell_of(math::Fixed::from_raw(saturating_add(centre.y.raw(), half_extent.y.raw())));
     const auto columns = static_cast<std::uint64_t>(x_high - x_low) + 1U;
     const auto rows = static_cast<std::uint64_t>(y_high - y_low) + 1U;
-    if (columns * rows > cells_.size()) {
+    if (columns * rows > cells_.size() && (inspected == nullptr || columns * rows > 4096)) {
         for (std::size_t position = 0; position < bodies_.size(); ++position) {
+            if (inspected != nullptr) ++*inspected;
             if (within_box(centre, half_extent, bodies_[position].position)) {
                 out.push_back(static_cast<std::uint32_t>(position));
             }
@@ -183,6 +221,7 @@ void SpaceIndex::box_positions(
                 return std::pair{cell.y, cell.x} < key;
             });
         for (; entry != cells_.end() && entry->y == row && entry->x <= x_high; ++entry) {
+            if (inspected != nullptr) ++*inspected;
             if (within_box(centre, half_extent, bodies_[entry->body].position)) {
                 out.push_back(entry->body);
             }

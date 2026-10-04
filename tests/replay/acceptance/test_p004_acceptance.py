@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent P0-04 acceptance probes (temporary adversarial inputs only).
 
-This is deliberately outside the production CMake graph.  It checks the frozen
+Registered in root CTest, this checks the frozen
 fixture and command-line boundary without regenerating or changing any checked-in
 fixture.  The C++ contract executable remains the API-level probe; this script
 adds independent byte, CLI, comparator, and hosted-artifact checks.
@@ -125,7 +125,7 @@ def check_cli(program: pathlib.Path, fixtures: pathlib.Path, audit: pathlib.Path
     with tempfile.TemporaryDirectory(prefix="p004-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         outputs: list[bytes] = []
-        for workers in WORKERS:
+        for workers in (*WORKERS, 8):
             code, output, exists = run_cli_case(
                 program, root, original, f"valid-{workers}", "--workers", str(workers)
             )
@@ -138,7 +138,7 @@ def check_cli(program: pathlib.Path, fixtures: pathlib.Path, audit: pathlib.Path
                 fail(f"workers={workers} output is not BOM-free LF CSV")
             outputs.append(data)
         if len(set(outputs)) != 1:
-            fail("1/2/4 worker CSV outputs differ")
+            fail("1/2/4/8 worker CSV outputs differ")
 
         code, output, exists = run_cli_case(program, root, zero, "zero", "--workers", "4")
         if code != 0 or not exists or (root / "zero.csv").read_bytes() != b"tick,sha256\n":
@@ -155,7 +155,8 @@ def check_cli(program: pathlib.Path, fixtures: pathlib.Path, audit: pathlib.Path
         struct.pack_into("<I", bad, 224, 0)
         malformed("length-zero", bytes(bad), "command")
         bad = bytearray(original)
-        struct.pack_into("<H", bad, 8, 2)
+        # Version 2 is supported now; use a version outside the format registry.
+        struct.pack_into("<H", bad, 8, 0xFFFF)
         malformed("version", bytes(bad), "version")
         bad = bytearray(original)
         bad[248] = 99
@@ -206,7 +207,8 @@ def check_cli(program: pathlib.Path, fixtures: pathlib.Path, audit: pathlib.Path
         completed = invoke(program, "--replay", str(fixtures / "original-v1.eawr-replay"))
         if completed.returncode == 0 or "EAWR-CORE-0001" not in completed.stdout:
             fail(f"missing --hash-out did not return argument error: {completed.returncode}: {completed.stdout}")
-        completed = invoke(program, "--replay", str(fixtures / "original-v1.eawr-replay"), "--hash-out", str(root / "invalid.csv"), "--workers", "3")
+        # Three workers are supported by the bounded thread pool; zero is not.
+        completed = invoke(program, "--replay", str(fixtures / "original-v1.eawr-replay"), "--hash-out", str(root / "invalid.csv"), "--workers", "0")
         if completed.returncode == 0 or "EAWR-CORE-0001" not in completed.stdout:
             fail(f"invalid worker count did not return argument error: {completed.stdout}")
         completed = invoke(program, "--replay", str(fixtures / "original-v1.eawr-replay"), "--hash-out", str(root), "--workers", "1")

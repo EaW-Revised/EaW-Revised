@@ -178,7 +178,7 @@ void EawrFogRendererProbe::_ready() {
     // A throwaway renderer draws both material routes once, so engine
     // resources created lazily on the first 3D draw are in the baseline; the
     // baseline is then taken with no renderer alive.
-    steps_.push_back({"warm-up", [this] {
+    steps_.push_back({.name = "warm-up", .act = [this] {
         renderer_ = std::make_unique<GodotRenderer>(*host_);
         upload(terrain_asset, plate(terrain_half_x, terrain_half_y, 2, 2), solid_texture({255, 255, 255, 255}),
             modern(terrain_program));
@@ -187,9 +187,9 @@ void EawrFogRendererProbe::_ready() {
         check(renderer_->declare_fog_consumer(terrain_asset).has_value()
             && renderer_->declare_fog_consumer(unit_asset).has_value(), "warm-up consumers");
         submit_scene(++tick_, terrain_asset, unit_asset, make_set({make_grid(base_desc(1), base_cells)}));
-    }, Capture::none});
-    steps_.push_back({"baseline-memory", [this] { renderer_.reset(); }, Capture::none});
-    steps_.push_back({"setup", [this] {
+    }, .capture = Capture::none, .expected = {}, .control_byte = 0});
+    steps_.push_back({.name = "baseline-memory", .act = [this] { renderer_.reset(); }, .capture = Capture::none, .expected = {}, .control_byte = 0});
+    steps_.push_back({.name = "setup", .act = [this] {
         texture_memory_baseline_ = RenderingServer::get_singleton()->get_rendering_info(
             RenderingServer::RENDERING_INFO_TEXTURE_MEM_USED);
         renderer_ = std::make_unique<GodotRenderer>(*host_);
@@ -267,7 +267,7 @@ void EawrFogRendererProbe::_ready() {
         }
         resources_before_ = renderer_->resources();
         record_stage("setup");
-    }, Capture::none});
+    }, .capture = Capture::none, .expected = {}, .control_byte = 0});
     build_steps();
     set_process(true);
 }

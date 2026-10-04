@@ -37,4 +37,18 @@ add_test(
 set_tests_properties(tag_applied_check_smoke PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+add_test(
+    NAME unit_census_game_data
+    COMMAND
+        "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/inventory/unit_census.py"
+        --check --docs "${PROJECT_SOURCE_DIR}/docs/behaviour/unit-census.md"
+)
+set_tests_properties(unit_census_game_data PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(NAME roster_gate_current COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/inventory/roster_gate.py" --check)
+add_test(NAME roster_gate_game_data COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/inventory/roster_gate.py" --check --game-data)
+set_tests_properties(roster_gate_game_data PROPERTIES SKIP_RETURN_CODE 77)
+
 eawr_label_tests()

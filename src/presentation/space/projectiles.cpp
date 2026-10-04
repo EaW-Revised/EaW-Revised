@@ -36,6 +36,28 @@ namespace {
 
 } // namespace
 
+std::optional<std::array<double, 3>> projectile_screen_axis(
+    const std::array<double, 3>& eye, const std::array<double, 3>& forward,
+    const std::array<double, 3>& centre, const std::array<double, 3>& direction) noexcept {
+    std::array<double, 3> ray{};
+    double depth = 0.0;
+    double depth_step = 0.0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        ray[i] = centre[i] - eye[i];
+        depth += ray[i] * forward[i];
+        depth_step += direction[i] * forward[i];
+    }
+    if (!(depth > 1.0e-6) || !std::isfinite(depth)) return std::nullopt;
+    // Differentiating ray / view-depth removes motion along this position's sight ray,
+    // rather than along the global camera forward vector (BP-68).
+    std::array<double, 3> tangent{};
+    for (std::size_t i = 0; i < 3; ++i) tangent[i] = direction[i] - ray[i] * (depth_step / depth);
+    const double size = std::hypot(tangent[0], tangent[1], tangent[2]);
+    if (!(size > 1.0e-6) || !std::isfinite(size)) return std::nullopt;
+    for (double& value : tangent) value /= size;
+    return tangent;
+}
+
 std::optional<std::array<double, 2>> projectile_facing(const sim::tactical::Projectile& projectile) noexcept {
     if (projectile.homing) return std::array<double, 2>{wrap(to_double(projectile.yaw)), to_double(projectile.pitch)};
     const auto step = vec(projectile.step);

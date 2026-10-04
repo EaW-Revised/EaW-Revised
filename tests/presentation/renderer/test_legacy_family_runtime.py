@@ -58,6 +58,7 @@ REJECTIONS = {
     "additive_fixed_function": "'MeshAdditive.fx' has no Godot adapter for technique 't1' (supported: 't0')",
     "additive_opaque_pass": "'MeshAdditive.fx' cannot draw in the opaque render pass",
     "additive_scalar_color": "binds parameter 'Color' as a scalar",
+    "vertex_additive_scalar_rate": "binds parameter 'UVScrollRate' as a scalar",
     "offset_texture_offset": "binds parameter 'UVOffset' as a texture",
     "solid_transparent_pass": "'MeshSolidColor.fx' cannot draw in the transparent render pass",
     "colorize_distinct_gloss": "gate MULTITEX-01",
@@ -68,6 +69,7 @@ CAPTURES = (
     "empty", "backdrop", "solid", "additive", "additive_zero_rate", "additive_defaults", "additive_culled",
     "additive_layers", "occluder_only", "additive_occluded", "solid_over_additive", "offset", "offset_zero",
     "gloss_reference", "colorize_white", "colorize_black", "colorize_specular", "additive_shadows_on",
+    "vertex_additive", "vertex_additive_alpha_one", "vertex_additive_scrolled",
 )
 
 
@@ -142,6 +144,12 @@ def verify_report(report):
         expect("offset_zero", label, add(BACKDROP, texel), PREDICTED, "a zero UVOffset leaves the texture")
         expect("additive_layers", label, add(BACKDROP, (2 * LAYER_TEXEL,) * 3, (0.5,) * 3), PREDICTED,
                "both layers of one draw add because MeshAdditive writes no depth")
+        expect("vertex_additive", label, add(BACKDROP, texel, ADDITIVE_COLOR), PREDICTED,
+               "AVC-03 uses uploaded vertex RGB and ignores material Color and both alpha inputs")
+        expect("vertex_additive_scrolled", label,
+               add(BACKDROP, ADDITIVE_TEXELS[OFFSET_SOURCE[label]], ADDITIVE_COLOR), PREDICTED,
+               "AVC-02 advances UV by authored rate times the effect clock")
+    same("vertex_additive_alpha_one", "vertex_additive", POINTS, "AVC-03 ignores vertex alpha")
     same("additive_zero_rate", "additive", POINTS, "TIME is fixed at 0, so UVScrollRate cannot move a capture")
     same("additive_culled", "backdrop", POINTS, "the reversed winding is back-face culled")
     same("additive_shadows_on", "additive", POINTS, "an unlit family is unchanged under shadows")
@@ -181,6 +189,10 @@ def sample_report():
     captures["additive"] = dict(additive, outside=list(BACKDROP))
     captures["additive_zero_rate"] = copy.deepcopy(captures["additive"])
     captures["additive_shadows_on"] = copy.deepcopy(captures["additive"])
+    captures["vertex_additive"] = copy.deepcopy(captures["additive"])
+    captures["vertex_additive_alpha_one"] = copy.deepcopy(captures["additive"])
+    captures["vertex_additive_scrolled"] = dict(
+        {label: additive[OFFSET_SOURCE[label]] for label in QUADRANTS}, outside=list(BACKDROP))
     captures["additive_defaults"] = dict(defaults, outside=list(BACKDROP))
     captures["offset_zero"] = copy.deepcopy(captures["additive_defaults"])
     captures["offset"] = dict({label: defaults[OFFSET_SOURCE[label]] for label in QUADRANTS}, outside=list(BACKDROP))
@@ -202,8 +214,8 @@ def sample_report():
         "schema": "eawr-legacy-family-probe-v1",
         "status": "legacy_family_probe_passed",
         "rendering_method": "forward_plus",
-        "steps_completed": 37,
-        "steps_total": 37,
+        "steps_completed": 43,
+        "steps_total": 43,
         "shadow_receiving_materials": 1,
         "shadow_variant_failures": 0,
         "resources_after_rejections": 0,
@@ -247,6 +259,8 @@ class LegacyFamilyReport(unittest.TestCase):
             "solid depth write": set_point("solid_over_additive", "tl", (51.0, 51.0, 51.0)),
             "occluder ignored": set_point("additive_occluded", "tl", (140.0, 135.0, 130.0)),
             "time scrolls": set_point("additive_zero_rate", "tl", (90.0, 195.0, 110.0)),
+            "vertex alpha applied": set_point("vertex_additive", "tl", BACKDROP),
+            "vertex clock ignored": set_point("vertex_additive_scrolled", "tl", (140.0, 135.0, 130.0)),
             "winding drawn": set_point("additive_culled", "tl", (140.0, 135.0, 130.0)),
             "offset ignored": set_point("offset", "tl", (240.0, 160.0, 130.0)),
             "colorize differs from MeshGloss": set_point("colorize_white", "br", (230.0, 95.0, 46.0)),
@@ -262,7 +276,7 @@ class LegacyFamilyReport(unittest.TestCase):
             "wrong pass": lambda r: r["submitted_passes"].update({"MeshAdditive.fx": "opaque"}),
             "missing capture": lambda r: r["captures"].pop("offset"),
             "probe failure": lambda r: r["failures"].append("x"),
-            "skipped steps": lambda r: r.update(steps_completed=36),
+            "skipped steps": lambda r: r.update(steps_completed=42),
         }
         for name, change in controls.items():
             with self.subTest(name):

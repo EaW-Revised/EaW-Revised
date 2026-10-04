@@ -1,7 +1,7 @@
 #pragma once
 
-// Internals of the authoritative sandbox shared by sflua_sandbox.cpp and
-// sflua_persist.cpp. Include every standard header first: sflua_upstream.hpp
+// Internals shared by the authoritative sandbox and persistence translation
+// units. Include every standard header first: sflua_upstream.hpp
 // redefines C library names for the upstream sources.
 
 #include <algorithm>
@@ -13,6 +13,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "sflua_metering.hpp"
 #include "sflua_persist.hpp"
 #include "sflua_sandbox.hpp"
 #include "sflua_upstream.hpp"
@@ -178,7 +179,7 @@ lua_Hook sandbox_count_hook() noexcept;
 inline constexpr int sandbox_hook_mask = LUA_MASKCOUNT | LUA_MASKCALL;
 
 // Logical size of the graph reachable from the registry and the main thread,
-// over the edges the canonical save follows (sflua_persist.cpp).
+// over the edges the canonical save follows (sflua_persist_graph.cpp).
 ::std::uint64_t measure_logical_bytes(const Sandbox::Impl& sandbox);
 
 // Records the prototype paths of a freshly compiled chunk.
@@ -186,5 +187,42 @@ void record_prototypes(Sandbox::Impl& sandbox, const Proto* root);
 
 // The sandbox's own C functions with their stable names.
 void append_sandbox_functions(::std::vector<CFunctionEntry>& out);
+
+namespace sandbox_internal {
+
+extern thread_local Sandbox::Impl* active_sandbox;
+Sandbox::Impl* active_for(lua_State* state) noexcept;
+Sandbox::Impl& require_active(lua_State* state);
+bool string_equals(const TObject* value, ::std::string_view text) noexcept;
+void raise_fault(Sandbox::Impl& sandbox, lua_State* state, SandboxFault fault);
+::std::uint64_t ensure_identity(Sandbox::Impl& sandbox, lua_State* state, const TObject* value);
+void charge_memory(Sandbox::Impl& sandbox, lua_State* state, ::std::uint64_t bytes);
+void check_memory(Sandbox::Impl& sandbox, lua_State* state, ::std::uint64_t bytes);
+void charge_stack(Sandbox::Impl& sandbox, lua_State* state);
+void charge(Sandbox::Impl& sandbox, lua_State* state, sflua_metering::StepUnits units);
+sflua_metering::StepUnits sort_units(::std::size_t count) noexcept;
+void count_hook(lua_State* state, lua_Debug* activation);
+bool is_frozen(const Sandbox::Impl& sandbox, const Table* table) noexcept;
+bool is_internal(const Sandbox::Impl& sandbox, const Table* table) noexcept;
+void check_table_write(Sandbox::Impl& sandbox, lua_State* state, const Table* table);
+void store_keys(Sandbox::Impl& sandbox, lua_State* state, Table* keys);
+int sandbox_pairs(lua_State* state);
+int sandbox_next(lua_State* state);
+int sandbox_foreach(lua_State* state);
+int sandbox_sort(lua_State* state);
+int sandbox_insert(lua_State* state);
+int sandbox_remove(lua_State* state);
+int sandbox_concat(lua_State* state);
+int sandbox_foreachi(lua_State* state);
+int sandbox_rep(lua_State* state);
+int sandbox_tostring(lua_State* state);
+int sandbox_collectgarbage(lua_State* state);
+bool stored_size_on_top(lua_State* state);
+void set_field_function(lua_State* state, int table, const char* name, lua_CFunction function);
+void set_forbidden(lua_State* state, int table, const char* name, const char* shown_name);
+void install_metered_patterns(lua_State* state);
+Table* new_registry_table(lua_State* state, const char* name);
+
+} // namespace sandbox_internal
 
 } // namespace eawr::script::EAWR_SFLUA_NAMESPACE

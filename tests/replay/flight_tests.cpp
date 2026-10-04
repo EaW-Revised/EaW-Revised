@@ -113,7 +113,8 @@ struct Squadron {
     Fixed speed_factor = units(1); // AB-24: TURBO scales the maximum speed
 
     // One frame: every craft reads the views as they stood before it, the leader is craft 0.
-    [[nodiscard]] std::vector<tactical::CraftView> step(const math::Vec3& destination) {
+    [[nodiscard]] std::vector<tactical::CraftView> step(const math::Vec3& destination,
+        const std::optional<tactical::LaneFlight>& lane = std::nullopt) {
         const std::vector<tactical::CraftView> before = craft;
         for (std::size_t index = 0; index < craft.size(); ++index) {
             tactical::CraftFrame frame;
@@ -124,6 +125,7 @@ struct Squadron {
             frame.formation_tolerance = units(25);
             frame.moving = true;
             frame.hold = destination;
+            frame.lane = lane;
             frame.speed_factor = speed_factor;
             const auto stepped = tactical::step_craft(frame);
             expect(static_cast<bool>(stepped), "the craft steps");
@@ -297,6 +299,119 @@ void test_reversal_is_a_loop() {
               << ", upright at " << upright_at << '\n';
 }
 
+// FM-06/FM-14: a reversal splits the vertical direction of the leader and its trailing slots.
+void test_reversal_directions() {
+    auto squadron = x_wings();
+    std::array<double, 5> low{};
+    std::array<double, 5> high{};
+    for (int frame = 0; frame < 100; ++frame) {
+        static_cast<void>(squadron.step(at(-3000, 0)));
+        for (std::size_t index = 0; index < squadron.craft.size(); ++index) {
+            const double height = real(squadron.craft[index].position.z);
+            low[index] = std::min(low[index], height);
+            high[index] = std::max(high[index], height);
+        }
+    }
+    expect(high[0] > 80.0, "FM-06: the level leader reverses upward");
+    for (std::size_t index = 1; index < squadron.craft.size(); ++index) {
+        expect(low[index] < -20.0, "FM-06/FM-14: follower " + std::to_string(index)
+            + " reverses below the layer (low " + std::to_string(low[index]) + ")");
+    }
+}
+
+// WSQ-10/WSQ-17: after a long level flight, a late reversal still steers one
+// turn radius along the retained segment and eases every craft back to its layer.
+void test_late_reversal_rejoins() {
+    auto squadron = x_wings();
+    const std::array<tactical::GroupSquadron, 1> stopped{tactical::GroupSquadron{}};
+    const auto empty = tactical::squadron_group_slots(stopped, at(0, 0));
+    expect(empty && !empty.value()[0].lane, "FO-02: a zero-length move stays arrived instead of acquiring an arbitrary segment");
+    const auto make_lane = [&](const math::Vec3& destination) {
+        tactical::GroupSquadron group;
+        group.position = squadron.craft[0].position;
+        group.max_speed = squadron.profile.max_speed;
+        group.min_speed = squadron.profile.min_speed;
+        const std::array<tactical::GroupSquadron, 1> groups{group};
+        const auto mapped = tactical::squadron_group_slots(groups, destination);
+        expect(mapped && mapped.value()[0].lane.has_value(), "WSQ-17: a single squadron retains a path segment");
+        return mapped.value()[0].lane.value();
+    };
+    math::Vec3 destination = at(8000, 0);
+    auto lane = make_lane(destination);
+    double peak = 0.0;
+    int regroup = -1;
+    std::array<double, 5> late{};
+    for (int tick = 0; tick < 1050; ++tick) {
+        if (tick == 750) {
+            destination = at(-4000, 0);
+            lane = make_lane(destination);
+        }
+        const tactical::LaneFlight flight{lane.direction, Fixed{}, squadron.profile.max_speed};
+        static_cast<void>(squadron.step(destination, flight));
+        if (tick < 750) continue;
+        peak = std::max(peak, real(squadron.craft[0].position.z));
+        double height = 0.0;
+        for (std::size_t index = 0; index < squadron.craft.size(); ++index) {
+            height = std::max(height, std::abs(real(squadron.craft[index].position.z)));
+            if (tick == 900) late[index] = real(squadron.craft[index].position.z);
+        }
+        if (tick > 800 && height < 1.0 && regroup < 0) regroup = tick;
+    }
+    expect(peak > 80.0, "WSQ-17: the late reversal still climbs through its half loop");
+    // WSQ-17: a five-X-wing native trace reverses at frame 751, peaks at
+    // 109.801392, and first samples every craft below one unit at frame 906.
+    // Its frame-901 heights are reordered by the authored slots, leader first.
+    constexpr std::array<double, 5> native_late{0.158724, -0.469523, -0.663341, -1.253026, -0.843593};
+    expect(std::abs(peak - 109.801392) < 0.01, "WSQ-17: the leader's reversal peak matches the native trace");
+    // Formation slack is 25 / 4.8 = 5.21 frames; round up and allow the native
+    // trace's two-frame sampling interval. Compare elapsed time from reversal.
+    expect(std::abs((regroup - 750) - (906 - 751)) <= 8,
+        "WSQ-17: regroup time agrees with the native trace within formation slack and sampling");
+    for (std::size_t index = 0; index < late.size(); ++index) {
+        expect(std::abs(late[index] - native_late[index]) < 1.0,
+            "WSQ-17: leader and follower heights agree with the native late sample within one unit");
+    }
+    expect(regroup >= 801 && regroup <= 900, "WSQ-17: all craft rejoin the layer by tick 900 ("
+        + std::to_string(regroup) + ")");
+    for (const double height : late) expect(std::abs(height) < 1.0, "WSQ-17: every craft is back at its layer at tick 900");
+    std::cout << "late reversal: peak " << peak << ", regroup " << regroup << ", tick900 heights";
+    for (const double height : late) std::cout << ' ' << height;
+    std::cout << '\n';
+
+    // A leader already above the layer must use the retained direction rather than
+    // the distant destination's bearing. Changing only goal distance cannot change its step.
+    tactical::CraftView leader{1, at(0, 0, 100), {}, &squadron.profile};
+    leader.state.yaw = units(180);
+    leader.state.pitch = units(30);
+    leader.state.velocity = at(-4, 0, -2);
+    tactical::CraftFrame frame;
+    frame.self = &leader;
+    frame.leader = &leader;
+    frame.moving = true;
+    frame.lane = tactical::LaneFlight{at(-1, 0), Fixed{}, squadron.profile.max_speed};
+    frame.hold = at(-2000, 0);
+    const auto near = tactical::step_craft(frame);
+    frame.hold = at(-8000, 0);
+    const auto far = tactical::step_craft(frame);
+    expect(near && far && near.value().position == far.value().position && near.value().state == far.value().state,
+        "WSQ-17: the leader's height approach does not flatten toward a farther endpoint");
+    leader.position = at(0, 0);
+    leader.state = {};
+    leader.state.velocity = {squadron.profile.max_speed, Fixed{}, Fixed{}};
+    frame.hold = at(8000, 0);
+    frame.speed_factor = units(2);
+    const tactical::LaneMember member{leader.position,
+        tactical::SquadronLane{1, at(0, 0), at(1, 0), Fixed{}, Fixed{}},
+        squadron.profile.max_speed, squadron.profile.min_speed};
+    const std::array<tactical::LaneMember, 1> members{member};
+    const auto flights = tactical::formation_lane_flight(members, Fixed{}, Fixed{});
+    expect(flights && flights.value()[0].individual_speed, "AB-24: a single-squadron lane uses current craft speed");
+    if (flights) frame.lane = flights.value()[0];
+    const auto boosted = tactical::step_craft(frame);
+    expect(boosted && boosted.value().state.velocity.x > squadron.profile.max_speed,
+        "AB-24: a single-squadron path still accelerates under TURBO");
+}
+
 // C-21 (FM-14): the slot of a follower on the right of a leader banked 40 degrees left rises
 // with the bank, so the follower climbs toward it; beside a level leader it stays level.
 void test_formation_banks_with_leader() {
@@ -391,7 +506,7 @@ void test_failure_names_the_site() {
     frame.hold = edge;
     const auto stepped = tactical::step_craft(frame);
     const std::string message = stepped ? std::string() : stepped.error().message;
-    expect(message.starts_with("craft 7: FM-01 position: ") && message.find("(raw 9223372036854775797 + raw ") != std::string::npos,
+    expect(message.starts_with("craft 7: FM-11 form up: ") && message.find("(raw 9223372036854775797 + raw ") != std::string::npos,
         "#615: the diagnostic names the step and its operands (" + message + ")");
 }
 
@@ -402,6 +517,8 @@ int main() {
     test_nose_bank_and_turn(2);
     test_bank_follows_the_turn();
     test_reversal_is_a_loop();
+    test_reversal_directions();
+    test_late_reversal_rejoins();
     test_formation_banks_with_leader();
     test_stopped_craft_beside_a_ship();
     test_speed_factor_rounding_to_zero();

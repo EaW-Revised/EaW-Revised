@@ -30,7 +30,8 @@ else()
     set(EAWR_MATH_TEST_LIBRARY eawr_sim)
 endif()
 
-add_executable(math_contract_tests math_tests.cpp)
+add_executable(math_contract_tests math_tests.cpp
+    wide_limb_tests.cpp)
 target_link_libraries(math_contract_tests PRIVATE ${EAWR_MATH_TEST_LIBRARY})
 target_compile_features(math_contract_tests PRIVATE cxx_std_20)
 
@@ -79,4 +80,7 @@ add_test(
 )
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+# Each file runs its CPU contracts; graphical exercises retain their opt-in gates.
+eawr_add_python_contract(python_math_range_analysis tests.math.test_range_analysis)
+
 eawr_label_tests()

@@ -41,6 +41,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -86,8 +87,21 @@ struct Failure {
     std::string message;
 };
 
+// #957: a tick phase's wall-clock time over a seed's ticks, in milliseconds.
+struct PhaseStats {
+    double mean{};
+    double p99{};
+    double worst{};
+    std::uint64_t worst_tick{};
+};
+struct TimingStats {
+    PhaseStats total, world, ai, lua;
+    bool present{};
+};
+
 struct SeedResult {
     std::uint64_t seed{};
+    TimingStats timing;
     bool ran{};
     std::vector<Failure> failures;
     std::string outcome; // ended, capped
@@ -122,6 +136,38 @@ std::string utc_time(const std::chrono::system_clock::time_point at) {
     return text.str();
 }
 
+PhaseStats phase_stats(const std::vector<double>& samples) {
+    PhaseStats stats;
+    if (samples.empty()) return stats;
+    std::vector<double> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    double sum = 0.0;
+    for (std::size_t at = 0; at < samples.size(); ++at) {
+        sum += samples[at];
+        if (samples[at] > stats.worst) {
+            stats.worst = samples[at];
+            stats.worst_tick = at + 1;
+        }
+    }
+    stats.mean = sum / static_cast<double>(samples.size());
+    stats.p99 = sorted[std::min(sorted.size() - 1, static_cast<std::size_t>(static_cast<double>(sorted.size()) * 0.99))];
+    return stats;
+}
+
+foc::AiSchedule schedule_of(const soak::Options& options) {
+    foc::AiSchedule schedule;
+    if (options.ai_faithful) {
+        schedule.mode = *options.ai_faithful ? foc::AiSchedule::Mode::faithful : foc::AiSchedule::Mode::staggered;
+    }
+    if (options.ai_attach_cap) schedule.attach_per_tick = *options.ai_attach_cap;
+    return schedule;
+}
+
+std::uint64_t steady_nanoseconds() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count());
+}
+
 void write_replay_file(const std::filesystem::path& path, const tactical::TacticalReplay& replay, SeedResult& result) {
     auto bytes = tactical::write_replay(replay);
     if (!bytes) {
@@ -137,10 +183,195 @@ void write_replay_file(const std::filesystem::path& path, const tactical::Tactic
     result.replay_file = path.filename().string();
 }
 
+// #957 (SCH-04): the most work of one kind any tick of a seed's battle does, counted by the AI's
+// journal (deterministic: no clock), under one schedule.
+struct ScheduleCounts {
+    std::uint32_t max_attached{};
+    std::uint32_t max_maintenances{};
+    std::uint32_t max_deferred{};
+    std::uint64_t attached{};
+    std::uint64_t ticks_with_attach{};
+};
+
+std::variant<ScheduleCounts, std::string> count_schedule(const Loaded& loaded, const soak::Options& options,
+    const std::uint64_t seed, const foc::AiSchedule& schedule) {
+    auto journal = std::make_shared<foc::AiJournal>();
+    auto built = soak::build_battle(loaded, {.seed = seed, .anonymous_content = false, .schedule = schedule, .journal = journal});
+    if (const auto* reason = std::get_if<std::string>(&built)) return *reason;
+    auto& battle = *std::get<std::unique_ptr<Battle>>(built);
+    const eawr::platform::ThreadWorkerAdapter executor(options.workers);
+    for (std::uint64_t tick = 0; tick < options.ticks; ++tick) {
+        auto stepped = battle.session->step(executor);
+        if (!stepped) return "step " + std::to_string(tick + 1) + ": " + stepped.error().code + ' ' + stepped.error().message;
+    }
+    ScheduleCounts counts;
+    for (const auto& cost : journal->costs) {
+        counts.max_attached = std::max(counts.max_attached, cost.plans_attached);
+        counts.max_maintenances = std::max(counts.max_maintenances, cost.maintenances);
+        counts.max_deferred = std::max(counts.max_deferred, cost.plans_deferred);
+        counts.attached += cost.plans_attached;
+        counts.ticks_with_attach += cost.plans_attached != 0 ? 1 : 0;
+    }
+    return counts;
+}
+
+// #957 (SCH-02): the frames each AI player's goal, planning and execution services ran on, from the
+// journal's service rows, for a battle of two AI players or (extra = 1) three.
+std::variant<std::vector<foc::AiServiceEvent>, std::string> service_frames(const Loaded& loaded,
+    const soak::Options& options, const std::uint64_t seed, const foc::AiSchedule& schedule, const std::uint32_t extra,
+    const std::uint64_t ticks) {
+    auto journal = std::make_shared<foc::AiJournal>();
+    auto built = soak::build_battle(loaded,
+        {.seed = seed, .anonymous_content = false, .schedule = schedule, .journal = journal, .extra_ai_players = extra});
+    if (const auto* reason = std::get_if<std::string>(&built)) return *reason;
+    auto& battle = *std::get<std::unique_ptr<Battle>>(built);
+    const eawr::platform::ThreadWorkerAdapter executor(options.workers);
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        auto stepped = battle.session->step(executor);
+        if (!stepped) return "step " + std::to_string(tick + 1) + ": " + stepped.error().code + ' ' + stepped.error().message;
+    }
+    return journal->services;
+}
+
+// SCH-02 as a regression test: from the first service on, the staggered schedule never runs two AI
+// players' planning services, or their execution services, on one frame, and no two start their
+// goal service on one frame; the faithful schedule runs every player's services together, on the
+// same frames the staggered players' services recur on.
+void check_phases(const Loaded& loaded, const soak::Options& options, const std::uint64_t seed, SeedResult& result) {
+    const auto fail = [&](const std::string& rule, const std::string& message) {
+        result.failures.push_back({"schedule", rule, "the AI players' services are staggered from the first service on (SCH-02)",
+            options.ticks, {}, message});
+    };
+    constexpr std::uint64_t ticks = 60;
+    foc::AiSchedule staggered = schedule_of(options);
+    staggered.mode = foc::AiSchedule::Mode::staggered;
+    foc::AiSchedule faithful = staggered;
+    faithful.mode = foc::AiSchedule::Mode::faithful;
+    for (const std::uint32_t extra : {0U, 1U}) {
+        const std::size_t players = 2 + extra;
+        const std::string label = std::to_string(players) + " AI players";
+        const auto spread = service_frames(loaded, options, seed, staggered, extra, ticks);
+        const auto together = service_frames(loaded, options, seed, faithful, extra, ticks);
+        if (const auto* reason = std::get_if<std::string>(&spread)) return fail("phase-setup", label + ", staggered: " + *reason);
+        if (const auto* reason = std::get_if<std::string>(&together)) return fail("phase-setup", label + ", faithful: " + *reason);
+        const auto& a = std::get<std::vector<foc::AiServiceEvent>>(spread);
+        const auto& b = std::get<std::vector<foc::AiServiceEvent>>(together);
+        if (a.empty() || b.empty()) return fail("vacuous", label + ": no AI service ran, so the check measured nothing");
+        // The services of one kind at each frame, and each player's first frame of each kind.
+        using Kind = bool foc::AiServiceEvent::*;
+        const auto per_frame = [](const std::vector<foc::AiServiceEvent>& rows, const Kind kind) {
+            std::map<std::uint64_t, std::vector<std::uint32_t>> frames;
+            for (const auto& row : rows) {
+                if (row.*kind) frames[row.frame].push_back(row.player);
+            }
+            return frames;
+        };
+        const auto first_of = [](const std::vector<foc::AiServiceEvent>& rows, const Kind kind) {
+            std::map<std::uint32_t, std::uint64_t> first;
+            for (const auto& row : rows) {
+                if (row.*kind) first.emplace(row.player, row.frame);
+            }
+            return first;
+        };
+        const std::uint64_t origin = std::min(a.front().frame, b.front().frame);
+        if (a.front().frame != b.front().frame) {
+            fail("origin", label + ": the schedules' first service frames differ (" + std::to_string(a.front().frame) + " and "
+                    + std::to_string(b.front().frame) + ")");
+        }
+        const std::pair<const char*, Kind> kinds[] = {{"goal", &foc::AiServiceEvent::goals},
+            {"planning", &foc::AiServiceEvent::planning}, {"execution", &foc::AiServiceEvent::execution}};
+        for (const auto& [name, kind] : kinds) {
+            // Staggered: every player has its first service, on distinct frames, and (planning and
+            // execution) no frame in the run carries two players.
+            const auto first = first_of(a, kind);
+            std::set<std::uint64_t> starts;
+            for (const auto& [player, frame] : first) starts.insert(frame);
+            if (first.size() != players) fail("phase-missing", label + ": a player never ran its " + name + " service");
+            if (starts.size() != first.size()) {
+                fail("phase-shared", label + ": two players start their " + name + " service on one frame (staggered)");
+            }
+            if (kind != &foc::AiServiceEvent::goals) {
+                for (const auto& [frame, who] : per_frame(a, kind)) {
+                    if (who.size() > 1) {
+                        fail("phase-shared", label + ": " + std::to_string(who.size()) + " players ran their " + name
+                                + " service on frame " + std::to_string(frame) + " (staggered)");
+                        break;
+                    }
+                }
+            }
+            // Faithful: all players, every time.
+            for (const auto& [frame, who] : per_frame(b, kind)) {
+                if (who.size() != players) {
+                    fail("faithful", label + ": a " + name + " service on frame " + std::to_string(frame)
+                            + " did not run for every player (faithful)");
+                    break;
+                }
+            }
+            const auto together_first = first_of(b, kind);
+            for (const auto& [player, frame] : together_first) {
+                if (frame != origin) fail("faithful", label + ": a player's first " + name + " service is not on the first frame (faithful)");
+            }
+        }
+        // The first planning frame of the player at position 0 is the origin, as in the faithful schedule.
+        const auto planning = first_of(a, &foc::AiServiceEvent::planning);
+        if (!planning.empty() && std::min_element(planning.begin(), planning.end(), [](const auto& l, const auto& r) {
+                return l.second < r.second;
+            })->second != origin) {
+            fail("origin", label + ": no player's first planning service is on the first frame");
+        }
+        std::cout << "seed " << seed << " phases (" << label << "): first planning frames";
+        for (const auto& [player, frame] : planning) std::cout << " p" << player << "@" << frame;
+        std::cout << ", first goal frames";
+        for (const auto& [player, frame] : first_of(a, &foc::AiServiceEvent::goals)) std::cout << " p" << player << "@" << frame;
+        std::cout << std::endl;
+    }
+}
+
+// The work budget as a deterministic regression test (#957): under the staggered schedule no tick
+// attaches more plans than its cap, and the faithful schedule on the same seed does (so the check
+// measures something).
+void check_schedule(const Loaded& loaded, const soak::Options& options, const std::uint64_t seed, SeedResult& result) {
+    const auto fail = [&](const std::string& rule, const std::string& message) {
+        result.failures.push_back({"schedule", rule, "the AI's scheduled work per tick stays within its cap (SCH-04)",
+            options.ticks, {}, message});
+    };
+    foc::AiSchedule staggered = schedule_of(options);
+    staggered.mode = foc::AiSchedule::Mode::staggered;
+    foc::AiSchedule faithful = staggered;
+    faithful.mode = foc::AiSchedule::Mode::faithful;
+    const auto spread = count_schedule(loaded, options, seed, staggered);
+    const auto together = count_schedule(loaded, options, seed, faithful);
+    if (const auto* reason = std::get_if<std::string>(&spread)) return fail("schedule-setup", "staggered run: " + *reason);
+    if (const auto* reason = std::get_if<std::string>(&together)) return fail("schedule-setup", "faithful run: " + *reason);
+    const auto& a = std::get<ScheduleCounts>(spread);
+    const auto& b = std::get<ScheduleCounts>(together);
+    std::cout << "seed " << seed << " schedule: staggered max " << a.max_attached << " attaches and " << a.max_maintenances
+              << " maintenances a tick (" << a.attached << " plans over " << a.ticks_with_attach << " ticks), faithful max "
+              << b.max_attached << " and " << b.max_maintenances << " (" << b.attached << " plans over " << b.ticks_with_attach
+              << " ticks)" << std::endl;
+    if (a.max_attached > staggered.attach_per_tick) {
+        fail("attach-cap", "a staggered tick attached " + std::to_string(a.max_attached) + " plans, over the cap of "
+                + std::to_string(staggered.attach_per_tick));
+    }
+    if (a.attached == 0) fail("vacuous", "the staggered run attached no plan: the check measured nothing");
+    if (b.max_attached <= staggered.attach_per_tick) {
+        fail("vacuous", "the faithful run never attached more than " + std::to_string(staggered.attach_per_tick)
+                + " plan(s) in a tick, so the cap is not tested");
+    }
+}
+
 // One seed's battle. Failures go into the result; an exception is the caller's to contain.
 void run_battle(const Loaded& loaded, const soak::Options& options, const std::uint64_t seed, const bool compare,
     SeedResult& result) {
-    auto primary_built = soak::build_battle(loaded, {.seed = seed});
+    const auto journal = options.tick_trace ? std::make_shared<foc::AiJournal>() : std::shared_ptr<foc::AiJournal>();
+    if (options.check_schedule) {
+        result.ticks_run = options.ticks;
+        result.outcome = "capped";
+        check_schedule(loaded, options, seed, result);
+        check_phases(loaded, options, seed, result);
+        return;
+    }
+    auto primary_built = soak::build_battle(loaded, {.seed = seed, .anonymous_content = false, .schedule = schedule_of(options), .journal = journal});
     if (const auto* reason = std::get_if<std::string>(&primary_built)) {
         result.failures.push_back({"setup", "setup", "the M2 start builds", 0, {}, *reason});
         return;
@@ -148,7 +379,7 @@ void run_battle(const Loaded& loaded, const soak::Options& options, const std::u
     auto& primary = *std::get<std::unique_ptr<Battle>>(primary_built);
     std::unique_ptr<Battle> secondary_built;
     if (compare) {
-        auto second = soak::build_battle(loaded, {.seed = seed});
+        auto second = soak::build_battle(loaded, {.seed = seed, .anonymous_content = false, .schedule = schedule_of(options), .journal = nullptr});
         if (const auto* reason = std::get_if<std::string>(&second)) {
             result.failures.push_back({"setup", "setup", "the M2 start builds", 0, {}, *reason});
             return;
@@ -160,6 +391,8 @@ void run_battle(const Loaded& loaded, const soak::Options& options, const std::u
     const eawr::platform::ThreadWorkerAdapter compare_executor(compare ? options.hash_workers : std::size_t{1});
     soak::Invariants invariants(primary.content.motion, primary.content.fog, options.limits);
     auto& session = *primary.session;
+    session.set_step_clock(steady_nanoseconds);
+    std::vector<double> total_ms, world_ms, ai_ms, lua_ms;
     bool sim_failed = false;
     bool diverged = false;
     const auto began = Clock::now();
@@ -182,6 +415,14 @@ void run_battle(const Loaded& loaded, const soak::Options& options, const std::u
         }
         result.ticks_run = tick + 1;
         result.final_hash = stepped.value().state_sha256;
+        {
+            const auto& timing = stepped.value().timing;
+            const auto ms = [](const std::uint64_t ns) { return static_cast<double>(ns) / 1.0e6; };
+            total_ms.push_back(took * 1000.0);
+            world_ms.push_back(ms(timing.world_ns));
+            ai_ms.push_back(ms(timing.engine_ns));
+            lua_ms.push_back(ms(timing.service_ns));
+        }
         if (compare) {
             auto other = secondary_built->session->step(compare_executor);
             if (!other || other.value().state_sha256 != stepped.value().state_sha256) {
@@ -209,6 +450,33 @@ void run_battle(const Loaded& loaded, const soak::Options& options, const std::u
         }
     }
     result.seconds = std::chrono::duration<double>(Clock::now() - began).count();
+    result.timing = {phase_stats(total_ms), phase_stats(world_ms), phase_stats(ai_ms), phase_stats(lua_ms), !total_ms.empty()};
+    if (options.tick_trace && journal) {
+        std::error_code ignored;
+        std::filesystem::create_directories(*options.tick_trace, ignored);
+        std::ofstream trace(*options.tick_trace / ("seed-" + std::to_string(seed) + "-ticks.csv"), std::ios::binary);
+        trace << "tick,total_ms,world_ms,ai_ms,lua_ms,goals_evaluated,maintenances,plans_attached,plans_deferred,plans_pumped,"
+                 "plan_instances,plan_instructions,freestore_runs,freestore_instructions\n";
+        trace << std::fixed << std::setprecision(3);
+        for (std::size_t at = 0; at < total_ms.size() && at < journal->costs.size(); ++at) {
+            const auto& cost = journal->costs[at];
+            trace << at + 1 << ',' << total_ms[at] << ',' << world_ms[at] << ',' << ai_ms[at] << ',' << lua_ms[at] << ','
+                  << cost.goals_evaluated << ',' << cost.maintenances << ',' << cost.plans_attached << ',' << cost.plans_deferred
+                  << ',' << cost.plans_pumped << ',' << cost.plan_instances << ',' << cost.plan_instructions << ','
+                  << cost.freestore_runs << ',' << cost.freestore_instructions << '\n';
+        }
+    }
+    if (options.tick_trace && journal) {
+        // The plan timeline (#957 behaviour comparison): who plans what against which target, when.
+        std::ofstream plans(*options.tick_trace / ("seed-" + std::to_string(seed) + "-plans.csv"), std::ios::binary);
+        plans << "tick,player,plan,goal,target,event,detail\n";
+        for (const auto& event : journal->plans) {
+            std::string detail = event.detail;
+            std::replace(detail.begin(), detail.end(), ',', ';');
+            plans << event.tick << ',' << event.player << ',' << event.plan << ',' << event.goal << ',' << event.target << ','
+                  << event.event << ',' << detail << '\n';
+        }
+    }
     if (!sim_failed && !diverged && result.outcome.empty()) {
         result.outcome = "capped";
         result.decided = session.world().outcome();
@@ -256,6 +524,21 @@ std::string seed_json(const soak::Options& options, const SeedResult& result) {
         if (result.compared) {
             text << ",\"workerComparison\":{\"workers\":" << options.hash_workers << ",\"ticksCompared\":"
                  << result.compared_ticks << '}';
+        }
+        if (result.timing.present) {
+            const auto phase = [&](const char* name, const PhaseStats& stats) {
+                text << '"' << name << "\":{\"mean\":" << soak::json_number(stats.mean) << ",\"p99\":" << soak::json_number(stats.p99)
+                     << ",\"worst\":" << soak::json_number(stats.worst) << ",\"worstTick\":" << stats.worst_tick << '}';
+            };
+            text << ",\"timingMs\":{";
+            phase("total", result.timing.total);
+            text << ',';
+            phase("world", result.timing.world);
+            text << ',';
+            phase("ai", result.timing.ai);
+            text << ',';
+            phase("lua", result.timing.lua);
+            text << '}';
         }
         text << ",\"metrics\":{\"maxHullPenetration\":" << soak::json_number(result.metrics.max_hull_penetration)
              << ",\"maxHullRun\":" << result.metrics.max_hull_run << ",\"maxSlotRun\":" << result.metrics.max_slot_run
@@ -355,8 +638,13 @@ void print_result(const soak::Options& options, const SeedResult& result) {
     std::cout << "seed " << result.seed << ": ";
     if (result.passed()) {
         std::cout << result.ticks_run << " ticks, battle " << result.outcome << ", " << std::fixed
-                  << std::setprecision(1) << result.seconds << " s" << (result.compared ? ", workers agree" : "")
-                  << std::endl;
+                  << std::setprecision(1) << result.seconds << " s" << (result.compared ? ", workers agree" : "");
+        if (result.timing.present) {
+            std::cout << std::setprecision(2) << "; tick ms: mean " << result.timing.total.mean << " p99 " << result.timing.total.p99
+                      << " worst " << result.timing.total.worst << "; ai p99 " << result.timing.ai.p99 << " worst "
+                      << result.timing.ai.worst << "; lua p99 " << result.timing.lua.p99 << " worst " << result.timing.lua.worst;
+        }
+        std::cout << std::endl;
         return;
     }
     const auto& first = result.failures.front();

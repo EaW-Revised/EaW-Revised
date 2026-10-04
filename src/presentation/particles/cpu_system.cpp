@@ -1,10 +1,9 @@
 #include "eawr/presentation/particles/particles.hpp"
+#include "eawr/presentation/particles/prewarmed_capacity.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <unordered_map>
-#include <unordered_set>
 
 // CPU behavior is ported from the MIT-licensed alo-viewer revision
 // 9bb0053919cc5df8377610d4f91b11d956d6c2f4. DirectX matrices and renderer
@@ -45,7 +44,9 @@ bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.parti
     std::isfinite(emitter.skip_time)&&std::isfinite(emitter.freeze_time)&&
     std::isfinite(emitter.inherited_velocity_scale)&&std::isfinite(emitter.max_inherited_velocity)&&
     finite(emitter.position)&&finite(emitter.velocity)&&std::isfinite(emitter.lifetime)&&
-    std::isfinite(emitter.lifetime_variation)&&std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
+    std::isfinite(emitter.lifetime_variation)&&(!emitter.lifetime_range||
+        (std::isfinite(emitter.lifetime_range->minimum)&&std::isfinite(emitter.lifetime_range->maximum)))&&
+    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
     std::isfinite(emitter.inward_acceleration)&&std::isfinite(emitter.wind_response)&&
     std::isfinite(emitter.terrain_elasticity)&&finite(emitter.red)&&finite(emitter.green)&&finite(emitter.blue)&&
     finite(emitter.alpha)&&finite(emitter.size)&&std::isfinite(emitter.size_variation)&&finite(emitter.uv_index)&&
@@ -116,6 +117,11 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
                      std::optional<MeshBinding> mesh_binding)
     :definition_(std::move(definition)),random_state_(seed?seed:1U),max_particles_(max_particles),
      mesh_binding_(std::move(mesh_binding)){
+    // PL-01, PS-47: keep raw decode separate from the legacy post-load runtime.
+    if(definition_.version==AloParticleVersion::legacy_v1){
+        for(auto& emitter:definition_.emitters)
+            if(finite(emitter))emitter.lifetime_range=postload_lifetime_range(emitter);
+    }
     if(mesh_binding_){
         bool surface{};
         for(const auto& emitter:definition_.emitters)
@@ -179,11 +185,89 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
             (definition_.emitters[child].creator_id==39||definition_.emitters[child].creator_id==40))
             children_[parent].push_back(child);
     }
-    particles_.reserve(std::min<std::size_t>(max_particles_,4096U));
+    capacities_=emitter_capacity_plan(definition_,mesh_vertex_count_,max_particles_);
+    std::size_t reserved{};
+    for(std::size_t index=0;index<capacities_.size();++index){
+        if(!emitters_[index].active)capacities_[index].reserved=0;
+        emitters_[index].free_slots.reserve(capacities_[index].reserved);
+        reserved+=capacities_[index].reserved;
+    }
+    // PS-19: packed storage is shared, admission and reusable slots are not.
+    particles_.reserve(reserved);
+    std::size_t parent_slots{},links{};
+    const auto link_budget=std::min<std::size_t>(reserved,65536U);
+    for(std::size_t index=0;index<children_.size();++index){
+        if(!children_[index].empty())parent_slots+=capacities_[index].reserved;
+        for(const auto child:children_[index])if(definition_.emitters[child].creator_id==39){
+            const auto extra=std::min(link_budget-links,capacities_[index].reserved);
+            links+=extra;
+        }
+    }
+    events_.reserve(parent_slots*2U);
+    max_child_instances_=links;
+    child_instances_.reserve(links);
     emitter_start_.assign(definition_.emitters.size(),0.0F);
+    enabled_.assign(definition_.emitters.size(),1U);
 }
 
-void CpuSystem::set_origin(const Vec3 origin){if(finite(origin))origin_=origin;}
+core::Result<void> CpuSystem::set_detail(ParticleDetail detail){
+    if(!std::isfinite(detail.global)||!std::isfinite(detail.local))
+        return core::Result<void>::failure({std::string(diagnostic_codes::invalid_value),
+            core::Severity::error,"particle detail inputs must be finite",{},{},{},{}});
+    detail.global=std::clamp(detail.global,0.0F,1.0F);
+    detail.local=std::clamp(detail.local,0.0F,1.0F);
+    if(detail==detail_)return core::Result<void>::success();
+    const bool local_changed=detail.local!=detail_.local;
+    detail_=detail;
+    if(local_changed){
+        // PS-36: band thresholds are inclusive; emitter count is independent of draw detail.
+        const float band=detail.local<=0.5F?0.5F:detail.local<=0.7F?0.7F:1.0F;
+        const auto count=static_cast<std::size_t>(std::ceil(static_cast<float>(emitters_.size())*band));
+        for(std::size_t index=0;index<enabled_.size();++index){
+            enabled_[index]=index<count?1U:0U;
+            std::size_t node=index;
+            for(std::size_t hops=0;enabled_[index]&&hops<=enabled_.size();++hops){
+                const auto parent=definition_.emitters[node].parent_emitter;
+                if(parent==EmitterDefinition::no_parent)break;
+                if(parent>=count||parent>=enabled_.size()||hops==enabled_.size())enabled_[index]=0;
+                else node=parent;
+            }
+        }
+    }
+    for(auto& particle:particles_)particle.draw_eligible=draw_eligible(particle);
+    return core::Result<void>::success();
+}
+
+std::size_t CpuSystem::reserved_memory_bytes() const {
+    std::size_t bytes=particles_.capacity()*sizeof(Particle)+events_.capacity()*sizeof(ParentEvent)
+        +child_instances_.capacity()*sizeof(ChildInstance);
+    for(const auto& emitter:emitters_)bytes+=emitter.free_slots.capacity()*sizeof(std::size_t);
+    return bytes;
+}
+
+bool CpuSystem::emitter_enabled(const std::size_t index) const noexcept{
+    return index<enabled_.size()&&enabled_[index]!=0;
+}
+
+bool CpuSystem::draw_eligible(const Particle& particle) const noexcept{
+    const auto& emitter=definition_.emitters[particle.emitter_index];
+    // PS-35: nonweather every-vertex draws all slots, including at zero detail.
+    if(emitter.mesh_mode==MeshSpawnMode::every_vertex&&!emitter.weather)return true;
+    const auto capacity=capacities_[particle.emitter_index].reserved;
+    if(capacity==0)return false;
+    const float k=std::ceil(static_cast<float>(capacity)*detail_.local*detail_.global);
+    if(k>=static_cast<float>(capacity))return true;
+    if(k<=0)return false;
+    // PS-35: masks use the independent emitter's admitted allocation denominator.
+    const auto rank=(static_cast<std::uint64_t>(particle.draw_slot)*60659ULL+60913ULL)%capacity;
+    return rank<static_cast<std::size_t>(k);
+}
+
+void CpuSystem::set_origin(const Vec3 origin){
+    if(!finite(origin))return;
+    if(!origin_set_){sampled_origin_=origin;origin_set_=true;}
+    origin_=origin;
+}
 void CpuSystem::set_basis(const Basis3 basis){if(finite(basis))basis_=basis;}
 void CpuSystem::set_wind(const Vec3 acceleration){if(finite(acceleration))wind_=acceleration;}
 core::Result<void> CpuSystem::set_mesh_frame(const MeshFrame& frame){
@@ -223,6 +307,7 @@ Vec3 CpuSystem::sample(const PropertyGroup& group,const bool hollow){
 void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& emitter,
                                     const std::size_t emitter_index,const float spawn_time,const Particle* parent){
     particle={};particle.id=next_particle_id_++;particle.emitter_index=emitter_index;particle.spawn_time=spawn_time;
+    Vec3 mesh_offset_normal{};
     if(emitter.creator_id==35){
         // EnhancedMesh overrides Shape position sampling and parent inheritance.
         particle.velocity=sample(emitter.velocity,emitter.hollow_velocity);
@@ -254,7 +339,8 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         }else vertex=submesh.vertices[vertex_index];
         const auto& mesh_frame=mesh_binding_->frame;
         const Vec3 normal=transformed(mesh_frame.basis,vertex.normal);
-        particle.position=mesh_frame.origin+transformed(mesh_frame.basis,vertex.position)+normal*emitter.mesh_surface_offset;
+        particle.position=mesh_frame.origin+transformed(mesh_frame.basis,vertex.position);
+        if(emitter.mesh_mode!=MeshSpawnMode::every_vertex)mesh_offset_normal=normalized(normal);
         const float tilt=std::atan2(normal.z,std::sqrt(normal.x*normal.x+normal.y*normal.y));
         const float azimuth=std::atan2(normal.y,normal.x);
         const float first=particle.velocity.x,second=particle.velocity.y;
@@ -275,10 +361,13 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         particle.velocity+=normalized(parent->velocity)*std::min(speed*emitter.inherited_velocity_scale,
             emitter.max_inherited_velocity);
     }
-    if(emitter.inward_speed!=0.0F)particle.velocity=normalized(particle.position-origin_)*emitter.inward_speed;
     particle.texcoords={0,0,1,1};particle.color={0.1F,1.0F,0.5F,1.0F};particle.size=1.0F;
     particle.death_time=spawn_time+emitter.lifetime;
-    if(emitter.lifetime_variation>0)particle.death_time+=random(0,emitter.lifetime_variation)*emitter.lifetime;
+    // PL-01: legacy births use the post-load sampler; constants keep their saved default.
+    if(emitter.lifetime_range){
+        const auto range=*emitter.lifetime_range;
+        particle.death_time=spawn_time+(range.minimum==range.maximum?range.minimum:random(range.minimum,range.maximum));
+    }else if(emitter.lifetime_variation>0)particle.death_time+=random(0,emitter.lifetime_variation)*emitter.lifetime;
     particle.size_scale=1.0F;
     if(emitter.size_variation>0)particle.size_scale+=random(-emitter.size_variation,emitter.size_variation);
     particle.rotation_direction=emitter.random_rotation_direction&&random(0,1)<0.5F?-1.0F:1.0F;
@@ -289,6 +378,17 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         particle.color_offset.z=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.z);
         particle.color_offset.w=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.w);
     }
+    if(emitter.creator_id==35&&emitter.mesh_mode!=MeshSpawnMode::every_vertex){
+        // Mesh emission: the debug build offsets random samples by half the
+        // sampled billboard half-extent, along the normalized world normal.
+        const float lifetime=particle.death_time-particle.spawn_time;
+        const float relative=lifetime>0?saturated((time_-particle.spawn_time)/lifetime):1.0F;
+        const float size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
+        particle.position+=mesh_offset_normal*(emitter.mesh_surface_offset*size*0.5F);
+    }
+    if(emitter.inward_speed!=0.0F)particle.velocity=normalized(particle.position-origin_)*emitter.inward_speed;
+    particle.motion_velocity=particle.velocity;
+    particle.inherited_speed_limit=inherited_speed_limit_;
     update_particle(particle,emitter,0.0F);
 }
 
@@ -302,7 +402,8 @@ void CpuSystem::update_particle(Particle& particle,const EmitterDefinition& emit
     particle.color={sample_track(emitter.red,relative,1),sample_track(emitter.green,relative,1),sample_track(emitter.blue,relative,1),sample_track(emitter.alpha,relative,1)};
     if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
     particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
-    const int grid=std::max(1,static_cast<int>(std::ceil(std::sqrt(static_cast<float>(emitter.texture_size)))));
+    // PS-30: integer square root, including nonsquare authored frame counts.
+    const int grid=std::max(1,static_cast<int>(std::sqrt(static_cast<double>(emitter.texture_size))));
     const int uv=safe_truncated_index(sample_track(emitter.uv_index,relative,0));
     particle.texcoords={static_cast<float>(uv%grid)/grid,static_cast<float>(uv/grid)/grid,1.0F/grid,1.0F/grid};
     if(!emitter.random_rotation)particle.rotation+=delta*particle.rotation_direction*sample_track(emitter.rotation_rate,relative,0);
@@ -316,16 +417,27 @@ std::size_t CpuSystem::live_child_instances() const{
 void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const Particle* parent,
                             AdvanceStats& stats,std::vector<ParentEvent>& events){
     const auto& emitter=definition_.emitters[index];
+    // PS-36/PS-37: reject births only; already live particles still update and retire.
+    if(!emitter_enabled(index))return;
+    if(emitter.creator_id==39&&(detail_.local<=0.7F||
+        (!emitter.bursting&&parent&&!draw_eligible(*parent))))return;
     const float requested=emitter.bursting?emitter.particles_per_interval:1.0F;
     const std::size_t base_count=requested>=static_cast<float>(std::numeric_limits<std::size_t>::max())?
         std::numeric_limits<std::size_t>::max():static_cast<std::size_t>(requested);
     const std::size_t count=emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex?
         base_count*mesh_vertex_count_:base_count;
-    const std::size_t available=particles_.size()<max_particles_?max_particles_-particles_.size():0U;
+    auto& state=emitters_[index];
+    const std::size_t available=capacities_[index].reserved-state.live;
     const std::size_t spawn_count=std::min(count,available);
+    saturating_add(stats.requested,count);
     for(std::size_t particle_index=0;particle_index<spawn_count;++particle_index){
         Particle particle;initialize_particle(particle,emitter,index,spawn_time,parent);
-        particles_.push_back(particle);events.push_back({particle,false});++stats.spawned;
+        if(state.free_slots.empty())particle.draw_slot=state.next_slot++;
+        else{particle.draw_slot=state.free_slots.back();state.free_slots.pop_back();}
+        particle.draw_eligible=draw_eligible(particle);
+        particles_.push_back(particle);
+        if(!children_[index].empty())events.push_back({particle,false});
+        ++stats.spawned;++state.live;
     }
     const std::size_t dropped=count-spawn_count;
     saturating_add(stats.dropped_at_capacity,dropped);saturating_add(total_dropped_,dropped);
@@ -337,16 +449,20 @@ void CpuSystem::process_events(std::vector<ParentEvent>& events,AdvanceStats& st
     while(cursor<events.size()){
         const ParentEvent event=events[cursor++];
         for(const std::size_t index:children_[event.parent.emitter_index]){
+            if(frozen(index))continue;
             const auto& emitter=definition_.emitters[index];
             if(event.death){
-                if(emitter.creator_id!=40)continue;
+                // PS-22/PS-36: draw masks do not stand in for death-spawn permission.
+                if(emitter.creator_id!=40||detail_.local<=0.5F||!emitter_enabled(index))continue;
                 ++stats.death_bursts;
                 spawn_batch(index,time_,&event.parent,stats,events);
             }else{
                 if(emitter.creator_id!=39)continue;
-                if(active_instances>=std::min<std::size_t>(max_particles_,65536U)){
+                if(active_instances>=max_child_instances_){
                     ++stats.instances_dropped_at_capacity;continue;
                 }
+                // Retain the per-parent link while its birth gate is closed: a later
+                // detail increase can resume trails without recreating the parent.
                 ChildInstance instance;
                 instance.id=next_instance_id_++;
                 instance.emitter_index=index;
@@ -368,37 +484,46 @@ void CpuSystem::process_events(std::vector<ParentEvent>& events,AdvanceStats& st
                         if(!(added.next_spawn>instance.next_spawn)||!std::isfinite(added.next_spawn))added.active=false;
                     }
                 }
-                if(!child_instances_.back().active)--active_instances;
+                if(!child_instances_.back().active){--active_instances;child_instances_.pop_back();}
             }
         }
     }
     events.clear();
 }
 
-bool CpuSystem::frozen(const std::size_t emitter_index,const float at_time) const{
-    const float freeze=definition_.emitters[emitter_index].freeze_time;
-    return std::isfinite(freeze)&&freeze>0.0F&&at_time-emitter_start_[emitter_index]>=freeze;
+bool CpuSystem::frozen(const std::size_t emitter_index) const{
+    return emitters_[emitter_index].frozen;
 }
 
 void CpuSystem::preroll(AdvanceStats& stats){
-    const auto skip_of=[](const EmitterDefinition& emitter){
-        return std::isfinite(emitter.skip_time)&&emitter.skip_time>0.0F?
-            std::min(emitter.skip_time,max_skip_seconds):0.0F;
-    };
-    float longest{};
-    for(const auto& emitter:definition_.emitters)longest=std::max(longest,skip_of(emitter));
-    if(longest<=0.0F)return;
-    // Every emitter starts so that it has run exactly its own skip time when
-    // the pre-roll ends; emitters without one start at the end.
-    const auto steps=static_cast<std::uint32_t>(std::ceil(longest/preroll_step));
-    const float span=static_cast<float>(steps)*preroll_step;
+    std::vector<float> durations(definition_.emitters.size());
+    std::vector<std::uint32_t> counts(definition_.emitters.size());
+    std::uint32_t steps{};
     for(std::size_t index=0;index<definition_.emitters.size();++index){
-        const float start=span-skip_of(definition_.emitters[index]);
+        const float target=definition_.emitters[index].skip_time;
+        if(frozen(index)||!std::isfinite(target)||target<=0.0F)continue;
+        const float bounded=std::min(target,max_skip_seconds);
+        std::uint32_t count{};
+        // PS-07: inclusive comparison against accumulated single-precision time.
+        while(durations[index]<=bounded){durations[index]+=preroll_step;++count;}
+        counts[index]=count;
+        steps=std::max(steps,count);
+    }
+    if(steps==0)return;
+    std::vector<float> times(static_cast<std::size_t>(steps)+1U);
+    for(std::uint32_t index=0;index<steps;++index)times[index+1U]=times[index]+preroll_step;
+    // Align by complete step count on the same float clock sequence, avoiding
+    // cancellation that could drop a short emitter's first prewarm step.
+    // Zero-target emitters begin only on the ordinary caller update.
+    for(std::size_t index=0;index<definition_.emitters.size();++index){
+        const float start=times[steps-counts[index]];
         emitter_start_[index]=start;
         emitters_[index].next_spawn+=start;
     }
     for(std::uint32_t index=0;index<steps;++index)
-        step(static_cast<float>(index+1U)*preroll_step-time_,stats);
+        step_segment(preroll_step,stats,true);
+    for(std::size_t index=0;index<emitters_.size();++index)
+        emitters_[index].elapsed=durations[index];
     // Rebase: presentation time restarts at zero with the pre-rolled state.
     const float shift=time_;
     time_=0.0F;
@@ -414,23 +539,29 @@ void CpuSystem::preroll(AdvanceStats& stats){
 AdvanceStats CpuSystem::advance(const float delta_seconds){
     AdvanceStats stats;if(!std::isfinite(delta_seconds)||delta_seconds<0||
         delta_seconds>std::numeric_limits<float>::max()-time_)return stats;
-    if(!prerolled_){prerolled_=true;preroll(stats);}
-    step(delta_seconds,stats);
+    if(!prerolled_){
+        prerolled_=true;
+        // PS-08: the first outer update admits freeze before prewarming.
+        freeze_crossing(delta_seconds);
+        preroll(stats);
+        step_segment(delta_seconds,stats);
+    }else step(delta_seconds,stats);
     return stats;
 }
 
 void CpuSystem::step(const float delta_seconds,AdvanceStats& stats){
-    const float end=time_+delta_seconds;
-    float next=end;
+    freeze_crossing(delta_seconds);
+    step_segment(delta_seconds,stats);
+}
+
+void CpuSystem::freeze_crossing(const float delta_seconds){
+    // PS-08: equality advances; strict crossing freezes permanently and skips
+    // the complete update rather than splitting it at the boundary.
     for(std::size_t index=0;index<definition_.emitters.size();++index){
         const float freeze=definition_.emitters[index].freeze_time;
         if(!std::isfinite(freeze)||freeze<=0.0F)continue;
-        const float boundary=emitter_start_[index]+freeze;
-        if(boundary>time_&&boundary<next)next=boundary;
+        if(emitters_[index].elapsed+delta_seconds>freeze)emitters_[index].frozen=true;
     }
-    if(next==end){step_segment(delta_seconds,stats);return;}
-    step_segment(next-time_,stats);
-    step(end-time_,stats);
 }
 
 CpuSystem::EmitterMotion CpuSystem::emitter_motion() const{
@@ -463,51 +594,71 @@ void CpuSystem::follow(Particle& particle,const EmitterMotion& motion) const{
 void CpuSystem::follow_emitter(){
     const EmitterMotion motion=emitter_motion();
     for(Particle& particle:particles_){
-        if(definition_.emitters[particle.emitter_index].translater_id!=26||frozen(particle.emitter_index,time_))continue;
+        if(definition_.emitters[particle.emitter_index].translater_id!=26||frozen(particle.emitter_index))continue;
         follow(particle,motion);
     }
     previous_origin_=origin_;
     previous_basis_=basis_;
 }
 
-void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats){
+void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const bool prewarming){
     const float before=time_;
     time_+=delta_seconds;const EmitterMotion motion=emitter_motion();
-    std::vector<ParentEvent> events;
-    std::unordered_set<std::uint64_t> dead_ids;
+    // MD-07: sample the attached frame independently of render-only following.
+    if(delta_seconds>0.0F){
+        emitter_velocity_=(origin_-sampled_origin_)*(1.0F/delta_seconds);
+        if(!finite(emitter_velocity_))emitter_velocity_={};
+        const float sampled_speed=std::hypot(emitter_velocity_.x,emitter_velocity_.y,emitter_velocity_.z);
+        if(std::isfinite(sampled_speed))inherited_speed_limit_=std::max(inherited_speed_limit_,sampled_speed);
+        sampled_origin_=origin_;
+    }
+    auto& events=events_;
+    events.clear();
     std::size_t write{};
     for(std::size_t read=0;read<particles_.size();++read){auto particle=particles_[read];const auto& emitter=definition_.emitters[particle.emitter_index];
-        if(frozen(particle.emitter_index,before)){particles_[write++]=particle;continue;}
-        if(time_>=particle.death_time||(emitter.killer_id==21&&particle.position.z<0)){
-            dead_ids.insert(particle.id);
-            events.push_back({particle,true});++stats.killed;continue;
+        if(frozen(particle.emitter_index)){particles_[write++]=particle;continue;}
+        if(time_>=particle.death_time||(detail_.local>0.7F&&emitter.killer_id==21&&particle.position.z<0)){
+            emitters_[particle.emitter_index].free_slots.push_back(particle.draw_slot);
+            --emitters_[particle.emitter_index].live;
+            if(!children_[particle.emitter_index].empty())events.push_back({particle,true});
+            ++stats.killed;continue;
         }
         // A linked particle first moves with its emitter to the current frame; the world velocity,
         // with an object-space acceleration rotated once by the current basis, moves it from there.
         update_particle(particle,emitter,delta_seconds);if(emitter.translater_id==26)follow(particle,motion);
-        particle.position+=particle.velocity*delta_seconds;particle.velocity+=particle.acceleration*delta_seconds;
+        particle.motion_velocity=particle.velocity;
+        if(emitter.inherit_emitter_motion&&emitter.parent_emitter==EmitterDefinition::no_parent){
+            particle.motion_velocity+=emitter_velocity_*emitter.inherited_velocity_scale;
+        }
+        particle.inherited_speed_limit=inherited_speed_limit_;
+        particle.position+=particle.motion_velocity*delta_seconds;particle.velocity+=particle.acceleration*delta_seconds;
         particles_[write++]=particle;
     }
     particles_.resize(write);
-    for(auto& instance:child_instances_)if(instance.active&&dead_ids.contains(instance.parent_id)){
-        instance.active=false;++stats.child_instances_detached;
+    // Stable IDs remain ascending through compaction and append. Binary lookup
+    // avoids rebuilding allocating hash nodes for every particle each update.
+    const auto find_parent=[&](const std::uint64_t id){
+        return std::lower_bound(particles_.begin(),particles_.end(),id,
+            [](const Particle& particle,const std::uint64_t wanted){return particle.id<wanted;});
+    };
+    for(auto& instance:child_instances_)if(instance.active){
+        const auto parent=find_parent(instance.parent_id);
+        if(parent==particles_.end()||parent->id!=instance.parent_id){
+            instance.active=false;++stats.child_instances_detached;
+        }
     }
     child_instances_.erase(std::remove_if(child_instances_.begin(),child_instances_.end(),
         [](const ChildInstance& instance){return !instance.active;}),child_instances_.end());
     process_events(events,stats);
     constexpr std::size_t max_spawn_events_per_advance=100000U;std::size_t events_count{};
-    std::unordered_map<std::uint64_t,std::size_t> particle_indices;
-    particle_indices.reserve(particles_.size());
-    for(std::size_t index=0;index<particles_.size();++index)
-        particle_indices.emplace(particles_[index].id,index);
     for(auto& instance:child_instances_){
-        const auto parent=particle_indices.find(instance.parent_id);
-        if(parent==particle_indices.end()){
+        const auto parent=find_parent(instance.parent_id);
+        if(parent==particles_.end()||parent->id!=instance.parent_id){
             instance.active=false;++stats.child_instances_detached;continue;
         }
-        instance.parent_snapshot=particles_[parent->second];
+        instance.parent_snapshot=*parent;
         const auto& emitter=definition_.emitters[instance.emitter_index];
-        if(frozen(instance.emitter_index,before))continue;
+        if(frozen(instance.emitter_index))continue;
         while(instance.active&&time_>=instance.next_spawn&&events_count++<max_spawn_events_per_advance){
             spawn_batch(instance.emitter_index,instance.next_spawn,&instance.parent_snapshot,stats,events);
             const float elapsed=instance.next_spawn-instance.start_time;
@@ -526,7 +677,7 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats){
     std::size_t root_events{};
     for(std::size_t index=0;!detached_&&index<emitters_.size();++index){auto& state=emitters_[index];const auto& emitter=definition_.emitters[index];
         if(emitter.creator_id!=34&&emitter.creator_id!=35)continue;
-        if(frozen(index,before))continue;
+        if(frozen(index)||(prewarming&&before<emitter_start_[index]))continue;
         while(state.active&&time_>=state.next_spawn&&root_events++<max_spawn_events_per_advance){
             spawn_batch(index,state.next_spawn,nullptr,stats,events);
             const float elapsed=state.next_spawn-emitter_start_[index]-emitter.start_delay;if(emitter.stop_time>0&&elapsed>=emitter.stop_time){state.active=false;break;}
@@ -537,6 +688,7 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats){
         if(root_events>=max_spawn_events_per_advance)state.active=false;
     }
     process_events(events,stats);
+    if(!prewarming)for(auto& state:emitters_)if(!state.frozen)state.elapsed+=delta_seconds;
     previous_origin_=origin_;
     previous_basis_=basis_;
 }

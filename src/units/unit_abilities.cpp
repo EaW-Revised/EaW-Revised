@@ -43,12 +43,16 @@ bool runs_defend_script(const UnitType& type) noexcept {
     return iequals(type.lua_script, "ObjectScript_PowerToShields");
 }
 
-core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std::span<const tactical::PlayerId> humans) {
+core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std::span<const tactical::PlayerId> humans,
+    bool (*allowed)(std::string_view, std::string_view), const bool default_autofire) {
     using Result = core::Result<tactical::AbilityTable>;
     tactical::AbilityTable table;
+    const auto damage_types = damage_type_index(tables);
+    table.beam_damage_type = damage_types.damage({});
     table.humans.assign(humans.begin(), humans.end());
     std::sort(table.humans.begin(), table.humans.end());
     table.humans.erase(std::unique(table.humans.begin(), table.humans.end()), table.humans.end());
+    if (default_autofire) table.autofire_defaults = table.humans;
     for (const auto& unit : tables.units) {
         // AB-15: a squadron's own Unit_Abilities_Data is not the one that acts; its craft's is.
         // AB-60 (#561): a team ability acts on the squadron's team container, which is the
@@ -56,7 +60,9 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         if (unit.kind == UnitKind::squadron) {
             tactical::UnitAbilityProfile team;
             team.type_id = assets::object_type_crc(unit.id);
+            team.special = unit.team_special_abilities;
             for (const auto& ability : unit.team_abilities) {
+                if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
                 if (tactical::ability_kind(ability.type) != tactical::AbilityKind::ion_cannon_shot) continue;
                 tactical::AbilityProfile entry;
                 entry.kind = tactical::AbilityKind::ion_cannon_shot;
@@ -65,12 +71,14 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.team = true;
                 team.abilities.push_back(entry);
             }
-            if (!team.abilities.empty()) table.profiles.push_back(std::move(team));
+            if (!team.abilities.empty() || !team.special.empty()) table.profiles.push_back(std::move(team));
             continue;
         }
         tactical::UnitAbilityProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
+        profile.special = unit.special_abilities;
         for (const auto& ability : unit.abilities) {
+            if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
             tactical::AbilityProfile entry;
@@ -78,20 +86,57 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             entry.expiration_frames = frames(ability.expiration_seconds);
             entry.recharge_frames = frames(ability.recharge_seconds);
             entry.supports_autofire = ability.supports_autofire;
+            if (kind == tactical::AbilityKind::barrage) {
+                entry.barrage_target_type = assets::object_type_crc("Dummy_Barrage_Target");
+                entry.fixed_inaccuracy = ability.fixed_inaccuracy;
+                entry.target_z_offset = ability.target_z_offset.value_or(Fixed{});
+            }
+            if (kind == tactical::AbilityKind::replenish_wingmen) {
+                if (unit.replenish_team.empty()) return Result::failure(failure(unit.id + " replenishment requires a team (WHE-63)"));
+                entry.replenish_team = assets::object_type_crc(unit.replenish_team);
+                entry.replenish_particle = ability.replenish_particle;
+            }
+            bool modelled = true;
+            if (kind == tactical::AbilityKind::harmonic_bomb || kind == tactical::AbilityKind::weaken_enemy) {
+                if (ability.spawned_projectile_index >= tables.projectiles.size())
+                    return Result::failure(failure(unit.id + " spawned ability requires a projectile type (WHE-61)"));
+                const auto& projectile = tables.projectiles[ability.spawned_projectile_index];
+                tactical::SpawnedAbilityProfile spawned;
+                spawned.type = assets::object_type_crc(projectile.id);
+                spawned.damage = projectile.damage.value_or(Fixed{});
+                spawned.damage_type = damage_types.damage(projectile.damage_type);
+                spawned.blast = projectile.blast;
+                spawned.weaken = projectile.weaken;
+                spawned.shield_damage = projectile.does_shield_damage;
+                spawned.hitpoint_damage = projectile.does_hitpoint_damage;
+                spawned.countdown_frames = frames(ability.bomb_countdown_seconds);
+                spawned.reach = ability.effective_radius.value_or(Fixed{});
+                spawned.z_offset = ability.target_position_z_offset.value_or(Fixed{});
+                entry.spawned = std::move(spawned);
+            }
+            if (kind == tactical::AbilityKind::concentrate_fire || kind == tactical::AbilityKind::energy_weapon
+                || kind == tactical::AbilityKind::tractor_beam) {
+                entry.effective_radius = ability.effective_radius.value_or(Fixed{});
+                entry.gui_activated_ability_name = ability.gui_activated_ability_name;
+            }
             for (const auto& modifier : ability.modifiers) {
                 auto& m = entry.modifiers;
                 const auto& name = modifier.modifier;
                 if (iequals(name, "WEAPON_DELAY_MULTIPLIER")) m.weapon_delay = modifier.value;
+                else if (iequals(name, "SCATTER_RADIUS_MULTIPLIER")) m.scatter_radius = modifier.value;
+                else if (iequals(name, "FIRE_RATE_MULTIPLIER")) m.fire_rate = modifier.value;
                 else if (iequals(name, "SHIELD_REGEN_MULTIPLIER")) m.shield_regen = modifier.value;
                 else if (iequals(name, "SHIELD_REGEN_INTERVAL_MULTIPLIER")) m.shield_regen_interval = modifier.value;
                 else if (iequals(name, "ENERGY_REGEN_MULTIPLIER")) m.energy_regen = modifier.value;
                 else if (iequals(name, "ENERGY_REGEN_INTERVAL_MULTIPLIER")) m.energy_regen_interval = modifier.value;
                 else if (iequals(name, "SPEED_MULTIPLIER")) m.speed = modifier.value;
-                else return Result::failure(failure(unit.id + " " + ability.type + ": modifier " + name + " is not modelled"));
+                else if (iequals(name, "CAUSE_DAMAGE_MULTIPLIER")) m.cause_damage = modifier.value;
+                else if (iequals(name, "TAKE_DAMAGE_MULTIPLIER")) m.take_damage = modifier.value;
+                else { modelled = false; break; } // AB-26: expose only completely supported abilities
             }
-            profile.abilities.push_back(entry);
+            if (modelled) profile.abilities.push_back(entry);
         }
-        if (profile.abilities.empty()) continue;
+        if (profile.abilities.empty() && profile.special.empty()) continue;
         if (profile.abilities.size() > tactical::max_abilities_per_type) {
             return Result::failure(failure(unit.id + " authors more than two modelled abilities"));
         }

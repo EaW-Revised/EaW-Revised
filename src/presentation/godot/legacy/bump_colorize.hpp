@@ -30,9 +30,8 @@
 // + D.rgb) + light-0 specular x Specular x saturate(n.H)^16 x normal.a,
 // alpha D.a. Shininess is authored but unread. Declared states match the
 // other opaque hull effects (ZWriteEnable TRUE, ZFunc LESSEQUAL, blend only
-// when LIGHT_SCALE.a < 1); the opaque pass binds LIGHT_SCALE.a = 1, and no
-// transparent LIGHT_SCALE source exists, so the transparent pass is not
-// admitted.
+// when LIGHT_SCALE.a < 1). The adapter keeps its opaque material contract;
+// FW-19's per-instance geometry transparency supplies the live unit blend.
 //
 // Colour policy (docs/rendering.md): the arithmetic runs on stored texel and
 // constant values, as the retail ps_2_0 does, and ALBEDO is the stored result.
@@ -57,6 +56,8 @@ uniform vec3 eawr_emissive = vec3(0.0);
 uniform vec3 eawr_diffuse = vec3(1.0);
 uniform vec3 eawr_specular = vec3(1.0);
 uniform vec3 eawr_colorization = vec3(0.0, 1.0, 0.0);
+// WBP-50: negative alpha preserves the uploaded material colour.
+instance uniform vec4 eawr_unit_colorization = vec4(0.0, 0.0, 0.0, -1.0);
 uniform vec2 eawr_uv_offset = vec2(0.0);
 uniform mat4 eawr_sph_fill_r;
 uniform mat4 eawr_sph_fill_g;
@@ -64,8 +65,6 @@ uniform mat4 eawr_sph_fill_b;
 uniform vec4 eawr_light_scale = vec4(1.0);
 // The unit's own light scale (GodotRenderer::set_light_scale), e.g. the shield flash.
 instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
-// The unit's own opacity (GodotRenderer::set_unit_opacity, #535): a screen-door fade of the opaque pass.
-instance uniform float eawr_unit_opacity = 1.0;
 uniform vec3 eawr_light_direction = vec3(0.0, 1.0, 0.0);
 uniform vec3 eawr_light_diffuse = vec3(2.0, 1.88, 1.72);
 uniform vec3 eawr_light_specular = vec3(2.0, 1.88, 1.72);
@@ -106,13 +105,10 @@ inline constexpr std::string_view shader_tail = R"GODOT(    vec3 frame_tangent =
 }
 
 void fragment() {
-    if (eawr_unit_opacity < 1.0) {
-        float eawr_dither = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))));
-        if (eawr_dither >= eawr_unit_opacity) discard;
-    }
     vec4 base = texture(BaseTexture, UV);
     vec4 normal_texel = texture(NormalTexture, UV);
-    vec3 surface = mix(base.rgb, eawr_colorization * base.rgb, base.a);
+    vec3 colorization = eawr_unit_colorization.a < 0.0 ? eawr_colorization : eawr_unit_colorization.rgb;
+    vec3 surface = mix(base.rgb, colorization * base.rgb, base.a);
     vec3 normal_vector = 2.0 * (normal_texel.rgb - 0.5);
     float n_dot_l = clamp(dot(normal_vector, eawr_tangent_light), 0.0, 1.0);
     float n_dot_h = clamp(dot(normal_vector, eawr_tangent_half), 0.0, 1.0);

@@ -163,6 +163,8 @@ public:
     };
     Start start(const Request& request, const Vec3& listener, Random& random);
     void finished(std::size_t voice);
+    // SP-03: attached sounds move with their source; BA-05/BA-09 cull at that current position.
+    void set_position(std::size_t voice, const Vec3& position);
     // The voice's event, while it plays.
     [[nodiscard]] const SfxEvent* playing(std::size_t voice) const;
     [[nodiscard]] std::size_t playing_count() const;

@@ -1,10 +1,10 @@
 # M2 skirmish start (tick zero)
 
-P2-04 (EAWR-67). `eawr::skirmish`
+Pinned skirmish startup (legacy EAWR-67). `eawr::skirmish`
 (`include/eawr/skirmish/start.hpp`) builds tick zero of the pinned FoC space skirmish
 ([m2-skirmish.md](../plan/phase-2/m2-skirmish.md), SK-01 to SK-24 and SK-30 to SK-36) as a
-[tactical setup](replay-format.md#tactical-replay-format-v2-p2-03). It reuses the EAWR-65 unit tables
-(`eawr::units`) and the EAWR-66 `TacticalSession`. `read_start_inputs` reads the map and the XML facts
+[tactical setup](replay-format.md#tactical-replay-format-v2). It reuses the FoC space-unit tables
+(`eawr::units`) and the tactical world, commands and replay v2 `TacticalSession`. `read_start_inputs` reads the map and the XML facts
 from a mounted FoC view; `build_start` is a pure function of those plain inputs.
 
 ## Fixture
@@ -21,16 +21,23 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   object types (`assets::object_type_crc`). Slot k takes the k-th `MP_Color_*` constant of
   `gameconstants.xml` (SK-12). The colour is census data, not tactical state.
 - **Markers.** The k-th lobby player of team t, in slot order, takes the k-th
-  `Team_tt_Space_Station` and the k-th `Team_tt_Spawn_Point_Marker` in retail marker search
+  `Team_tt_Spawn_Point_Marker` in retail marker search
   order (SK-11). Retail links each new object at the head of its object list and a marker search
   walks that list, so the search meets the map's markers in reverse TED record order (FoC debug
   build symbols; the Rebel start in the retail capture). M2 uses only k = 0: records 48 and 52
   for the Rebel, 54 and 57 for the Empire. Marker records must be yaw-only.
-- **Station (SK-20).** The station marker's `Marker_For_Specific_Object_Type` entry whose
-  `Affiliation` names the player's faction, placed on the marker with its yaw.
+- **Station (SK-20, WSS-61).** Each `Team_tt_Space_Station` marker becomes one
+  station owned by the first occupied player of that team. Its
+  `Marker_For_Specific_Object_Type` entry whose `Affiliation` names the team's
+  faction is placed on the marker with its yaw. Teammates use the allied station
+  and retain separate credits, population, production queues and spawn markers.
+  Station count does not limit team player count. Setup rejects a roster beyond
+  authored map capacity, or a team beyond its usable spawn-marker count, with a
+  diagnostic before Start. Three or four independent teams require three or four
+  authored start positions respectively; stock space maps have at most three.
 - **Companies (SK-21, SK-22).** The faction's `Space_Skirmish_AI_Default_Forces`, then the fixture
   fleet, each with the marker's yaw on the first free point near the spawn marker, in that order
-  (EAWR-597, [space movement](behaviour/space-movement.md#placement-597) PL-01 to PL-07: rings around
+  (non-overlapping starting-unit placement, [space movement](behaviour/space-movement.md#placement-597) PL-01 to PL-07: rings around
   the marker up to 2500 units; the map objects, the stations and every company placed before
   block). A squadron company is its squadron's team container, at the centre of its craft; its
   craft follow the map objects (below) in the entity order, and each craft is placed by its own
@@ -40,14 +47,14 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   says. A map object with roll or pitch keeps its yaw alone (the Euler order is unresolved,
   [asset-formats.md](asset-formats.md)); the census lists the dropped angles. The capture points
   stay inert (SK-32): rules v1 has no capture system.
-- **Retail map-object ownership (EAWR-272).** Evidence IDs OW-E1 to OW-E8 are FoC debug-build and
+- **Retail map-object ownership.** Evidence IDs OW-E1 to OW-E8 are FoC debug-build and
   FoC XML readings kept with the private research notes. A TED owner index is an editor player index: the
   editor makes one default player per faction in faction order, so the index names the faction
   `scene::faction_order` gives it, and an index past the factions names the Neutral one
   (OW-E1, OW-E2; AU-70). The skirmish players are the lobby slots, then one player without the
   command flag for every faction that is not `Is_Playable` and has
   `Create_Player_In_Multiplayer_Games`, in faction order (OW-E3). Each such player takes the
-  next free player ID and its own team; retail puts them on no team (team −1), and the remake
+  next free player ID and its own team; retail puts them on no team (team âˆ’1), and the remake
   keeps separate teams (fidelity list). Then each map object is decided on its own:
   - an object of a playable faction (FoC: Rebel, Empire, Underworld) is deleted;
   - an object of a non-playable faction goes to that faction's player;
@@ -68,24 +75,24 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   3 Pirates, 4 Neutral, 5 Hostile, 6 Sarlacc and 7 Hutts, the pads, dock and gravity well
   belong to player 4 and the containers to player 7. That matches the owner's play
   observation: the containers are Hutt-owned, orange on the minimap, destructible neutral mines
-  (RO-2, owner EAWR-312).
+  (RO-2, the resource-container ownership capture).
 - **Entity IDs** count from 1: the lobby players in slot order (station, then companies in list
   order), then the map objects that stay, in TED record order, then every squadron company's
   craft in company then `Squadron_Units` order (role `craft`).
 - **Transforms.** Positions are the TED binary32 values converted exactly to Q24
   (`scene::fixed_from_binary32`). The rotation for yaw y degrees is the Q24 quaternion
   `normalize(0, 0, sin h, cos h)` with h = `wrap_turn(y / 720)` turns.
-- **Heights (SK-05, EAWR-666).** Every company, station, map object and squadron craft is raised by
+- **Heights (SK-05, per-unit flight height).** Every company, station, map object and squadron craft is raised by
   its type's `Layer_Z_Adjust` over the point it is placed on (a company or craft over the free
   point the placement found on its marker's plane); a squadron's team container is not ([space-movement](behaviour/space-movement.md#heights-666)
   LZ-01, LZ-02). The census lists the raised positions.
-- **Economy (SK-30, SK-31, EAWR-530).** Each lobby player starts with `MP_Default_Credits` (6000),
+- **Economy (SK-30, SK-31, station purchasing).** Each lobby player starts with `MP_Default_Credits` (6000),
   earns its station's income, builds at its station and has its faction's population cap; the
   census states them per player. The pinned tick-zero state (`sim_headless --skirmish m2`) is
   built without them; a session given the economy rules (`skirmish::economy_rules`,
   [space purchasing](behaviour/space-purchasing.md)) carries its ledgers from tick zero.
 - **Launches (SK-23, SK-36).** Each spawner's `Starting_Spawned_Units_Tech_0` is census data for
-  EAWR-75 (`"simulated": false`). Tick zero launches nothing, and reserves are not listed.
+  fighter simulation (`"simulated": false`). Tick zero launches nothing, and reserves are not listed.
 
 ## Census and replay
 
@@ -105,7 +112,7 @@ and unit the setup fields (`player_id`, `team`, `faction_id`, `commandable`; `en
 colours, reveal ranges, `AI_Combat_Power` totals (SK-24) and launches.
 
 `--skirmish m2` creates the session with `sensor_table(tables)`: one `SensorProfile` per unit-table
-type with a sensor range, keyed by type ID (EAWR-68, EAWR-271: `units::sensor_range`). That is 12
+type with a sensor range, keyed by type ID (space queries and visibility, squadron fog reveal: `units::sensor_range`). That is 12
 profiles: the 7 stations and ships with `REVEAL`, the `Y-Wing` craft (the only craft with
 `REVEAL`) and the 5 squadrons, which reveal with their team container's range (800; the Y-wing
 squadron's container 1000). Squadron companies therefore reveal at tick zero at their own
@@ -114,7 +121,7 @@ replay data. It changes the snapshot digest and never the state hash, so a repla
 which binds no sensor table, has the same state hash and a different snapshot digest.
 
 `tests/skirmish/fixtures/m2-start.eawr-replay` is that replay with 30 ticks. Its tick-zero state
-hash is `3cfadb5ada5c5cd1a7551ffde3f13341a290ef3efa421f234cb5c6c4e99fd7a3`. The CLI test
+hash is `9c52d81b8736b411c16cbcb68af561e5d8106cd108946a888a946c162b240b6e`. The CLI test
 recomputes it from the header and setup bytes with the frozen `EAWRTST` encoding; with
 `EAWR_EAW_GAME_ROOT` the start is rebuilt from FoC data and must write the same bytes.
 Regenerate it only when a start rule or the unit-table identity changes:
@@ -124,9 +131,9 @@ Regenerate it only when a start rule or the unit-table identity changes:
 
 The retail default lobby (Coruscant, slot 1 Rebel, one AI) is captured on the rig with
 `tools/validation/p1_capture/Invoke-FocMapCapture.ps1 -MapId coruscant-space -GraphicsPreset Highest`.
-Positions are compared on the battle minimap, which maps the TED square −6100..6100 onto
-160 × 164 pixels (`MINIMAP_WORLD` in `foc_capture.py`), about 76 TED units per pixel. A census
+Positions are compared on the battle minimap, which maps the TED square âˆ’6100..6100 onto
+160 Ã— 164 pixels (`MINIMAP_WORLD` in `foc_capture.py`), about 76 TED units per pixel. A census
 position matches when the centre of its minimap icon or blip lies within 2 minimap pixels
-(about 150 TED units). Since EAWR-597 the companies spread around their marker as retail's do. Owners and colours are compared by the slot
+(about 150 TED units). With non-overlapping starting-unit placement, the companies spread around their marker as retail's do. Owners and colours are compared by the slot
 colour on the unit, station and radar art. The Empire side is under fog in a slot-1 view, and
 the SK-22 fleet is not a lobby start (fidelity list).

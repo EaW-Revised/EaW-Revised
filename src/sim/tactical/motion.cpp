@@ -139,11 +139,20 @@ constexpr Fixed min_roll_share = Fixed::from_raw(1677722);
 // Arc steps a plan may take before it flies straight to the target.
 constexpr int max_arc_steps = 64;
 constexpr std::int64_t rate_limit_raw = max_motion_rate * Fixed::scale;
-// Lower bounds that keep every path span below 2^24 frames, so the exact Hermite terms below
-// stay inside 192 bits: speed and rate of turn 1/16 per frame, acceleration 2^-12.
+// Numeric limits, not movement rules (MV-01). The slowest authored super capital turns
+// at 0.01 * 1.2 > 1/128 degrees/frame. Including Q24 rounding, their speeds are in
+// [0.35,1), a,d > 0.02, and vmax/rate < 31. At any accepted endpoints and starting speed
+// in [0,vmax], R < 2048, acceleration travel < 25, and 64 arcs/inside-circle exits travel < 64 * 4R.
+// Endpoint separation is < 2^20, so each leg (including the final straight) is < 2^21
+// units and < 2^23 frames. A straight tangent is < leg + 2*vmax^2/min(a,d) < 2^22 units;
+// arc tangents are <= 180*vmax/rate < 5580. Raw spans are < 2^47, deltas/tangents < 2^46.
+// Thus the sum of Hermite position terms is < 5 * 2^(3*47+46) < 2^190; velocity
+// terms are < 12 * 2^(2*47+46+24) < 2^168. Both fit the existing exact 192 bits.
+// Helpers subdivide legs. Face turns are <= 180/rate * slowdown and need no Hermite.
+// Keep the speed/acceleration bounds: every authored value already exceeds them.
 constexpr std::int64_t min_speed_raw = Fixed::scale / 16;
 constexpr std::int64_t min_acceleration_raw = Fixed::scale >> 12;
-constexpr std::int64_t min_turn_raw = Fixed::scale / 16;
+constexpr std::int64_t min_turn_raw = Fixed::scale / 128;
 
 namespace wide = math::detail;
 
@@ -291,6 +300,11 @@ const Footprint* MotionTable::footprint(const TypeId type_id) const noexcept {
 }
 
 core::Result<void> validate_motion(const MotionTable& table) {
+    if (table.nebula_disable_seconds.raw() < 0 || table.nebula_disable_seconds.raw() > 3600 * math::Fixed::scale
+        || !std::is_sorted(table.nebula_service_types.begin(), table.nebula_service_types.end())
+        || std::adjacent_find(table.nebula_service_types.begin(), table.nebula_service_types.end()) != table.nebula_service_types.end()) {
+        return core::Result<void>::failure(invalid("invalid nebula service content"));
+    }
     if (!(table.rules.arc_degrees.raw() > 0 && table.rules.arc_degrees <= whole(180))) {
         return core::Result<void>::failure(invalid("the arc angle must be in (0, 180] degrees"));
     }
@@ -312,7 +326,8 @@ core::Result<void> validate_motion(const MotionTable& table) {
         if (!within(profile.max_speed, min_speed_raw) || !within(profile.acceleration, min_acceleration_raw)
             || !within(profile.deceleration, min_acceleration_raw) || !within(profile.rate_of_turn, min_turn_raw)) {
             return core::Result<void>::failure(invalid(context
-                + "speed and rate of turn must be in [1/16, 1024], acceleration and deceleration in [2^-12, 1024]"));
+                + "speed must be in [1/16, 1024], rate of turn in [1/128, 1024], "
+                  "acceleration and deceleration in [2^-12, 1024]"));
         }
         if (profile.turn_in_place_slowdown < whole(1) || profile.turn_in_place_slowdown.raw() > rate_limit_raw) {
             return core::Result<void>::failure(invalid(context + "the turn-in-place slowdown must be in [1, 1024]"));
@@ -332,6 +347,10 @@ core::Result<void> validate_motion(const MotionTable& table) {
         if (!in_range(footprint.x_extent) || !in_range(footprint.y_extent) || !in_range(footprint.radius)) {
             return core::Result<void>::failure(invalid(context + "extents and radius must be in [0, 262144]"));
         }
+        if (footprint.obstacle_offset.x.raw() < -coordinate_limit_raw || footprint.obstacle_offset.x.raw() > coordinate_limit_raw
+            || footprint.obstacle_offset.y.raw() < -coordinate_limit_raw || footprint.obstacle_offset.y.raw() > coordinate_limit_raw) {
+            return core::Result<void>::failure(invalid(context + "obstacle offsets must be in [-262144, 262144]"));
+        }
     }
     if (const auto& rules = table.avoidance) {
         const auto positive = [](const Fixed value) { return value.raw() > 0 && value.raw() <= rate_limit_raw; };
@@ -349,6 +368,10 @@ core::Result<void> validate_motion(const MotionTable& table) {
             || rules->search_budget == 0 || rules->search_delay == 0 || rules->search_delay > 1024
             || rules->search_slice == 0) {
             return core::Result<void>::failure(invalid("avoidance rules are out of range"));
+        }
+        // PC-08: a sliced search must land before the approach can be reevaluated.
+        if (rules->search_delay >= table.rules.reevaluation_frames) {
+            return core::Result<void>::failure(invalid("search delay must be less than the reevaluation interval"));
         }
         // FoC floors neither the soft radius nor OccupationRadiusCoefficientSpace: a one-raw-unit
         // radius would put billions of points on a destination search ring. A footprint whose outer

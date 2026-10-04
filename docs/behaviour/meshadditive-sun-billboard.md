@@ -1,4 +1,6 @@
-# MeshAdditive sun billboard (P1 EAWR-27 source research)
+<a id="meshadditive-sun-billboard-p1-27-source-research"></a>
+
+# MeshAdditive sun billboard (P1 rendering source research)
 
 ## Interface contract
 

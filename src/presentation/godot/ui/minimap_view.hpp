@@ -53,6 +53,8 @@ public:
     void show(Frame frame);
     // The fog layer's shown texels (MinimapFog::texels); re-uploaded when a pass completed.
     void set_fog(std::span<const std::uint8_t> texels, std::uint32_t width, std::uint32_t height, std::uint64_t pass);
+    void set_hazards(std::span<const presentation::ui::MinimapHazard> hazards,
+        const presentation::ui::MinimapExtents& extents, const presentation::ui::MinimapSettings& settings);
     void set_look(std::function<void(presentation::ui::MinimapPoint)> look) { look_ = std::move(look); }
     void set_move(std::function<void(presentation::ui::MinimapPoint)> move) { move_ = std::move(move); }
 
@@ -84,6 +86,11 @@ private:
     // Fog and backdrop, drawn behind the control's own blips and outline with repeat and mipmaps.
     godot::RID layers_;
     godot::Ref<godot::ImageTexture> fog_;
+    godot::Ref<godot::ImageTexture> hazards_;
+    std::vector<presentation::ui::MinimapHazard> hazard_inputs_;
+    std::array<double, 4> hazard_extents_{};
+    std::array<std::uint32_t, 2> hazard_size_{};
+    std::size_t hazard_pixels_{};
     std::uint64_t fog_pass_{};
     std::uint32_t fog_width_{};
     std::uint32_t fog_height_{};

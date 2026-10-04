@@ -1,4 +1,6 @@
-# Retail mode-7 (`sun`) billboard placement (P1 EAWR-27, gate G-01)
+<a id="retail-mode-7-sun-billboard-placement-p1-27-gate-g-01"></a>
+
+# Retail mode-7 (`sun`) billboard placement (P1 rendering, gate G-01)
 
 ## Interface contract (retail rule, asset basis)
 

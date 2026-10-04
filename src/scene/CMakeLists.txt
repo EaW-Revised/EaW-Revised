@@ -1,4 +1,6 @@
-add_library(eawr_scene STATIC idle_tags.cpp scene.cpp scene_assets.cpp scene_build.cpp scene_evidence.cpp space_population.cpp)
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+add_library(eawr_scene STATIC ${EAWR_SCENE_SOURCES})
 add_library(eawr::scene ALIAS eawr_scene)
 
 target_include_directories(

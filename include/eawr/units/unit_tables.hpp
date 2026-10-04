@@ -56,6 +56,8 @@ enum class HardpointType : std::uint8_t {
     gravity_well,
     enable_special_ability,
     dummy_art,
+    weapon_mass_driver, // MD-01: append to preserve existing content-identity enum values.
+    weapon_special, // WAD-31: ordinary weapon type, distinct from enable_special_ability.
 };
 
 struct InaccuracyEntry final {
@@ -83,6 +85,7 @@ struct Weapon final {
     std::vector<InaccuracyEntry> inaccuracy;
     bool opportunity_fire_when_targeting{};
     bool opportunity_fire_when_idle{};
+    std::optional<std::uint32_t> appearance_delay_frames; // WAD-37/40, hardpoint only
     bool operator==(const Weapon&) const = default;
 };
 
@@ -119,6 +122,16 @@ struct Hardpoint final {
     std::optional<Fixed> fighter_bay_flyout_distance;
     // HARD_POINT_FIGHTER_BAY (#75): the X axis of the attachment bone's bind frame, model space.
     std::optional<Vec3> bay_axis;
+    bool requires_manual_target{}; // WAD-39: no automatic shot without a manual assignment
+    std::optional<Fixed> manual_cooldown_seconds;
+    bool manual_is_turret{};
+    BonePoint manual_turret;
+    BonePoint manual_barrel;
+    Vec3 manual_rest{};
+    Vec3 manual_offset{};
+    std::optional<Fixed> manual_rotate_speed;
+    std::optional<Fixed> manual_yaw_extent;
+    std::optional<Fixed> manual_pitch_extent;
     bool operator==(const Hardpoint&) const = default;
 };
 
@@ -132,6 +145,8 @@ struct Projectile final {
     std::string category;
     bool does_shield_damage{};
     bool does_energy_damage{};
+    bool disables_engines_when_power_drained{};
+    std::optional<Fixed> disable_engines_duration;
     bool does_hitpoint_damage{};
     std::optional<Fixed> energy_per_shot;
     std::optional<Fixed> ai_combat_power; // weighs a hardpoint's share of its unit's (#361)
@@ -143,6 +158,14 @@ struct Projectile final {
     std::optional<Fixed> ion_stun_shot_rate_reduction;
     bool ion_stun_stack_duration{};
     std::optional<Fixed> ion_stun_radius;
+    sim::tactical::BlastProfile blast{};
+    std::string blast_immune_faction;
+    std::optional<Fixed> max_lifetime{};
+    std::optional<bool> explode_at_target_radius{};
+    std::optional<Fixed> rocket_curve_distance{};
+    std::optional<Fixed> rocket_curve_offset{};
+    std::optional<Fixed> rocket_straight_distance{};
+    sim::tactical::WeakenProfile weaken{};
     bool operator==(const Projectile&) const = default;
 };
 
@@ -163,6 +186,14 @@ struct Ability final {
     // resolved to its index in the projectile table.
     std::string projectile_override;
     std::uint32_t projectile_index{no_index};
+    std::optional<Fixed> effective_radius;
+    std::string gui_activated_ability_name;
+    std::optional<Fixed> fixed_inaccuracy{};
+    std::optional<Fixed> target_z_offset{};
+    std::string spawned_object;
+    std::uint32_t spawned_projectile_index{no_index};
+    std::optional<Fixed> bomb_countdown_seconds, target_position_z_offset;
+    std::string replenish_particle;
     bool operator==(const Ability&) const = default;
 };
 
@@ -228,6 +259,19 @@ struct CollisionMesh final {
 // E71-15, E71-17, E71-18). The collision box is the model's collision bounds: the union of its
 // collidable meshes' boxes in the bind pose, half extents before Scale_Factor; a model without
 // a collidable mesh has the box +-1.
+struct HazardProfile final {
+    std::vector<std::string> behavior;
+    std::vector<std::string> space_behavior;
+    bool asteroid_field{};
+    bool ion_storm{};
+    bool nebula{};
+    bool impassable_asteroid{};
+    bool asteroid_damage{};
+    bool nebula_service{};
+    Vec3 obstacle_offset{};
+    bool operator==(const HazardProfile&) const = default;
+};
+
 struct SpaceFootprint final {
     bool space_obstacle{};                    // SPACE_OBSTACLE in Behavior or SpaceBehavior
     std::optional<Fixed> custom_hard_x;       // Custom_Hard_XExtent
@@ -236,6 +280,7 @@ struct SpaceFootprint final {
     std::optional<Fixed> obstacle_radius;     // Space_Obstacle_Radius
     std::optional<Fixed> collision_x;         // model collision half extents, unscaled
     std::optional<Fixed> collision_y;
+    HazardProfile hazard; // WHZ-01: independent flags and authored service attachment
     bool operator==(const SpaceFootprint&) const = default;
 };
 
@@ -247,6 +292,13 @@ struct ObstacleType final {
     std::optional<Fixed> scale_factor;
     std::string model_path;
     SpaceFootprint footprint;
+    bool influences_capture{true};
+    bool construction_blocker{true};
+    bool living_projectile_collision{}; // WBP-50: false by default for map objects
+    bool selectable{}; // WSU-21: presentation fields do not enter content identity
+    bool mouse_sensitive{}; // WSU-13: map props use the same admission as live units
+    bool last_state_visible_under_fow{};
+    bool initial_state_visible_under_fow{};
     bool operator==(const ObstacleType&) const = default;
 };
 
@@ -266,6 +318,11 @@ struct IncomeBonus final {
     std::optional<Fixed> additive;   // Income_Additive_Value
     std::optional<Fixed> multiplier; // Income_Multiplier
     std::string target_source;       // Target_Stream_Source
+    std::optional<Fixed> interval_multiplier;
+    std::string activation_style;
+    std::uint32_t stacking_category{};
+    bool all_allied_sources{};
+    bool reverse{};
     bool operator==(const IncomeBonus&) const = default;
 };
 
@@ -274,6 +331,20 @@ struct BuildGroup final {
     std::string faction;
     std::vector<std::string> types;
     bool operator==(const BuildGroup&) const = default;
+};
+
+// WPR-51: automatic combat bonuses authored on an upgrade object.
+struct CombatBonus final {
+    std::uint32_t stacking_category{};
+    std::vector<std::string> types;
+    std::vector<std::string> categories;
+    std::array<Fixed, 6> percentages{}; // health, damage, energy, shield, defense, speed
+    std::string name;
+    sim::tactical::SpecialAbilityFilter filter;
+    std::string specific_faction;
+    bool enabled{true};
+    std::vector<sim::tactical::TypeId> excluded_containers;
+    bool operator==(const CombatBonus&) const = default;
 };
 
 // What a type builds and costs in a skirmish (#530, PU-10 to PU-21, PU-31).
@@ -286,6 +357,18 @@ struct Production final {
     std::optional<Fixed> reinforcement_prevention_radius; // Reinforcement_Prevention_Radius
     std::vector<IncomeStream> income;
     std::vector<IncomeBonus> income_bonuses;
+    std::optional<std::uint32_t> lifetime_player;
+    std::optional<std::uint32_t> current_player;
+    std::optional<std::uint32_t> lifetime_allies;
+    std::optional<std::uint32_t> current_allies;
+    std::vector<std::string> prerequisites;
+    std::string next_level;
+    bool upgrade_object{};
+    bool level_up{};
+    bool increments_tech{};
+    std::string removes_previous;
+    std::string next_upgrade; // WPR-63: menu metadata, outside content identity
+    std::vector<CombatBonus> combat_bonuses;
     bool operator==(const Production&) const = default;
 };
 
@@ -310,6 +393,7 @@ struct UnitType final {
     std::string targeting_priority_set;
     std::uint32_t targeting_priority_set_index{no_index};
     std::optional<Fixed> targeting_max_attack_distance;
+    std::optional<Fixed> targeting_min_attack_distance;
     std::optional<Fixed> targeting_stickiness_seconds;
     std::vector<std::string> category_mask;
     std::uint64_t category_bits{};           // category_mask in GameObjectCategoryType bits
@@ -321,8 +405,19 @@ struct UnitType final {
     // identity leaves them out.
     bool has_space_evaluator{};
     std::uint32_t tech_level{};
+    std::uint32_t base_level{}; // SAE-02: Base_Level on live stations
     std::optional<Fixed> space_fow_reveal_range; // the type's own range (#68); used only with `reveal`
     bool reveal{}; // REVEAL in its Behavior or SpaceBehavior list (#271)
+    // WSU-21, WSU-15: presentation selection eligibility; excluded from content identity.
+    bool selectable{};
+    bool mouse_sensitive{}; // WSU-13: behaviour, impassable asteroid or living-collidable valid target
+    bool bar_admitted{}; // WSU-50: selectable, hero, construction or indigenous-spawner admission
+    bool locomotion{};
+    bool decoration{};
+    // FW-25/26: presentation memory only; excluded from content identity.
+    bool last_state_visible_under_fow{};
+    bool initial_state_visible_under_fow{};
+    std::optional<std::uint32_t> neutral_fog_animation_index; // FW-30: presentation only
     bool shielded{}; // SHIELDED in its Behavior or SpaceBehavior list (#74)
     bool powered{};  // POWERED in its Behavior or SpaceBehavior list: it has an energy pool (#361)
     bool ion_stun_effect{}; // ION_STUN_EFFECT in its Behavior or SpaceBehavior list: it can be ion stunned (#561)
@@ -334,19 +429,28 @@ struct UnitType final {
     // #665 (WSU-10, WSU-12): Mouse_Collide_Override_Sphere_Radius, the pick sphere a pointer ray
     // hits when it misses the collision meshes. Presentation only: the content identity leaves it out.
     std::optional<Fixed> mouse_collide_sphere_radius;
+    // WBP-35/36: presentation-only; excluded from simulation content identity.
+    bool hides_when_built_on{};
+    bool visible_to_enemies_when_empty{};
+    std::uint32_t gui_row{};
     // Squadrons (#271): the team container the squadron spawns (Create_Team_Type, default
     // `Team`), and that container's Space_FOW_Reveal_Range when the container has REVEAL.
     std::string team_type;
     std::optional<Fixed> team_reveal_range;
+    // WSQ-60: container trace metadata, independent of the craft's combat durability.
+    std::optional<Fixed> team_hull; // Tactical_Health, including the debug-build default
+    std::optional<Fixed> team_shield_points;
     // #561: the team container's own Unit_Abilities_Data (ION_CANNON_SHOT's recharge, autofire and
     // override projectile for the Y-wing squadron, AB-60).
     std::vector<Ability> team_abilities;
+    std::vector<sim::tactical::SpecialAbilityProfile> team_special_abilities;
     bool victory_relevant{};
     bool destroyed_with_hardpoints{}; // Should_Be_Destroyed_When_All_Hardpoints_Destroyed (#72)
     std::vector<Hardpoint> hardpoints; // in HardPoints order
     std::optional<Weapon> weapon;      // object weapon (Projectile_Types)
     std::vector<BonePoint> target_bones;
     std::vector<Ability> abilities;
+    std::vector<sim::tactical::SpecialAbilityProfile> special_abilities;
     // `Abilities` sub-objects (station income and radar) as authored; since #530 the income is
     // modelled through `production`, the radar stays off (SK-31):
     // element name and Name attribute.
@@ -354,6 +458,7 @@ struct UnitType final {
     SpaceFootprint footprint; // #71
     std::optional<Spawner> spawner;
     std::vector<SquadronMember> members;
+    bool homogeneous{true}; // L-2: Is_Homogeneous controls card folding; presentation only.
     std::string lua_script;
     // #75: craft attack runs (Strafe_Distance) and a squadron's diversion ranges and formation
     // tolerance (Guard_Chase_Range, Idle_Chase_Range, Squadron_Formation_Error_Tolerance); #452
@@ -372,8 +477,49 @@ struct UnitType final {
     // #409: Out_Of_Combat_Defense_Adjustment, a craft's defense while idle or approaching (DG-26).
     std::optional<Fixed> out_of_combat_defense;
     Production production; // #530
+    // WBP-01..19: live capture content, and the separate UC replacement path.
+    bool capture_point{};
+    bool build_pad{};
+    bool under_construction{};
+    bool living_projectile_collision{}; // WBP-50/51: effective living object types opt in
+    bool influences_capture{true};
+    bool ownership_sticks{};
+    bool community_property{};
+    // WSU-16: station selection metadata, separate from capture-pad simulation identity.
+    bool station_community_property{};
+    bool construction_blocker{true};
+    bool child_persists{true};
+    bool destroy_when_child_dies{};
+    std::optional<Fixed> pad_rebuild_seconds;
+    std::optional<Fixed> tactical_respawn_seconds;
+    std::optional<Fixed> capture_radius;
+    std::optional<Fixed> capture_seconds;
+    std::string constructed_type;
+    bool tactical_sale{};
+    std::optional<Fixed> tactical_sell_percentage;
+    BonePoint build_attachment;
     // #457: Minimum_Follow_Distance, how close a chasing craft closes before it slows (FD-05).
     std::optional<Fixed> follow_distance;
+    std::optional<Fixed> score_cost_credits{}; // WBF-45: result/scoring input; no physics identity
+    std::optional<Fixed> score_combat_power{}; // WBF-45: original scoring type's combat metric
+    bool named_hero{}; // WHE-01: authored identity, independent of class/category
+    bool generic_hero{};
+    bool team_named_hero{};
+    bool team_generic_hero{};
+    struct CompanyMember {
+        std::string type;
+        bool named_hero{}, generic_hero{};
+        bool attach_to_flagship{};
+        std::string unique_space_unit;
+        bool operator==(const CompanyMember&) const = default;
+    };
+    std::vector<CompanyMember> company_members;
+    std::string company_transport;
+    std::string deployed_space_type; // WHE-49: ship or automatically formed team
+    bool creates_carried_heroes{};
+    bool display_contained_hero_bars{};
+    std::string replenish_team;
+    bool redirect_damage_to_teammates{};
     bool operator==(const UnitType&) const = default;
 };
 
@@ -454,6 +600,8 @@ struct InputFile final {
 };
 
 struct UnitTables final {
+    std::optional<Fixed> pad_ai_build_multiplier; // WBP-15: difficulty data, only with live capture content
+    std::vector<std::uint64_t> pad_neutral_factions; // WHZ-51: authored Is_Neutral, sorted faction type CRCs
     std::vector<UnitType> units; // pinned types, then craft, in first-reference order
     std::vector<ObstacleType> obstacles; // pinned_m2_obstacles order (#71)
     std::vector<Projectile> projectiles;
@@ -481,6 +629,8 @@ struct LoadInput final {
     FileDigest digest;
     std::vector<std::string> types; // empty = pinned_m2_types()
     std::vector<std::string> obstacles; // empty with empty `types` = pinned_m2_obstacles()
+    std::string difficulty{"Normal_Default"}; // SK-42 default; alternate difficulties use their XML values
+    std::string space_map; // WHZ-01: load effective profiles for this map's actual placed types
 };
 
 // Fails only when an input is missing (no catalog or filesystem); every data
@@ -550,8 +700,13 @@ inline constexpr Fixed unlisted_priority = Fixed::from_raw(std::numeric_limits<s
 // its Mod_Multiplier rows by name; squadron types are skipped (their craft carry the ability,
 // AB-15). `humans` are the session's human players (AB-41). Fails when an ability authors a
 // modifier that is not modelled, two types share a type ID or validate_abilities rejects it.
+// `allowed`, when supplied, excludes individual abilities under a caller's release policy (RG-03).
+// AB-45: human owners use the enabled creation preference by default; false binds a
+// session with the preference disabled. Individual ability commands still override each unit.
 [[nodiscard]] core::Result<sim::tactical::AbilityTable> ability_table(
-    const UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {});
+    const UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {},
+    bool (*allowed)(std::string_view unit, std::string_view ability) = nullptr,
+    bool default_autofire = true);
 // Whether a type runs the PowerToShields object script (`Lua_Script`), whose DEFEND rule the
 // ability table's stand-in carries (AB-41).
 [[nodiscard]] bool runs_defend_script(const UnitType& type) noexcept;

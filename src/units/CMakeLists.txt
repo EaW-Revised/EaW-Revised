@@ -1,4 +1,6 @@
-add_library(eawr_units STATIC unit_abilities.cpp unit_combat.cpp unit_durability.cpp unit_identity.cpp unit_motion.cpp unit_priority.cpp unit_support.cpp unit_tables.cpp)
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+add_library(eawr_units STATIC ${EAWR_UNITS_SOURCES})
 add_library(eawr::units ALIAS eawr_units)
 
 target_include_directories(

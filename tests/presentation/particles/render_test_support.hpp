@@ -7,6 +7,7 @@
 #include "eawr/presentation/particles/proxy_binding.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -81,6 +83,8 @@ struct LegacyEmitter final {
     bool world{};
     bool tail{};
     bool no_depth{};
+    bool depth_sort{};
+    std::uint32_t primitive{1};
     float tail_size{12.0F};
     std::string texture{"p_synthetic_glow.tga"};
     std::string normal;
@@ -93,6 +97,8 @@ struct LegacyEmitter final {
 inline Bytes legacy_emitter(const LegacyEmitter& spec) {
     Bytes properties;
     append(properties, mini(0x04, integer(spec.blend)));
+    append(properties, mini(0x05, integer(spec.primitive)));
+    append(properties, mini(0x2b, flag(spec.depth_sort)));
     append(properties, mini(0x0f, scalar(2.0F)));
     append(properties, mini(0x2a, integer(4)));
     append(properties, mini(0x10, integer(4)));
@@ -106,7 +112,7 @@ inline Bytes legacy_emitter(const LegacyEmitter& spec) {
         append(properties, mini(0x28, scalar(spec.parent_link_strength)));
         append(properties, mini(0x43, flag(true)));
     }
-    Bytes groups; append(groups, old_group(spec.velocity_x)); append(groups, old_group()); append(groups, old_group());
+    Bytes groups; append(groups, old_group(spec.velocity_x)); append(groups, old_group(2)); append(groups, old_group());
     Bytes tracks;
     for (int i = 0; i < 4; ++i) { append(tracks, track_header(1, 1, true)); append(tracks, chunk(1, {})); }
     for (int i = 0; i < 3; ++i) { append(tracks, track_header(i == 0 ? 2.0F : 0.0F, i == 0 ? 2.0F : 0.0F, false)); append(tracks, chunk(1, {})); }
@@ -165,11 +171,13 @@ inline particles::SystemDefinition mixed_system() {
 class RecordingBackend final : public particles::RenderBackend {
 public:
     std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override {
+        if (std::this_thread::get_id() != caller_) { ++wrong_thread; return 0; }
         if (refuse_emitter && plan.emitter_index == *refuse_emitter) return 0;
         const std::uint64_t id = next_++;
         live[id] = plan.emitter_index; ++created; return id;
     }
     void update_emitter(const std::uint64_t resource, const particles::VertexStream& stream) override {
+        if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
         if (!live.contains(resource)) { ++invalid_updates; return; }
         expect(finite_stream(stream), "backend uploads only finite vertices and bounds");
         record.push_back(particles::stream_hash(stream));
@@ -177,6 +185,7 @@ public:
         vertices += stream.vertices.size();
     }
     void destroy_emitter(const std::uint64_t resource) override {
+        if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
         if (live.erase(resource) == 0) ++invalid_destroys; else ++destroyed;
     }
     std::map<std::uint64_t, std::size_t> live;
@@ -184,11 +193,15 @@ public:
     std::vector<std::uint64_t> record;
     std::size_t created{}, destroyed{}, invalid_updates{}, invalid_destroys{}, vertices{};
     std::optional<std::size_t> refuse_emitter;
+    std::atomic<std::size_t> wrong_thread{};
 private:
+    const std::thread::id caller_{std::this_thread::get_id()};
     std::uint64_t next_{1};
 };
 
 inline particles::CameraFrame test_camera() { return particles::camera_frame_from_render({0, 20, 60}, {0, 0, 0}, {0, 1, 0}); }
+
+void test_offscreen_updates_and_bounds();
 
 inline std::vector<std::uint64_t> run(RecordingBackend& backend, const std::uint32_t seed, const int frames) {
     particles::EffectRegistry registry(backend);
@@ -226,10 +239,15 @@ void test_quad_geometry();
 void test_finite_rotation_boundary();
 void test_stream_validation();
 void test_fixed_seed_streams();
+void test_particle_detail_gates();
+void test_legacy_sort_triangles_and_atlas();
+void test_cpu_steady_state_allocates_nothing();
+void test_particle_detail_batch();
 void test_release_and_replacement_lifecycle();
 void test_effect_brightness();
 void test_emitter_glow_follows_turning_pose();
 void test_present_allocates_nothing();
+void test_legacy_moving_kite();
 void test_camera_and_attachment_frames();
 void test_mesh_registry_boundary();
 void test_mesh_root_precedence();
@@ -252,6 +270,8 @@ void test_attachment_determinism();
 void test_attachment_merge_stats();
 void test_heat_pixel_change_bound();
 void test_batch_matches_serial();
+void test_attachment_batch_matches_serial();
+void test_attachment_batch_requires_stats();
 void test_batch_hashes_on_request();
 void test_batch_work_counts();
 void test_batch_rejects_repeats_and_unknown();

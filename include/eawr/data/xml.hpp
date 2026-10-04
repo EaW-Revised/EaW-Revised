@@ -58,6 +58,7 @@ struct Definition {
     std::size_t definition_order{0};
     bool active{true};
     bool winner{false};
+    bool namespace_winner{false}; // strongest definition within category
 };
 
 struct EffectiveValue {
@@ -140,8 +141,11 @@ public:
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] Profile profile() const noexcept;
     [[nodiscard]] const Definition* find(std::string_view object_id) const noexcept;
+    // Select within one registry namespace; game objects cannot be shadowed by abilities.
+    [[nodiscard]] const Definition* find(std::string_view object_id, Category category) const noexcept;
     [[nodiscard]] std::vector<const Definition*> find_all(std::string_view object_id) const;
     [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id) const;
+    [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id, Category category) const;
     [[nodiscard]] const std::vector<Definition>& definitions() const noexcept;
     [[nodiscard]] const std::vector<InventoryFile>& physical_inventory() const noexcept;
     [[nodiscard]] const std::vector<RegistryFile>& registry_files() const noexcept;
@@ -151,6 +155,8 @@ private:
     struct Overlay;
     explicit Catalog(std::shared_ptr<Impl> impl);
     [[nodiscard]] const Definition& definition_at(std::size_t index) const noexcept;
+    [[nodiscard]] core::Result<EffectiveObject> resolve_in(std::string_view object_id,
+        std::optional<Category> category) const;
     std::shared_ptr<Impl> impl_;
     std::shared_ptr<const Overlay> overlay_; // with_overrides: replaced definitions over a shared load
     friend struct LoadResult;

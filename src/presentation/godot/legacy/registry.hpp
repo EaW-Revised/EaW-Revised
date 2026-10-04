@@ -6,6 +6,7 @@
 #include "grass.hpp"
 #include "mesh_additive.hpp"
 #include "mesh_additive_offset.hpp"
+#include "mesh_additive_vcolor.hpp"
 #include "mesh_gloss_colorize.hpp"
 #include "mesh_solid_color.hpp"
 #include "tree.hpp"
@@ -28,6 +29,7 @@ namespace eawr::presentation::godot_backend::legacy {
 inline constexpr Family families[]{
     mesh_additive::family,
     mesh_additive_offset::family,
+    mesh_additive_vcolor::family,
     mesh_solid_color::family,
     mesh_gloss_colorize::family,
     tree::family,
@@ -86,7 +88,6 @@ inline constexpr Family families[]{
     const Family* family = find_family(material);
     return family != nullptr && family->reads_wind;
 }
-
 [[nodiscard]] inline std::vector<Uniform> uniforms(const MaterialDescription& material) {
     const Family* family = find_family(material);
     return family == nullptr ? std::vector<Uniform>{} : family->uniforms(material);

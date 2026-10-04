@@ -62,7 +62,7 @@ struct Mapped {
 // mapped slot than the two occupation radii rejects every ring and is kept (FM-05a).
 [[nodiscard]] Vec3 nearest_open(Calc& calc, const FormationMember& member, const Vec3 point, const CollisionWorld& world,
     const std::uint64_t frame, std::span<const EntityId> bucket_ids, const std::vector<std::pair<Vec3, Fixed>>& placed,
-    const AvoidanceRules& rules, std::optional<core::Diagnostic>& failure) {
+    const AvoidanceRules& rules, std::optional<core::Diagnostic>& failure, const std::uint8_t filter) {
     for (const auto& [other, other_radius] : placed) {
         if (length3(calc, minus3(calc, point, other)) < calc.add(member.occupation_radius, other_radius)) return point;
     }
@@ -70,7 +70,7 @@ struct Mapped {
     footprint.layer = member.layer;
     footprint.radius = member.soft_radius;
     const auto open = nearest_open_position(rules, footprint, world, member.entity, frame,
-        {member.position.x, member.position.y}, {point.x, point.y}, bucket_ids);
+        {member.position.x, member.position.y}, {point.x, point.y}, bucket_ids, filter);
     if (!open) {
         failure = open.error();
         return point;
@@ -83,7 +83,8 @@ struct Mapped {
 // position nearest the anchor.
 [[nodiscard]] Vec3 along_line(Calc& calc, const FormationMember& member, const Vec3 anchor, const Vec2 d,
     const std::vector<std::pair<Vec3, Fixed>>& placed, const CollisionWorld& world, const std::uint64_t frame,
-    std::span<const EntityId> bucket_ids, const AvoidanceRules& rules, std::optional<core::Diagnostic>& failure) {
+    std::span<const EntityId> bucket_ids, const AvoidanceRules& rules, std::optional<core::Diagnostic>& failure,
+    const std::uint8_t filter) {
     const Fixed r = member.occupation_radius;
     const Fixed step = std::max(min_line_step, calc.mul(r, quarter));
     const Vec3 advance{calc.mul(d.x, step), calc.mul(d.y, step), Fixed{}};
@@ -103,7 +104,7 @@ struct Mapped {
             failure = hits.error();
             return anchor;
         }
-        bool free = hits.value() == 0;
+        bool free = (hits.value() & filter) == 0;
         for (const auto& [other, other_radius] : placed) {
             if (!free) break;
             free = !(length3(calc, minus3(calc, point, other)) < calc.add(r, other_radius));
@@ -111,7 +112,7 @@ struct Mapped {
         if (free) return point;
         point = {calc.add(point.x, advance.x), calc.add(point.y, advance.y), point.z};
     }
-    return nearest_open(calc, member, anchor, world, frame, bucket_ids, placed, rules, failure);
+    return nearest_open(calc, member, anchor, world, frame, bucket_ids, placed, rules, failure, filter);
 }
 
 } // namespace
@@ -148,10 +149,17 @@ core::Result<std::vector<FormationSlot>> map_group_move(const std::span<const Fo
     created.reserve(members.size());
     std::vector<Fixed> to_target(members.size());
     std::vector<Fixed> times(members.size());
+    std::vector<std::uint8_t> filters(members.size(), collision_all);
     Fixed slowest{};
     for (std::size_t index = 0; index < members.size(); ++index) {
         // FM-09a: a ship with no speed gets no formation and no time; the others still map.
         if (members[index].max_speed.raw() <= 0) continue;
+        Footprint footprint;
+        footprint.asteroid_damage = members[index].asteroid_damage;
+        const auto filter = movement_collision_filter(world, footprint, members[index].entity, frame,
+            members[index].position, target, members[index].through_hazards);
+        if (!filter) return Slots::failure(filter.error());
+        filters[index] = filter.value();
         created.push_back(index);
         to_target[index] = length3(calc, minus3(calc, target, members[index].position));
         auto time = time_to_reach(members[index], target);
@@ -206,12 +214,12 @@ core::Result<std::vector<FormationSlot>> map_group_move(const std::span<const Fo
                         calc.add(target.y, calc.mul(d->y, member.occupation_radius)), target.z};
                 }
                 // The later slots line up from the target shifted as the first slot was.
-                slot = nearest_open(calc, member, base, world, frame, bucket_ids, placed, rules, failure);
+                slot = nearest_open(calc, member, base, world, frame, bucket_ids, placed, rules, failure, filters[bucket[order]]);
                 if (failure) return Slots::failure(*failure);
                 anchor = {calc.add(target.x, calc.sub(slot.x, base.x)), calc.add(target.y, calc.sub(slot.y, base.y)),
                     calc.add(target.z, calc.sub(slot.z, base.z))};
             } else {
-                slot = along_line(calc, member, anchor, *d, placed, world, frame, bucket_ids, rules, failure);
+                slot = along_line(calc, member, anchor, *d, placed, world, frame, bucket_ids, rules, failure, filters[bucket[order]]);
                 if (failure) return Slots::failure(*failure);
             }
             destination[bucket[order]] = slot;

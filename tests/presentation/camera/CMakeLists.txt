@@ -26,6 +26,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         bindings_main.cpp
         camera_binding_event_tests.cpp
         "${EAWR_ROOT}/apps/viewer/src/camera_binding_config.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_tokens.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_values.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_table.cpp"
         "${EAWR_ROOT}/apps/viewer/src/camera_input.cpp"
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
         "${EAWR_ROOT}/src/presentation/camera/camera.cpp"
@@ -69,6 +72,9 @@ else()
         bindings_main.cpp
         camera_binding_event_tests.cpp
         "${EAWR_ROOT}/apps/viewer/src/camera_binding_config.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_tokens.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_values.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_table.cpp"
         "${EAWR_ROOT}/apps/viewer/src/camera_input.cpp"
     )
     target_include_directories(camera_bindings_tests PRIVATE "${EAWR_ROOT}/apps/viewer/src")
@@ -107,8 +113,14 @@ add_executable(map_camera_bridge_tests
     map_camera_config_tests.cpp
     map_camera_lifecycle_tests.cpp
     map_camera_movement_tests.cpp
+    map_camera_pan_tests.cpp
+    map_camera_terrain_tests.cpp
+    map_camera_orbit_tests.cpp
     "${EAWR_ROOT}/apps/viewer/src/map_camera.cpp"
     "${EAWR_ROOT}/apps/viewer/src/camera_binding_config.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_tokens.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_values.cpp"
+    "${EAWR_ROOT}/apps/viewer/src/camera_binding_table.cpp"
     "${EAWR_ROOT}/apps/viewer/src/camera_input.cpp"
 )
 target_include_directories(map_camera_bridge_tests PRIVATE "${EAWR_ROOT}/apps/viewer/src")

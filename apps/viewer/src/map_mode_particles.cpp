@@ -94,12 +94,10 @@ bool MapParticleProvider::prepare(const assets::Map& map, const scene::Scene& bu
         if (source.orientation_status == assets::OrientationStatus::nonfinite) {
             fail("transform_nonfinite"); continue;
         }
-        if (source.orientation_status != assets::OrientationStatus::yaw_only) {
-            fail("orientation_three_axis"); continue;
-        }
-        const std::array<float, 4> values{source.position->x, source.position->y,
-            source.position->z, source.orientation_degrees->z};
-        std::array<Fixed, 4> checked{};
+        const std::array<float, 6> values{source.position->x, source.position->y,
+            source.position->z, source.orientation_degrees->z, source.orientation_degrees->y,
+            source.orientation_degrees->x};
+        std::array<Fixed, 6> checked{};
         bool valid = true;
         for (std::size_t index = 0; index < values.size(); ++index) {
             auto value = scene::fixed_from_binary32(values[index]);
@@ -111,7 +109,10 @@ bool MapParticleProvider::prepare(const assets::Map& map, const scene::Scene& bu
             checked[index] = value.value();
         }
         if (!valid) continue;
-        auto transform = scene::placement_transform(checked[0], checked[1], checked[2], checked[3],
+        auto height = sim::math::add(checked[2], Fixed::from_raw(placement.layer_z_adjust_raw));
+        if (!height) { fail(core::format_diagnostic(height.error())); continue; }
+        checked[2] = height.value();
+        auto transform = scene::placement_transform(checked[0], checked[1], checked[2], checked[3], checked[4], checked[5],
             Fixed::from_raw(placement.scale_raw));
         if (!transform) { fail(core::format_diagnostic(transform.error())); continue; }
         const auto as_float = [](const Fixed value) {

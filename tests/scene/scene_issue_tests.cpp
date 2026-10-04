@@ -88,7 +88,30 @@ void scene_issue_contracts(const TempTree& tree, const eawr::data::Catalog& cata
     expect(!has(p[7], Cause::shader_unsupported, "NeverDrawn.fx"), "an invisible mesh's shader is not counted");
     expect(p[7].drawable() && !p[7].resolved(), "a partially unsupported model is drawn but unresolved");
     expect(has(p[8], Cause::position_absent) && !p[8].drawable(), "an absent position blocks drawing");
-    expect(has(p[9], Cause::orientation_three_axis) && !p[9].transform, "three-axis orientation stays quarantined");
+    expect(!has(p[9], Cause::orientation_three_axis) && p[9].resolved() && p[9].drawable(),
+           "a finite three-axis placement draws (R-ROT-01..03)");
+    if (p[9].transform) {
+        // Independent point rotations: fixed quarter turn, X roll, Y pitch, Z yaw.
+        // This checks the decoder-to-scene path, not only the matrix helper.
+        const double radians = std::acos(-1.0) / 180.0;
+        const double cr = std::cos(10.0 * radians), sr = std::sin(10.0 * radians);
+        const double cp = std::cos(20.0 * radians), sp = std::sin(20.0 * radians);
+        const double cy = std::cos(30.0 * radians), sy = std::sin(30.0 * radians);
+        for (std::size_t column = 0; column < 3; ++column) {
+            const std::array<double, 3> v{column == 1 ? -1.0 : 0.0, column == 0 ? 1.0 : 0.0,
+                column == 2 ? 1.0 : 0.0};
+            const std::array<double, 3> rolled{v[0], cr * v[1] - sr * v[2], sr * v[1] + cr * v[2]};
+            const std::array<double, 3> pitched{cp * rolled[0] + sp * rolled[2], rolled[1],
+                -sp * rolled[0] + cp * rolled[2]};
+            const std::array<double, 3> expected{cy * pitched[0] - sy * pitched[1],
+                sy * pitched[0] + cy * pitched[1], pitched[2]};
+            for (std::size_t row = 0; row < 3; ++row) {
+                const double actual = static_cast<double>(p[9].transform->matrix.rows[row][column].raw()) / Fixed::scale;
+                expect(std::abs(actual - expected[row]) < 1e-5, "placement matrix numerically matches R-ROT-01");
+            }
+        }
+        expect(p[9].transform->yaw_degrees_raw == 30 * Fixed::scale, "presentation retains the unchanged yaw (R-ROT-04)");
+    }
     expect(has(p[10], Cause::transform_nonfinite), "a NaN position is rejected, not repaired");
     expect(has(p[11], Cause::transform_overflow), "an out-of-range position is rejected");
     expect(has(p[12], Cause::scale_invalid, "-1") && !p[12].drawable(), "a non-positive scale is rejected");
@@ -97,8 +120,8 @@ void scene_issue_contracts(const TempTree& tree, const eawr::data::Catalog& cata
     expect(has(p[14], Cause::transform_nonfinite) && !p[14].transform && !p[14].drawable(),
            "a NaN roll is rejected, never presented as yaw-only");
 
-    expect(scene.resolved_count() == 3, "three placements fully resolve");
-    expect(scene.drawable_count() == 4, "four placements are drawable");
+    expect(scene.resolved_count() == 4, "four placements fully resolve");
+    expect(scene.drawable_count() == 5, "five placements are drawable");
     expect(scene.count(Cause::shader_unsupported) == 1, "per-cause counts count placements");
     const auto groups = eawr::scene::issue_groups(scene);
     const auto unsupported = std::find_if(groups.begin(), groups.end(), [](const eawr::scene::IssueGroup& group) {
@@ -112,7 +135,7 @@ void scene_issue_contracts(const TempTree& tree, const eawr::data::Catalog& cata
             < std::tie(right.cause, right.object_id, right.model_path, right.detail);
     }), "issue groups have stable cause/object/model/detail order");
     const auto instances = scene.instances();
-    expect(instances.size() == 4 && instances.front().entity_id == 1 && instances.front().asset_id == 2,
+    expect(instances.size() == 5 && instances.front().entity_id == 1 && instances.front().asset_id == 2,
            "the simulation receives fixed transforms and stable ids for drawable placements only");
 
     // Determinism: rebuilding gives the same hash; permuting the records

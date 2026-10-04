@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/commands.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
 
 #include <array>
 #include <cstddef>
@@ -23,6 +24,34 @@
 namespace eawr::presentation::ui {
 
 using Rgb = std::array<std::uint8_t, 3>;
+
+// WU-43..WU-46: the world uses the cards' state, but only an active ability shows here.
+// Squadron icons take the first active slot; a bracket can show both. No heap storage.
+struct WorldOverlayUnit final {
+    sim::EntityId entity{};
+    std::array<std::uint32_t, 2> abilities{};
+    bool ally{};
+    bool visible{};
+    bool on_screen{};
+    bool squadron{};
+    bool bracket{};
+};
+[[nodiscard]] std::array<std::uint32_t, 2> world_ability_overlays(
+    const WorldOverlayUnit& unit, const AbilityState& state);
+// WU-44: icon centre above the bracket, with a three-reference-pixel gap from the bar.
+[[nodiscard]] float bracket_ability_y(float bracket_y, float bar_height_pixels,
+                                      float icon_height_pixels, float ui_scale) noexcept;
+// WU-43, WU-44: a separate component effect quad, native size at its own scale.
+// Authored offsets are reference pixels with +Y up; screen coordinates have +Y down.
+struct WorldAbilityRect final {
+    float x{};
+    float y{};
+    float width{};
+    float height{};
+};
+[[nodiscard]] WorldAbilityRect world_ability_rect(std::array<float, 2> centre,
+    std::array<float, 2> native_size, std::array<float, 2> effect_offset,
+    float component_scale, float ui_scale) noexcept;
 
 // --- Selection circle (WU-01 to WU-03) -----------------------------------------------------------
 
@@ -70,6 +99,8 @@ struct BarUnit {
     float health{};           // the displayed hull fraction
     bool shielded{};          // SHIELDED behaviour
     bool hide_health_bar{};   // GUI_Hide_Health_Bar
+    bool neutral{};           // WSU-63: neutral props have no health or shield bars
+    bool admitted{true};       // WSU-50: selectable/hero/special admission before bar rules
 };
 struct BarVisibility {
     bool health{};
@@ -109,6 +140,21 @@ inline constexpr float garrison_flag_height = 14.0F;
 // WU-27) reads its icon's world point through the same gripper placement (WU-26), so the offset
 // applies there too, on top of the grid's own within-cell layout.
 inline constexpr float squadron_icon_screen_offset_fraction = 0.048F;
+
+// WU-49: an arriving squadron's icon waits at its landing point; the craft fly to it.
+struct SquadronIconAnchor final {
+    std::array<float, 3> position{};
+    float speed{};
+    bool arriving{};
+};
+// Returns true while arrival or its first ordinary frame owns the anchor.
+[[nodiscard]] bool place_squadron_arrival_icon(SquadronIconAnchor& anchor,
+    std::optional<std::array<float, 3>> landing, std::array<float, 3> presented) noexcept;
+
+// WU-47: named heroes and explicit heads share the world identity frame.
+[[nodiscard]] constexpr bool hero_world_identity(const bool named_hero, const bool show_hero_head) noexcept {
+    return named_hero || show_hero_head;
+}
 // WU-24: the pixel offset itself, for a `screen_height` pixel viewport.
 [[nodiscard]] float squadron_icon_screen_offset(float screen_height) noexcept;
 // WU-22: the icon's health level is ceil(10 x the squadron's health).

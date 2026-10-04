@@ -419,6 +419,7 @@ void GodotRenderer::Impl::set_surface_material(RenderingServer& rendering, const
         rendering->material_set_shader(consumer.material, consumer.shader);
         configure_material(*rendering, resource.description, consumer.material, resource.texture,
             resource.binding_textures);
+        if (resource.priority) rendering->material_set_render_priority(consumer.material, *resource.priority);
         set_surface_material(*rendering, resource.mesh, consumer.material);
     } else {
         consumer.material = resource.material;

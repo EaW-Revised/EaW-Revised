@@ -10,6 +10,7 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -22,6 +23,23 @@ namespace eawr::sim::tactical {
 inline constexpr std::uint32_t object_weapon = 0xffffffffU;
 // No target hardpoint: the shot aims at the unit itself.
 inline constexpr std::uint32_t no_hardpoint = 0xffffffffU;
+
+// WAD-39: authored mechanical turret inputs in the unit frame, only for manual guns.
+struct ManualTurretProfile {
+    math::Vec3 pivot{};
+    std::array<math::Vec3, 3> axes{};
+    math::Vec3 coordinate_pivot{}; // owner's attachment bone, independent of turret bind rotation
+    std::array<math::Vec3, 3> coordinate_axes{};
+    math::Vec3 rest{}; // degrees, source Y pitch and Z yaw
+    math::Vec3 offset{};
+    math::Fixed speed{}; // degrees per logical frame
+    math::Fixed yaw_extent{};
+    math::Fixed pitch_extent{};
+    bool barrel{};
+    math::Vec3 barrel_pivot{};
+    std::array<math::Vec3, 3> barrel_axes{};
+    friend bool operator==(const ManualTurretProfile&, const ManualTurretProfile&) = default;
+};
 
 // Fire_Inaccuracy_Distance: the aim scatter against targets of these categories (DG-24).
 struct InaccuracyRow {
@@ -55,6 +73,11 @@ struct ShotProfile {
     // and Projectile_Ion_Stun_On_Detonation stuns it (IS-01).
     bool energy_damage{};
     std::optional<IonStunShot> ion_stun{};
+    BlastProfile blast{};
+    // EN-08: engine shutdown on a positive energy drain; absent for ordinary large ions.
+    std::optional<std::uint32_t> disable_engines_frames{};
+    std::optional<FlightProfile> flight{};
+    std::uint32_t appearance_delay_frames{}; // WAD-37/40: no movement before expiry; visible on expiry
     friend bool operator==(const ShotProfile&, const ShotProfile&) = default;
 };
 
@@ -87,6 +110,13 @@ struct WeaponProfile {
     // weapon hardpoints', times the type's own. It weighs the directions a unit can fire in when
     // it turns toward an ordered target (A-06); zero for the object weapon.
     math::Fixed ai_combat_power{};
+    bool special{}; // WAD-31/32: ordinary service, selected projectile required
+    bool requires_manual_target{}; // WAD-39: manual consumer supplies a separate assignment
+    std::optional<ShotProfile> barrage_shot{}; // WAD-38: ordinary weapon inputs, overridden projectile
+    math::Fixed manual_min_range{};
+    std::uint32_t manual_cooldown_frames{};
+    std::optional<ManualTurretProfile> manual_turret{};
+    bool manual_turret_required{};
     friend bool operator==(const WeaponProfile&, const WeaponProfile&) = default;
 };
 
@@ -177,6 +207,13 @@ struct CombatProfile {
     // (the collision box turned by the unit, then axis-aligned) and starts, ends or has its
     // midpoint closer to the unit than the modifier times that box's largest half extent hits it.
     std::optional<math::Fixed> sphere_modifier{};
+    bool living_projectile_collision{true}; // WHZ-51: false rejects ordinary projectile contact
+    bool capture_point{}; // WBP-01: recognized independently of the optional economy binding
+    // WAD-20/21: authored selectors, including empty names and hardpoints without a known position.
+    std::vector<std::string> hardpoint_meshes{}; // HardPoints order; compared case-insensitively
+    bool hero{}; // WHE-60: named or generic identity, independent of CategoryMask
+    math::Fixed min_attack_distance{}; // WHE-58: zero nested minimum retains ordinary minimum
+    bool redirect_damage_to_teammates{}; // WHE-64
     friend bool operator==(const CombatProfile&, const CombatProfile&) = default;
 };
 
@@ -199,6 +236,7 @@ struct PrioritySet {
 struct CombatTable {
     std::vector<CombatProfile> profiles; // strictly increasing type_id
     std::vector<PrioritySet> priority_sets;
+    std::vector<FactionId> pad_neutral_factions{}; // WHZ-51: authored neutral factions for ordinary combat
     [[nodiscard]] const CombatProfile* find(TypeId type_id) const noexcept;
     friend bool operator==(const CombatTable&, const CombatTable&) = default;
 };
@@ -221,7 +259,7 @@ inline constexpr std::int64_t frame_tolerance_raw = std::int64_t{1} << 12;
 
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase, every priority set index exists,
 // set rows strictly increase, a type has at most 255 weapons, hardpoint indices are below 255,
-// ranges and attack distances are in [0, max_combat_distance], cones in [0, 360], recharge
+// ranges and attack distances are in [0, max_combat_distance], cones in [0, 720], recharge
 // bounds ordered and at most max_recharge_hundredths, pulse counts at least 1, AI combat powers
 // in [0, max_weapon_combat_power] and points within max_combat_distance on each axis.
 [[nodiscard]] core::Result<void> validate_combat(const CombatTable& table);
@@ -315,11 +353,36 @@ struct OpportunityOutcome {
 
 // --- Unit combat state ------------------------------------------------------------------------
 
+struct ManualWeaponState {
+    EntityId target{};
+    PlayerId requesting_player{};
+    std::uint64_t assigned_frame{};
+    math::Fixed yaw{};
+    math::Fixed pitch{};
+    math::Fixed desired_yaw{};
+    math::Fixed desired_pitch{};
+    friend constexpr bool operator==(const ManualWeaponState&, const ManualWeaponState&) noexcept = default;
+};
+
+struct ManualPlayerClock {
+    std::uint64_t last_fired_frame{};
+    std::uint32_t cooldown_frames{};
+    friend constexpr bool operator==(const ManualPlayerClock&, const ManualPlayerClock&) noexcept = default;
+};
+
+[[nodiscard]] inline math::Fixed manual_readiness(const ManualPlayerClock& clock, const std::uint64_t frame) {
+    if (clock.cooldown_frames < 1 || (frame >= clock.last_fired_frame
+        && frame - clock.last_fired_frame >= clock.cooldown_frames)) return math::Fixed::from_raw(math::Fixed::scale);
+    const auto elapsed = frame >= clock.last_fired_frame ? frame - clock.last_fired_frame : 0;
+    return math::Fixed::from_raw(static_cast<std::int64_t>(elapsed) * math::Fixed::scale / clock.cooldown_frames);
+}
+
 // One weapon's fire cycle and opportunity target. Hashed state.
 struct WeaponState {
     OpportunityState opportunity{};
     std::uint32_t countdown{};   // frames before the weapon may be serviced again
     std::uint32_t pulses_left{}; // shots left in the current burst
+    std::optional<ManualWeaponState> manual{}; // absent keeps old canonical state bytes
     friend constexpr bool operator==(const WeaponState&, const WeaponState&) noexcept = default;
 };
 
@@ -355,7 +418,9 @@ enum class CombatEventKind : std::uint8_t {
 inline constexpr std::uint32_t hit_outcome_shield_absorbed = 1U; // the shield took all of it
 // A weapon_fired event's outcome: the shot is the weapon's ability shot (#561, AB-66).
 inline constexpr std::uint32_t fired_ability_shot = 1U;
+inline constexpr std::uint32_t fired_barrage_shot = 2U;
 inline constexpr std::uint32_t hit_outcome_armor_reduced = 2U;   // hull armor multiplier <= 0.75
+inline constexpr std::uint32_t hit_outcome_storm_shield = 4U; // coordinator-reserved, WHZ-32 flash branch
 inline constexpr math::Fixed armor_reduced_limit = math::Fixed::from_raw(math::Fixed::scale * 3 / 4);
 
 struct CombatEvent {
@@ -368,6 +433,8 @@ struct CombatEvent {
     math::Vec3 origin{};
     math::Vec3 aim{};
     std::uint32_t outcome{};
+    // DG-30 diagnostic: original projectile target, excluded from canonical event encoding.
+    EntityId selected_target{};
     friend constexpr bool operator==(const CombatEvent&, const CombatEvent&) noexcept = default;
 };
 

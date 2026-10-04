@@ -71,5 +71,37 @@ struct ClipPosition final {
 [[nodiscard]] core::Result<Pose> sample_idle(const Player& player, const IdlePlayback& playback,
                                              std::uint32_t start_frame, std::uint64_t tick,
                                              std::uint32_t ticks_per_second);
+[[nodiscard]] core::Result<void> sample_idle(const Player& player, const IdlePlayback& playback,
+    std::uint32_t start_frame, std::uint64_t tick, std::uint32_t ticks_per_second, Pose& output);
+
+// Environment-owned idle state: initialize the pose and bindings at load,
+// then retain their storage. A held presentation tick does no work.
+struct IdlePose final {
+    Pose pose;
+    std::optional<std::uint64_t> tick;
+    struct Work final {
+        std::size_t samples{};
+        std::size_t bones{};
+        std::size_t bindings{};
+    } work;
+
+    template <typename Instances, typename Bind>
+    [[nodiscard]] core::Result<void> advance(const Player& player, const IdlePlayback& playback,
+        const std::uint32_t start_frame, const std::uint64_t next_tick, const std::uint32_t ticks_per_second,
+        const Instances& instances, Bind&& bind) {
+        work = {};
+        if (tick == next_tick) return core::Result<void>::success();
+        if (auto sampled = sample_idle(player, playback, start_frame, next_tick, ticks_per_second, pose); !sampled)
+            return sampled;
+        work.samples = 1;
+        work.bones = pose.bones.size();
+        for (const auto& [entity, asset] : instances) {
+            ++work.bindings;
+            if (auto bound = bind(entity, asset, pose.bones); !bound) return bound;
+        }
+        tick = next_tick;
+        return core::Result<void>::success();
+    }
+};
 
 } // namespace eawr::presentation::animation

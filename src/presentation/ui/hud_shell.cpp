@@ -3,6 +3,7 @@
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/theme.hpp"
+#include "eawr/presentation/animation/animation.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -51,6 +52,10 @@ HudShellButton shell_button(const data::ui::ShellAnchor& anchor, const data::ui:
     button.mouse_over = first_token(component, data::ui::Field::mouse_over_texture_name);
     button.pressed = first_token(component, data::ui::Field::selected_texture_name);
     button.disabled = first_token(component, data::ui::Field::disabled_texture_name);
+    button.blank = first_token(component, data::ui::Field::blank_texture_name);
+    button.flash = first_token(component, data::ui::Field::flash_texture_name);
+    button.click_shift = component.flag(data::ui::Field::click_shift);
+    button.selected_alpha = component.flag(data::ui::Field::selected_alpha);
     button.tooltip = first_token(component, data::ui::Field::tooltip_text);
     const auto alternates = component.list(data::ui::Field::icon_alternate_texture_name);
     button.alternates.assign(alternates.begin(), alternates.end());
@@ -142,6 +147,41 @@ std::string tactical_shell_model(const data::ui::CommandBarCatalog& catalog) {
         if (!model.empty()) return std::string(model);
     }
     return std::string(tactical_shell_fallback_model);
+}
+
+core::Result<PauseShell> pause_shell(const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog) {
+    const auto* component = catalog.find("pause_shell");
+    const std::string name = component ? std::string(component->text(data::ui::Field::model_name)) : std::string();
+    if (name.empty()) return core::Result<PauseShell>::failure(warning(diagnostic_codes::hud_shell_part, "pause_shell names no model"));
+    PauseShell out;
+    out.model = "data/art/models/" + name;
+    auto model = assets::load_model(filesystem, out.model);
+    if (!model) return core::Result<PauseShell>::failure(model.error());
+    out.animation = out.model.substr(0, out.model.find_last_of('.')) + "_idle_00.ala";
+    auto clip = assets::load_animation(filesystem, out.animation);
+    if (!clip) return core::Result<PauseShell>::failure(clip.error());
+    auto player = animation::Player::create(model.value(), &clip.value());
+    if (!player) return core::Result<PauseShell>::failure(player.error());
+    auto pose = player.value().sample_position(player.value().playable_frames(), 1);
+    if (!pose) return core::Result<PauseShell>::failure(pose.error());
+    std::vector<data::ui::ShellTransform> transforms;
+    transforms.reserve(pose.value().bones.size());
+    for (const auto& bone : pose.value().bones) transforms.push_back(bone.model_asset);
+    for (std::size_t index = 0; index < model.value().bones.size(); ++index) {
+        if (equal_name(model.value().bones[index].name, "text_attack"))
+            out.text_origin = assets::Vec2f{transforms[index][12], transforms[index][13]};
+    }
+    out.anchors = data::ui::shell_anchors(model.value(), transforms).shell;
+    for (const auto& anchor : out.anchors.anchors()) {
+        const bool additive = equal_name(anchor.shader, "MeshAdditive.fx");
+        if (!anchor.visible || (!additive && !equal_name(anchor.shader, "MeshAlpha.fx"))
+            || anchor.base_texture.empty()) continue;
+        out.meshes.push_back({anchor.name, additive ? ShellBlend::additive : ShellBlend::alpha,
+            anchor.base_texture, anchor.z_min, anchor.triangles});
+    }
+    std::stable_sort(out.meshes.begin(), out.meshes.end(),
+        [](const auto& left, const auto& right) { return left.z < right.z; });
+    return core::Result<PauseShell>::success(std::move(out));
 }
 
 std::string command_bar_mega_texture(const data::ui::CommandBarCatalog& catalog) {
@@ -332,6 +372,8 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
     const auto* reinforce = catalog.find(reinforcement_component);
     if (reinforce_anchor != nullptr && reinforce != nullptr) {
         out.reinforcement = shell_button(*reinforce_anchor, *reinforce);
+        // PU-70: space uses the first alternate icon (the second is the same art).
+        if (!out.reinforcement->alternates.empty()) out.reinforcement->normal = out.reinforcement->alternates.front();
     } else {
         missing(reinforcement_component, reinforce_anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
     }
@@ -348,23 +390,26 @@ std::string reinforce_pane_model(const data::ui::CommandBarCatalog& catalog) {
 }
 
 HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
-                                const HudFaction faction) {
+                                const data::ui::TextDatabase* text_database) {
     HudReinforcePane out;
     out.model = shell.model_path();
     const auto missing = [&](const std::string_view part, const std::string_view why) {
         out.diagnostics.push_back(warning(diagnostic_codes::hud_shell_part,
             std::string(part) + " " + std::string(why) + "; the reinforcement pane draws without it", out.model));
     };
-    for (const auto* anchor : shell.for_variant(alt_variant(faction))) {
-        const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
-        const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
-        if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
-        if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
-        out.meshes.push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
-                              anchor->base_texture, anchor->z_min, anchor->triangles});
+    // PU-67: the pane alternates are row counts; the command bar's faction alternates do not apply.
+    for (std::size_t rows = 0; rows < out.meshes.size(); ++rows) {
+        for (const auto* anchor : shell.for_variant(static_cast<std::uint32_t>(rows))) {
+            const bool alpha = equal_name(anchor->shader, "MeshAlpha.fx");
+            const bool additive = equal_name(anchor->shader, "MeshAdditive.fx");
+            if ((!alpha && !additive) || anchor->base_texture.empty() || anchor->triangles.empty()) continue;
+            if (catalog.find(anchor->name) != nullptr || !anchor->visible) continue;
+            out.meshes[rows].push_back({anchor->name, additive ? ShellBlend::additive : ShellBlend::alpha,
+                                      anchor->base_texture, anchor->z_min, anchor->triangles});
+        }
+        std::stable_sort(out.meshes[rows].begin(), out.meshes[rows].end(),
+                         [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
     }
-    std::stable_sort(out.meshes.begin(), out.meshes.end(),
-                     [](const HudShellMesh& a, const HudShellMesh& b) { return a.z < b.z; });
     for (std::size_t row = 0; row < pane_rows; ++row) {
         for (std::size_t column = 0; column < pane_columns; ++column) {
             const std::string name = std::string(pane_slot_stem) + numbered("", row) + numbered("", column);
@@ -390,6 +435,22 @@ HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data:
         if (const auto* component = catalog.find(pane_close_component)) {
             out.close = shell_button(*anchor, *component);
             out.close->normal = first_token(*component, data::ui::Field::icon_texture_name);
+            out.close_swap_texture = component->flag(data::ui::Field::swap_texture);
+            HudIconText label;
+            label.text.name = std::string(pane_close_component);
+            label.text.rect = anchor->rect;
+            label.text.face = std::string(component->text(data::ui::Field::font_name));
+            label.text.point_size = component->integer(data::ui::Field::font_point_size).value_or(6);
+            if (const auto colour = component->color(data::ui::Field::text_color)) label.text.colour = *colour;
+            label.text.outline = component->flag(data::ui::Field::text_outline);
+            label.text.emboss = component->flag(data::ui::Field::text_emboss);
+            label.text_offset = component->vec2(data::ui::Field::text_offset).value_or(data::ui::Vec2{});
+            out.close_text = std::move(label);
+            // PU-72: battle mode resolves this key; setup mode's Begin label is outside this pane.
+            out.close_text_key = "TEXT_BUTTON_CLOSE";
+            if (const auto* entry = text_database ? text_database->find(out.close_text_key) : nullptr)
+                out.close_label = data::ui::to_utf8(entry->value);
+            else missing(pane_close_component, "has no close label in the text database");
         }
     }
     if (!out.close) missing(pane_close_component, "is missing");
@@ -479,11 +540,11 @@ PlanetName planet_name(const std::optional<std::string>& context_name, const dat
             std::move(why) + "; the HUD shows the map's context name " + out.context));
         return out;
     };
-    const data::Definition* planet = objects != nullptr ? objects->find(out.context) : nullptr;
+    const data::Definition* planet = objects != nullptr ? objects->find(out.context, data::Category::game_object) : nullptr;
     if (planet == nullptr || !equal_name(planet->type_name, "Planet")) {
         return fall_back("no Planet object is named " + out.context);
     }
-    auto resolved = objects->resolve(out.context);
+    auto resolved = objects->resolve(out.context, data::Category::game_object);
     const data::EffectiveValue* text_id = resolved ? resolved.value().value("Text_ID") : nullptr;
     if (text_id == nullptr) return fall_back("Planet " + out.context + " has no Text_ID");
     out.text_id = text_id->value.raw_text;
@@ -502,9 +563,9 @@ PlanetName planet_name(const std::optional<std::string>& context_name, const dat
 
 UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* objects,
                               const data::ui::TextDatabase* text) {
-    UnitCardLooks out{std::string(), std::string(type), std::nullopt};
-    if (objects == nullptr || objects->find(type) == nullptr) return out;
-    auto resolved = objects->resolve(type);
+    UnitCardLooks out{std::string(), std::string(type), std::nullopt, {}};
+    if (objects == nullptr || objects->find(type, data::Category::game_object) == nullptr) return out;
+    auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return out;
     const auto trimmed = [](const std::string& value) {
         const auto first = value.find_first_not_of(" \t\r\n");
@@ -522,6 +583,24 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
         const std::string key = trimmed(id->value.raw_text);
         const data::ui::TextEntry* entry = text != nullptr && !key.empty() ? text->find(key) : nullptr;
         if (entry != nullptr) out.name = data::ui::to_utf8(entry->value);
+    }
+    // WBP-36: multiplayer description overrides the generic encyclopedia text.
+    for (const std::string_view tag : {"Encyclopedia_Text", "MP_Encyclopedia_Text"}) {
+        if (const auto* id = resolved.value().value(tag)) {
+            const auto keys = trimmed(id->value.raw_text);
+            std::string description;
+            std::size_t begin = keys.find_first_not_of(" ,\t\r\n");
+            while (begin != std::string::npos) {
+                const auto end = keys.find_first_of(" ,\t\r\n", begin);
+                const auto key = std::string_view(keys).substr(begin, end == std::string::npos ? end : end - begin);
+                if (const auto* entry = text ? text->find(key) : nullptr) {
+                    if (!description.empty()) description += '\n';
+                    description += data::ui::to_utf8(entry->value);
+                }
+                begin = end == std::string::npos ? end : keys.find_first_not_of(" ,\t\r\n", end);
+            }
+            if (!description.empty()) out.description = std::move(description);
+        }
     }
     return out;
 }

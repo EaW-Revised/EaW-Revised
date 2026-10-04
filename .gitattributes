@@ -1,5 +1,6 @@
 # These bytes participate in canonical inventory and tool-source hashes.
 tools/inventory/*.py text eol=lf
+data/skirmish/roster-gate.json text eol=lf
 plan/inventories/*.json text eol=lf
 # The tag registry gate compares its JSON with its canonical layout.
 docs/tag-coverage/* text eol=lf

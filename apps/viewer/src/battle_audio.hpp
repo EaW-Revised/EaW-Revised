@@ -5,6 +5,7 @@
 
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
+#include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -24,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <ostream>
 #include <set>
 #include <tuple>
@@ -58,6 +60,7 @@ public:
     void frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
                std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, double delta);
     void release();
+    void loading_complete();
     // The report's "battle_audio" member, followed by ",\n".
     void write_report(std::ostream& output) const;
 
@@ -69,13 +72,39 @@ private:
         std::map<std::uint32_t, const audio::SfxEvent*> detonate;      // Projectile_SFXEvent_Detonate
         std::map<std::uint32_t, const audio::SfxEvent*> detonate_armor; // ..._Reduced_By_Armor
         const audio::SfxEvent* death{};
+        const audio::SfxEvent* spin_death{};
+        const audio::SfxEvent* asteroid_damage{};
+        const audio::SfxEvent* ambient_moving{};
+        int ambient_min_delay{150};
+        int ambient_max_delay{300};
+        const audio::SfxEvent* build_started{};
+        const audio::SfxEvent* build_complete{};
+        const audio::SfxEvent* build_cancelled{};
+        struct SpeechEvent final {
+            std::string name;
+            std::vector<godot::Ref<godot::AudioStream>> streams;
+            std::vector<std::string> files;
+            double volume{1.0};
+        };
+        const SpeechEvent* build_underway_speech{};
+        const SpeechEvent* build_completed_speech{};
+        const SpeechEvent* build_stopped_speech{};
+        bool announce_sighting{};
+        bool type_sighted{};
+        const audio::SfxEvent* spotted{};
+        bool squadron{};
+        const audio::SfxEvent* sold{};
         std::vector<const audio::SfxEvent*> hardpoint_deaths;           // HardPoints order
         std::vector<sim::math::Vec3> hardpoint_points;
+        std::vector<std::string> hardpoint_types;
         const audio::SfxEvent* select{};
         const audio::SfxEvent* move{};
         const audio::SfxEvent* attack{};
         const audio::SfxEvent* group_move{};
         const audio::SfxEvent* group_attack{};
+        const audio::SfxEvent* stop{};
+        const audio::SfxEvent* guard{};
+        std::map<std::string, const audio::SfxEvent*> attack_hardpoint;
         std::vector<std::string> categories;
         std::optional<int> ranking;
         // The unit's voice lines for switching an ability on and off (BA-52), by kind.
@@ -108,7 +137,19 @@ private:
     [[nodiscard]] const Sample& sample(const std::string& name);
     [[nodiscard]] godot::Ref<godot::AudioStream> music_stream(const std::string& file);
     // Starts `sfx` (a 3D one at `position`); `reason` keys the report's counts.
-    void play(const audio::SfxEvent* sfx, std::optional<audio::Vec3> position, bool hidden, const std::string& reason);
+    void play(const audio::SfxEvent* sfx, std::optional<audio::Vec3> position, bool hidden, const std::string& reason,
+              sim::EntityId loop_child = sim::invalid_entity_id, sim::EntityId attached = sim::invalid_entity_id);
+    struct BuildSounds final {
+        const audio::SfxEvent* started{};
+        const audio::SfxEvent* loop{};
+        const audio::SfxEvent* complete{};
+        const audio::SfxEvent* captured{};
+        const audio::SfxEvent* lost{};
+        const audio::SfxEvent* sold{};
+    };
+    [[nodiscard]] const BuildSounds& build_sounds(const std::string& faction);
+    std::map<std::string, BuildSounds> build_sounds_;
+    std::map<sim::EntityId, std::pair<std::size_t, std::uint64_t>> pad_loops_;
     void respond(const BattleInput::Acknowledgement& acknowledgement, const LiveSessionView& live);
     // BA-50, BA-51: the toggle sound of an ability the snapshot at `tick` shows switched on or off.
     void toggle_abilities(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
@@ -116,8 +157,61 @@ private:
     void voice_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live);
     [[nodiscard]] const std::map<sim::tactical::AbilityKind, Toggle>& toggles_of(const std::string& faction);
     void cue_music(const audio::MusicDirector::Cue& cue);
-    void update_voices(const audio::Vec3& listener);
+    void update_voices(const audio::Vec3& listener, const LiveSessionView& live);
     void update_music(double delta);
+    void ambient_moving(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live,
+                        std::span<const sim::EntityId> visible);
+    struct AmbientTimer final {
+        std::uint64_t next{};
+        std::uint64_t seen{};
+    };
+    struct AmbientMember final {
+        sim::EntityId container{};
+        sim::EntityId leader{};
+    };
+    struct AmbientRow final {
+        std::uint64_t tick{};
+        sim::EntityId unit{};
+        bool moving{};
+        bool hidden{};
+    };
+    std::map<sim::EntityId, AmbientTimer> ambient_timers_;
+    bool ambient_begun_{};
+    std::vector<sim::tactical::Squadron> ambient_roster_;
+    std::map<sim::EntityId, AmbientMember> ambient_members_;
+    audio::Random ambient_random_{0x1501}; // presentation-only delays, independent of voice admission
+    std::vector<AmbientRow> ambient_rows_;
+    std::uint64_t ambient_visits_{};
+    std::uint64_t ambient_initialized_{};
+    std::uint64_t ambient_retired_{};
+    std::uint64_t ambient_peak_{};
+    std::uint64_t ambient_due_{};
+    std::uint64_t ambient_stationary_{};
+    std::uint64_t ambient_follower_skips_{};
+    std::uint64_t ambient_attached_updates_{};
+    std::uint64_t ambient_hidden_updates_{};
+    std::uint64_t ambient_detached_{};
+    using SpeechEvent = TypeSounds::SpeechEvent;
+    [[nodiscard]] const SpeechEvent* speech_event(std::string_view name);
+    void production_cue(const SpeechEvent* speech, const audio::SfxEvent* fallback, std::string_view reason);
+    void update_speech(bool paused);
+    std::map<std::string, SpeechEvent> speech_events_;
+    audio::SpeechQueue<SpeechEvent> speech_queue_;
+    audio::SpeechStream speech_stream_;
+    godot::AudioStreamPlayer* speech_player_{};
+    audio::SpeechStream::Handle queued_speech_handle_{};
+    double speech_started_at_{};
+    bool queued_speech_started_{};
+    std::uint64_t speech_queued_{};
+    std::uint64_t speech_completed_{};
+    std::uint64_t speech_failed_{};
+    std::uint64_t speech_overflow_{};
+    audio::SightingAnnouncements sightings_;
+    const audio::SfxEvent* enemy_spotted_{};
+    std::uint64_t sighting_tick_{};
+    std::uint64_t ducked_starts_{};
+    std::uint64_t ducked_updates_{};
+    bool gui_dialog_{};
 
     godot::Node3D* host_;
     const vfs::Vfs* filesystem_;
@@ -131,6 +225,12 @@ private:
     std::map<sim::tactical::TypeId, TypeSounds> types_;
     std::map<std::string, Sample> samples_;
     std::vector<audio::MusicEvent> music_events_;
+    std::array<const audio::MusicEvent*, 2> summary_events_{}; // WBF-47: resolved win, lose
+    const audio::MusicEvent* summary_event_{};
+    std::size_t summary_next_file_{};
+    bool summary_shown_{};
+    std::array<const audio::SfxEvent*, 2> outcome_events_{}; // local faction's space win, lose
+    bool outcome_shown_{};
     std::unique_ptr<audio::MusicDirector> music_;
     godot::SubViewport* listener_viewport_{};
     godot::Camera3D* listener_camera_{};
@@ -144,9 +244,13 @@ private:
         bool started{};
         std::uint64_t frame{};  // the frame it started (the report's lifetimes)
         double started_at{};    // the clock when it started
+        sim::EntityId attached{sim::invalid_entity_id}; // SP-03: a spinning dead copy
+        double positional_gain{};
+        bool ambient{}; // SND-11: live-object attachment, separate from spin-away's dead copy
     };
     double clock_{};  // seconds of frames presented
     std::array<VoiceState, audio::Voices::voices_3d + audio::Voices::voices_2d> voice_states_{};
+    std::uint64_t attached_moves_{};
     // Two music players crossfade (Fade_In_Seconds, Fade_Out_Previous_Seconds).
     struct MusicTrack final {
         godot::AudioStreamPlayer* player{};
@@ -199,6 +303,10 @@ private:
     std::vector<StartRow> start_rows_;
     double presented_tick_{};
     std::uint64_t fired_through_{};
+    std::size_t economy_cues_delivered_{};
+    std::size_t productions_delivered_{};
+    bool population_full_{};
+    std::map<std::string, const audio::SfxEvent*> arrival_sounds_;
     bool released_{};
     // Report.
     std::uint64_t frames_{};

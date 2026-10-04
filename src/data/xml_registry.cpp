@@ -5,8 +5,10 @@
 #include "pugixml.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -181,24 +183,17 @@ bool is_ability_type(const std::string_view type_name) {
     return key.size() >= 7U && key.ends_with("ability");
 }
 
-std::pair<std::uint64_t, std::uint64_t> line_column(
-    const std::span<const std::byte> bytes,
-    const std::ptrdiff_t raw_offset
-) {
+SourceOffsets::SourceOffsets(const std::span<const std::byte> bytes) : size_(bytes.size()) {
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        if (bytes[i] == std::byte{'\n'}) line_starts_.push_back(i + 1);
+}
+
+std::pair<std::uint64_t, std::uint64_t> SourceOffsets::line_column(const std::ptrdiff_t raw_offset) const {
     if (raw_offset <= 0) return {1, 1};
-    const auto offset = std::min<std::size_t>(static_cast<std::size_t>(raw_offset), bytes.size());
-    std::uint64_t line = 1;
-    std::uint64_t column = 1;
-    for (std::size_t i = 0; i < offset; ++i) {
-        const auto ch = std::to_integer<unsigned char>(bytes[i]);
-        if (ch == '\n') {
-            ++line;
-            column = 1;
-        } else {
-            ++column;
-        }
-    }
-    return {line, column};
+    const auto offset = std::min<std::size_t>(static_cast<std::size_t>(raw_offset), size_);
+    const auto next = std::upper_bound(line_starts_.begin(), line_starts_.end(), offset);
+    return {static_cast<std::uint64_t>(next - line_starts_.begin()),
+            static_cast<std::uint64_t>(offset - *std::prev(next)) + 1};
 }
 
 std::vector<std::ptrdiff_t> attribute_offsets(
@@ -311,7 +306,7 @@ core::Result<ParsedDocument> parse_document(
     const std::span<const std::byte> bytes,
     const vfs::AssetRecord& record
 ) {
-    ParsedDocument parsed;
+    ParsedDocument parsed{.document = {}, .root = {}, .offsets = SourceOffsets(bytes)};
     auto result = parsed.document.load_buffer(
         bytes.data(), bytes.size(), pugi::parse_full | pugi::parse_ws_pcdata, pugi::encoding_auto);
     std::optional<std::string> numeric_root_name;
@@ -325,7 +320,7 @@ core::Result<ParsedDocument> parse_document(
         }
     }
     if (!result) {
-        const auto [line, column] = line_column(bytes, result.offset);
+        const auto [line, column] = parsed.offsets.line_column(result.offset);
         SourceLocation source{record.canonical_path, record.source_id, record.layer_id, line, column};
         return core::Result<ParsedDocument>::failure(diagnostic(
             diagnostic_codes::malformed_xml,
@@ -334,7 +329,7 @@ core::Result<ParsedDocument> parse_document(
     }
     for (const auto child : parsed.document.children()) {
         if (child.type() == pugi::node_doctype) {
-            const auto [line, column] = line_column(bytes, child.offset_debug());
+            const auto [line, column] = parsed.offsets.line_column(child.offset_debug());
             SourceLocation source{record.canonical_path, record.source_id, record.layer_id, line, column};
             return core::Result<ParsedDocument>::failure(diagnostic(
                 diagnostic_codes::forbidden_doctype,
@@ -462,9 +457,10 @@ void classify(
 XmlNode build_node(
     const pugi::xml_node source,
     const std::span<const std::byte> bytes,
-    const vfs::AssetRecord& record
+    const vfs::AssetRecord& record,
+    const SourceOffsets& source_offsets
 ) {
-    const auto [line, column] = line_column(bytes, source.offset_debug());
+    const auto [line, column] = source_offsets.line_column(source.offset_debug());
     XmlNode result{
         .name = source.name(),
         .raw_text = {},
@@ -481,7 +477,7 @@ XmlNode build_node(
     for (const auto attribute : source.attributes()) {
         const auto attribute_offset = attribute_index < offsets.size()
             ? offsets[attribute_index] : source.offset_debug();
-        const auto [attribute_line, attribute_column] = line_column(bytes, attribute_offset);
+        const auto [attribute_line, attribute_column] = source_offsets.line_column(attribute_offset);
         result.attributes.push_back(XmlAttribute{
             .name = attribute.name(),
             .value = attribute.value(),
@@ -496,7 +492,7 @@ XmlNode build_node(
         if (child.type() == pugi::node_pcdata || child.type() == pugi::node_cdata) {
             result.raw_text += child.value();
         } else if (child.type() == pugi::node_element) {
-            result.children.push_back(build_node(child, bytes, record));
+            result.children.push_back(build_node(child, bytes, record, source_offsets));
         }
     }
     return result;
@@ -589,9 +585,10 @@ void add_definition(
     const std::size_t registry_order,
     const std::size_t definition_order,
     std::vector<core::Diagnostic>& diagnostics,
-    const LoadOptions& options
+    const LoadOptions& options,
+    const SourceOffsets& offsets
 ) {
-    auto root = build_node(source, bytes, record);
+    auto root = build_node(source, bytes, record, offsets);
     classify(root, profile, schema_type, bytes, source, diagnostics, root.name, options);
     const auto id_value = attribute_value(root, "Name");
     Definition definition{
@@ -622,6 +619,7 @@ void add_nested_abilities(
     std::size_t& definition_order,
     std::vector<core::Diagnostic>& diagnostics,
     const LoadOptions& options,
+    const SourceOffsets& offsets,
     const bool inside_abilities
 ) {
     const bool in_list = inside_abilities || ascii_iequals(node.name(), "Abilities");
@@ -634,10 +632,10 @@ void add_nested_abilities(
             std::vector<core::Diagnostic> already_reported_by_owner;
             add_definition(catalog, child, bytes, record, profile, Category::ability,
                            type.value_or(std::string(child.name())), registry_order,
-                           definition_order++, already_reported_by_owner, options);
+                           definition_order++, already_reported_by_owner, options, offsets);
         }
         add_nested_abilities(catalog, child, bytes, record, profile, registry_order,
-                             definition_order, diagnostics, options, in_list);
+                             definition_order, diagnostics, options, offsets, in_list);
     }
 }
 
@@ -657,6 +655,13 @@ void index_winners(Catalog::Impl& catalog, std::vector<core::Diagnostic>& diagno
         });
         catalog.winners[id] = indexes.front();
         catalog.definitions[indexes.front()].winner = true;
+        std::array<bool, static_cast<std::size_t>(Category::sfx) + 1> categories{};
+        for (const auto index : indexes) {
+            auto& definition = catalog.definitions[index];
+            auto& seen = categories[static_cast<std::size_t>(definition.category)];
+            definition.namespace_winner = !seen;
+            seen = true;
+        }
         if (indexes.size() > 1) {
             const auto& winner = catalog.definitions[indexes.front()];
             std::ostringstream message;

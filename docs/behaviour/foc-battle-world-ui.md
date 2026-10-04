@@ -1,4 +1,6 @@
-# FoC battle UI in the world: selection circles, bars, squadron icons, hardpoint reticles (EAWR-424)
+<a id="foc-battle-ui-in-the-world-selection-circles-bars-squadron-icons-hardpoint-reticles-424"></a>
+
+# FoC battle UI in the world: selection circles, bars, squadron icons, hardpoint reticles (battle world UI and squadron selection)
 
 ## Applicability
 
@@ -47,26 +49,26 @@ Nothing here reaches the simulation.
   retail footage (issue-311) agrees: at FoC's default camera distance (1000) a corvette's medium
   bar is about 100 reference pixels wide (68 x 1.5). A close camera therefore draws large bars:
   a craft's small bar is 51 reference pixels at distance 1000 and six times its width at 250
-  (EAWR-436 eye check: judged at FoC's default distance).
+  (eye check judged at FoC's default distance).
 - WU-14. A bar shows level ceil(10 x fraction) of 0..10; the filled part is fraction x width from
   the left over the black back (`i_bar_control_wide*`) with a black outline of one pixel.
 - WU-15. The health bar's colour is its level's texture: black 0, red 1 to 3, orange 4 and 5, yellow
   6 and 7, yellow-green 8 and 9, green 10. The shield bar is always cyan (0, 190, 255).
-- WU-16 (EAWR-502). FoC considers only the unit under the pointer and the local player's selection; no
+- WU-16 (hovered squadron health bars). FoC considers only the unit under the pointer and the local player's selection; no
   other unit gets bars, whatever its health. Such a unit shows its bars while it is selected, or,
   when it is not selected, while the pointer is over it or its health is below 10 %. A fogged unit
-  shows none. Hovered enemies show their bars too. Before EAWR-502 the remake also showed every craft
+  shows none. Hovered enemies show their bars too. Before the hovered squadron health bars work the remake also showed every craft
   of a squadron while the pointer was over its icon (an un-evidenced remake addition, never
   confirmed in the debug build); the owner reported it drew a bar over every member craft, each
   scaled as if the camera were close to it (WU-13, legitimately large for a small fighter under a
   close camera), so a hovered squadron of several craft showed a wall of oversized bars covering
   them. The squadron's own small bar by its icon (WU-22) already shows its health; hovering the
-  icon shows nothing more (owner, EAWR-502).
+  icon shows nothing more (owner, hovered squadron health bars).
 - WU-17. A craft of a squadron never shows a shield bar and shows its own health bar only while it
   is shown by the pointer (WU-16); a squadron's container shows no bars in space (its icon does).
-  Owner (EAWR-424): "hovering a craft shows that craft's stats": the remake shows the hovered craft's
+  Owner (battle world UI and squadron selection): "hovering a craft shows that craft's stats": the remake shows the hovered craft's
   bar also while its squadron is selected. The debug build reads as if a selected squadron's craft
-  showed none (they are selected units). **Deliberate difference** (owner, EAWR-790, 2026-10-01): the
+  showed none (they are selected units). **Deliberate difference** (owner, hovered-craft health-bar policy, 2026-10-01): the
   remake keeps the hovered craft's bar; FoC's behaviour stays recorded here.
 - WU-18. The bars sit over the unit: its world bounds' centre moved along the camera's up axis by
   the largest extent of the bounds along it (`GUI_Bounds_Scale` 1, the default) or by the bounds'
@@ -74,8 +76,31 @@ Nothing here reaches the simulation.
   there and the health bar below it by the shield bar's height x `Health_Bar_Spacing` (2); without
   a shield bar the health bar takes its place. Project policy: the bounds are the remake's pick box.
 
+## Hero world identity
+
+- WU-47 (debug build, HWI-1). A named hero (`Is_Named_Hero`) or an explicit
+  `Show_Hero_Head` gets the world identity frame and its `Icon_Name`. Generic hero
+  identity alone does not enable the head. This is independent of the command-bar
+  hero tray. In space a member of a team is represented by the team's identity.
+- WU-48 (debug build, HWI-2). Standalone hero identities project the ship's position
+  and add 0.048 of the screen height downward, using the same frame and health bar
+  as squadron identities. Selection and hover change the frame, not admission.
+  An enemy identity hides in fog or stealth; allied identities bypass enemy fog.
+  There is no camera-distance admission threshold. The ordinary world UI switch
+  hides the identity; the reduced-frame mode retains it. The remake applies these
+  rules to visible standalone space heroes and reuses the squadron hit rectangle
+  for selection and orders. Carried hero heads and stacked flagship identities
+  remain unimplemented (legacy EAWR-1194).
+
 ## Squadron icon
 
+- WU-49 (retail capture, fighter arrival comparison, 2026-10-04). During hyperspace
+  arrival the icon stays at the landing point while the visible craft fly towards it.
+  It is visible before the craft finish their jump; it follows neither the leader nor
+  the moving formation centre during that interval. Ordinary icon smoothing resumes
+  after arrival. The remake places the icon at the published landing point during
+  arrival, then seeds ordinary movement from the presented formation centre with zero
+  slide speed. The usual downward screen offset still applies (WU-24).
 - WU-20. Every squadron the local player sees has an icon: the gripper frame
   (`st_grab_bar`, `i_button_unit_frame_gripper`, Scale 0.6) with the squadron's `Icon_Name` inside
   and a small health bar (`st_health_bar`, Scale 0.8, 16 reference pixels below its centre).
@@ -87,7 +112,7 @@ Nothing here reaches the simulation.
 - WU-22. The icon's bar shows the squadron's health. Project policy (unverified): the live craft's
   hull over the hull of all of its craft, so a lost craft empties its share.
 - WU-23. Clicking the icon selects the squadron, as clicking one of its craft does.
-- WU-23a (EAWR-550; walk [WSU-38](walks/sensors-ui.md)). A left double click on an own squadron's icon
+- WU-23a (squadron-type double-click selection; walk [WSU-38](walks/sensors-ui.md)). A left double click on an own squadron's icon
   runs the type-on-screen selection for the squadron leader's craft type (the squadron's own type
   when it has no craft left): it adds every own squadron with a craft of that type on screen,
   whether or not its icon is, as a double click on a unit adds its type on screen (selection S-4).
@@ -99,33 +124,104 @@ Nothing here reaches the simulation.
   centre, the same rule as a unit's (selection S-3). In M2 every squadron's craft share one type,
   so an X-wing squadron never brings in a Y-wing or TIE squadron; a dogfighting squadron counts by
   its craft, not by where its icon sits in the combat cell's grid (WU-25, WU-26).
-- WU-24 (EAWR-500). FoC's icon follows a smoothed point near the squadron (the team's gripper point,
-  debug build); project policy: the squadron's centre (its container's position), projected to
-  screen space. FoC's gripper placement always asks for its screen offset when it does place the
-  icon (debug build): after the world point projects to screen space it adds 0.048 of the screen
+- WU-24 (squadron icon placement; walk WSU-34 to WSU-36). FoC's icon follows a smoothed point near
+  the squadron (debug build). Each drawn frame the anchor moves with its old speed, then gains
+  the leader type's `Max_Thrust`, capped by the fastest live member's current velocity per frame.
+  In the idle grid it brakes by the same thrust when its stopping distance reaches the distance
+  left. It snaps when the point is closer than one step, or in fast forward. The renderer reads
+  presentation-only velocity and idle-grid metadata; canonical snapshots and session hashes
+  exclude those fields. The desired anchor remains our published squadron container position:
+  the idle-grid point while idle, otherwise the formation centre (WSQ-48).
+  After the world point projects to screen space it adds 0.048 of the screen
   height to Y (+Y down), so the icon sits below the squadron's projected centre instead of over it;
   the offset is a plain screen-space addition, so it does not scale or clamp with camera distance
   beyond the ordinary perspective shrink of the whole icon. Before this the remake drew the icon
-  exactly at the projected centre, covering the craft (owner, EAWR-500: "the icons ... covering all the
-  fighters"). The dogfight grid (WU-25 to WU-27) places a joined squadron's icon through the same
-  gripper mechanism (debug build), so the offset applies to a gridded icon too, on top of the
-  grid's own within-cell layout (WU-26); FoC skips re-placing an already-settled gripper on a given
-  frame (an optimisation against a steady point, not a separate no-offset path), which the remake's
-  per-frame recompute has no equivalent state for and does not reproduce.
+  exactly at the projected centre, covering the craft (owner, squadron icon placement: "the icons ... covering all the
+  fighters"). A joined squadron in the dogfight grid (WU-25 to WU-27) is placed exactly at its
+  screen slot without that offset (WSU-36), and holds still as the craft pitch and roll.
   Its size is the data's: the 60-pixel gripper frame at Scale 0.6, 36 reference pixels with the
   frame's transparent border (the owner's retail footage shows the visible frame about 25
   reference pixels across). It looks large next to the ships at FoC's default camera distance and
   small next to them close up.
 
-- WU-23b (EAWR-553). A right click on a squadron icon acts on the squadron, as a right click on one of its
+<a id="ability-overlays-and-control-group-numbers-768"></a>
+
+## Ability overlays and control-group numbers
+
+- WU-43 (walk WSU-33; debug build, AO-01, R983-01, R983-02; data). An allied squadron's icon shows its first unit
+  ability's icon only in the active second state; if that slot is not active, it takes the active
+  second slot instead. Enemies show no ability overlay. Ready, recharging, disabled and autofire
+  without activation show none. The icon uses the same ability art lookup as the unit cards
+  ([ability buttons](foc-ability-buttons.md) AB-04), for example `SPOILER_LOCK`
+  `i_sa_s_foil_mode.tga`, at native texture size and scale 1 in the frame's lower-effect slot.
+  Its separate quad uses `st_grab_bar`'s `Lower_Effect_Offset`, authored as 0 30: centred
+  30 reference pixels above the squadron identity, with +Y up, independent of the frame's
+  0.6 scale. The identity remains fully visible. Generic `Overlay_Offset` does not place
+  this ability art. The lower effect is submitted in the background layer. The upper effect remains the
+  garrison flag (WU-39), so both can show together.
+- WU-44 (walk WSU-58; debug build, AO-02 to AO-04, R983-03; data). Every allied unit that gets a bracket
+  under WSU-50 can show its active unit ability, including frigates, capitals, stations and a
+  hovered individual craft. Space squadron containers get their icon instead. The first active
+  slot sets the bracket's icon. An active second slot replaces it if the first is off, or becomes
+  the lower effect if both are active. Enemies show neither. This uses the same second-state
+  predicate and art lookup as WU-43, including timed abilities while active (AO-05: starting
+  the reversed expiration timer leaves the recharge counter at zero); a duration dial,
+  recharge or autofire by itself adds no world overlay. The `st_ability_icon` component draws
+  the texture's native width and height at its component scale (default 1), independent of the
+  bar's distance scale. Its centre is above the bracket point by half the scaled bar height,
+  half the icon height and 3 reference pixels. It is centred horizontally in space (weather
+  can shift it in land mode, out of scope). The debug build submits health, shield, control-group
+  text, then ability icon, then the garrison and other effects. Submission order does not
+  determine text layering (WU-45). The additional second slot shares the primary icon's component
+  point and uses `Lower_Effect_Offset` (not authored on `st_ability_icon`; zero default).
+  A second slot substituting for an inactive first slot uses the primary icon slot instead.
+  Fog, a point behind the camera or off screen hides the entire bracket.
+- WU-45 (walk WSU-33, WSU-55; debug build, AO-01, AO-02, AO-07; data). A squadron icon shows its
+  control-group digit in `st_grab_bar`'s font and colour: EmpireAtWar-Medium, 9 pt, white,
+  outlined, `Text_Offset` -10 -6. A bracket shows its unit's digit, or its parent squadron's,
+  using `st_control_group`: the same font, size and outline, `Text_Offset` 0 -32.
+  Offsets are relative to the component point, with +Y up; on screen the icon text is 10 reference
+  pixels left and 6 down, the bracket text 32 down. Group 0 shows `0`; without membership there is
+  no text. The bracket point is truncated to whole screen pixels (WSU-54). Tactical text is queued
+  three layers above its component base, capped at layer 6, and remains visible over the ability
+  art despite the component's earlier submission; lower-effect ability art remains behind it
+  (R983-02, R983-03). The viewer draws the lower effect before the squadron frame and
+  identity, and the additional bracket effect before its primary icon; it draws the cached digit after the
+  ability texture to preserve this foreground layer.
+- WU-46 (project). World overlays read the same `AbilityState` provider as the cards, including
+  their live squadron aggregation (space-abilities AB-50). Each visible icon or bracket queries
+  at most two authored slots. The provider visits only those slots' holders with sorted snapshot
+  lookups; no copied holder vector or scan of unrelated instances. Control-group membership is
+  indexed when groups change; ten shaped digits per text style are reused until viewport or font
+  changes. Art regions and component effect offsets are resolved at prepare time. Placement uses
+  a stack-only rectangle calculation. No new per-frame pass over all units is added.
+  The GPU regression control `EAWR_WORLD_ABILITY_ART_CONTROL=off` suppresses only world
+  ability art, so pixel comparisons retain identical active snapshot, selection and world
+  background, including the pixels visible through translucent identity art.
+
+Source receipt AO-01 is the debug build's squadron-icon update; AO-02 is its bracket anchor and
+state update; AO-03 is bracket layout; AO-04 is bracket submission; AO-05 is the ability-state
+query, recharge predicate and expiration start. R983-01 resolves the squadron ability setter
+to the lower-effect slot; R983-02 traces its separate quad and authored offset through component
+rendering. R983-03 resolves the bracket's primary icon setter and additional lower-effect setter
+through the component table, paired with bracket layout and rendering. These supersede AO-01's
+original generic-overlay interpretation and AO-02's upper-effect interpretation of the additional
+bracket ability. Private research receipts stay outside tracked files. `Lower_Effect_Offset`
+is applied to both lower-effect paths. The nearby `Build_Dial_Offset` and
+autofire overlay fields are not wired into world overlays: this path has no dial or autofire
+effect (AO-01, AO-02). `st_ability_icon`'s legacy `Icon_Alternate_Texture_Name` list is not used
+by this path: AO-02 sets the texture directly through the ability art lookup. The unit ability's
+`Alternate_Icon_Name` override remains pending in the card art lookup's ability coverage (legacy EAWR-760); no M2 overlay in this check authors an override.
+
+- WU-23b (enemy squadron-icon attack input). A right click on a squadron icon acts on the squadron, as a right click on one of its
   craft does: on an enemy squadron's icon a selection attacks that squadron's container (space-fighters
   FO-04), for fighters, bombers and capital ships alike; on a selected or allied squadron's icon
   nothing happens (selection O-1). Debug build: the click's target is the object found under the
   pointer for left and right button alike (walk [WSU-38](walks/sensors-ui.md): an enemy icon's right
   click attacks the squadron). The order point is still the battle plane point under the cursor
   (P-3). The debug build's hardpoint reticle under the pointer replaces the picked object's target
-  with its hardpoint's parent, so when hardpoint orders (EAWR-531) land the reticle is tested before the
-  icon. Project policy (EAWR-635): an icon in a dogfight grid cell (WU-25, WU-26) is targeted where it is
+  with its hardpoint's parent, so when specific-hardpoint attack orders land the reticle is tested before the
+  icon. Project policy (squadron-icon height and evidence corrections): an icon in a dogfight grid cell (WU-25, WU-26) is targeted where it is
   drawn. Unverified: whether the icon counts as that object pick. Not modelled: the attack cursor over the
   icon (the viewer draws no state cursors yet).
 
@@ -156,14 +252,14 @@ Nothing here reaches the simulation.
   columns 30 reference pixels apart, the first row starting half its width left of the cell
   point's screen position, the rows 30 reference pixels apart, in the cell's list order (WU-25).
   The cell point's height is the `Layer_Z_Adjust` of the craft type of the cell's first squadron
-  (debug build): a constant, so the grid stands still while the fighters pitch and climb (EAWR-564);
+  (debug build): a constant, so the grid stands still while the fighters pitch and climb (stable dogfight icon grid);
   the remake does not follow a squadron's own height or the fight's average. The type is that
-  squadron's first live craft's (EAWR-635), so the grid doesn't drop to 0 when its first craft dies.
+  squadron's first live craft's (squadron-icon height and evidence corrections), so the grid doesn't drop to 0 when its first craft dies.
   Unverified: which of the squadron's objects FoC takes the type from. The rows' direction
   (downward) is unverified.
 - WU-27. Project policy (unverified): the remake draws an icon's centre where FoC sets the icon's
   drag position; FoC's grid starts at the space map's box, which the remake does not load, so its
-  grid starts at the world origin and has no edges; since EAWR-457 the sim flies the dogfights over
+  grid starts at the world origin and has no edges; since the squadron dogfight pairing and chase work the sim flies the dogfights over
   these cells (space-fighters FD-01 to FD-03) and the snapshot carries each squadron's cell, so
   the viewer draws the icons from the sim's cells; the service order is ascending squadron ID (FoC services each craft
   and the order across squadrons was not traced); and the icon jumps to its slot where FoC slides
@@ -171,7 +267,7 @@ Nothing here reaches the simulation.
 
 ## Launched-craft flag
 
-- WU-37 (EAWR-632). A hangar-launched squadron's icon carries a small white flag. The hangar spawner
+- WU-37 (hangar-launched craft flags). A hangar-launched squadron's icon carries a small white flag. The hangar spawner
   marks every craft it creates, and the team object that holds them, as a "garrison unit"; the
   starting forces of a skirmish are not marked (the start marks only fleet escort objects, which
   the M2 fixture has none of). Craft a script spawns are not known to be marked: the remake leaves
@@ -202,7 +298,7 @@ Nothing here reaches the simulation.
   of that share of the screen high, centred on the hardpoint. Both shares are of the whole
   screen (the HUD's 0..1 screen units), so the size is fixed on the screen: it is not scaled with
   the camera distance, not clamped and not relative to the ship's size, and a far corvette
-  shrinks under reticles that stay the same (EAWR-515, debug build). On a 16:9 screen the reticle is
+  shrinks under reticles that stay the same (hardpoint reticle scaling, debug build). On a 16:9 screen the reticle is
   wider than tall (57.6 x 43.2 pixels at 1920 x 1080, 38.4 x 28.8 at 1280 x 720). The whole
   64 x 64 reticle texture is stretched over the rectangle (texture coordinates 0..1); the art
   mostly leaves a transparent margin, so the visible ring is a little smaller. Every frame the
@@ -218,22 +314,22 @@ Nothing here reaches the simulation.
   by the tactical camera (debug build). Nothing hides it: the point is not tested against the
   hull or the screen edge. So FoC's reticle stays on its bone at any camera pitch and through a
   bank.
-- WU-35. Project policy (EAWR-515): the remake takes the attachment point at the model's bind pose
+- WU-35. Project policy (hardpoint reticle scaling): the remake takes the attachment point at the model's bind pose
   (the combat table's hardpoint position, in the unit frame) and places it with the unit's drawn
   pose, Rz(yaw) Ry(pitch) Rx(roll) (R-ROT-01), the same transform the model is drawn with. An
-  animated attachment bone is not followed; fidelity list. Before EAWR-515 the anchor took the yaw
+  animated attachment bone is not followed; fidelity list. Before the hardpoint reticle scaling work (legacy EAWR-515) the anchor took the yaw
   alone, so a banking ship's reticles drifted off the hull, most visibly under the steep camera
   pitch of the owner's -60 degree `Pitch_Min` (the reticle pitch gap).
 - WU-36. After a click that targets a hardpoint, its reticle flashes: it halves in width and
   height and back every 3 frames for the flash's loop count (debug build). Hardpoint targeting
-  is EAWR-531's (WU-41, WU-42).
-- WU-41 (EAWR-531, debug build). The hardpoints are picked by the reticles' own rectangles: the last drawn
+  belongs to the specific-hardpoint attack-order implementation (WU-41, WU-42).
+- WU-41 (specific-hardpoint attack orders, debug build). The hardpoints are picked by the reticles' own rectangles: the last drawn
   reticle whose rectangle holds the pointer is the one on top, and it replaces the object the pick ray
-  found. The test runs before the squadron icon's (the icon rule WU-23 comes after it, EAWR-553). A
+  found. The test runs before the squadron icon's (the icon rule WU-23 comes after it, enemy squadron-icon attack input). A
   reticle under the pointer keeps its unit hovered, so moving onto a reticle beyond the hull's pick
   volume keeps the reticles. A right click on it orders the selection to attack that hardpoint of its
   unit ([space orders](space-orders.md) OR-20); a left click selects its unit (project choice, unverified).
-- WU-42 (EAWR-531, debug build). After an attack order on a hardpoint its reticle flashes for 60 render
+- WU-42 (specific-hardpoint attack orders, debug build). After an attack order on a hardpoint its reticle flashes for 60 render
   services: it shows the `_Tracked` art, half its width and height for the first three services and
   then toggling between half and full size every three, whether or not the pointer is over the unit.
   The flash ends early when the hardpoint is destroyed. The cursor keeps its plain attack look (no
@@ -256,7 +352,7 @@ Nothing here reaches the simulation.
 - C-6. Two squadrons attacking each other's craft share one combat cell: their icons sit side by
   side 30 reference pixels apart at the cell point; a squadron attacking a ship, or a squadron
   that fights something else, keeps its icon over itself (WU-25, WU-26).
-- C-7 (EAWR-502). Hovering a squadron's icon (not one of its craft) shows no bar over any of its
+- C-7 (hovered squadron health bars). Hovering a squadron's icon (not one of its craft) shows no bar over any of its
   craft, only the icon's own small health bar (WU-16, WU-22).
 
 ## Unverified

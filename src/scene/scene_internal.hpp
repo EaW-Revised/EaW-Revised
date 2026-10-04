@@ -21,6 +21,6 @@ constexpr std::array<std::string_view, 1> model_suffixes{".alo"};
 [[nodiscard]] core::Diagnostic diagnostic(std::string_view code, std::string message);
 [[nodiscard]] std::string hex32(std::uint32_t value);
 [[nodiscard]] std::string trimmed(std::string_view value);
-[[nodiscard]] ModelFacts model_facts(const AssetAccess& access, const std::string& path);
+[[nodiscard]] ModelFacts model_facts(const AssetAccess& access, const std::string& path, bool construction = false);
 
 } // namespace eawr::scene

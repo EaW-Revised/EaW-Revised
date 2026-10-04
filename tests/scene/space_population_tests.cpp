@@ -176,7 +176,8 @@ void tag_contracts() {
     gun.object_id = "HP_Gun";
     gun.type_name = "HardPoint";
     const auto station_tags = eawr::scene::space_object_tags(
-        station, [&](const std::string_view id) -> std::optional<eawr::data::EffectiveObject> {
+        station, [&](const std::string_view id, const eawr::data::Category category) -> std::optional<eawr::data::EffectiveObject> {
+            expect(category == eawr::data::Category::hardpoint, "attachments request the hardpoint namespace");
             if (id == "HP_Dish") return dish;
             if (id == "HP_Gun") return gun;
             return std::nullopt;
@@ -419,14 +420,14 @@ void reference_map() {
     input.catalog = &catalog;
     input.access = cache.access();
     const eawr::scene::Scene scene = eawr::scene::build(input);
-    const eawr::scene::ObjectResolver resolve = [&](const std::string_view id) -> std::optional<eawr::data::EffectiveObject> {
-        auto resolved = catalog.resolve(id);
+    const eawr::scene::ObjectResolver resolve = [&](const std::string_view id, const eawr::data::Category category) -> std::optional<eawr::data::EffectiveObject> {
+        auto resolved = catalog.resolve(id, category);
         if (!resolved) return std::nullopt;
         return std::move(resolved.value());
     };
     const auto decisions = eawr::scene::classify_space_placements(
         scene, [&](const std::string_view id) -> std::optional<eawr::scene::SpaceObjectTags> {
-            auto resolved = resolve(id);
+            auto resolved = resolve(id, eawr::data::Category::game_object);
             if (!resolved) return std::nullopt;
             return eawr::scene::space_object_tags(*resolved, resolve);
         });
@@ -513,8 +514,8 @@ void foc_hardpoint_corpus() {
     expect(static_cast<bool>(loaded), "FoC catalog loads");
     if (!loaded) return;
     const eawr::data::Catalog& catalog = loaded.value().catalog;
-    const eawr::scene::ObjectResolver resolve = [&](const std::string_view id) -> std::optional<eawr::data::EffectiveObject> {
-        auto resolved = catalog.resolve(id);
+    const eawr::scene::ObjectResolver resolve = [&](const std::string_view id, const eawr::data::Category category) -> std::optional<eawr::data::EffectiveObject> {
+        auto resolved = catalog.resolve(id, category);
         if (!resolved) return std::nullopt;
         return std::move(resolved.value());
     };
@@ -527,12 +528,44 @@ void foc_hardpoint_corpus() {
         }
         return cache.model("data/art/models/" + name);
     };
+    // MD-06: compose both stock rounds, including their transform and proxies.
+    eawr::assets::Map rounds;
+    rounds.kind = eawr::assets::MapKind::space;
+    for (const std::string id : {"Proj_Kedalbe_Mass_Driver", "Proj_Vengeance_Mass_Driver"}) {
+        eawr::assets::Placement source;
+        source.key.record_ordinal = static_cast<std::uint32_t>(rounds.placements.size());
+        source.type_crc = 0U; // Synthetic placement with an explicit catalog identity.
+        source.type_resolution = eawr::assets::TypeResolution::unique;
+        eawr::assets::ObjectTypeRef type{};
+        type.logical_name = id;
+        source.type_candidates.push_back(std::move(type));
+        source.orientation_status = eawr::assets::OrientationStatus::yaw_only;
+        source.orientation_degrees = eawr::assets::SourceVec3{};
+        source.position = eawr::assets::SourceVec3{};
+        rounds.placements.push_back(std::move(source));
+    }
+    eawr::scene::BuildInput round_input;
+    round_input.map = &rounds;
+    round_input.catalog = &catalog;
+    round_input.access = cache.access();
+    const auto round_scene = eawr::scene::build(round_input);
+    expect(round_scene.placements.size() == 2, "MD-06: both stock round placements compose");
+    for (const auto& round : round_scene.placements) {
+        std::cout << "  stock round " << round.object_id << ": asset " << round.asset_id
+                  << ", pose " << round.transform.has_value() << ", effects " << round.effects.size();
+        for (const auto& issue : round.issues) {
+            std::cout << "; " << eawr::scene::to_string(issue.cause) << ' ' << issue.detail;
+        }
+        std::cout << '\n';
+        expect(eawr::scene::drawable_projectile_effects(round),
+               "MD-06: stock mesh-free round has a resolved effect and authored transform");
+    }
     std::size_t owners{}, emitters{}, decals{}, attachments{}, on_bone{}, star_destroyer_emitters{};
     float worst{};
     std::set<std::string> seen;
     for (const eawr::data::Definition& definition : catalog.definitions()) {
         if (!seen.insert(definition.id).second) continue;
-        const auto object = resolve(definition.id);
+        const auto object = resolve(definition.id, eawr::data::Category::game_object);
         if (!object) continue;
         const eawr::data::EffectiveValue* model_name = object->value("Space_Model_Name");
         if (model_name == nullptr || object->value("HardPoints") == nullptr) continue;
@@ -601,7 +634,39 @@ void foc_hardpoint_corpus() {
 
 } // namespace
 
+void projectile_effect_contracts() {
+    eawr::scene::Scene scene;
+    auto effect = placement(0, "Round", {});
+    effect.effects.push_back({"glow", "data/art/models/invented_glow.alo", 0, false});
+    effect.issues.push_back({Cause::model_has_no_surface, "invented_round.alo"});
+    expect(eawr::scene::drawable_projectile_effects(effect), "MD-06: resolved mesh-free projectile effects draw");
+    scene.placements.push_back(effect);
+    auto missing = effect;
+    missing.effects[0].resolved.clear();
+    scene.placements.push_back(missing);
+    auto invalid = effect;
+    invalid.transform.reset();
+    scene.placements.push_back(invalid);
+    auto broken = effect;
+    broken.issues.push_back({Cause::model_failed_to_load, "invented_round.alo"});
+    scene.placements.push_back(broken);
+    auto prop = effect;
+    prop.object_id = "Prop";
+    scene.placements.push_back(prop);
+    const auto decisions = eawr::scene::classify_space_placements(scene,
+        [](const std::string_view id) -> std::optional<eawr::scene::SpaceObjectTags> {
+            return eawr::scene::SpaceObjectTags{id == "Prop" ? "SpaceProp" : "Projectile", false, false, false};
+        });
+    expect(decisions[0].role == SpaceRole::drawn && decisions[0].drawn_surfaces.empty(),
+        "MD-06: projectile proxies enter the live emitter path without mesh surfaces");
+    for (std::size_t index = 1; index < decisions.size(); ++index) {
+        expect(decisions[index].role == SpaceRole::not_drawable,
+            "MD-06: missing effects, invalid transforms, decode failures and other object types stay rejected");
+    }
+}
+
 int main() {
+    projectile_effect_contracts();
     synthetic_contracts();
     tag_contracts();
     damage_decal_contracts();

@@ -23,6 +23,7 @@ out/
 .vscode/
 *.user
 __pycache__/
+.offload/
 *.py[cod]
 
 # Per-machine overrides of config/host-paths.json and config/gpu-hosts.json

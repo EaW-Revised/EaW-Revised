@@ -51,6 +51,7 @@ using namespace godot;
 namespace eawr::presentation::godot_backend {
 namespace effect_mode_detail {
 
+[[nodiscard]] std::string json(std::string_view value);
 [[nodiscard]] std::string hash_bytes(std::span<const std::byte> bytes);
 [[nodiscard]] std::string canonical(std::string_view name);
 [[nodiscard]] std::string_view file_name(std::string_view authored);
@@ -219,6 +220,8 @@ struct EffectMode::State final {
     [[nodiscard]] std::filesystem::path capture_path_for(std::string_view label) const;
     void capture_intermediate();
     [[nodiscard]] int finish();
+    void write_probe_emitters(std::ostream& output) const;
+    void write_probe_frames(std::ostream& output) const;
     [[nodiscard]] bool write_report() const;
 };
 

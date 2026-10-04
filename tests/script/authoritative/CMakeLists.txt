@@ -1,5 +1,6 @@
 # Authoritative Lua sandbox and scheduler (#247, docs/lua-sandbox.md).
-add_executable(lua_sandbox_tests lua_sandbox_tests.cpp)
+add_executable(lua_sandbox_tests lua_sandbox_tests.cpp
+    lua_scheduler_tests.cpp)
 target_link_libraries(
     lua_sandbox_tests
     PRIVATE eawr::script_authoritative eawr::script_numeric eawr::lua_502_sf eawr::platform eawr::sim eawr::core
@@ -23,7 +24,8 @@ add_test(NAME lua_script_bench_smoke COMMAND lua_script_bench --quick --workers 
 
 # Canonical Lua persistence and the versioned script state hash (#248,
 # docs/lua-persistence.md).
-add_executable(lua_persistence_tests lua_persistence_tests.cpp)
+add_executable(lua_persistence_tests lua_persistence_tests.cpp
+    lua_persistence_inflated_tests.cpp)
 target_link_libraries(
     lua_persistence_tests
     PRIVATE eawr::script_authoritative eawr::script_numeric eawr::platform eawr::sim eawr::core

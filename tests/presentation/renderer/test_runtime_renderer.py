@@ -66,6 +66,8 @@ class RuntimeRendererExercise(unittest.TestCase):
             # technique/pass/render-pass and non-spatial rejections, and the
             # comment-led spatial source compiled through the anchored probe.
             self.assertIn(LEGACY_SELECTOR_MARKER, completed.stdout)
+            self.assertIn("EAWR runtime: shader cache binding admission, byte and entry budgets passed",
+                          completed.stdout)
             self.assertEqual(output.count("SHADER ERROR"), 1, output)
             result = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(HARNESS.verify_runtime_report(result), [])

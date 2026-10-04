@@ -54,9 +54,17 @@ function Fake_Object(type_name, owner)
 	o.Stop = function()
 		return Fake_Call("stop")
 	end
+	o.Prevent_Opportunity_Fire = function(on)
+		o.fire_suppressed = on
+		return Fake_Call("prevent-fire")
+	end
 	o.Activate_Ability = function(ability, on)
 		table.insert(Fake.abilities, {o.type_name, ability, on})
 		return Fake_Call("ability")
+	end
+	o.Attack_Target = function(target)
+		o.attack_target = target
+		return Fake_Call("attack")
 	end
 	o.Attack_Move = function(target)
 		o.attack_target = target
@@ -373,7 +381,7 @@ end
 
 -- #532 (FH-20): findmask asks Find_Nearest once for each filter after the start wait, then an
 -- unknown name a second later, and keeps the answers on its line and in the AI log.
-function Test_Find_Mask()
+function Test_Find_Mask(debugger)
 	Battle("findmask")
 	local station = Fake_Object("Skirmish_Rebel_Star_Base_1", LOCAL)
 	Fake.stations = {Skirmish_Rebel_Star_Base_1 = station}
@@ -393,12 +401,28 @@ function Test_Find_Mask()
 	end
 	station.Get_Distance = function(other) return 1234.5 end
 	DebugMessage = function(text) table.insert(logged, text) end
+	EaWR_Stage.mask_debugger = debugger
+	EaWR_Stage.mask_unknown_hold = true
 	Serve(90)
+	Check(table.getn(asked) == table.getn(EaWR_Stage_Mask_Filters), "findmask: debugger hold retains all known answers")
+	Check(not EaWR_Stage.mask_unknown_requested, "findmask: held unknown query has not started")
+	EaWR_Stage.mask_unknown_hold = false
+	Serve(20)
 	Check(Fake.suspend_calls == 1, "findmask: the AI is suspended")
 	Check(table.getn(asked) == table.getn(EaWR_Stage_Mask_Filters) + 1, "findmask: every filter and the unknown name are asked once")
-	Check(string.find(EaWR_Stage.line, "C=STAR_DESTROYER@1234 SC=nil", 1, true) ~= nil, "findmask: the line names each answer: " .. EaWR_Stage.line)
+	if debugger then
+		Check(string.len(EaWR_Stage.line) < 80 and string.find(EaWR_Stage.line, "done X=E", 1, true) ~= nil,
+		      "findmask: debugger display is a short phase label")
+		Check(table.getn(logged) == 0, "findmask: debugger state does not emit the joined verbose output")
+	else
+		Check(string.find(EaWR_Stage.line, "C=STAR_DESTROYER@1234 SC=nil", 1, true) ~= nil, "findmask: the line names each answer: " .. EaWR_Stage.line)
+		Check(table.getn(logged) == 2 and string.find(logged[1], "EAWR FM S=nil", 1, true) == 1, "findmask: the answers go to the AI log")
+	end
 	Check(string.find(EaWR_Stage.line, " X=E", 1, true) ~= nil, "findmask: an error is E: " .. EaWR_Stage.line)
-	Check(table.getn(logged) == 2 and string.find(logged[1], "EAWR FM S=nil", 1, true) == 1, "findmask: the answers go to the AI log")
+	Check(EaWR_Stage.mask_answers.C.kind == "object" and EaWR_Stage.mask_answers.C.distance == 1234.5,
+	      "findmask: the debugger receives the unrounded object result")
+	Check(EaWR_Stage.mask_answers.SC.kind == "nil" and EaWR_Stage.mask_unknown_answer.kind == "error",
+	      "findmask: nil and error are distinct structured results")
 	Check(not Posted("ERR"), "findmask: no ERR")
 	Find_Nearest = nil
 	DebugMessage = nil
@@ -444,7 +468,29 @@ Test_Turbo_Samples()
 Test_Refused_Ability_Abandons_The_Case()
 Test_Pause()
 Test_Find_Mask()
+Test_Find_Mask(true)
 Test_Melee()
+Battle("bolts")
+Serve(100)
+local bolt_shooter = EaWR_Stage.ship
+local bolt_target = EaWR_Stage.victims[1]
+Check(bolt_shooter and bolt_shooter.type_name == "Calamari_Cruiser", "bolts: MC80 shooter")
+Check(bolt_target and bolt_target.type_name == "Acclamator_Assault_Ship", "bolts: Acclamator target")
+Check(bolt_shooter and bolt_shooter.attack_target == bolt_target and Posted("FX bolts north"), "bolts: staged attack is labelled")
+EaWR_Stage_Reset()
+Check(bolt_shooter and bolt_shooter.despawned and bolt_target and bolt_target.despawned, "bolts: reset disposes both subjects")
+Battle("shieldgen")
+Serve(100)
+local generator = EaWR_Stage.ship
+Check(generator and generator.type_name == "Underworld_Star_Base_1", "shieldgen: authored station is staged")
+Check(generator and generator.fire_suppressed, "shieldgen: the subject stays idle")
+Check(table.getn(Fake.objects) == 1 and Posted("FX shieldgen intact"), "shieldgen: one persistent, labelled subject")
+EaWR_Stage_Reset()
+Check(generator and generator.despawned, "shieldgen: battle reset disposes the subject")
+Battle("shieldgen")
+Fake.refuse["prevent-fire"] = true
+Serve(100)
+Check(Posted("ERR") and not Posted("FX shieldgen intact"), "shieldgen: refused setup is never labelled successful")
 Test_Outcome("victory", "Skirmish_Empire_Star_Base_1", nil)
 Test_Outcome("defeat", "Skirmish_Rebel_Star_Base_1", nil)
 Test_Outcome("victory", "Skirmish_Empire_Star_Base_1", true)

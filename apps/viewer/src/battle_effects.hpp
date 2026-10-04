@@ -119,6 +119,13 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
+        return registry_->set_detail(detail);
+    }
+    void measure_preparation(bool enabled) noexcept { measure_preparation_ = enabled; projectile_prepare_ms_ = 0.0; }
+    [[nodiscard]] double projectile_prepare_ms() const noexcept { return projectile_prepare_ms_; }
+    // BP-68: perspective axis measurements are capture diagnostics, off in normal play.
+    void collect_axis_diagnostics(bool enabled) noexcept { collect_axis_diagnostics_ = enabled; }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "battle_effects" member, followed by ",\n".
@@ -128,6 +135,8 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    bool measure_preparation_{};
+    double projectile_prepare_ms_{};
     enum class Render : std::uint8_t { none, model, beam, kite };
     struct ProjectileLook final {
         std::string projectile;
@@ -137,15 +146,21 @@ private:
         std::array<float, 2> slot{};
         std::array<float, 4> colour{1.0F, 1.0F, 1.0F, 1.0F};
         std::string detonation;        // Projectile_Object_Detonation_Particle
+        std::string lifetime_detonation; // Projectile_Lifetime_Detonation_Particle
         std::string armor_reduced;     // Projectile_Object_Armor_Reduced_Detonation_Particle
         std::string shield_absorbed;   // Projectile_Absorbed_By_Shields_Particle
         double step_length{};          // the shot's Max_Speed: its frame step (0: unknown)
     };
     struct TypeLooks final {
+        std::array<space::Vec3d, 2> beam_origins{};
+        std::string energy_owner_particle;
+        std::string replenish_particle;
         std::map<std::uint32_t, ProjectileLook> weapons; // by weapon slot key (HardPoints index or object_weapon)
         // #862 (space-abilities AB-66): the weapon's ability shot, the squadron's
         // ION_CANNON_SHOT override projectile, by weapon slot key.
         std::map<std::uint32_t, ProjectileLook> ability_weapons;
+        // WAD-38: BARRAGE retains its own override beside ordinary and ion shots.
+        std::map<std::uint32_t, ProjectileLook> barrage_weapons;
         std::string death_explosion;                     // Death_Explosions
         std::string spin_explosion;                      // Spin_Away_On_Death_Explosion (#447)
         std::vector<std::string> hardpoint_explosions;   // Death_Explosion_Particles, HardPoints order
@@ -153,6 +168,8 @@ private:
         // BP-63: Damage_Hit_Particles and Shield_Hit_Particles, in XML order.
         std::vector<std::string> damage_hits;
         std::vector<std::string> shield_hits;
+        std::vector<std::string> asteroid_hits;
+        space::ShieldCollisionMesh asteroid_collision;
         // Whether the model has a SHIELD sub-object (BP-17); what a projectile can hit (its
         // collidable meshes and the SHIELD mesh, BP-19) in model space (bind pose), built once
         // per type and cast against in model space; the type's Scale_Factor.
@@ -188,6 +205,18 @@ private:
         std::uint64_t resource{};
         particles::VertexStream stream;
     };
+    struct HeroBeamLook {
+        Batch batch;
+        std::string texture;
+        float width{};
+        particles::Color colour{1.0F, 1.0F, 1.0F, 1.0F};
+    };
+    std::array<HeroBeamLook, 2> hero_beams_;
+    std::map<sim::EntityId, particles::EffectHandle> energy_owner_effects_;
+    std::map<std::uint64_t, sim::tactical::TypeId> spawned_projectile_types_;
+    std::map<sim::tactical::TypeId, std::string> weaken_particles_;
+    std::map<std::pair<std::uint64_t, sim::EntityId>, particles::EffectHandle> weaken_effects_;
+    std::uint64_t energy_beams_drawn_{}, tractor_beams_drawn_{};
 
     [[nodiscard]] const ParticleType* particle_type(const std::string& name);
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
@@ -234,6 +263,7 @@ private:
     // the weapon_fired events that say so; they draw and hit with the ability shot's look.
     // Kept with the tick they launched and forgotten ability_projectile_memory ticks later.
     std::map<std::uint64_t, std::uint64_t> ability_projectiles_;
+    std::map<std::uint64_t, std::uint64_t> barrage_projectiles_;
     std::optional<std::uint64_t> ability_noted_through_;  // the last tick note_ability_shots read
     // Ability shots fired (weapon_fired events) and drawn (kite or beam frames), by projectile type.
     std::map<std::string, std::uint64_t> ability_shots_fired_;
@@ -270,6 +300,10 @@ private:
     std::uint64_t max_kites_{};
     std::uint64_t kites_head_leading_{};   // kite frames whose head vertex is furthest along the flight
     std::uint64_t kites_head_trailing_{};  // kite frames drawn back to front (BP-02)
+    std::uint64_t kite_axis_samples_{};
+    double kite_axis_max_sine_{};  // independent perspective projection of drawn axis vs motion
+    std::uint64_t kite_axis_reversed_{};
+    bool collect_axis_diagnostics_{};
     std::uint64_t max_beams_{};
     std::map<std::string, std::uint64_t> not_drawn_;     // projectile type -> frames it was in flight undrawn
     std::map<std::string, std::uint64_t> spawned_;       // reason:particle -> count

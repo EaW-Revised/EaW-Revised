@@ -171,6 +171,8 @@ public:
     void world_input(const godot::Ref<godot::InputEvent>& event);
     // #425: the command bar's unit cards; null before build() or when the shell has no card slots.
     [[nodiscard]] EawrUnitCards* unit_cards() const noexcept;
+    // WSU-33, WSU-55: world group text shares the command bar's cached font provider.
+    [[nodiscard]] godot::Ref<godot::Font> world_group_font(bool squadron) const;
     // #530: the build queue, the credits and the reinforcement pane; null before build() or when
     // the shell has none of them.
     [[nodiscard]] EawrProductionPanel* production() const noexcept;
@@ -190,6 +192,7 @@ public:
     struct MinimapView final {
         presentation::ui::MinimapExtents extents;
         std::vector<presentation::ui::MinimapUnit> units;
+        std::vector<presentation::ui::MinimapHazard> hazards;
         std::optional<std::array<std::array<double, 2>, 4>> ground; // MM-09, source X/Y
         std::vector<presentation::ui::MinimapRevealer> revealers;
         // #494: the local player's fog cells; when set, the fog layer reads them, not `revealers`.
@@ -224,6 +227,8 @@ public:
     void set_time_view(const TimeView& view);
     // #453: the local player's result (true: victory) once decided, and whether the battle ended.
     void set_battle(std::optional<bool> won, bool ended);
+    void set_results(const presentation::ui::BattleResults& results);
+    void set_begin(bool ready);
     // #848 (docs/behaviour/foc-battle-selection.md V-5b): while either overview level is on, the
     // tactical shell with everything on it and, while paused, the pause banner hide; the win/lose
     // message and the end panel stay (V-5e).

@@ -65,7 +65,7 @@ with `W` of 0 or 1; `S` = 0 with `W` = 0.
 
 ### Authored water minis (not selection inputs)
 
-These minis never change which technique is selected. They are listed so EAWR-27 does not
+These minis never change which technique is selected. They are listed so terrain, water, sky and nebula rendering does not
 need to reopen them. `0x15` is stored next to the family field, but none of the selection
 or draw paths above read it (G-07). `0x16` is the family (R-12). `0x1d`, `0x1e` and `0x1f`
 are the bump, base and third texture names (R-16, R-18). `0x1a` is the water RGB colour

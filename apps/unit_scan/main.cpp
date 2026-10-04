@@ -224,8 +224,8 @@ int main(const int argc, char** argv) {
     if (args->all_types) {
         // Every effective game object that authors HardPoints, instead of the pinned M2 fleet.
         for (const auto& definition : loaded.value().catalog.definitions()) {
-            if (!definition.winner || definition.category != eawr::data::Category::game_object) continue;
-            auto effective = loaded.value().catalog.resolve(definition.id);
+            if (!definition.namespace_winner || definition.category != eawr::data::Category::game_object) continue;
+            auto effective = loaded.value().catalog.resolve(definition.id, eawr::data::Category::game_object);
             if (!effective) continue;
             const auto* hardpoints = effective.value().value("HardPoints");
             if (hardpoints != nullptr && !hardpoints->value.raw_text.empty()) input.types.push_back(definition.id);

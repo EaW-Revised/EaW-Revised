@@ -151,6 +151,8 @@ using Rigid = std::array<float, 12>;
     if (ieq(shader, "MeshAdditiveVColor.fx")) return SceneRoute::meshadditive_vcolor;
     if (ieq(shader, "Planet.fx")) return SceneRoute::planet;
     if (ieq(shader, "Nebula.fx")) return SceneRoute::nebula;
+    // The alpha companion of the planet model stays with that model's owner.
+    if (ieq(shader, "MeshAlpha.fx")) return SceneRoute::legacy_mesh;
     return SceneRoute::unsupported;
 }
 
@@ -319,6 +321,7 @@ std::string_view to_string(const SceneRoute route) noexcept {
     case SceneRoute::meshadditive_vcolor: return "meshadditive_vcolor";
     case SceneRoute::planet: return "planet";
     case SceneRoute::nebula: return "nebula";
+    case SceneRoute::legacy_mesh: return "legacy_mesh";
     case SceneRoute::unsupported: return "unsupported";
     }
     return "unknown";

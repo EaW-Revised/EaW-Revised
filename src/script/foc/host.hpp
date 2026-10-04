@@ -93,8 +93,10 @@ struct ViewUnit {
     std::optional<math::Fixed> max_hull;
     std::optional<math::Fixed> max_shields;
     std::uint64_t visible_to{};          // snapshot player bits
-    sim::EntityId attack_target{};       // the unit's attack target
+    sim::EntityId attack_target{};       // weapon target: combat eligibility and in-range events
+    sim::EntityId formation_target{};    // commanded formation target: Lua object queries
     bool moving{};                       // a planned path or turn
+    bool formation_moving{};             // formation point travel for Lua order queries
     tactical::OrderKind order{tactical::OrderKind::none};
     sim::EntityId order_target{};
     bool container{};                    // a squadron's team container
@@ -107,6 +109,8 @@ struct ViewUnit {
     sim::EntityId squadron{};            // a craft's team container
     std::vector<sim::EntityId> members;  // a container's live craft
     std::vector<tactical::AbilityStatus> abilities; // #76: the snapshot's (none on a container)
+    tactical::TypeId purchase_type{}; // SAE-11/WHE-49: logical identity; combat still reads type
+    std::uint64_t purchase_token{}; // SAE-11: distinguish concurrent arrivals of the same type
 };
 
 struct ViewPlayer {
@@ -144,8 +148,13 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
     for (const auto& instance : snapshot.instances()) instances.emplace(instance.entity_id, &instance);
     std::map<sim::EntityId, const tactical::Squadron*> containers;
     std::map<sim::EntityId, sim::EntityId> craft;
+    std::map<sim::EntityId, std::pair<sim::EntityId, bool>> formations;
     for (const auto& squadron : world.squadrons()) {
         containers.emplace(squadron.container, &squadron);
+        if (const auto state = world.squadron_state(squadron.container)) {
+            formations.emplace(squadron.container,
+                std::pair{state->target, state->mode == tactical::SquadronMode::move});
+        }
         for (const sim::EntityId member : squadron.members) craft.emplace(member, squadron.container);
     }
     const auto fraction = [](math::Fixed part, math::Fixed whole) {
@@ -156,6 +165,8 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         ViewUnit entry;
         entry.id = unit.entity_id;
         entry.type = unit.type_id;
+        entry.purchase_type = tactical::purchase_identity(unit);
+        entry.purchase_token = unit.purchase_token;
         entry.owner = unit.owner;
         entry.position = unit.position;
         entry.rotation = unit.rotation;
@@ -189,6 +200,13 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         }
         if (const auto combat = world.combat_state(unit.entity_id)) entry.attack_target = combat->attack_target;
         if (const auto motion = world.motion_state(unit.entity_id)) entry.moving = motion->kind != tactical::MotionKind::none;
+        // FH-23: a squadron (and its craft) reports the formation target before a weapon
+        // target. Its container travels through the formation, without a ship motion state.
+        const auto formation = formations.find(entry.craft ? entry.squadron : entry.id);
+        if (formation != formations.end()) {
+            entry.formation_target = formation->second.first;
+            entry.formation_moving = formation->second.second;
+        }
         view->units.push_back(entry);
     }
     return view;
@@ -205,6 +223,9 @@ struct ContrastEntry {
 
 struct Host {
     AiSetup setup;
+    // SAE-02/03: borrowed immutable world during the barrier's script service.
+    const tactical::TacticalSession* world{};
+    std::shared_ptr<const tactical::TacticalSnapshot> snapshot;
     std::map<tactical::TypeId, const AiType*> types;
     std::map<std::string, const AiType*, std::less<>> types_by_name;
     std::map<tactical::PlayerId, const AiPlayer*> players;
@@ -220,6 +241,11 @@ struct Host {
     [[nodiscard]] const AiType* type(tactical::TypeId id) const {
         const auto found = types.find(id);
         return found == types.end() ? nullptr : found->second;
+    }
+    [[nodiscard]] const tactical::EconomyView* economy(tactical::PlayerId id) const {
+        if (!snapshot) return nullptr;
+        for (const auto& account : snapshot->economy()) if (account.player == id) return &account;
+        return nullptr;
     }
     [[nodiscard]] bool neutral(tactical::PlayerId id) const {
         const auto found = players.find(id);
@@ -265,6 +291,18 @@ inline std::optional<math::Vec3> position_of(const Host& host, const Value& valu
     }
     return out;
 }
+
+struct UnitDestination {
+    sim::EntityId object{};
+    math::Vec3 position{};
+};
+
+// FH-42: attack-target accepts objects directly or through an AI target.
+const ViewUnit* destination_object(const Host& host, const Value& value);
+
+// FH-41: movement takes a point; attack-move and guard may retain an object.
+std::optional<UnitDestination> unit_destination(const Host& host, const ViewUnit& mover,
+    const Value& value, bool follow_object, bool guard);
 
 inline std::optional<math::Fixed> distance(const math::Vec3& a, const math::Vec3& b) {
     auto x = math::subtract(b.x, a.x);

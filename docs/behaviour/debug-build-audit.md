@@ -5,16 +5,16 @@
 - Product: Star Wars Empire at War: Forces of Corruption. The code source is the FoC debug
   build with its program database (class, function and enum names, asserts), read on
   2026-09-26 under the [clean-room rule](../clean-room.md). Data claims were re-read in the FoC
-  profile of the retail XML. Recordings are the P2-06 fidelity scenarios
-  ([tests/fidelity](../../tests/fidelity/README.md)) and the EAWR-67 start capture.
+  profile of the retail XML. Recordings are the fixed-force fidelity scenarios
+  ([tests/fidelity](../../tests/fidelity/README.md)) and the pinned skirmish start capture.
 - Bounded question: for each gameplay or simulation claim in the behaviour notes below, does
   the original code do what the note says? Issue
-  EAWR-265.
-- Scope done: priorities 1 to 4 of EAWR-265 (space targeting, hardpoints, visibility and query
+  debug-build behaviour audit (legacy EAWR-265).
+- Scope done: priorities 1 to 4 of debug-build behaviour audit (space targeting, hardpoints, visibility and query
   order, tick rate, skirmish start, unit data loading) in part 1, and priorities 5 and 6 (Lua
   host, compiled chunks, API declarations, FoC tactical AI, XML registry, tactical camera input,
-  river groups) in part 2. Locomotion (EAWR-70) and the Lua number precision question (EAWR-246, settled
-  by EAWR-263) are excluded.
+  river groups) in part 2. Locomotion (ship movement and turning) and the Lua number precision question (Lua numeric-profile qualification, settled
+  by authoritative Lua numeric profile) are excluded.
 - Part 2 also read the installed FoC data where a claim depends on it: the Lua manifest
   (`plan/inventories/lua-manifest.json`) and the terrain-track records of the eight FoC maps
   with ribbon groups.
@@ -34,7 +34,7 @@
 | n/a | A data, owner or remake (project) rule with no original-code counterpart to check. |
 
 Where code and recordings disagree the recording wins. No such disagreement was found: every
-recording that bears on an audited claim (S-01, S-02, S-03, the EAWR-67 capture, and in part 2 the
+recording that bears on an audited claim (S-01, S-02, S-03, the pinned skirmish start capture, and in part 2 the
 owner's Naboo river stream) agrees with the code.
 
 A conclusion that the original never does something rests on code alone. Such conclusions are
@@ -84,7 +84,7 @@ resolved, fully or in part, is counted as confirmed.
 | R-14 | confirmed | The scan frame advances whether or not a target is found (AU-01). |
 | R-15 | confirmed | Neither the scan nor the firing attempt tests line of sight or obstruction (AU-01 to AU-05, AU-12). |
 | C-01 to C-08 | confirmed | Each follows from the rules above; C-01, C-03 and C-04 are also backed by recordings S-01, S-02 and S-03. Counted as eight claims. |
-| G-01 | not checkable | The collection comes from a spatial tree in collection order; its order depends on tree history. EAWR-469 read the tree and implements it (space-targeting CO-01 to CO-12). |
+| G-01 | not checkable | The collection comes from a spatial tree in collection order; its order depends on tree history. Target collection order and fighter approach read the tree and implements it (space-targeting CO-01 to CO-12). |
 | G-02 | not checkable | Binary32 against Q24 equivalence needs runtime comparison. |
 | G-03 | confirmed | Recipient resolved: the signal goes to the squadron when the parent leads its squadron, to nobody for other squadron members, and to the parent otherwise; the payload names the target and the hardpoint (AU-01). Timing stays with S-03. |
 
@@ -95,7 +95,7 @@ resolved, fully or in part, is counted as confirmed.
 | HD-01 | confirmed | Hull and hardpoint maxima times the space multiplier; the AI difficulty health multiplier applies only to AI-owned objects; then one plus the health modifiers (AU-28). |
 | HD-02 | confirmed | A hit on a live destroyable hardpoint damages only it; a hit on a destroyed one does nothing; a hit on a non-destroyable hardpoint goes to the hull (AU-20, AU-21). |
 | HD-03 | confirmed | Health clamps at zero and the hardpoint's effects switch off there (AU-22). |
-| HD-04 | confirmed | Threshold is data; the retail reticle colours come from the EAWR-72 research (E72-13) and were not re-read. |
+| HD-04 | confirmed | Threshold is data; the retail reticle colours come from the hardpoint damage, destruction and repair research (E72-13) and were not re-read. |
 | HD-05 | n/a | Data. |
 | HD-10 | confirmed | A destroyed or disabled weapon hardpoint may not fire (AU-11). |
 | HD-11 | confirmed | Last engine lost: engines off for good, TURBO and SPOILER_LOCK end, maximum speed times the engines-disabled modifier (AU-23, AU-24). |
@@ -117,7 +117,7 @@ resolved, fully or in part, is counted as confirmed.
 | HD-30 to HD-32 | n/a | Remake command rules (the Lua call was not re-read). Counted as three claims. |
 | G-H1 | confirmed | Resolved in part: within one object's service the drag runs before that object's weapons. The order between projectile hits and other objects' services stays open. |
 | G-H2 | not checkable | The flag default was not read. |
-| G-H3 | not checkable | Disables are EAWR-74 and EAWR-76 scope. |
+| G-H3 | not checkable | Disables are projectile, damage and shield resolution and space ability implementation scope. |
 | G-H4 | not checkable | The repair event's admission checks were not read. |
 | G-H5, G-H6 | confirmed | Retail changes hardpoint art only at destruction (AU-22); retail computes in binary32 (AU-26). Counted as two claims. |
 
@@ -127,14 +127,14 @@ resolved, fully or in part, is counted as confirmed.
 |---|---|---|
 | V-01 | n/a | Data. |
 | V-02 | confirmed | Tags apply in document order, so the last single-value occurrence wins (AU-80). |
-| V-03 | differs (runtime, RO-1) | The craft carry no `REVEAL` behaviour (AU-44, AU-48), as the code reading found, but fighters do reveal: RO-1 (EAWR-275) recorded a lone `X-Wing` and a lone `TIE_Fighter` squadron revealing through the squadron's team container, which has `REVEAL` with range 800. The reveal is centred on the members' bounding box, follows the formation, and survives the leader's death. The craft's own authored ranges go unused. EAWR-271 moves the fighter sensor profile from the craft to the squadron container. |
+| V-03 | differs (runtime, RO-1) | The craft carry no `REVEAL` behaviour (AU-44, AU-48), as the code reading found, but fighters do reveal: RO-1 (audit runtime observations) recorded a lone `X-Wing` and a lone `TIE_Fighter` squadron revealing through the squadron's team container, which has `REVEAL` with range 800. The reveal is centred on the members' bounding box, follows the formation, and survives the leader's death. The craft's own authored ranges go unused. Squadron-container fog reveal moves the fighter sensor profile from the craft to the squadron container. |
 | V-04 | differs | Team sharing is confirmed: a revealer reveals for every allied player (AU-44). But an allied object is exempt from fog only when it reveals itself; an allied craft without `REVEAL` is fogged by cells like any other object (AU-40). |
 | V-05, V-06 | differs | Retail contact is by fog cells, not an exact disc: a revealer marks a rasterised circle of cells whose radius is the range divided by the cell size, rounded; an object is seen when any of its sample points lies in a marked cell (AU-43, AU-47). Height is ignored, as the note says. Counted as two claims. |
 | V-07 | n/a | Remake arithmetic. |
 | V-08 | n/a | The simulation reads the current cell state. Retail presentation re-checks every 30 frames and fades (AU-49); the remake's binary contact is a project choice. |
 | V-09 | confirmed | Clarified: weapon targeting applies fog for every owner, AI included; `AIUsesFogOfWarSpace` only relaxes fog queries made without the force flag (AU-41). |
 | V-10 | confirmed | Map owners are players and their revealers reveal for their allies (AU-44). Added detail: an object without the hide-when-fogged or team behaviour is never fogged; every M2 map object has the hide-when-fogged behaviour. |
-| Q-01 | n/a | Project order; target scans use the CO rules since EAWR-469. |
+| Q-01 | n/a | Project order; target scans use the CO rules since the target collection order and fighter approach work. |
 | Q-02 | confirmed | Targeting box as R-07 (AU-03). |
 | Q-03, Q-05 | n/a | Project rules. Counted as two claims. |
 | Q-04 | confirmed | Retail queries one player's owned collidable objects at a time (AU-03). |
@@ -153,7 +153,7 @@ resolved, fully or in part, is counted as confirmed.
 | TR-03 | confirmed | Game time is frames divided by the logical rate (TR-E4; object Lua service uses the same). |
 | TR-04 | confirmed | The seconds-to-frames helper rounds half away from zero on the binary32 product (AU-63). Added: several subsystems do not use it and truncate instead (weapon recharge and pulse delay, AU-64; the opportunity rescan interval, AU-01). |
 | TR-05, TR-06 | n/a | Project rules. Counted as two claims. |
-| TR-U1 | not checkable | Needs the EAWR-43 cadence measurement. |
+| TR-U1 | not checkable | Needs the original-game behaviour recordings cadence measurement. |
 | TR-U2 | confirmed | Resolved: half away from zero after a binary32 multiply and add. |
 | TR-U3 | not checkable | Wall-clock pacing. |
 | TR-U4 | n/a | Covered by TR-04 above. |
@@ -163,9 +163,9 @@ resolved, fully or in part, is counted as confirmed.
 | Claim | Verdict | Reason |
 |---|---|---|
 | Players | n/a | IDs and colours are project and owner rules (SK-12 colours match the capture). |
-| Markers | confirmed | The k-th spawn marker in object-list order, head insertion (the EAWR-67 code reading and capture; not re-read here). |
-| Station | not found | The skirmish station placement path was not located in this pass; the EAWR-67 capture puts the station on its marker. |
-| Companies | confirmed | All default and fleet companies are created at the one spawn marker with its facing (the EAWR-67 code reading). |
+| Markers | confirmed | The k-th spawn marker in object-list order, head insertion (the pinned skirmish start code reading and capture; not re-read here). |
+| Station | not found | The skirmish station placement path was not located in this pass; the pinned skirmish start capture puts the station on its marker. |
+| Companies | confirmed | All default and fleet companies are created at the one spawn marker with its facing (the pinned skirmish start code reading). |
 | Map objects | differs | Retail remaps map-object ownership by faction, not by TED owner index: objects of a playable faction are deleted, objects of a non-playable faction go to that faction's real player, and without one a non-discardable decoration goes to the Neutral player and anything else is deleted (AU-70). |
 | Entity IDs, transforms | n/a | Project. Counted as two claims. |
 | Economy, launches | n/a | Owner rules (SK-30, SK-31, SK-23). Counted as two claims. |
@@ -199,7 +199,7 @@ resolved, fully or in part, is counted as confirmed.
 | L-07 | confirmed | A failed module load fails the start. Added detail: the debug build offers to reload the script and retries on yes (AU-104). |
 | L-10, L-11 | confirmed | Absent or non-function names give no result; parameters in order; one result; a failed protected call takes the alert path and gives no result (AU-115). Added detail: a nil result is also no result. Counted as two claims. |
 | L-12 to L-14 | confirmed | The host object is called through its `__call` metamethod: the userdata comes first, the rest follow in order, the current coroutine is set before dispatch, the result list becomes the Lua results and an empty or missing list gives none. Tables become maps only when the callee opts in (AU-112, AU-114). Counted as three claims. |
-| L-15 | differs | The x64 host wrapper stores numbers as binary64 (AU-112). The P0 host keeps its binary32 boundary by the [numeric profile](../lua-numeric-profile.md) decision (EAWR-263); the note now states both. |
+| L-15 | differs | The x64 host wrapper stores numbers as binary64 (AU-112). The P0 host keeps its binary32 boundary by the [numeric profile](../lua-numeric-profile.md) decision (authoritative Lua numeric profile); the note now states both. |
 | L-16 | n/a | A Phase 0 requirement (`P0-07-REQ`), not a retail rule. |
 | L-20, L-21 | confirmed | A coroutine names a global function and takes at most one initial value; the identifier is the zero-based slot index. Live threads are held in a global table named `LuaThreadTable` (AU-109, AU-141). Counted as two claims. |
 | L-22 | confirmed | The pump visits slots in index order and resumes each once (AU-110). |
@@ -355,37 +355,37 @@ elevation otherwise (AU-138). Naboo's river tracks have custom height 0 (AU-139)
 ## Remake implementation check
 
 The audited notes were compared with `src/sim`, `src/units` and `src/skirmish`. Targeting is not
-implemented yet (EAWR-73), so its corrections change no code.
+implemented yet (target selection and weapon fire), so its corrections change no code.
 
 - Priority sets: `units` loaded `Attack_Priorities` and `Hard_Point_Priorities` only. The FoC
   sets also carry unit, category, property and hardpoint exclusions (every space set excludes
-  the `NotOpportunityTarget` property and the destroyable asteroids). EAWR-73 needs them. Done in
-  EAWR-270: the exclusions, entry kinds, unit property flags and the set-side R-09 scoring
+  the `NotOpportunityTarget` property and the destroyable asteroids). The target-selection and weapon-fire implementation needs them. Done in
+  target-priority exclusions and property flags: the exclusions, entry kinds, unit property flags and the set-side R-09 scoring
   ([unit data](../unit-data.md#priority-sets)).
 - Sensors: `sensor_table` gives a profile to every type with `Space_FOW_Reveal_Range`,
-  including the four craft that have no `REVEAL` behaviour; per RO-1 the reveal belongs to the squadron container instead (V-03, EAWR-271). The contact test is the exact
+  including the four craft that have no `REVEAL` behaviour; per RO-1 the reveal belongs to the squadron container instead (V-03, squadron-container fog reveal). The contact test is the exact
   disc of V-07, a project choice.
 - Map objects: `build_start` keeps every map object and makes one player per TED owner index
   (Skirmish start, Map objects). On Coruscant the owners are Neutral (index 3) and Hutts
   (index 7, the resource containers), both non-playable, so no object would be deleted. The
   owner confirmed the containers are Hutt-owned in play (orange on the minimap), neutral
-  destructible mines (RO-2, owner EAWR-312). Done in EAWR-272: `build_start` makes the retail
+  destructible mines (RO-2, owner resource-container capture). Done in map-object ownership by faction: `build_start` makes the retail
   skirmish players and remaps or deletes map objects by faction
   ([skirmish start](../skirmish-start.md)); Coruscant deletes nothing.
-- Durability (`sim::tactical`, EAWR-72) matches the confirmed hardpoint rules.
+- Durability (`sim::tactical`, hardpoint damage, destruction and repair) matches the confirmed hardpoint rules.
 
 Part 2 compared the Lua, AI, camera and river notes with `src/script`, `src/presentation` and
 the viewer.
 
 - Lua host: `script_host.cpp` opens base, string and table. Leaving out `security` changes no
-  script (L-02). The L-23/LUA-G07 pump difference recorded by this audit was resolved in EAWR-292:
+  script (L-02). The L-23/LUA-G07 pump difference recorded by this audit was resolved in coroutine pump slot retention:
   the host now reads the topmost result and restarts a thread after `return true`.
 - Compiled chunks: the Phase 0 conversion path serves the EaW smoke fixture only. The FoC
   runtime loads text sources, which the VFS already selects (L-06), so no conversion is needed
   there.
-- Tactical AI: not implemented yet (EAWR-79). Every engine entry of the EAWR-79 selection exists in FoC
+- Tactical AI: not implemented yet (tactical AI host). Every engine entry of the tactical AI host selection exists in FoC
   (AI-42), so the member and receiver binding of AI-44 has a complete name list to bind.
-- Camera: the map cameras follow the FoC middle-button law since PI-9 (EAWR-295): Ctrl + middle
+- Camera: the map cameras follow the FoC middle-button law since PI-9 (rotate-drag camera law): Ctrl + middle
   drag rotates and tilts by the XML per-mouse-unit rates in screen-fraction units (RO-7), a
   plain middle drag translates and a middle click resets the view.
 - Rivers: `terrain::visible_rivers` keeps groups by draw mode 4 or 5 and ignores the track type.
@@ -394,7 +394,7 @@ the viewer.
 
 ## Findings for open tickets
 
-For EAWR-73 (weapon fire), from the firing attempt read for R-13 (AU-12):
+For weapon fire, from the firing attempt read for R-13 (AU-12):
 
 - The attempt checks the planar distance from the weapon midpoint to the aim point against the
   range plus the target's soft radius, and rejects a point closer than the minimum range.
@@ -405,7 +405,7 @@ For EAWR-73 (weapon fire), from the firing attempt read for R-13 (AU-12):
   truncates.
 - AI-owned hardpoints with a maximum recharge of at most 3.0 s always opportunity-fire (R-01).
 
-For EAWR-79 (tactical AI), from the goal, planning, freestore and Lua code (AU-117 to AU-132):
+For tactical AI host (tactical AI), from the goal, planning, freestore and Lua code (AU-117 to AU-132):
 
 - Implement the goal loop in the order given under [FoC tactical AI](#foc-tactical-ai). In
   tactical mode the budget shares only order the categories.
@@ -424,22 +424,22 @@ For EAWR-79 (tactical AI), from the goal, planning, freestore and Lua code (AU-1
 
 | ID | Title | Scope |
 |---|---|---|
-| PI-1 | units: load priority-set exclusions, exact-type entries and property flags | `load_priority_sets` reads only `Attack_Priorities` and `Hard_Point_Priorities`. The R-09 lookup also needs the unit, category, property and hardpoint exclusions and each type's property flags. Needed before EAWR-73 chooses opportunity targets. |
-| PI-2 | sim: fighter fog reveal follows FoC's actual source (EAWR-271) | Filed re-scoped after the owner's report that fighters do reveal: find the real source of fighter reveal and match it; do not remove fighter sensors unless RO-1 shows retail fighters reveal nothing. |
-| PI-3 | skirmish: retail map-object ownership by faction | `build_start` makes one player per TED owner index and keeps every object; retail remaps by faction and deletes playable-faction objects (Skirmish start). Done in EAWR-272. |
+| PI-1 | units: load priority-set exclusions, exact-type entries and property flags | `load_priority_sets` reads only `Attack_Priorities` and `Hard_Point_Priorities`. The R-09 lookup also needs the unit, category, property and hardpoint exclusions and each type's property flags. Needed before the target selection and weapon fire work chooses opportunity targets. |
+| PI-2 | sim: fighter fog reveal follows FoC's actual source (squadron-container fog reveal) | Filed re-scoped after the owner's report that fighters do reveal: find the real source of fighter reveal and match it; do not remove fighter sensors unless RO-1 shows retail fighters reveal nothing. |
+| PI-3 | skirmish: retail map-object ownership by faction | `build_start` makes one player per TED owner index and keeps every object; retail remaps by faction and deletes playable-faction objects (Skirmish start). Done in map-object ownership by faction. |
 | PI-4 | units: retail list-tag, empty-value and boolean parse semantics | Variant list tags, empty or `TBD` values and boolean spellings differ from the unit-table value rules ([unit-data.md](../unit-data.md)). No pinned type is affected; align before the tables load more types. |
 | PI-5 | sim: retail fog-cell contact rule (fidelity) | Rules v1 uses an exact disc and ignores dense cells (V-05 to V-07, G-V2). Decide after RO-3 whether M2 needs the retail cell rule. |
 | PI-6 | script: coroutine pump keeps a slot on a true result | The host ends a coroutine on a normal return and rejects multi-value yields; retail keeps any slot whose topmost value is true and restarts a coroutine that returned true (L-23, LUA-G07). Align after RO-4. |
-| PI-7 | inventories: FoC Lua registration index | The declaration index is GlyphX and misses 20 FoC globals and 61 member names, and lists 22 wide-string methods FoC lacks (AU-117). Add a names-only FoC index (visible name, receiver class) for EAWR-79 stubs and missing-API reports. |
+| PI-7 | inventories: FoC Lua registration index | The declaration index is GlyphX and misses 20 FoC globals and 61 member names, and lists 22 wide-string methods FoC lacks (AU-117). Add a names-only FoC index (visible name, receiver class) for tactical AI host stubs and missing-API reports. |
 | PI-8 | presentation: classify terrain tracks by track type (fidelity) | `visible_rivers` selects by draw mode. Retail selects the water pass by the track-type parameter and draws every other track in the track pass; `um11` has 42 water-type tracks. Land water elevation from river tracks belongs to later land work. |
-| PI-9 | camera: FoC rotate-drag law (fidelity) | Retail rotate drags also tilt pitch by `Pitch_Per_Mouse_Unit`, move in screen fractions times 4 (1 with Ctrl) and a middle click without a drag resets the view. Adopted after RO-7 (EAWR-295): see the middle-button law in tactical-camera-input.md. |
+| PI-9 | camera: FoC rotate-drag law (fidelity) | Retail rotate drags also tilt pitch by `Pitch_Per_Mouse_Unit`, move in screen fractions times 4 (1 with Ctrl) and a middle click without a drag resets the view. Adopted after RO-7 (rotate-drag camera law): see the middle-button law in tactical-camera-input.md. |
 
 ## Runtime observations needed
 
 | ID | Observation | Settles |
 |---|---|---|
 | RO-1 | In a FoC space skirmish with fog on, does a lone X-Wing or TIE Fighter squadron reveal enemy units that no other own unit sees? | V-03 (code reading says no; owner says yes) Answered 2026-09-26: yes, through the squadron container (V-03). |
-| RO-2 | Who owns the eight Hutts resource containers on Coruscant at the start of a retail skirmish (or are they removed)? | Answered 2026-09-26 (owner EAWR-312): Hutt-owned, orange on the minimap, neutral destructible mines. |
+| RO-2 | Who owns the eight Hutts resource containers on Coruscant at the start of a retail skirmish (or are they removed)? | Answered 2026-09-26 (owner resource-container capture): Hutt-owned, orange on the minimap, neutral destructible mines. |
 | RO-3 | Contact at the edge of a reveal range, one cell inside and one outside. | V-05, V-06 cell rule |
 | RO-4 | In the debug build, a script thread function that returns `true` after logging once: is it logged once, or again on every pump? | L-23 (code says again) |
 | RO-5 | A FoC space skirmish with the AI log on: does any tactical goal activation take the desire-ordered pass, or do all come from the random draw? | AI loop step 4 (code says the draw only) |
@@ -457,7 +457,7 @@ For EAWR-79 (tactical AI), from the goal, planning, freestore and Lua code (AU-1
 
 ## Inference sweep 2026-09-26
 
-Issue EAWR-332. `docs/` and `plan/`
+Scope: inferred-behaviour claim audit (legacy EAWR-332). `docs/` and `plan/`
 were searched for original-behaviour claims resting on inference ("project reading",
 "inference", "inferred", "assumed", "unconfirmed", "not traced", "static reading", "likely",
 "probably", "presumably", "reading only", "needs a runtime check"). Each claim was checked in the
@@ -470,26 +470,26 @@ the table above; "corrected" means the note or list was wrong and has been fixed
 | Claim | Where (note; code) | Verdict | Evidence |
 |---|---|---|---|
 | A tag authored twice in one layer keeps its last value (`Targeting_Max_Attack_Distance` 2000 then 800, `Space_FOW_Reveal_Range` 1200 then 1000), which the Phase 2 list called unconfirmed. | Phase 2 fidelity list, [unit-data.md](../unit-data.md); `src/units/unit_tables.cpp` | confirmed | IS-01 to IS-03 (object and hardpoint parsers visit tags in document order; float and string fields overwrite). The fidelity lines are removed. |
-| `HP_Empire_Station_One_01` authors `Fire_Bone_B` three times and "retail may fire from all three". | Phase 2 fidelity list; `unit_tables.cpp` `fire_b` | corrected | IS-02 to IS-04: `Fire_Bone_B` is one string field, so retail keeps only `FP01_LC_03`, as the unit tables do. Weapon fire belongs to EAWR-320. |
+| `HP_Empire_Station_One_01` authors `Fire_Bone_B` three times and "retail may fire from all three". | Phase 2 fidelity list; `unit_tables.cpp` `fire_b` | corrected | IS-02 to IS-04: `Fire_Bone_B` is one string field, so retail keeps only `FP01_LC_03`, as the unit tables do. Weapon fire belongs to target selection and weapon firing. |
 | `Dense_FOW_Reveal_Range_Multiplier` means the sensor range inside a nebula. | Phase 2 fidelity list, [space-visibility.md](space-visibility.md) G-V2; not loaded | confirmed | IS-07, IS-08. Added detail: a type without the tag gets 0.5; dense cells are those under the obstacle circle of a nebula, asteroid field, impassable asteroid or ion storm; the plain reveal range has a floor of 10. |
-| An absent `Should_Be_Destroyed_When_All_Hardpoints_Destroyed` means no. | [space-hardpoints.md](space-hardpoints.md) HD-21, G-H2; `unit_tables.cpp`, `sim/tactical/durability.cpp` | differs | IS-05, IS-06: the FoC default is yes. The last-hardpoint check runs when a hardpoint hit leaves that hardpoint at zero or below. EAWR-340. |
+| An absent `Should_Be_Destroyed_When_All_Hardpoints_Destroyed` means no. | [space-hardpoints.md](space-hardpoints.md) HD-21, G-H2; `unit_tables.cpp`, `sim/tactical/durability.cpp` | differs | IS-05, IS-06: the FoC default is yes. The last-hardpoint check runs when a hardpoint hit leaves that hardpoint at zero or below. All-hardpoints-destroyed default. |
 | A spawner's launch list is its fighter-bay hardpoints. | space-hardpoints.md HD-13; `sim` squadron launch flags | confirmed | IS-11: every hardpoint of type fighter bay, in hardpoint order. |
 | Hardpoints without repair values cannot be repaired. | space-hardpoints.md HR-06; `durability.cpp` `repair_frame` | confirmed (reason corrected) | IS-09, IS-10: the repair order is offered only for a star-base object's hardpoint below full health. The service never reads the amount, so a zero amount would repair forever without gain. The remake's amount check gives the same M2 outcome. |
 | Retail lets a player repair another player's object, or a hardpoint without values. | space-hardpoints.md G-H4 | unverified (in part) | IS-09, IS-10: neither the event nor the service checks the owner. The step that picks the click action for an enemy star base was not traced. |
 | A skirmish unit spawned on a marker takes the marker's facing. | [p1-effective-environment.md](p1-effective-environment.md) R-ROT-04, Phase 2 fidelity list; `src/skirmish/start.cpp` | confirmed | IS-12, IS-13. Added detail: the marker's facing also sets the player's reinforcement facing, and each company is created in free space near its marker (search distance 2500), not on it. The fidelity line on the facing is removed. |
 | The k-th player of a team starts at the k-th team spawn marker. | [m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) SK-11 | confirmed | IS-12. The object order of the marker search was not re-read. |
-| TED `0x17` is likely the shadow colour. | p1-effective-environment.md G-SHD-01; viewer shadow floor (EAWR-225) | confirmed | IS-15. `0x15`, whose consumer was unknown (G-ENV-01), is the sky background colour. |
-| TED owner index 7 is Hutts in the FoC faction order. | Phase 2 fidelity list; `scene::faction_order` | confirmed | IS-16 did not find the map-load step; owner EAWR-312 confirmed the containers are Hutt-owned in play (orange on the minimap), neutral destructible mines. RO-2 is answered. |
+| TED `0x17` is likely the shadow colour. | p1-effective-environment.md G-SHD-01; viewer shadow floor (per-channel shadow floor) | confirmed | IS-15. `0x15`, whose consumer was unknown (G-ENV-01), is the sky background colour. |
+| TED owner index 7 is Hutts in the FoC faction order. | Phase 2 fidelity list; `scene::faction_order` | confirmed | IS-16 did not find the map-load step; owner resource-container capture confirmed the containers are Hutt-owned in play (orange on the minimap), neutral destructible mines. RO-2 is answered. |
 | A sky's orientation triple is converted from degrees twice. | p1-effective-environment.md R-SKY-03 | unverified | Not settled: the sky objects are created through the generic object path with (tilt, 0, z-angle). The remake converts once. Gate G-SKY-02 and a runtime check stay. |
-| Damage emitters show from "damaged" and stay on once destroyed. | [asset-formats.md](../asset-formats.md) hardpoint table; `scene::hardpoint_art` | differs | E72-03 (HD-04, G-H5): retail changes hardpoint art only on destruction. EAWR-329 fixed the viewer and note. |
-| Damage emitters on a bone that no listed hardpoint names stay drawn at spawn. | Phase 2 fidelity list (EAWR-136) | confirmed (static) | EAWR-284 reading: the hide step runs only below each listed hardpoint's `Damage_Particles` bone. Needs a runtime check; EAWR-329's area. |
-| A hardpoint model that repeats its owner's skeleton is drawn in the owner's model space. | [Phase 1 README](../../plan/phase-1/README.md) (EAWR-32); viewer space population | unverified | The attach step was not found in this pass. The rule matches the two Coruscant stations it came from. |
+| Damage emitters show from "damaged" and stay on once destroyed. | [asset-formats.md](../asset-formats.md) hardpoint table; `scene::hardpoint_art` | differs | E72-03 (HD-04, G-H5): retail changes hardpoint art only on destruction. Destroyed-hardpoint visual changes fixed the viewer and note. |
+| Damage emitters on a bone that no listed hardpoint names stay drawn at spawn. | Phase 2 fidelity list (hardpoint model variants) | confirmed (static) | station damage and blink effects reading: the hide step runs only below each listed hardpoint's `Damage_Particles` bone. Needs a runtime check; destroyed-hardpoint visual changes's area. |
+| A hardpoint model that repeats its owner's skeleton is drawn in the owner's model space. | [Phase 1 README](../../plan/phase-1/README.md) (XML unit placement); viewer space population | unverified | The attach step was not found in this pass. The rule matches the two Coruscant stations it came from. |
 | A lone Y-wing reveals 600 besides its squadron's 1000. | space-visibility.md G-V5 | unverified | Not re-read; the part 1 reading found no suppression. A Y-wing staging capture stays open. |
-| With zero credits the space production goals fail activation (inert). | [foc-tactical-ai.md](foc-tactical-ai.md) AI-31, the production row | unverified | Not re-read (AI-G08 was confirmed in part by AU-124). No AI code exists yet (EAWR-79). |
+| With zero credits the space production goals fail activation (inert). | [foc-tactical-ai.md](foc-tactical-ai.md) AI-31, the production row | unverified | Not re-read (AI-G08 was confirmed in part by AU-124). No AI code exists yet (tactical AI host). |
 
 Totals: 9 confirmed (one with its reason corrected), 3 corrected or differing, 4 unverified
 (one of them in part). Code against evidence: one mismatch, the HD-21 default, which changes
-tactical outcomes and hashes and is filed as EAWR-340 on board EAWR-7. The dense multiplier, the
+tactical outcomes and hashes and is filed as all-hardpoints-destroyed default on board Lua runtime and script model. The dense multiplier, the
 reveal cells and the free-space placement were already on the Phase 2 fidelity list.
 
 Runtime observations added:
@@ -497,4 +497,4 @@ Runtime observations added:
 | ID | Observation | Settles |
 |---|---|---|
 | RO-8 | A FoC space map whose sky authors a non-zero z-angle: does the sky turn by that angle, or by the angle converted twice? | R-SKY-03, G-SKY-02 |
-| RO-9 | A retail station whose hardpoints are all destroyed except the non-destroyable ones: does the next hit on a non-destroyable hardpoint kill it? | EAWR-340 edge case |
+| RO-9 | A retail station whose hardpoints are all destroyed except the non-destroyable ones: does the next hit on a non-destroyable hardpoint kill it? | all-hardpoints-destroyed default edge case |

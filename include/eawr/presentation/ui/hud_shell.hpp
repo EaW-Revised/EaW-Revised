@@ -71,6 +71,17 @@ struct HudShellMesh {
     std::vector<data::ui::ShellTriangle> triangles;
 };
 
+// TM-09: the mounted pause shell held at the final frame of its first idle clip.
+struct PauseShell final {
+    std::string model;
+    std::string animation;
+    data::ui::ShellAnchors anchors;
+    std::optional<assets::Vec2f> text_origin;
+    std::vector<HudShellMesh> meshes;
+};
+[[nodiscard]] core::Result<PauseShell> pause_shell(const vfs::Vfs& filesystem,
+    const data::ui::CommandBarCatalog& catalog);
+
 struct HudShellButton {
     std::string name;
     data::ui::ReferenceRect rect; // the mesh's extent
@@ -84,6 +95,10 @@ struct HudShellButton {
     std::string mouse_over;
     std::string pressed;
     std::string disabled;
+    std::string blank;
+    std::string flash;
+    bool click_shift{};
+    bool selected_alpha{};
     std::string tooltip; // text-DB key
     std::vector<std::string> alternates; // Icon_Alternate_Texture_Name (a card border's pieces)
 };
@@ -209,9 +224,14 @@ struct HudShell {
 // row-major, 4 per row), the close button `r_close` and the population text `r_pop_text`.
 struct HudReinforcePane {
     std::string model;
-    std::vector<HudShellMesh> meshes;
+    // PU-67: these alternates encode occupied rows, independently of faction.
+    std::array<std::vector<HudShellMesh>, 5> meshes;
     std::vector<HudShellButton> slots;
     std::optional<HudShellButton> close;
+    std::optional<HudIconText> close_text;
+    std::string close_text_key;
+    std::string close_label;
+    bool close_swap_texture{};
     std::optional<HudIconText> population;
     std::string slot_face;
     std::int32_t slot_point_size{};
@@ -225,7 +245,7 @@ struct HudReinforcePane {
 [[nodiscard]] std::string reinforce_pane_model(const data::ui::CommandBarCatalog& catalog);
 // Never fails: a missing part is left out with one EAWR-UI-0320 warning.
 [[nodiscard]] HudReinforcePane reinforce_pane(const data::ui::ShellAnchors& shell, const data::ui::CommandBarCatalog& catalog,
-                                              HudFaction faction);
+                                              const data::ui::TextDatabase* text = nullptr);
 
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
@@ -279,6 +299,7 @@ struct UnitCardLooks {
     // #530 PU-62: Tactical_Build_Cost_Multiplayer, the price a build button shows for a type the
     // session does not build (an upgrade object in M2, PU-20).
     std::optional<std::int64_t> build_cost;
+    std::string description;
 };
 [[nodiscard]] UnitCardLooks unit_card_looks(std::string_view type, const data::Catalog* objects,
                                             const data::ui::TextDatabase* text);

@@ -1,6 +1,7 @@
 #pragma once
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
+#include "eawr/presentation/skin_pose.hpp"
 
 #include "diagnostic_buffer.hpp"
 #include "fog_adapter.hpp"
@@ -14,6 +15,7 @@
 #include "stored_output.hpp"
 #include "submission_plan.hpp"
 #include "upload_identity.hpp"
+#include "upload_identity_pool.hpp"
 #include "upload_winding.hpp"
 
 #include <godot_cpp/classes/global_constants.hpp>
@@ -72,6 +74,19 @@ struct ReflectedUniform final {
     std::string hint_string;
 };
 
+struct CachedShader final {
+    RID shader;
+    std::vector<ReflectedUniform> uniforms;
+    std::vector<std::string> tokens;
+    ~CachedShader();
+};
+
+class GodotShaderCache::Impl final {
+public:
+    std::map<std::string, std::shared_ptr<const CachedShader>, std::less<>> entries;
+    std::size_t source_bytes{};
+};
+
 [[nodiscard]] std::vector<ReflectedUniform> reflected_uniforms(RenderingServer& rendering, const RID& shader);
 [[nodiscard]] std::optional<std::string> portable_limit_problem(
     const std::vector<ReflectedUniform>& uniforms, const std::vector<std::string>& tokens);
@@ -94,9 +109,12 @@ public:
         // Per-binding textures (upload with BindingTexture entries), by name.
         std::vector<std::pair<std::string, RID>> binding_textures;
         RID shader;
+        std::shared_ptr<const CachedShader> shared_shader;
         RID material;
         RenderPass pass{RenderPass::opaque};
+        std::optional<std::int32_t> priority{};
         std::size_t bone_count{};
+        std::vector<std::uint8_t> skin_used_bones;
         bool skinned{};
         std::vector<std::uint32_t> billboard_modes;
         std::vector<std::int32_t> bone_parents;
@@ -111,7 +129,7 @@ public:
         // render mode to replace, so the default shader is drawn instead.
         bool shadow_variant_failed{};
         // A repeated upload is a shared reference only for this identity.
-        detail::UploadIdentity identity{};
+        std::shared_future<detail::UploadIdentity> identity;
     };
 
     struct FogConsumer final {
@@ -154,7 +172,7 @@ public:
         std::vector<Transform3D> model_transforms{};
     };
 
-    explicit Impl(Node3D& owner);
+    explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders);
 
     ~Impl();
 
@@ -221,9 +239,14 @@ public:
 
     void set_billboard_light(const sim::AssetId asset_id, const std::array<float, 3>& toward_light);
     [[nodiscard]] core::Result<void> set_material_scalar(sim::AssetId asset_id, std::string_view binding, float value);
+    [[nodiscard]] core::Result<void> set_material_priority(sim::AssetId asset_id, std::int32_t priority);
     void set_light_scale(sim::EntityId entity_id, const std::array<float, 3>& rgb);
     void apply_light_scale(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
+    void set_unit_colorization(sim::EntityId entity_id, const std::array<float, 3>& rgb);
+    void apply_unit_colorization(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
     void set_unit_opacity(sim::EntityId entity_id, float alpha);
+    void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
+    void forget_instance_pose(sim::EntityId entity_id);
     void apply_unit_opacity(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
 
     [[nodiscard]] std::vector<GodotRenderer::SkinBindingEvidence> skin_bindings() const;
@@ -305,7 +328,8 @@ private:
     InstanceMap::iterator remove_instance(RenderingServer* rendering, const InstanceMap::iterator instance);
 
     [[nodiscard]] static bool apply_skin_pose(
-        RenderingServer& rendering, const Instance& instance, const PendingPose& pose);
+        RenderingServer& rendering, const Instance& instance, const PendingPose& pose,
+        std::span<const std::uint8_t> changes = {});
 
     void refresh_billboards(RenderingServer& rendering, const sim::EntityId entity,
                             const Instance& instance, const Resource& resource);
@@ -360,12 +384,15 @@ private:
     static void free_resource(RenderingServer& rendering, const Resource& resource);
 
     Node3D& owner_;
+    std::shared_ptr<GodotShaderCache> shader_cache_;
     RID scenario_;
     RID viewport_;
     RID camera_;
     Transform3D view_transform_;
     RID environment_;
     stored_output::Compositor stored_compositor_;
+    // Declared before resources so it also outlives their digest futures.
+    std::unique_ptr<detail::UploadIdentityPool> upload_identity_pool_;
     std::map<sim::AssetId, Resource> resources_;
     std::map<std::string, RID> shared_textures_;
     std::optional<GodotRenderer::LightingState> lighting_;
@@ -379,11 +406,14 @@ private:
     detail::ResourceLeaseLedger leases_;
     std::unordered_map<sim::EntityId, Instance> instances_;
     std::unordered_map<sim::EntityId, PendingPose> skin_poses_;
+    std::vector<std::uint8_t> skin_changes_;
+    BillboardPoseScratch<Transform3D> billboard_pose_;
     // Per-entity light scale RGB (set_light_scale); absent means (1, 1, 1).
     std::unordered_map<sim::EntityId, std::array<float, 3>> light_scales_;
-    // Per-entity opacity (set_unit_opacity, #535); absent means 1 (fully opaque). Applied as an
-    // instance shader parameter that the hull adapters dither with, not FoC's shader-level alpha
-    // blend (space-fog-presentation.md FW-18).
+    // Allocated once per coloured piece, retained while capture progress changes.
+    std::unordered_map<sim::EntityId, std::array<float, 3>> colorizations_;
+    // Per-entity opacity (set_unit_opacity); absent means 1. Geometry transparency shares the
+    // smooth blend across every material (space-fog-presentation.md FW-18, FW-19).
     std::unordered_map<sim::EntityId, float> opacities_;
     detail::MissingAssetWaits missing_waits_;
     std::vector<GodotRenderer::SubmissionEvidence> submission_evidence_;

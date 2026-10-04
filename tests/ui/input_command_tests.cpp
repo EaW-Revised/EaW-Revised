@@ -201,6 +201,18 @@ void command_sink_contracts() {
     expect(ability != nullptr && ability->ability == tactical::AbilityKind::turbo
                && ability->action == tactical::AbilityAction::deactivate,
         "a unit ability intent becomes an ability command");
+    for (const auto kind : {tactical::AbilityKind::ion_cannon_shot, tactical::AbilityKind::concentrate_fire,
+        tactical::AbilityKind::energy_weapon, tactical::AbilityKind::tractor_beam}) {
+        auto beam = intent(ui::TacticalVerb::ability, {4}, {}, 12, 0, ui::CommandOrigin::world_click);
+        beam.unit_ability = kind;
+        beam.hardpoint = 5;
+        const auto transferred = ui::command_payload(beam);
+        expect(transferred && transferred.value() == tactical::CommandPayload{
+            tactical::AbilityPayload{kind, tactical::AbilityAction::activate, 12, 5}},
+            "targeted ability world click preserves target and hardpoint through the command sink");
+        beam.target = sim::invalid_entity_id;
+        expect(!ui::command_payload(beam), "targeted ability activation refuses a missing world target");
+    }
     // #531 (space-orders OR-20): an attack intent that names a hardpoint becomes an attack on it.
     auto on_hardpoint = intent(ui::TacticalVerb::attack, {4}, {}, 12, 0, ui::CommandOrigin::world_click);
     on_hardpoint.hardpoint = 5;
@@ -418,7 +430,92 @@ void input_routing_contracts() {
 } // namespace
 
 int main() {
+    {
+        ui::CommandScheduler scheduler(local_player);
+        ui::OrderInput input(scheduler);
+        input.set_selection({1});
+        auto issued = input.world_command(at(point(100, 0)), ui::CommandOrigin::world_click,
+            ui::OrderModifiers{false, false, true});
+        expect(issued && issued.value(), "WHZ-08a: right double click issues a movement order");
+        auto commands = scheduler.take(0);
+        const auto* move = commands.size() == 1 ? std::get_if<tactical::MovePayload>(&commands[0].payload) : nullptr;
+        expect(move && move->through_hazards, "WHZ-08a: double click survives input and command scheduling");
+        tactical::TacticalReplay replay{setup(), 1, commands};
+        auto bytes = tactical::write_replay(replay);
+        expect(static_cast<bool>(bytes), "WHZ-08a: explicit hazard movement has a valid replay encoding");
+        if (bytes) {
+            auto parsed = tactical::parse_replay(bytes.value());
+            expect(parsed && parsed.value() == replay, "WHZ-08a: hazard movement replay round trips");
+        }
+        const auto script = [](const bool through) {
+            return Script{
+                {0, [through](ui::OrderInput& in) {
+                    in.set_selection({1});
+                    const auto result = in.world_command(at(point(100, 0)), ui::CommandOrigin::world_click,
+                        ui::OrderModifiers{false, false, through});
+                    expect(result && result.value(), "WHZ-08a: movement submits for canonical flag contract");
+                }},
+                {2, [](ui::OrderInput& in) { check(in, in.stop(ui::CommandOrigin::hotkey), "WHZ-08a: stop replaces the prior movement flag"); }},
+            };
+        };
+        const sim::InlineExecutor executor;
+        const auto ordinary = play(script(false), executor, 3);
+        const auto forced = play(script(true), executor, 3);
+        expect(ordinary.hashes.size() == 3 && forced.hashes.size() == 3
+            && ordinary.hashes[0] != forced.hashes[0] && ordinary.hashes[2] == forced.hashes[2],
+            "WHZ-08a: MVHZ binds a retained flag even without motion and disappears on replacement");
+        issued = input.world_command(at(point(100, 0), 10, true), ui::CommandOrigin::world_click,
+            ui::OrderModifiers{false, false, true});
+        commands = scheduler.take(1);
+        expect(issued && commands.size() == 1 && std::holds_alternative<tactical::AttackPayload>(commands[0].payload),
+            "WHZ-08a: double click on an enemy retains the ordinary attack command");
+    }
+    {
+        auto sell = intent(ui::TacticalVerb::pad_sell, {91});
+        ui::CommandScheduler scheduler(local_player);
+        expect(static_cast<bool>(scheduler.issue(sell)), "WBP-30 sale schedules one selected child");
+        const auto commands = scheduler.take(0);
+        expect(commands.size() == 1 && commands.front().units == std::vector<sim::EntityId>{91}
+            && std::holds_alternative<tactical::PadSellPayload>(commands.front().payload),
+            "WBP-30 sale reaches the recorded command stream");
+        sell.units.clear();
+        expect(!scheduler.issue(sell), "sale requires a child");
+        sell.units = {91, 92};
+        expect(!scheduler.issue(sell), "sale refuses multiple children");
+    }
+    {
+        auto build = intent(ui::TacticalVerb::pad_build, {91});
+        build.type = 123;
+        const auto payload = ui::command_payload(build);
+        expect(payload && std::holds_alternative<tactical::PadBuildPayload>(payload.value()),
+            "WBP-36 palette dispatches the pad build payload");
+        if (payload) {
+            const auto* pad = std::get_if<tactical::PadBuildPayload>(&payload.value());
+            expect(pad && pad->type == 123, "UC type survives dispatch");
+        }
+        ui::CommandScheduler scheduler(local_player);
+        expect(static_cast<bool>(scheduler.issue(build)), "the palette request queues");
+        const auto commands = scheduler.take(0);
+        expect(commands.size() == 1 && commands.front().units == std::vector<sim::EntityId>{91},
+            "the parent pad survives dispatch to the replay command");
+        build.units.push_back(92);
+        expect(!scheduler.issue(build), "a pad request cannot become a multi-station purchase");
+    }
     command_sink_contracts();
+    {
+        auto weaken = intent(ui::TacticalVerb::ability, {91});
+        weaken.unit_ability = tactical::AbilityKind::weaken_enemy;
+        weaken.ability_action = tactical::AbilityAction::activate;
+        weaken.destination = {eawr::sim::math::Fixed::from_raw(17), eawr::sim::math::Fixed::from_raw(-31), {}};
+        const auto payload = ui::command_payload(weaken);
+        const auto* ability = payload ? std::get_if<tactical::AbilityPayload>(&payload.value()) : nullptr;
+        expect(ability && ability->position == weaken.destination && ability->target == 0,
+            "weaken world point survives the command sink without an object target");
+        weaken.ability_action = tactical::AbilityAction::deactivate;
+        const auto ended = ui::command_payload(weaken);
+        expect(ended && !std::get<tactical::AbilityPayload>(ended.value()).position,
+            "a non-activation carries no world point");
+    }
     command_scheduler_cross_thread();
     input_routing_contracts();
     if (test::ui::failures() != 0) {

@@ -65,18 +65,17 @@ TEXTURES = {
 
 EXPECTED = {
     "placements": 7,
-    # towers 0 and 1, the depot: every surface supported and resolved.
-    "resolved": 3,
+    # towers 0, 1 and 6, the depot: every surface supported and resolved.
+    "resolved": 4,
     # plus the beacon, whose shadow-volume surface is unsupported.
-    "drawable": 4,
-    "unresolved": 4,
+    "drawable": 5,
+    "unresolved": 3,
     "by_cause": {
         "shader_unsupported": 2,  # beacon (shadow volume) and marker (solid colour)
         "crc_missing": 1,
-        "orientation_three_axis": 1,
     },
     "scene_assets": 4,
-    "instances": 4,
+    "instances": 5,
     "surfaces_uploaded": 3,
 }
 

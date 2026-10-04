@@ -24,6 +24,10 @@ namespace model = presentation::ui;
 // ABE-5: the press flash (Selected_Texture_Name) fades out over 0.2 s.
 constexpr double flash_seconds = 0.2;
 
+[[nodiscard]] String reason_text(const std::string_view reason) {
+    return reason.empty() ? String{} : String::utf8(reason.data(), static_cast<int64_t>(reason.size()));
+}
+
 [[nodiscard]] Rect2 rect2(const model::PixelRect& rect) {
     return Rect2(static_cast<float>(rect.x), static_cast<float>(rect.y), static_cast<float>(rect.width),
                  static_cast<float>(rect.height));
@@ -74,7 +78,8 @@ void EawrAbilityButtons::setup(Setup setup) {
 void EawrAbilityButtons::show(model::AbilityBar bar) {
     const auto same_button = [](const model::AbilityButton& a, const model::AbilityButton& b) {
         return a.component == b.component && a.ability == b.ability && a.shifted == b.shifted && a.icon == b.icon
-            && a.disabled == b.disabled && a.recharge == b.recharge && a.autofire == b.autofire && a.units == b.units;
+            && a.disabled == b.disabled && a.recharge == b.recharge && a.autofire == b.autofire && a.units == b.units
+            && a.disabled_reason == b.disabled_reason;
     };
     const auto same_mark = [](const model::CardAbilityMark& a, const model::CardAbilityMark& b) {
         return a.slot == b.slot && a.second == b.second && a.icon == b.icon && a.dial == b.dial && a.autofire == b.autofire;
@@ -85,6 +90,7 @@ void EawrAbilityButtons::show(model::AbilityBar bar) {
     if (same) return;
     bar_ = std::move(bar);
     if (hovered_ && *hovered_ >= bar_.buttons.size()) hovered_.reset();
+    set_tooltip_text(hovered_ ? reason_text(bar_.buttons[*hovered_].disabled_reason) : String());
     queue_redraw();
 }
 
@@ -127,6 +133,7 @@ void EawrAbilityButtons::_gui_input(const Ref<InputEvent>& event) {
         const auto index = button_at(motion->get_position());
         if (index != hovered_) {
             hovered_ = index;
+            set_tooltip_text(index ? reason_text(bar_.buttons[*index].disabled_reason) : String());
             queue_redraw();
         }
         return;
@@ -164,6 +171,7 @@ void EawrAbilityButtons::_notification(const int what) {
     if (what == NOTIFICATION_MOUSE_EXIT) {
         if (hovered_) {
             hovered_.reset();
+            set_tooltip_text(String());
             queue_redraw();
         }
     } else if (what == NOTIFICATION_PROCESS) {

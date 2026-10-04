@@ -1,13 +1,12 @@
 # Authoritative Lua sandbox and scheduler
 
-Contract for EAWR-247,
+Contract for the Lua sandbox (legacy EAWR-247),
 2026-09-26: the sandbox, canonical iteration, script time and randomness, and the tick
 scheduler of the authoritative Lua profile. It implements the
 [multiplayer readiness](multiplayer-readiness.md) policy with the amendments listed there,
 on the soft-float VM of the [numeric profile](lua-numeric-profile.md). The
 [P0 host](lua-runtime.md) is unchanged. Policy identity `eawr-lua-sandbox-v3` (v2 meters the
-table library and `string.rep`, EAWR-373; v3 adds metered pattern matching and the memory quota,
-EAWR-375), random
+table library and `string.rep`; v3 adds metered pattern matching and the memory quota), random
 stream identity `eawr-script-rng-v1`; changing a rule below needs a new identity, and both
 belong to session identity, to saved state and to state hashes ([persistence](lua-persistence.md)).
 v2 (2026-09-27) charges the table library's size-driven loops and `string.rep` to the budget
@@ -164,7 +163,7 @@ worker counts. Each instance draws from index 0 in every tick. A bounded draw in
 rejects words below 2^64 mod b, each rejected word consuming a draw; a unit draw is
 (word >> 11) × 2^-53, exact. The test `lua_sandbox_clock_rng` freezes words, draws and a
 10,000-word digest. `GameRandom.Free_Random` cannot be registered as a binding; FoC's
-`GameRandom` API itself belongs to EAWR-79.
+`GameRandom` API itself belongs to the tactical AI host.
 
 ## Scheduler
 
@@ -193,11 +192,11 @@ param)` returns the next slot number (never reused); the slot's function is the 
 value at creation, and the parameter reaches only the first resume. A pump visits slots in
 ascending order and re-reads the slot count, so a thread created during a pump runs in the
 same pump. After each resume the pump reads the topmost value the thread left (L-23 as
-corrected from the FoC debug build in EAWR-287): `true` keeps the slot, anything else or an
+corrected from the FoC debug build in the Lua, AI and camera behaviour audit): `true` keeps the slot, anything else or an
 error ends it. Retail does not tell a yield from a return, so a thread that returns `true`
 keeps its slot and starts its function again, without its parameter, on the next pump; a
 multi-value yield is decided by its last value. This is one policy point,
-`keep_slot_after_true_return` in `scheduler.cpp`, pending the runtime check RO-4 (EAWR-296);
+`keep_slot_after_true_return` in `scheduler.cpp`, pending the runtime check RO-4 (camera and audit rig observations);
 false gives the P0 rule (a normal return ends the slot). `_ScriptExit()` ends the pump after the current thread
 and removes the instance after the tick, keeping its output. `GetThreadID()` is -1 outside
 threads; `ThreadValue(name)`, `ThreadValue.Set(name, value)` and `ThreadValue.Reset()` keep
@@ -280,7 +279,7 @@ step the world; service the scripts on the same executor. Scripts therefore see 
 they follow, and their commands execute in the next one: never during a script call.
 
 A script command becomes a tactical player command through the translator registered for
-its verb (EAWR-79 registers FoC's), a pure function of the command that names the issuing
+its verb (the tactical AI host registers FoC's), a pure function of the command that names the issuing
 player, the units and the payload; script numbers cross into Q24 through `to_fixed`. The
 key is the router's: the next tick to execute and the issuer's next sequence, one past the
 latest key the world accepted from either path, so a player's UI input and its script share
@@ -294,7 +293,7 @@ service and the tick, so the world rejects that order when it executes it. Each 
 routed exactly once and enters the world's replay like any player command, so a headless
 replay of `record()` reproduces every world tick without a script (`lua_bridge_routing`).
 The tick's hash is `authoritative_state_sha256` over the world and script hashes; the live
-session turns it off (`set_authoritative_hash`, EAWR-895) and asks for the script hash only on
+session turns it off (`set_authoritative_hash`, off-thread script hashing) and asks for the script hash only on
 request, since it reads only the world's hash. A failed
 world step or script service is terminal.
 
@@ -338,10 +337,10 @@ ticks after 30 warm-up ticks:
 | 256 | 8 | 0.24 ms | 0.59 ms | 0.89 ms |
 
 The design budget (total Lua p99 at most 3 ms per 30 Hz tick) holds for 256 instances even
-on one worker, though the single-worker maximum is above it. The worker rows run on the EAWR-276
+on one worker, though the single-worker maximum is above it. The worker rows run on the persistent simulation worker pool
 pool (`platform::ThreadWorkerAdapter`); 8 workers are the rig's four cores with SMT. This
 scenario is heavier in table work than in arithmetic; the soft-float share of Lua time is measured by
-`lua_numeric_bench` (EAWR-246), about half for arithmetic-heavy code. EAWR-79 measures the real FoC
+`lua_numeric_bench`, about half for arithmetic-heavy code. The tactical AI host measures the real FoC
 AI load.
 
 ## Open items
@@ -349,11 +348,11 @@ AI load.
 - The game build's live session does not run scripts yet; hosting `ScriptedTacticalSession`
   on its simulation thread, world events as script events, and the story-driven HUD outputs
   (`FLASH_GUI`, `FORCE_CLICK_GUI` as immutable presentation messages whose clicks enter the
-  command path once) come with EAWR-79's bindings and EAWR-236's presentation bridge.
+  command path once) come with the tactical AI host's bindings and the Lua HUD presentation bridge.
 - FoC's per-object service gate (`ServiceRate`, `LastService`, a first offset drawn from the
-  sync random stream) and `GameRandom` belong to EAWR-79 with the object script bindings.
+  sync random stream) and `GameRandom` belong to the tactical AI host with the object script bindings.
 - The memory quota is per instance; a session-wide total (many instances each near their
   quota) is not bounded.
-- Mod gap (EAWR-610 scan): Fall of the Republic's EaWX cross-plot serialiser round-trips values
+- Mod gap (LuaJIT evaluation scan): Fall of the Republic's EaWX cross-plot serialiser round-trips values
   through `string.dump` and `loadstring`, which this sandbox forbids; that mod's feature fails
   here until a safe equivalent exists (unverified whether its tactical scripts reach it).

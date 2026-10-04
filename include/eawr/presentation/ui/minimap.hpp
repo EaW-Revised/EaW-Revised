@@ -44,6 +44,9 @@ struct MinimapSettings {
     bool guide_rectangle{};                         // Space_Is_Guide_Rectangle
     bool colorize_selected{true};                   // Radar_Colorize_Selected_Units
     data::ui::Rgba8 selected{209, 255, 209, 255};   // Radar_Selected_Units_Color
+    data::ui::Rgba8 nebula{255, 255, 255, 64};     // Nebula_Effect_Color, WHZ-71
+    data::ui::Rgba8 field{103, 130, 139, 127};     // Space_Asteroid_Field_Color, WHZ-72
+    data::ui::Rgba8 field_border{174, 171, 200, 127}; // Space_Asteroid_Field_Border_Color
     // MM-07: Factions.xml `Color` per faction name, for owners without a lobby colour.
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_colours;
     std::vector<core::Diagnostic> diagnostics;
@@ -63,6 +66,11 @@ struct MinimapTypeLooks {
     std::array<float, 2> size{0.05F, 0.05F};         // Radar_Icon_Size: half extents in minimap units
     bool show_facing{true};                          // Radar_Show_Facing
     bool rotate_icon{};                              // Radar_Rotate_Icon: the texture turns a quarter
+    float point_size{2.0F};                          // MM-16: Radar_Blip_Size, truncated before plotting
+    bool draw_to_scale{};                            // MM-17: Radar_Draw_To_Scale (default No)
+    double space_scale{2.0};                         // Radar_Icon_Scale_Space
+    bool hazard{};                                  // WHZ-70: field, storm or nebula
+    std::uint8_t hazard_kind{};                      // presentation report: field 1, storm 2, nebula 4
 };
 [[nodiscard]] MinimapTypeLooks minimap_type_looks(std::string_view type, const data::Catalog* objects);
 
@@ -99,9 +107,24 @@ struct MinimapUnit {
     double x{};
     double y{};
     double yaw_degrees{}; // facing about +z from +x
+    bool in_nebula{};     // WHZ-70/MM-12: suppress hostile blips independently of fog bypass
+    std::array<double, 2> world_half_size{}; // model's world bounds, before the radar scale
+    bool team{};         // MM-17: a model-free team's extent is the authored radar scale itself
 };
 
-// One textured quad of the minimap (MM-06, MM-07, MM-08).
+// MM-15: live members in team order, including members hidden by fog.
+struct MinimapSquadronMember {
+    double x{}, y{}, yaw_degrees{};
+    bool visible{};
+};
+struct MinimapSquadronPose {
+    double x{}, y{}, yaw_degrees{};
+};
+// Empty teams and teams whose first live member is unseen have no radar identity.
+[[nodiscard]] std::optional<MinimapSquadronPose> minimap_squadron_pose(
+    std::span<const MinimapSquadronMember> members) noexcept;
+
+// One textured quad or empty-icon point of the minimap (MM-06, MM-07, MM-08, MM-16).
 struct MinimapBlip {
     sim::EntityId id{};
     std::string icon;
@@ -110,13 +133,32 @@ struct MinimapBlip {
     double rotation_degrees{}; // counter-clockwise in the minimap frame; 0 draws the icon upright
     bool rotate_icon{};
     data::ui::Rgba8 colour{255, 255, 255, 255};
+    std::uint32_t point_pixels{1}; // MM-16: only the truncated size 2 produces a 2x2 block
 };
+struct MinimapPixelRect {
+    std::uint32_t x{}, y{}, width{}, height{};
+    friend constexpr bool operator==(const MinimapPixelRect&, const MinimapPixelRect&) noexcept = default;
+};
+// MM-16: texture pixels, top row first. A centre on the right or bottom edge is outside;
+// a 2x2 point on the last interior row/column is clipped rather than recentered.
+[[nodiscard]] std::optional<MinimapPixelRect> minimap_point_pixels(const MinimapBlip& blip,
+    std::uint32_t width, std::uint32_t height) noexcept;
 // The blips in draw order: the engine submits its icon list from the back, so the first unit is
 // drawn last and sits on top. Units whose type is not visible on the radar, or hostile units whose
 // type is hidden from enemy radars, are left out, as is a unit outside the world square.
 [[nodiscard]] std::vector<MinimapBlip> minimap_blips(std::span<const MinimapUnit> units,
     const std::function<const MinimapTypeLooks&(std::string_view type)>& looks, const MinimapExtents& extents,
     const MinimapSettings& settings);
+
+struct MinimapHazard {
+    double x{}, y{};
+    double x_extent{}, y_extent{}; // model bounding-box half extents, independent of soft tracking
+    std::uint8_t kind{};
+    friend bool operator==(const MinimapHazard&, const MinimapHazard&) = default;
+};
+// WHZ-72: one shared ellipse mask, two edge orientations and Gaussian fill/border coverage.
+[[nodiscard]] std::vector<std::uint8_t> minimap_hazards(std::span<const MinimapHazard> hazards,
+    const MinimapExtents& extents, const MinimapSettings& settings, std::uint32_t width, std::uint32_t height);
 
 // MM-09: the camera's view on the minimap. `ground` holds where the rays through the viewport's
 // top-left, top-right, bottom-right and bottom-left corners meet the reference plane (world X/Y).

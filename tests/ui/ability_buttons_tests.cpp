@@ -153,6 +153,20 @@ void test_active_dial() {
         if (!mark.dial) expect(!mark.icon.empty(), "AB-08: the untimed active card shows its icon and no dial");
     }
     expect(dials == 1 && bar.marks.size() == 2, "AB-08: the timed active card shows its icon and its dial");
+
+    // AB-05: zero completion is still a dial, both on the last active frame and
+    // at the start of recharge. It must not become the ready-state sentinel.
+    for (const ui::AbilityStatus status : {ui::AbilityStatus::active, ui::AbilityStatus::recharging}) {
+        state.stage({{1, turbo, {status, 0.0, false}}});
+        const ui::AbilityBar boundary = ui::ability_bar(layout, units, state, nullptr);
+        const ui::AbilityButton* zero = find(boundary, turbo);
+        expect(zero != nullptr && zero->recharge == 0.0, "AB-05: zero completion keeps the button dial");
+        bool card_dial = false;
+        for (const ui::CardAbilityMark& mark : boundary.marks) {
+            if (mark.icon == "i_sa_power_to_engines.tga" && mark.dial && *mark.dial == 0.0) card_dial = true;
+        }
+        expect(card_dial, "AB-08: zero completion keeps the card dial");
+    }
 }
 
 // AB-01: a second ability shifts both buttons and takes the next component.

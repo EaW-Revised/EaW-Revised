@@ -124,7 +124,7 @@ const DebrisProps::ParticleType* DebrisProps::particle_type(const std::string& n
     auto found = particle_types_.find(name);
     if (found != particle_types_.end()) return &found->second;
     ParticleType type;
-    auto object = catalog_->resolve(name);
+    auto object = catalog_->resolve(name, data::Category::game_object);
     if (!object) {
         type.cause = "not in the XML catalog";
     } else {
@@ -163,12 +163,12 @@ void DebrisProps::prepare(const units::UnitTables& tables, const tactical::Comba
         const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type->second->id));
         for (std::uint32_t hardpoint = 0; hardpoint < type->second->hardpoints.size(); ++hardpoint) {
             const std::string& id = type->second->hardpoints[hardpoint].id;
-            auto object = catalog_->resolve(id);
+            auto object = catalog_->resolve(id, data::Category::hardpoint);
             const std::string prop_type = object ? tag(object.value(), "Death_Breakoff_Prop") : std::string{};
             if (prop_type.empty()) continue;
             std::string status = "ready";
             Prop prop{.unit = unit, .hardpoint = hardpoint, .ship = placed_ships.size(), .type = prop_type};
-            auto prop_object = catalog_->resolve(prop_type);
+            auto prop_object = catalog_->resolve(prop_type, data::Category::game_object);
             const tactical::TargetHardpoint* point = nullptr;
             if (profile != nullptr) {
                 for (const tactical::TargetHardpoint& entry : profile->hardpoints) {

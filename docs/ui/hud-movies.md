@@ -1,10 +1,12 @@
-# HUD movies (EAWR-237, G12)
+<a id="hud-movies-237-g12"></a>
+
+# HUD movies (G12)
 
 Decision, 2026-09-26: FoC's HUD movies are Bink 1. The player converts them once
 with **their own FFmpeg** into a local Theora cache, and the viewer plays that cache
 with Godot's built-in `VideoStreamTheora`. The project ships and downloads no FFmpeg,
 no RAD SDK, no Bink decoder and no original or converted game data. This PR is the
-playback building block; EAWR-83 (UI-09) binds it to the tactical and galactic shell
+playback building block; the tactical HUD (UI-09) binds it to the tactical and galactic shell
 slots (see [Binding to the shell](#binding-to-the-shell-83)).
 
 ## Formats and resolution
@@ -128,9 +130,11 @@ stand-in tools, 0706 and 0707; a real packing of a generated clip when FFmpeg is
 project-authored Theora fixture that plays, loops and composites its alpha; 0702,
 0705, 0708).
 
-## Binding to the shell (EAWR-83)
+<a id="binding-to-the-shell-83"></a>
 
-This PR builds no shell. To bind it, EAWR-83 needs to:
+## Binding to the shell
+
+This playback component builds no shell. The tactical HUD binding needs to:
 
 1. Take the movie name from the request: `COMMANDBAR_MOVIE` parameter 1, `MULTIMEDIA`
    parameter 9 unless `-1`, or the faction's `Tactical_Intro_Command_Bar_Movie_Name`

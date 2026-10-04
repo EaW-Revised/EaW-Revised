@@ -22,6 +22,12 @@ sys.path.insert(0, str(ROOT / "tools" / "fonts"))
 import demo  # noqa: E402
 
 
+# These relocated-package checks start a new interpreter and import the launcher
+# from disk. Allow Windows VM startup/scanning latency; pipe-hang checks below
+# retain their short deadlines so an accidental input()/pause still fails fast.
+PACKAGE_STARTUP_TIMEOUT = 30 if os.name == "nt" else 10
+
+
 class PackageReleaseTests(unittest.TestCase):
     def fake_build(self, root: pathlib.Path, suffix: str, vs_layout: bool) -> pathlib.Path:
         build = root / "build"
@@ -98,10 +104,54 @@ class PackageReleaseTests(unittest.TestCase):
             command = [sys.executable, str(package / "demo.py"), "--help"]
             if os.name != "nt":
                 command = ["sh", str(package / "play-demo.sh"), "--help"]
-            result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True,
+                                    timeout=PACKAGE_STARTUP_TIMEOUT)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--game-root", result.stdout)
             self.assertIn("--godot", result.stdout)
+            self.assertIn("--m2", result.stdout)
+            # The relocated copy's default launch opens the setup screen from its own folder only.
+            code = ("import json, pathlib, sys; from unittest import mock; sys.path.insert(0, sys.argv[1]); import demo\n"
+                    "game = pathlib.Path(sys.argv[2])\n"
+                    "with mock.patch.object(demo, 'game_root', return_value=game), "
+                    "mock.patch.object(demo, 'godot_binary', return_value=pathlib.Path(sys.argv[3])), "
+                    "mock.patch.object(demo.fonts, 'locate_executable', return_value=game / 'StarWarsG.exe'), "
+                    "mock.patch.object(demo.fonts, 'extract'), "
+                    "mock.patch.object(demo.subprocess, 'call', return_value=0) as run:\n"
+                    "    code = demo.main(['--game-root', sys.argv[2], '--godot', sys.argv[3], "
+                    "'--eawr-perf-trace', str(pathlib.Path(sys.argv[1]) / 'lag report/trace.csv'), "
+                    "'--eawr-live-replay-out', str(pathlib.Path(sys.argv[1]) / 'lag report/battle.eawr-replay')])\n"
+                    "print(json.dumps([code, run.call_args[0][0], str(run.call_args[1]['cwd'])]))\n")
+            (package / "out").mkdir(exist_ok=True)
+            result = subprocess.run([sys.executable, "-c", code, str(package), str(root / "game"), str(root / "Godot")],
+                                    cwd=root, env=env, capture_output=True, text=True, timeout=PACKAGE_STARTUP_TIMEOUT)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            code, command, cwd = json.loads(result.stdout.splitlines()[-1])
+            self.assertEqual(code, 0)
+            package = package.resolve()  # the launcher resolves its own folder (no 8.3 short names)
+            self.assertEqual(pathlib.Path(cwd), package)
+            self.assertIn("--eawr-skirmish-setup", command)
+            self.assertNotIn("--eawr-live-session", command)
+            self.assertEqual(pathlib.Path(command[command.index("--eawr-perf-trace") + 1]).resolve(),
+                             package / "lag report/trace.csv")
+            self.assertEqual(pathlib.Path(command[command.index("--eawr-live-replay-out") + 1]).resolve(),
+                             package / "lag report/battle.eawr-replay")
+            self.assertNotIn("--eawr-map-camera-config", command)
+            self.assertEqual(pathlib.Path(command[command.index("--path") + 1]), package / "project")
+            self.assertEqual(pathlib.Path(command[command.index("--eawr-font-cache") + 1]), package / "out/fonts")
+            self.assertFalse(any(str(ROOT) in part for part in command), command)
+
+    @unittest.skipUnless(os.name == "nt", "Windows startup allowance")
+    def test_relocated_package_tolerates_loaded_windows_startup(self):
+        run = subprocess.run
+        def loaded_start(command, **kwargs):
+            # Model 12 seconds of interpreter/scanner startup without slowing CI.
+            # The original 10-second bound fails before launcher checks execute.
+            if kwargs["timeout"] < 12:
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return run(command, **kwargs)
+        with patch.object(subprocess, "run", side_effect=loaded_start):
+            self.test_relocated_linux_package_has_all_launcher_dependencies()
 
 
 class DemoLauncherTests(unittest.TestCase):
@@ -203,31 +253,61 @@ class DemoLauncherTests(unittest.TestCase):
             with patch.object(demo, "ROOT", root):
                 self.assertEqual(next(demo.godot_candidates()), console)
 
-    def test_clean_folder_launch_provisions_fonts_and_uses_absolute_paths(self):
+    def launch(self, root: pathlib.Path, *launcher_args: str):
+        """Run demo.main against stand-ins; returns (viewer command, call kwargs, font extract mock)."""
+        (root / "out").mkdir(exist_ok=True)
+        game = root / "game install"
+        godot = root / "Godot.exe"
+        with patch.object(demo, "ROOT", root), patch.object(demo, "game_root", return_value=game), \
+                patch.object(demo, "godot_binary", return_value=godot), \
+                patch.object(demo.fonts, "locate_executable", return_value=game / "corruption/StarWarsG.exe"), \
+                patch.object(demo.fonts, "extract") as extract, \
+                patch.object(demo.subprocess, "call", return_value=0) as run:
+            self.assertEqual(demo.main(["--game-root", str(game), "--godot", str(godot)] + list(launcher_args)), 0)
+        return run.call_args[0][0], run.call_args[1], extract
+
+    def assert_owner_look(self, command, root: pathlib.Path):
+        for flag, value in (("--eawr-lighting", "sh"), ("--eawr-environment", "map"), ("--eawr-shadows", "on"),
+                            ("--eawr-map-effects", "on"), ("--eawr-hud", "tactical"), ("--eawr-live-ai", "on"),
+                            ("--eawr-font-cache", str(root / "out/fonts")),
+                            ("--eawr-game-root", str(root / "game install"))):
+            self.assertEqual(command[command.index(flag) + 1], value, flag)
+
+    def test_default_launch_opens_skirmish_setup_with_owner_look(self):
         with tempfile.TemporaryDirectory(prefix="demo caf\u00e9 with spaces ") as temporary:
             root = pathlib.Path(temporary)
-            (root / "out").mkdir()
-            game = root / "game install"
-            godot = root / "Godot.exe"
-            with patch.object(demo, "ROOT", root), patch.object(demo, "game_root", return_value=game), \
-                    patch.object(demo, "godot_binary", return_value=godot), \
-                    patch.object(demo.fonts, "locate_executable", return_value=game / "corruption/StarWarsG.exe"), \
-                    patch.object(demo.fonts, "extract") as extract, \
-                    patch.object(demo.subprocess, "call", return_value=0) as run:
-                self.assertEqual(demo.main(["--game-root", str(game), "--godot", str(godot),
-                                            "--godot-quit-after", "30", "--", "--eawr-audio", "off"]), 0)
-            extract.assert_called_once_with(game / "corruption/StarWarsG.exe", root / "out/fonts", False, False)
-            command = run.call_args[0][0]
-            self.assertEqual(command[:5], [str(godot), "--path", str(root / "project"), "--quit-after", "30"])
-            self.assertEqual(command[command.index("--eawr-live-session") + 1], "m2")
-            self.assertEqual(command[command.index("--eawr-font-cache") + 1], str(root / "out/fonts"))
-            self.assertEqual(command[command.index("--eawr-map-camera-config") + 1],
-                             str(root / "project/config/coruscant-live-session-camera.xml"))
-            self.assertEqual(command[command.index("--eawr-lighting") + 1], "sh")
+            command, kwargs, extract = self.launch(root, "--godot-quit-after", "30", "--", "--eawr-audio", "off")
+            extract.assert_called_once_with(root / "game install/corruption/StarWarsG.exe", root / "out/fonts",
+                                            False, False)
+            self.assertEqual(command[:6], [str(root / "Godot.exe"), "--path", str(root / "project"),
+                                           "--quit-after", "30", "--"])
+            self.assertIn("--eawr-skirmish-setup", command)
+            # The setup screen chooses the map and derives its camera; nothing fixed to Coruscant or M2.
+            for fixed in ("--eawr-live-session", "--eawr-map", "--eawr-populate", "--eawr-map-camera-config",
+                          "--eawr-camera-interactive", "--m2"):
+                self.assertNotIn(fixed, command)
+            self.assertFalse(any("coruscant" in part.casefold() for part in command))
+            self.assert_owner_look(command, root)
             self.assertEqual(command[command.index("--eawr-audio") + 1], "on")
             self.assertEqual(command[-2:], ["--eawr-audio", "off"])
-            self.assertEqual(run.call_args[1]["cwd"], root)
-            self.assertEqual(json.loads((root / "out/demo.json").read_text())["game_root"], str(game))
+            self.assertEqual(kwargs["cwd"], root)
+            self.assertEqual(json.loads((root / "out/demo.json").read_text())["game_root"], str(root / "game install"))
+
+    def test_m2_flag_keeps_fixed_coruscant_battle(self):
+        with tempfile.TemporaryDirectory(prefix="demo m2 ") as temporary:
+            root = pathlib.Path(temporary)
+            command, _, _ = self.launch(root, "--m2", "--", "--eawr-hud", "off")
+            self.assertNotIn("--eawr-skirmish-setup", command)
+            self.assertNotIn("--m2", command)
+            self.assertEqual(command[command.index("--eawr-live-session") + 1], "m2")
+            self.assertEqual(command[command.index("--eawr-map") + 1], "data/art/maps/_mp_space_coruscant.ted")
+            self.assertEqual(command[command.index("--eawr-map-camera-config") + 1],
+                             str(root / "project/config/coruscant-live-session-camera.xml"))
+            self.assertIn("--eawr-populate", command)
+            self.assertIn("--eawr-camera-interactive", command)
+            self.assert_owner_look(command, root)
+            self.assertEqual(command[command.index("--eawr-audio") + 1], "on")
+            self.assertEqual(command[-2:], ["--eawr-hud", "off"])
 
     def test_wrong_engine_and_failed_font_validation_prevent_launch(self):
         with patch.object(demo.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="4.6.stable.official")):

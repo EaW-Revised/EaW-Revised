@@ -289,7 +289,8 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     }
     std::vector<bool> serviced(players_.size(), false);
     for (std::size_t player = 0; player < players_.size(); ++player) {
-        serviced[player] = service && tick % rules_.service_period == players_[player].player_id % rules_.service_period;
+        serviced[player] = !full_reveals_.contains(players_[player].player_id)
+            && service && tick % rules_.service_period == players_[player].player_id % rules_.service_period;
     }
 
     // Cells, by row bands: each worker owns whole rows of every grid. The service runs first
@@ -383,6 +384,27 @@ bool FogCells::revealed(const std::size_t player_index, const math::Vec3& positi
     return (*values_[player_index][static_cast<std::size_t>(*row)])[static_cast<std::size_t>(*column)] != 0U;
 }
 
+core::Result<void> FogCells::reveal_all(const PlayerId player, const PartitionExecutor& executor) {
+    const auto found = std::find_if(players_.begin(), players_.end(),
+        [&](const Player& entry) { return entry.player_id == player; });
+    if (found == players_.end()) return invalid("reveal-all recipient is not a declared player");
+    if (full_reveals_.contains(player)) return core::Result<void>::success();
+    const auto index = static_cast<std::size_t>(found - players_.begin());
+    auto rows = values_[index];
+    // All clear rows share one immutable buffer, so the reveal writes one row of bytes.
+    const auto clear = std::make_shared<std::vector<std::uint8_t>>(rules_.cells_wide, held_value);
+    const auto applied = executor.execute_phase("fog-reveal-all", tick_partition_count, [&](const std::size_t partition) {
+        const auto band = partition_range(partition, rules_.cells_tall);
+        for (auto row = band.begin; row < band.end; ++row) rows[row] = clear;
+    });
+    if (!applied) return applied;
+    values_[index] = std::move(rows);
+    flat_values_[index].reset();
+    full_reveals_.insert(player);
+    copied_grid_bytes_ = rules_.cells_wide;
+    return core::Result<void>::success();
+}
+
 std::span<const std::uint8_t> FogCells::values(const std::size_t player_index) const {
     auto& cached = flat_values_[player_index];
     if (!cached) {
@@ -412,6 +434,13 @@ void FogCells::append_state(std::vector<std::uint8_t>& bytes) const {
     sim::detail::append_u64(bytes, values_.size());
     for (const auto& grid : values_) {
         for (const auto& row : grid) bytes.insert(bytes.end(), row->begin(), row->end());
+    }
+    if (!full_reveals_.empty()) {
+        // coordinator-reserved optional block, V-20: future refresh depends on these holds.
+        constexpr std::uint8_t tag[] = {'F', 'R', 'E', 'V'};
+        bytes.insert(bytes.end(), std::begin(tag), std::end(tag));
+        sim::detail::append_u64(bytes, full_reveals_.size());
+        for (const auto player : full_reveals_) sim::detail::append_u32(bytes, player);
     }
 }
 

@@ -7,7 +7,7 @@
   The private evidence map (IDs TR-E1 to TR-E4) is under the ignored `out/research/`.
 - Bounded question: how much game time one simulation tick covers, and whether the game-speed
   setting changes it.
-- Status: **pinned, awaiting confirmation.** EAWR-43 records the retail executable every logical
+- Status: **pinned, awaiting confirmation.** original-game behaviour recordings records the retail executable every logical
   frame and measures its cadence. That measurement confirms or replaces TR-01. Until then, the
   pin rests on the debug build alone.
 
@@ -41,7 +41,7 @@
 
 | ID | Unknown | Effect |
 |---|---|---|
-| TR-U1 | The retail executable's measured cadence (EAWR-43). | If it differs from 30, TR-01, the tactical rules version and the replay-v2 fixtures change together. |
+| TR-U1 | The retail executable's measured cadence (original-game behaviour recordings). | If it differs from 30, TR-01, the tactical rules version and the replay-v2 fixtures change together. |
 | TR-U2 | Resolved by the [debug-build audit](debug-build-audit.md): ties round away from zero, after a binary32 multiply and a binary32 add of one half (TR-04). | A later ticket that converts XML durations to ticks reproduces both binary32 steps; durations whose ticks do not fall near a tie are unaffected. |
 | TR-U3 | Resolved by [time controls](tactical-time-controls.md) TM-01 to TM-03: 10, 20, 30, 45 and 60 frames a second, 120 in fast forward, each paced by whole-millisecond waits. | None for the simulation (TR-06). |
 | TR-U4 | Subsystems that run only every N frames, or convert seconds to frames by truncation (TR-04). | Each behaviour note states its own cadence and conversion in logical frames. |

@@ -29,6 +29,9 @@ enum class RangeMetric : std::uint8_t {
 // values, so it never rounds or overflows. A negative radius matches nothing.
 [[nodiscard]] bool within_range(
     const math::Vec3& from, const math::Vec3& to, math::Fixed radius, RangeMetric metric) noexcept;
+// WBP-07: construction eligibility excludes the exact sphere boundary.
+[[nodiscard]] bool strictly_within_range(
+    const math::Vec3& from, const math::Vec3& to, math::Fixed radius, RangeMetric metric) noexcept;
 
 // Exact inclusive box test: |to - centre| <= half_extent on each of X, Y and Z. A negative
 // half extent on any axis matches nothing.
@@ -46,6 +49,8 @@ public:
 
     // Accepts the bodies in any order. Fails with EAWR-SIM-0304 on a zero or repeated ID.
     [[nodiscard]] static core::Result<SpaceIndex> build(std::span<const SpaceBody> bodies);
+    // Retains capacity for partition-owned preparation. Inputs have ascending, unique IDs.
+    [[nodiscard]] core::Result<void> rebuild_sorted(std::span<const SpaceBody> bodies);
 
     [[nodiscard]] std::size_t size() const noexcept { return bodies_.size(); }
     // Every body in ascending ID order.
@@ -62,7 +67,8 @@ public:
     // box, in no particular order, written to `out` (cleared first, so a caller can keep reusing
     // its capacity). Sorting them gives box()'s ascending-ID order.
     void box_positions(
-        const math::Vec3& centre, const math::Vec3& half_extent, std::vector<std::uint32_t>& out) const;
+        const math::Vec3& centre, const math::Vec3& half_extent, std::vector<std::uint32_t>& out,
+        std::uint64_t* inspected = nullptr) const;
     // Bodies within `radius` of `centre` under `metric` (within_range), optionally only
     // those of one owner.
     [[nodiscard]] std::vector<EntityId> range(

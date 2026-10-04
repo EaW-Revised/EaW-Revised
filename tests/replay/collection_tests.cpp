@@ -140,6 +140,70 @@ void test_trees_by_owner() {
     expect(trees.collect(9, everywhere()).empty(), "no tree for an owner without units");
 }
 
+void test_staged_trees_are_independent() {
+    CollectionTrees committed;
+    std::vector<CollectionTrees::Member> members;
+    for (EntityId id = 1; id <= 40; ++id) members.push_back({id, id < 20 ? 7U : 8U, cube(10 * static_cast<std::int64_t>(id), 0, 0)});
+    committed.update(members, 0);
+    std::vector<std::uint8_t> before;
+    committed.append_state(before);
+    auto staged = committed;
+    staged.update(members, 31); // a due rebuild must detach even without changed boxes
+    auto independent = committed;
+    independent.update(members, 31);
+    members.erase(members.begin());
+    members.front().owner = 8;
+    members.back().bounds = cube(1000, 0, 0);
+    staged.update(members, 32);
+    std::vector<std::uint8_t> unchanged;
+    committed.append_state(unchanged);
+    expect(unchanged == before, "staged rebuilds, removals, owner changes and moves leave committed trees byte-identical");
+    independent.update(members, 32);
+    committed = std::move(staged);
+    expect(committed.collect(7, everywhere()) == independent.collect(7, everywhere())
+        && committed.collect(8, everywhere()) == independent.collect(8, everywhere()),
+        "a committed staged tree preserves CO-11 collection order");
+}
+
+void test_ray_collection() {
+    CollectionTree tree;
+    tree.add(1, cube(20, 0, 0));
+    tree.add(2, cube(60, 0, 0));
+    tree.add(3, cube(40, 30, 0));
+    const math::Vec3 from{units(0), units(0), units(0)}, to{units(100), units(0), units(0)};
+    std::vector<EntityId> contacts;
+    tree.ray_collect(from, to, contacts);
+    expect_order(contacts, {2, 1}, "DG-30 ray reverses stored links and rejects off-ray boxes");
+    const auto capacity = contacts.capacity();
+    tree.ray_collect(to, from, contacts);
+    expect_order(contacts, {2, 1}, "DG-30 reversing segment direction does not rank by distance");
+    expect(contacts.capacity() == capacity, "DG-30 repeat ray query reuses the caller's allocation");
+    tree.ray_collect({units(0), units(5), units(0)}, {units(100), units(5), units(0)}, contacts);
+    expect_order(contacts, {2, 1}, "DG-30 ray touching a slab boundary is admitted");
+    tree.ray_collect({units(20), units(0), units(0)}, {units(20), units(0), units(0)}, contacts);
+    expect_order(contacts, {1}, "DG-30 zero-length segment inside a box");
+    tree.remove(2);
+    tree.moved(1, cube(20, 30, 0));
+    tree.ray_collect(from, to, contacts);
+    expect(contacts.empty(), "DG-30 removal and movement persist across ray queries");
+
+    CollectionTree split;
+    for (EntityId id = 1; id <= 40; ++id) split.add(id, cube(static_cast<std::int64_t>(id) * 10, 0, 0));
+    split.service(30);
+    split.ray_collect(from, {units(500), units(0), units(0)}, contacts);
+    std::vector<EntityId> descending;
+    for (EntityId id = 40; id > 0; --id) descending.push_back(id);
+    expect_order(contacts, descending, "DG-30 overloaded root waits past one second before rebuild");
+    split.service(31);
+    split.ray_collect(from, {units(500), units(0), units(0)}, contacts);
+    expect_order(contacts, split.collect(everywhere()), "DG-30 ray walks split child 0 then child 1 before reversal");
+    // Its tight diagonal AABB overlaps this cube, but the segment does not.
+    CollectionTree diagonal;
+    diagonal.add(1, cube(10, 80, 0));
+    diagonal.ray_collect(from, {units(100), units(100), units(0)}, contacts);
+    expect(contacts.empty(), "DG-30 rejects a box in the segment's AABB that misses the segment");
+}
+
 } // namespace
 
 int main() {
@@ -150,6 +214,8 @@ int main() {
     test_big_boxes();
     test_remove_swaps();
     test_trees_by_owner();
+    test_staged_trees_are_independent();
+    test_ray_collection();
     if (failures != 0) {
         std::cerr << failures << " collection tree check(s) failed\n";
         return 1;

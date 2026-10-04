@@ -1,6 +1,6 @@
 # Shader translation spike
 
-P0-10 provides a clean-room, local-only route from the five approved Direct3D 9
+The shader translation spike provides a clean-room, local-only route from the five approved Direct3D 9
 effects to Vulkan 1.1 SPIR-V. The translator verifies the protected archive and
 effect/include closure before it reads an effect, expands macros with a pinned
 preprocessor, parses effect structure with a lexer and nested-block parser, lowers
@@ -123,7 +123,7 @@ to a different output root must produce byte-identical manifests and stage hashe
 
 ## Rendering consumer
 
-ADR-011 selects Godot RenderingServer through a C++ GDExtension. RenderingServer
+[Godot presentation decision](architecture-decisions.md#adr-011-godot-presentation) selects Godot RenderingServer through a C++ GDExtension. RenderingServer
 materials do not ingest the spike's SPIR-V directly: the retained prototype expresses
 the selected MESHGLOSS semantics as reviewed Godot shader-language source, installs it
 with `shader_set_code`, binds parameters with `material_set_param`, and assigns the

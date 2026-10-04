@@ -189,7 +189,7 @@ std::string map_semantics(const eawr::assets::Map& map) {
     out << ",\"three_axis_records\":[";
     first = true;
     for (const eawr::assets::Placement& placement : map.placements) {
-        if (placement.orientation_status != eawr::assets::OrientationStatus::unsupported_three_axis_order
+        if (placement.orientation_status != eawr::assets::OrientationStatus::three_axis
             || !placement.orientation_degrees) continue;
         if (!first) out << ',';
         first = false;

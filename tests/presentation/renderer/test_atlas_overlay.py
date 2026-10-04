@@ -35,6 +35,7 @@ class AtlasOverlayContract(unittest.TestCase):
 
     def test_overlay_is_presentation_only_screen_space_work(self):
         source = mode_source("viewer_host")
+        physical = (ROOT / "apps/viewer/src/viewer_host_exercises_effects.cpp").read_text(encoding="utf-8")
         self.assertIn("canvas_item_add_texture_rect_region", source)
         self.assertIn("canvas_item_set_default_texture_filter", source)
         self.assertIn("CANVAS_ITEM_TEXTURE_FILTER_NEAREST", source)
@@ -42,9 +43,9 @@ class AtlasOverlayContract(unittest.TestCase):
         self.assertIn("void free_rids()", source)
         self.assertIn("release_atlas_overlay();", source)
         # It must never enter the 3D asset registry or the material routes.
-        start = source.index("bool ViewerHost::start_atlas_overlay()")
-        end = source.index("bool ViewerHost::verify_atlas_capture")
-        overlay_body = source[start:end]
+        start = physical.index("bool ViewerHost::start_atlas_overlay()")
+        end = physical.index("bool ViewerHost::verify_atlas_capture")
+        overlay_body = physical[start:end]
         for forbidden in ("renderer_->upload", "renderer_->submit", "MaterialDescription",
                           "instance_create", "scenario"):
             self.assertNotIn(forbidden, overlay_body)

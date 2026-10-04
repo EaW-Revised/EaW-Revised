@@ -1,6 +1,8 @@
 #include "space_environment_internal.hpp"
+#include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
+#include "eawr/presentation/particles/map_attachment_owner.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -10,21 +12,6 @@ namespace {
 // 2026-09-24). Everything below is judged by eye; the pure rules live in
 // space/environment_scene.hpp.
 // ---------------------------------------------------------------------------
-
-// MeshAdditiveVColor.fx: the MeshAdditive adapter with the authored vertex
-// colour as a further factor (the effect has no Color field; Color is bound
-// to (1, 1, 1, 1)). The same stored-value policy as the MeshAdditive route.
-[[nodiscard]] const std::string& meshadditive_vcolor_sky_shader() {
-    static const std::string source = [] {
-        std::string text(meshadditive_sky_shader);
-        constexpr std::string_view from = "clamp(Color.rgb * eawr_sky_light_scale.rgb";
-        constexpr std::string_view to = "clamp(COLOR.rgb * COLOR.a * Color.rgb * eawr_sky_light_scale.rgb";
-        const std::size_t at = text.find(from);
-        if (at != std::string::npos) text.replace(at, from.size(), to);
-        return text;
-    }();
-    return source;
-}
 
 constexpr std::string_view effect_clock_rule =
     "retail scene clock: TIME gains LogicalFPS / 1000 = 0.03 s per 30 Hz sim frame and wraps at 28800 s; here "
@@ -59,219 +46,14 @@ constexpr std::string_view effect_clock_rule =
     return result;
 }
 
-// Q24 render instance matrix of a source-basis transform; empty when a value
-// is not finite or leaves the Q24 range.
-[[nodiscard]] std::optional<sim::math::Mat3x4> instance_matrix(const space::Affine& source) {
-    const space::Affine render = space::render_affine(source);
-    sim::math::Mat3x4 result{};
-    constexpr double scale = static_cast<double>(sim::math::Fixed::scale);
-    constexpr double limit = 1.0e12;
-    for (std::size_t row = 0; row < 3; ++row) {
-        for (std::size_t column = 0; column < 4; ++column) {
-            const double value = static_cast<double>(render[row * 4 + column]) * scale;
-            if (!std::isfinite(value) || std::abs(value) > limit) return std::nullopt;
-            result.rows[row][column] = sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::llround(value)));
-        }
-    }
-    return result;
-}
 } // namespace
 
 namespace space_environment_detail {
 
-std::optional<assets::Texture> EnvironmentView::texture(const std::string& declared, std::string& logical,
-                                                        std::string& failure) {
-    const auto cached = textures_.find(declared);
-    if (cached != textures_.end()) {
-        logical = cached->second.first;
-        if (!cached->second.second) failure = texture_failures_[declared];
-        return cached->second.second;
-    }
-    std::optional<assets::Texture> result;
-    const auto path = probe_reference(*filesystem_, "data/art/textures/", declared, texture_suffixes);
-    if (!path) {
-        failure = "texture " + declared + " is not in the VFS";
-    } else {
-        logical = *path;
-        auto loaded = assets::load_texture(*filesystem_, *path);
-        if (!loaded) {
-            failure = core::format_diagnostic(loaded.error());
-        } else if (auto normalized = space::normalize_texture(loaded.value()); !normalized) {
-            failure = core::format_diagnostic(normalized.error());
-        } else {
-            result = std::move(normalized.value());
-        }
-    }
-    textures_.emplace(declared, std::make_pair(logical, result));
-    if (!result) texture_failures_[declared] = failure;
-    return result;
-}
-
-void EnvironmentView::upload(Item item, const space::SceneSurface& surface, const assets::Model& geometry,
-                             const space::Affine& transform, const assets::Model* planned_from,
-                             const bool sunlight_glow) {
-    const auto skip = [&](std::string cause) {
-        item.cause = std::move(cause);
-        items_.push_back(std::move(item));
-    };
-    MaterialDescription material{
-        .schema_version = MaterialDescription::current_schema_version,
-        .route = MaterialRoute::modern_spatial,
-        .pass = RenderPass::opaque,
-        .program = {},
-        .technique = {},
-        .pass_name = {},
-        .bindings = {},
-    };
-    std::vector<std::pair<std::string, std::string>> textures;
-    switch (surface.route) {
-    case space::SceneRoute::meshgloss:
-        material.program = std::string(meshgloss_sky_shader);
-        material.bindings = meshgloss_bindings(*surface.meshgloss, space::unlit_sky_policy());
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        break;
-    case space::SceneRoute::meshadditive:
-    case space::SceneRoute::meshadditive_vcolor:
-        material.pass = RenderPass::transparent;
-        material.program = surface.route == space::SceneRoute::meshadditive
-            ? std::string(meshadditive_sky_shader) : meshadditive_vcolor_sky_shader();
-        material.bindings = meshadditive_bindings(*surface.meshadditive, space::meshadditive_default_inputs());
-        textures.emplace_back("BaseTexture", surface.base_texture);
-        break;
-    case space::SceneRoute::planet:
-    case space::SceneRoute::nebula: {
-        space::EnvironmentEffectInputs inputs;
-        inputs.id = light_ ? "environment-0-light-0" : "no-light";
-        inputs.time_seconds = 0.0F;
-        inputs.light_scale = {1.0F, 1.0F, 1.0F, 1.0F};
-        if (light_) {
-            inputs.light_direction = space::render_from_source(light_->toward_light);
-            inputs.ambient_light = light_->ambient;
-            inputs.diffuse_light = light_->diffuse;
-            inputs.specular_light = light_->specular;
-        }
-        const space::EnvironmentEffectPlan plan = space::plan_environment_effect(
-            *planned_from, surface.mesh_index, surface.submesh_index, "t0", inputs);
-        if (plan.status != space::EnvironmentEffectStatus::ready) {
-            return skip("plan " + std::string(space::to_string(plan.status)) + ": " + plan.detail);
-        }
-        material = plan.material;
-        textures = plan.textures;
-        break;
-    }
-    case space::SceneRoute::unsupported:
-        return skip(surface.problem);
-    }
-    if (textures.empty() || textures.front().first != "BaseTexture") return skip("the surface binds no BaseTexture");
-    std::optional<assets::Texture> primary;
-    std::vector<GodotRenderer::BindingTexture> extra;
-    for (const auto& [binding, declared] : textures) {
-        std::string logical;
-        std::string failure;
-        auto loaded = texture(declared, logical, failure);
-        if (!loaded) return skip(binding + ": " + failure);
-        if (binding == "BaseTexture") {
-            item.texture = logical;
-            primary = std::move(loaded);
-        } else {
-            extra.push_back({binding, std::move(*loaded)});
-        }
-    }
-    const auto matrix = instance_matrix(transform);
-    if (!matrix) return skip("the object transform is not finite in Q24");
-    const sim::AssetId asset = next_asset_++;
-    if (auto uploaded = renderer_->upload(asset, geometry, *primary, material, extra); !uploaded) {
-        return skip(core::format_diagnostic(uploaded.error()));
-    }
-    if (sunlight_glow && light_) {
-        const assets::Vec3f toward = space::render_from_source(light_->toward_light);
-        renderer_->set_billboard_light(asset, {toward.x, toward.y, toward.z});
-    }
-    // An environment surface never casts: the sky encloses the scene, and the
-    // backdrop objects sit far outside any shadow the scene would use.
-    renderer_->set_casts_shadows(asset, false);
-    assets_.push_back(asset);
-    if (surface.route == space::SceneRoute::planet || surface.route == space::SceneRoute::nebula) {
-        effect_clock_assets_.push_back(asset);
-    }
-    instances_.push_back({static_cast<sim::EntityId>(asset), asset, *matrix});
-    if (item.role == "primary_sky" || item.role == "secondary_sky" || item.role == "sun") {
-        sky_instances_.emplace_back(instances_.size() - 1, transform);
-    }
-    item.asset = asset;
-    item.pass = material.pass;
-    item.status = "drawn";
-    items_.push_back(std::move(item));
-}
-
-void EnvironmentView::compose_object(const Placed& placed, const std::vector<space::SceneSurface>& surfaces) {
-    const bool sky = placed.role == "primary_sky" || placed.role == "secondary_sky";
-    for (const space::SceneSurface& surface : surfaces) {
-        Item item;
-        item.role = placed.role;
-        item.object = placed.object;
-        item.record = placed.record;
-        item.model = placed.model_path;
-        item.mesh = surface.mesh_name;
-        item.shader = surface.shader;
-        item.route = std::string(space::to_string(surface.route));
-        item.billboard = surface.billboard;
-        if (!surface.problem.empty()) {
-            item.cause = surface.problem;
-            items_.push_back(std::move(item));
-            continue;
-        }
-        if (surface.billboard == 0) {
-            upload(std::move(item), surface, surface.model, placed.transform, placed.model);
-            continue;
-        }
-        if (!(surface.billboard == 7 && sky)) {
-            // Preserve the authored rigid bone and its local vertices. The
-            // shared renderer updates its camera-facing palette every frame.
-            assets::Model billboard_model;
-            billboard_model.source = placed.model->source;
-            billboard_model.bones = placed.model->bones;
-            assets::Mesh mesh = placed.model->meshes[surface.mesh_index];
-            mesh.submeshes = {mesh.submeshes[surface.submesh_index]};
-            billboard_model.meshes.push_back(std::move(mesh));
-            if (surface.billboard == 6) item.role = placed.role + "_glow";
-            if (surface.billboard == 6 && !light_) {
-                item.cause = "sunlight glow needs environment light 0";
-                items_.push_back(std::move(item));
-                continue;
-            }
-            upload(std::move(item), surface, billboard_model, placed.transform, placed.model,
-                   surface.billboard == 6);
-            continue;
-        }
-        space::Billboard billboard;
-        if (surface.billboard == 7 && sky) {
-            item.role = "sun";
-            if (!light_) {
-                item.cause = "environment light 0 does not decode, so the sun has no direction";
-                items_.push_back(std::move(item));
-                continue;
-            }
-            billboard = space::sun_billboard(*placed.model, surface, eye_source_, target_source_, up_source_,
-                                             light_->toward_light, space::environment_sky_radius * 0.9F);
-        } else {
-            item.cause = "billboard mode " + std::to_string(surface.billboard) + " has no rule on a "
-                + placed.role + " object";
-            items_.push_back(std::move(item));
-            continue;
-        }
-        if (!billboard.problem.empty()) {
-            item.cause = billboard.problem;
-            items_.push_back(std::move(item));
-            continue;
-        }
-        upload(std::move(item), surface, billboard.model, space::identity_affine, placed.model);
-    }
-}
-
 bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs& filesystem,
                             const assets::ObjectTypeCatalog& catalog, const bool catalog_loaded,
                             const std::string& catalog_failure) {
+    core::load_profile::Scope scope(core::load_profile::Phase::scene_environment);
     filesystem_ = &filesystem;
     host_ = &host;
     catalog_failure_ = catalog_failure;
@@ -361,7 +143,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     target_source_ = space::source_from_render(camera_.target);
     up_source_ = space::source_from_render(camera_.up);
 
-    renderer_ = std::make_unique<GodotRenderer>(host);
+    renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
     renderer_->set_camera(camera_);
     renderer_->set_scene_bloom(options_.bloom);
 
@@ -448,15 +230,28 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
                 items_.push_back(std::move(item));
                 continue;
             }
-            // Any stored orientation, three-axis included, goes through the
-            // object rule; an absent one is (0, 0, 0).
-            const assets::Vec3f orientation = source->orientation_degrees
-                && std::isfinite(source->orientation_degrees->x) && std::isfinite(source->orientation_degrees->y)
-                && std::isfinite(source->orientation_degrees->z)
-                ? *source->orientation_degrees : assets::Vec3f{};
-            placed.transform = space::object_transform(*source->position, orientation, placed.scale);
+            if (!placement.transform) {
+                Item item;
+                item.role = placed.role;
+                item.object = placed.object;
+                item.record = placed.record;
+                item.model = placed.model_path;
+                item.cause = "the placement has no valid sourced transform";
+                items_.push_back(std::move(item));
+                continue;
+            }
+            // R-ROT-01..03 and LZ-01: reuse the same scene matrix as props,
+            // particle owners and bounds. environment_records_ prevents a second draw.
+            for (std::size_t row = 0; row < 3; ++row) {
+                for (std::size_t column = 0; column < 4; ++column) {
+                    placed.transform[row * 4 + column] = static_cast<float>(
+                        static_cast<double>(placement.transform->matrix.rows[row][column].raw())
+                        / static_cast<double>(sim::math::Fixed::scale));
+                }
+            }
             const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(*model);
             placed.radius = space::surface_radius(surfaces) * placed.scale;
+            if (!bind_idle(placement, *model, filesystem, placed)) return false;
             compose_object(placed, surfaces);
         }
     }
@@ -479,6 +274,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     // primary is optional; a declared primary still needs a supported route.
     if (!primary_sky_.empty() && !sky_drawn) return fail("the primary sky drew no surface");
     snapshot_ = std::make_shared<const sim::RenderSnapshot>(0, instances_);
+    if (!initialize_idle()) return false;
     return true;
 }
 
@@ -585,7 +381,14 @@ bool EnvironmentView::write_report() const {
             << ", \"asset\": " << item.asset << ", \"pass\": " << json(item.status == "drawn" ? to_string(item.pass) : "")
             << '}';
     }
-    output << (items_.empty() ? "" : "\n    ") << "],\n    \"not_rendered\": " << list(not_rendered_) << "},\n"
+    output << (items_.empty() ? "" : "\n    ") << "],\n    \"idle_placements\": [";
+    for (std::size_t index = 0; index < environment_idle_.size(); ++index) {
+        const auto& idle = environment_idle_[index];
+        output << (index == 0 ? "" : ",") << "{\"object\":" << json(idle.object)
+            << ",\"clip\":" << json(idle.clip_path) << ",\"start_frame\":" << idle.playback.start_frame
+            << ",\"instances\":" << idle.instances.size() << ",\"sampled_time\":" << number(idle.pose.pose.sampled_time_seconds) << '}';
+    }
+    output << "],\n    \"not_rendered\": " << list(not_rendered_) << "},\n"
         << "  \"capture_identity\": {\"viewport\": {\"width\": " << camera_.width << ", \"height\": " << camera_.height
         << "}, \"png\": ";
     if (capture_size_) {
@@ -778,21 +581,7 @@ std::optional<int> EnvironmentView::process(const double delta) {
             submit_since(instances_start);
         }
     }
-    // The effects' TIME runs on the same clock as the idle clips: held after
-    // the particle frames in a fixed capture, plus the idle offset (#185).
-    const std::uint64_t effect_tick = static_cast<std::uint64_t>(options_.real_time_clock
-        ? tick : std::min(tick, options_.clock_hold_ticks - 1U)) + options_.clock_offset;
-    if (effect_tick_ != effect_tick) {
-        effect_tick_ = effect_tick;
-        const float time = space::environment_effect_time(effect_tick);
-        for (const sim::AssetId asset : effect_clock_assets_) {
-            if (auto set = renderer_->set_material_scalar(asset, "eawr_effect_time", time); !set) {
-                completed_ = true;
-                static_cast<void>(fail("environment effect clock: " + core::format_diagnostic(set.error())));
-                return 2;
-            }
-        }
-    }
+    if (const auto failed = advance_effects(tick)) return failed;
     ++frame_;
     const auto submit_start = SubmitClock::now();
     const std::uint64_t sent_before = renderer_->submit_work().transforms_sent;
@@ -863,6 +652,18 @@ void SpaceEnvironment::close() {
 
 std::optional<presentation::camera::TacticalFrame> SpaceEnvironment::live_camera_frame() const {
     return state_->view ? state_->view->drawn_frame() : std::nullopt;
+}
+
+std::pair<bool, bool> space_environment_detail::EnvironmentView::pointer_mode(const bool ctrl) const {
+    if (!bridge_ || !bridge_->active()) return {};
+    const auto& adapter = bridge_->adapter();
+    // CU-04: use held camera actions; edge scrolling does not change the art.
+    const bool grab = adapter.is_held(camera_input::Action::rotate_grab);
+    return {adapter.is_held(camera_input::Action::push_scroll) || (grab && !ctrl), grab && ctrl};
+}
+
+std::pair<bool, bool> SpaceEnvironment::live_camera_pointer_mode(const bool ctrl) const {
+    return state_->view ? state_->view->pointer_mode(ctrl) : std::pair<bool, bool>{};
 }
 
 void SpaceEnvironment::live_camera_focus(const float source_x, const float source_y) {

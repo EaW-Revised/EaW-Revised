@@ -86,7 +86,7 @@ Other properties:
   (FoC debug build, BP-48): on reappearance the group is reset (it
   clears every particle, the burst count and the internal clock), so the
   drains are released (`drains_reset`) as the new generation starts. The
-  death clones use it (battle-presentation BP-48, EAWR-429). The first
+  death clones use it (battle-presentation BP-48, animated death-clone emitters). The first
   generation still waits for the first visible sample under every policy.
 
 ## EffectMode demonstration

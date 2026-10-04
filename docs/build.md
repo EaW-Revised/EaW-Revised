@@ -48,7 +48,7 @@ one explicitly.
 ## Game fonts
 
 The UI draws with the four EmpireAtWar faces that FoC embeds in its executable
-(`docs/ui/ui-layer.md`, decision D1 in EAWR-164). They are the foundry's work, so the project
+(`docs/ui/ui-layer.md`, font-provenance decision D1). They are the foundry's work, so the project
 never commits or ships them. Each player extracts them once from their own install:
 
 ```powershell

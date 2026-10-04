@@ -253,13 +253,19 @@ def require_text(where: str, value: object, pattern=None) -> str:
     return value
 
 
-def check_position(where: str, value: object) -> None:
+def is_pose_number(value: object) -> bool:
+    return (is_int(value) or isinstance(value, float) and math.isfinite(value)) and abs(value) <= MAX_SOURCE_UNITS
+
+
+def check_position(where: str, value: object, *, allow_decimal: bool = False) -> None:
     if not (
         isinstance(value, list)
         and len(value) == 3
-        and all(is_int(item) and abs(item) <= MAX_SOURCE_UNITS for item in value)
+        and all(is_pose_number(item) if allow_decimal else is_int(item) and abs(item) <= MAX_SOURCE_UNITS
+                for item in value)
     ):
-        raise InputError(f"{where}: position must be three integers in source units")
+        kind = "finite numbers" if allow_decimal else "integers"
+        raise InputError(f"{where}: position must be three {kind} in source units")
 
 
 def check_pin(where: str, value: object) -> dict:
@@ -341,16 +347,21 @@ def load_scenario(path: pathlib.Path) -> dict:
             where,
             unit,
             ("label", "type", "owner", "position", "facing_degrees", "spawn"),
-            ("staging", "shieldless"),
+            ("staging", "shieldless", "apply_initial_pose"),
         )
         if require_text(f"{where}.label", unit["label"], UNIT_LABEL) in units:
             raise InputError(f"{where}: label is repeated")
         require_text(f"{where}.type", unit["type"])
         if require_text(f"{where}.owner", unit["owner"]) not in player_labels:
             raise InputError(f"{where}: owner is not a declared player")
-        check_position(where, unit["position"])
-        if not (is_int(unit["facing_degrees"]) and 0 <= unit["facing_degrees"] < 360):
-            raise InputError(f"{where}: facing_degrees must be an integer in 0..359")
+        initial_pose = unit.get("apply_initial_pose", False)
+        if not isinstance(initial_pose, bool) or initial_pose and unit["spawn"] != "observed":
+            raise InputError(f"{where}: apply_initial_pose is a boolean for observed units only")
+        check_position(where, unit["position"], allow_decimal=initial_pose)
+        facing = unit["facing_degrees"]
+        valid_facing = is_pose_number(facing) if initial_pose else is_int(facing)
+        if not (valid_facing and 0 <= facing < 360):
+            raise InputError(f"{where}: facing_degrees must be {'a finite number' if initial_pose else 'an integer'} in [0, 360)")
         if unit["spawn"] not in ("start", "event", "observed"):
             raise InputError(f"{where}: spawn must be start, event or observed")
         flags = require_list(f"{where}.staging", unit.get("staging", []))

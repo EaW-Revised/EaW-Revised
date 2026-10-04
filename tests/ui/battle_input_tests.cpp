@@ -5,6 +5,7 @@
 #include "eawr/presentation/camera/overview.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/selection.hpp"
+#include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/world.hpp"
 #include "ui_test_support.hpp"
@@ -58,6 +59,45 @@ ui::BattleUnit unit(const sim::EntityId entity, const tactical::TypeId type, con
 
 // Straight down from above the point.
 ui::PickRay down_at(const float x, const float y) { return {{x, y, 500.0F}, {0.0F, 0.0F, -1.0F}}; }
+
+void neutral_props() {
+    // WSU-13/50/63: stock empty satellite and asteroid data admit a mouse contact, not a bar or attack.
+    for (const auto type : {tactical::TypeId{90}, tactical::TypeId{91}}) {
+        auto prop = unit(1, type, false, {}, std::array{640.0F, 360.0F});
+        prop.neutral = true;
+        prop.selectable = false;
+        const std::array units{prop};
+        expect(ui::pick_unit(down_at(0.0F, 0.0F), units) == prop.entity,
+            "WSU-13: the impassable-asteroid/build-pad mouse contact remains available");
+        expect(ui::right_click(ui::OrderMode::attack, &prop, false) == ui::RightClick::disarm,
+            "WHZ-51: hovering a neutral prop cannot make it an attack target");
+        ui::Selection selected;
+        selected.click(prop.entity, {}, units, viewport);
+        expect(selected.empty(), "WSU-16: neutral satellite/asteroid cannot enter selection");
+        ui::BarUnit bar;
+        bar.hovered = true; bar.has_health = true; bar.health = 1.0F; bar.shielded = true;
+        bar.admitted = prop.selectable;
+        auto shown = ui::bar_visibility(bar);
+        expect(!shown.health && !shown.shield, "WSU-50: a nonselectable prop has no hover health or shield bar");
+        prop.selectable = true;
+        bar.admitted = true; bar.neutral = true;
+        shown = ui::bar_visibility(bar);
+        expect(!shown.health && !shown.shield, "WSU-63: neutral selectable station keeps no combat bars");
+        prop.neutral = false; prop.own = true;
+        bar.neutral = false;
+        const std::array captured{prop};
+        selected.click(prop.entity, {}, captured, viewport);
+        shown = ui::bar_visibility(bar);
+        expect(selected.contains(prop.entity) && shown.health && shown.shield,
+            "WSU-16/50: captured selectable station resumes ordinary selection and bars");
+    }
+    auto decoration = unit(2, 92, false, {}, std::nullopt);
+    decoration.mouse_sensitive = false;
+    auto enemy = unit(3, 93, false, {0.0F, 0.0F, -20.0F}, std::nullopt, true);
+    const std::array volumes{decoration, enemy};
+    expect(ui::pick_unit(down_at(0.0F, 0.0F), volumes) == enemy.entity,
+        "WSU-13: a non-mouse-sensitive prop cannot mask an eligible hover target beneath it");
+}
 
 void picking() {
     // A 20 x 10 x 5 box turned 90 degrees: its long side runs along Y.
@@ -136,6 +176,57 @@ void clicks_and_boxes() {
 
     selection.retain(std::vector<sim::EntityId>{2, 3});
     expect(selection.units() == std::vector<sim::EntityId>{2, 3}, "destroyed units leave the selection");
+}
+
+void box_eligibility_and_icons() {
+    auto station = unit(1, 80, true, {}, std::array{200.0F, 200.0F});
+    station.locomotion = false;
+    auto ship = unit(5, 90, true, {}, std::array{300.0F, 200.0F});
+    auto decoration = unit(6, 90, true, {}, std::array{250.0F, 200.0F});
+    decoration.decoration = true;
+    auto unselectable = ship;
+    unselectable.entity = 7;
+    unselectable.selectable = false;
+    auto edge = ship;
+    edge.entity = 8;
+    edge.screen = std::array{400.0F, 200.0F};
+    auto pad = station;
+    pad.entity = 12;
+    pad.selectable = false;
+    auto construction = station;
+    construction.entity = 13;
+    auto completed = station;
+    completed.entity = 14;
+    std::vector<ui::BattleUnit> units{station, ship, decoration, unselectable, edge, pad, construction, completed};
+    ui::Selection selection;
+    selection.replace(std::array<sim::EntityId, 1>{9});
+    expect(selection.box({100, 100, 400, 300}, false, units)
+        && selection.units() == std::vector<sim::EntityId>{5},
+        "WSU-21: ships plus station/pad/UC/completed structures keeps only mobile non-decoration origins, half-open");
+    expect(!selection.box({100, 100, 220, 300}, false, units) && selection.contains(5),
+        "WSU-22: a station-only box preserves the previous ship selection");
+    selection.clear();
+    expect(!selection.box({100, 100, 220, 300}, false, units) && selection.empty(),
+        "WSU-22: a station-only box with nothing selected stays empty");
+    expect(selection.click(1, {}, units, viewport) && selection.contains(1), "WSU-23: click selects a station");
+    selection.clear();
+    expect(selection.double_click(1, units, viewport) && selection.contains(1), "WSU-23: station type selection permits stations");
+    selection.replace(std::array<sim::EntityId, 1>{9});
+    const std::vector<ui::SquadronIcon> icons{
+        {2, true, true, {100, 100, 130, 130}}, {3, true, true, {140, 100, 170, 130}},
+        {4, false, true, {100, 140, 130, 170}}, {10, true, false, {140, 140, 170, 170}},
+        {11, true, true, {180, 100, 220, 130}}};
+    expect(selection.box({100, 100, 200, 180}, false, units, icons)
+        && selection.units() == std::vector<sim::EntityId>{9, 2, 3},
+        "WSU-19: two whole own icon quads add to prior selection; enemy, unselectable and partial quads do not");
+    expect(selection.box({100, 100, 400, 300}, false, units, icons)
+        && selection.units() == std::vector<sim::EntityId>{5},
+        "WSU-19: an eligible craft/model replaces the prior selection and icon pass without Shift");
+    expect(selection.box({100, 100, 400, 300}, true, units, icons)
+        && selection.units() == std::vector<sim::EntityId>{5, 2, 3, 11}, "WSU-19: Shift keeps icon and model selections");
+    selection.clear();
+    expect(selection.type_on_screen(90, units, {100, 100, 400, 300})
+        && selection.units() == std::vector<sim::EntityId>{5}, "WSU-15: type selection filters decorations and half-open edges");
 }
 
 void control_groups() {
@@ -681,11 +772,33 @@ void hardpoint_mesh_orders() {
 }
 
 int main() {
+    {
+        ui::Selection selected;
+        selected.replace(std::array<sim::EntityId, 2>{1, 2});
+        selected.assign_group(1);
+        selected.replace(std::array<sim::EntityId, 1>{3});
+        selected.assign_group(2);
+        selected.clear();
+        selected.replace_entity(1, 7);
+        selected.replace_entity(7, 9); // two replacement events in one presentation frame
+        selected.retain(std::array<sim::EntityId, 3>{2, 3, 9});
+        expect(selected.empty() && selected.group(1) == std::vector<sim::EntityId>({9, 2}),
+            "WPR-52: unselected station transfers its group through batched replacements");
+        expect(selected.group(2) == std::vector<sim::EntityId>({3}), "WPR-52: other group membership survives");
+        const std::vector<ui::BattleUnit> alive{unit(9, 40, true, {}, std::nullopt), unit(2, 10, true, {}, std::nullopt)};
+        selected.recall_group(1, false, 5.0, alive);
+        expect(selected.units() == std::vector<sim::EntityId>({9, 2}), "WPR-52: recall selects the replacement");
+        selected.replace_entity(9, 10);
+        expect(selected.units() == std::vector<sim::EntityId>({10, 2}) && selected.group(1) == selected.units(),
+            "WPR-52: selected station and group transfer together");
+    }
     picking();
+    neutral_props();
     pick_volumes();
     hardpoint_mesh_orders();
     squadrons();
     clicks_and_boxes();
+    box_eligibility_and_icons();
     control_groups();
     overview();
     overview_yaw();

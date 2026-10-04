@@ -2,7 +2,7 @@
 
 The owner's rule: every FoC XML tag has a target in our code, or it is known to have none
 ([docs/tag-coverage.md](tag-coverage.md) holds the registry). "A loader reads it" is not enough:
-in EAWR-666 `Layer_Z_Adjust` was read for every unit and applied for craft, but ships ignored it. This
+in the flight-height bug, `Layer_Z_Adjust` was read for every unit and applied for craft, but ships ignored it. This
 check can prove application mechanically: change the value, run the battle, see whether anything
 changes. An unchanged battle leaves application unproven until its consumers are exercised.
 
@@ -60,10 +60,10 @@ contradiction concerns this load's tables; other scenario consumers still need r
 A **finding** is either a contradiction or an unproven registry claim:
 
 - `no change on an applied type`: the row says the value is applied for that type, and the battle
-  never changes (the EAWR-666 class). Either the code does not apply it for that type, or the registry
+  never changes (the per-unit flight-height gap). Either the code does not apply it for that type, or the registry
   is wrong, or the M2 battle does not reach it in `--ticks` (say so in the row's hint).
 - `changes on a type the registry says is missing`: a `partial` row's missing type now changes the
-  battle; the row should say `applied` (after EAWR-718, `Layer_Z_Adjust` on ships).
+  battle; the row should say `applied` (after per-unit flight-height placement, `Layer_Z_Adjust` on ships).
 - `worker divergence`: a spot-checked row's changed battle differs at `--check-workers` workers.
 
 A row that names no types is tried on every type its class can have; a type the scene has no
@@ -105,8 +105,8 @@ python tools/inventory/tag_applied_check.py run --registry docs/tag-coverage/<re
 
 It writes `plan.json` and `plan.tsv` (the checks), `results.jsonl` (the driver's line per check),
 `report.json`, `report.md`, and `issue-drafts/<area>.md`: one issue per subsystem (the registry
-row's `area`) with its findings, linking the subsystem's tracking issue (EAWR-649 movement, EAWR-650
-combat, EAWR-651 fighters, EAWR-652 AI, EAWR-653 presentation, EAWR-654 economy). `tag_applied_check.py issues
+row's `area`) with its findings, linking the subsystem's tracking issue (movement tag coverage (legacy EAWR-649), combat tag coverage (legacy EAWR-650),
+fighter tag coverage (legacy EAWR-651), AI tag coverage (legacy EAWR-652), presentation tag coverage (legacy EAWR-653), economy tag coverage (legacy EAWR-654)). `tag_applied_check.py issues
 --out out/tag-check --file` files them through the nightly soak's issue client (search, create
 and comment only): an open issue of the same area, found by a key in its body, gets a comment
 when its finding set or evidence labels change. A stable fingerprint stored in the issue or its
@@ -133,11 +133,13 @@ without the token). Timeout kills the wrapper and driver as one process group, a
 is a build target only when enabled. It is off until the owner turns it on with the cron
 (docs/nightly-soak.md).
 
-## Proof on EAWR-666
+<a id="proof-on-666"></a>
 
-On the integration head before EAWR-718, a registry that says `Layer_Z_Adjust` is applied for craft
+## Proof on the per-unit flight-height gap
+
+On the integration head before per-unit flight-height placement, a registry that says `Layer_Z_Adjust` is applied for craft
 and ships reports ships as `no change` ("in the unit tables, the battle never differs"): a
-finding. On EAWR-718's head the same row reports ships as `changes` from tick 1 (the ships spawn at
+finding. On the flight-height placement change's head the same row reports ships as `changes` from tick 1 (the ships spawn at
 their height). The craft change the battle on both heads.
 
 ## Limits

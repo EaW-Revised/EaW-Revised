@@ -26,6 +26,9 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import combined_source  # noqa: E402
+
 INVENTORIES = {
     "eaw": ROOT / "plan/inventories/unresolved-placements.json",
     "foc": ROOT / "plan/inventories/unresolved-placements-foc.json",
@@ -187,8 +190,8 @@ class SelectorTable(unittest.TestCase):
         passes = [entry.get("render_pass", "opaque")
                   for entry in coverage["routes"]["legacy_effect"]["selectors"]]
         self.assertEqual([("transparent" if row[3] == "true" else "opaque") for row in rows], passes)
-        renderer = "".join((ROOT / "src/presentation/godot" / name).read_text(encoding="utf-8") for name in (
-            "renderer.cpp", "renderer_fog.cpp", "renderer_instances.cpp", "renderer_upload.cpp"))
+        renderer = combined_source(*(f"src/presentation/godot/{name}" for name in (
+            "renderer.cpp", "renderer_fog.cpp", "renderer_instances.cpp", "renderer_upload.cpp")))
         contract = (ROOT / "src/presentation/godot/renderer_contract.cpp").read_text(encoding="utf-8")
         # A family with its own adapter file is reached through legacy/registry.hpp.
         registry = (ROOT / "src/presentation/godot/legacy/registry.hpp").read_text(encoding="utf-8")

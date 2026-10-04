@@ -2,9 +2,11 @@
 
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/math/trig.hpp"
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <vector>
@@ -194,13 +196,24 @@ inline constexpr std::uint32_t idle_cell_search_limit = 64;
 // `taken` lists the cells other squadrons hold.
 [[nodiscard]] std::optional<CombatCell> idle_cell_claim(const math::Vec3& desired, std::span<const CombatCell> taken);
 
+// WMV-17/18: a team can retain a completed position formation before any player order.
+// An autonomous split copies completion history and may replace that base position.
+struct SquadronFormationState {
+    math::Vec3 base_position{};
+    EntityId base_target{};
+    bool complete{};
+    bool has_reached_done{};
+    bool attack_override{};
+    friend bool operator==(const SquadronFormationState&, const SquadronFormationState&) = default;
+};
+
 // A squadron's orders and target (FT rules). Hashed state.
 struct SquadronState {
     EntityId container{};
     TypeId squadron_type{};
     EntityId spawner{};        // the unit that launched it; zero for a tick-zero squadron
     std::uint32_t entry{};     // the spawner entry it counts against (FL-08)
-    std::vector<EntityId> roster; // its craft at launch: member k flies formation offset k
+    std::vector<EntityId> roster; // launch history; the live roster determines formation slots
     SquadronMode mode{SquadronMode::idle};
     EntityId escorted{};
     math::Vec3 anchor{};       // idle: the point it holds
@@ -221,9 +234,10 @@ struct SquadronState {
     bool joined{};
     // #687 (FM-23 to FM-26): the idle cell it holds, if any; its point is then `anchor`.
     std::optional<CombatCell> idle_cell{};
-    // FO-10 (#599): the lane of a squadron moved with others in one formation; hashed only while
-    // set, so sessions without a group move of squadrons keep their hashes.
+    // WSQ-10/WSQ-17, FO-10: the move's current straight segment and formation slot;
+    // a squadron moved alone has zero slot offsets. Hashed only while set.
     std::optional<SquadronLane> lane{};
+    std::optional<SquadronFormationState> formation{}; // WMV-17/18, independent of FA-07
     friend bool operator==(const SquadronState&, const SquadronState&) = default;
 };
 
@@ -256,7 +270,8 @@ struct SpawnDecision {
 // hardpoint still stands. Updates the state; returns the launch, if any. Frames that are not the
 // service frame change nothing.
 [[nodiscard]] std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, SpawnerState& state,
-    std::uint64_t seed, std::uint64_t frame, EntityId unit, const std::vector<bool>& bay_intact);
+    std::uint64_t seed, std::uint64_t frame, EntityId unit, const std::vector<bool>& bay_intact,
+    bool suspended = false);
 
 // A launched squadron of `entry` left the session at `frame` (FL-08).
 void squadron_lost(const SpawnerProfile& profile, SpawnerState& state, std::uint32_t entry, std::uint64_t frame);
@@ -269,6 +284,39 @@ struct CraftView {
     math::Vec3 position{};
     CraftState state{};
     const CraftProfile* profile{};
+    math::TrigCache* trig_cache{}; // scratch owned by this craft
+};
+
+// FD-06 broad phase (#893): rows arrive in container/roster order after timer expiry.
+// Rows with running chase timers cannot be chosen and are excluded. Spatial buckets
+// only reject positions outside the attack-distance box; queries restore row order.
+// The views must outlive the index and stay fixed while workers query it.
+struct ChaseCandidate {
+    CombatCell joined_cell{};
+    TeamId team{};
+    const CraftView* craft{};
+};
+
+// One phase partition owns these buffers. Clear between scanners, retain capacity
+// between ticks; the returned span is valid until that partition's next query.
+struct ChaseQueryScratch {
+    std::vector<std::size_t> rows;
+    std::vector<const CraftView*> result;
+};
+
+class ChaseCandidateIndex final {
+public:
+    explicit ChaseCandidateIndex(std::vector<ChaseCandidate> candidates);
+    [[nodiscard]] std::span<const CraftView* const> query(const CraftView& self, CombatCell joined_cell,
+        TeamId team, ChaseQueryScratch& scratch) const;
+
+private:
+    struct Cell {
+        std::vector<std::size_t> rows;
+        std::map<std::array<std::int64_t, 2>, std::vector<std::size_t>> positions;
+    };
+    std::vector<ChaseCandidate> candidates_;
+    std::map<std::array<std::int32_t, 2>, Cell> cells_;
 };
 
 // FD-10: a ship or static object fighters steer around (a unit with a space layer), as a sphere
@@ -293,6 +341,7 @@ struct LaneFlight {
     math::Vec3 direction{};
     math::Fixed shift{};
     math::Fixed speed{};
+    bool individual_speed{}; // one member: use each craft's current maximum (AB-24)
 };
 
 // What one craft's frame reads (copied before the phase, never written by it).
@@ -314,8 +363,8 @@ struct CraftFrame {
     math::Fixed speed_factor{math::Fixed::from_raw(math::Fixed::scale)};
     // FO-01: a player move toward `hold` (at full speed, in formation) instead of holding it.
     bool moving{};
-    // FO-10 (#599): on a group move, the formation's path direction, the leader's sideways lane
-    // steer and the speed every craft forms up at; none on a move alone.
+    // WSQ-17, FO-10: the path direction, leader's sideways lane steer and the speed
+    // every craft forms up at, including on a move alone.
     std::optional<LaneFlight> lane{};
     // #457: the squadron's dogfight, its combat cell, and the craft this one chases while its
     // chase timer runs (FD-05), null for none.
@@ -324,6 +373,7 @@ struct CraftFrame {
     const CraftView* chase{};
     // FD-10: the ships to steer around, ascending ID.
     std::span<const CraftObstacle> obstacles{};
+    math::TrigCache* trig_cache{}; // optional; the locomotor owns a local cache otherwise
 };
 
 struct CraftStep {

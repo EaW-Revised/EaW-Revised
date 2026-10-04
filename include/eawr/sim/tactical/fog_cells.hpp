@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <set>
 #include <vector>
 
 // Retail space fog cells (#274; docs/behaviour/space-visibility.md V-11 to V-17): the logical
@@ -72,6 +73,10 @@ public:
         std::span<const FogRevealer> revealers, const PartitionExecutor& executor,
         std::span<const FogFlash> flashes = {});
 
+    // V-20: holds the entire grid for this player across ordinary refresh. Transactional,
+    // with row assignments partitioned; retained snapshots keep their previous rows.
+    [[nodiscard]] core::Result<void> reveal_all(PlayerId player, const PartitionExecutor& executor);
+
     // Whether a unit at `position` is unfogged for the player_index-th player: its cell is in
     // the grid and its value is above zero.
     [[nodiscard]] bool revealed(std::size_t player_index, const math::Vec3& position) const noexcept;
@@ -105,6 +110,7 @@ private:
     std::vector<std::vector<HoldRow>> holds_; // revealers holding each cell
     mutable std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> flat_values_;
     std::size_t copied_grid_bytes_{};
+    std::set<PlayerId> full_reveals_; // V-20; canonical only when nonempty
 };
 
 } // namespace eawr::sim::tactical

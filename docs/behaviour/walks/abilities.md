@@ -11,7 +11,7 @@
   - the targeted ion shot, the behaviour ability `HUNT`, and the interactions with orders,
     stuns, shields and engines.
   It lists every rule in evaluation order and gives the gaps against the remake. It also answers
-  the owner's MC80 question (EAWR-670).
+  the owner's question about MC80 shield-boost duration (legacy EAWR-670).
 - Sources:
   - **debug build**: the FoC debug executable with symbols, read under the clean-room rule.
     The evidence IDs (EAB-nn) are opaque and their map stays private.
@@ -23,7 +23,7 @@
   (HD). This walk re-reads their order in the frame and cites them instead of repeating them.
 - Out of scope, recorded as an interface:
   - the command bar, the buttons, hotkeys, the card marks and the world ability icon (walk 8,
-    [ability buttons](../foc-ability-buttons.md), EAWR-521, PR EAWR-678);
+    [ability buttons](../foc-ability-buttons.md), ability-button eye check, retail ability-state staging (legacy EAWR-678));
   - the AI plans' choice of when to run a plan (walk 6);
   - the weapon, shield, energy and movement services that read the multipliers (walks 2 to 4);
   - land abilities, hero abilities, and the nebula and ion-storm cancels (no M2 map has
@@ -95,7 +95,7 @@
 |---|---|---|
 | WAB-10 | The countdown is serviced every frame. For each ability it takes the frames elapsed since its own last service (1 in steady play, never negative). Because it counts elapsed frames, a skipped service loses no time. The game speed does not change it: a logical frame is 1/30 s of game time at every speed (TR-02). | debug build EAB-01, EAB-12 |
 | WAB-11 | **Expiration.** While the ability is on, the count rises by the elapsed frames, up to E. In the service where the count reaches E, the ability **expires**:<ul><li>it switches off (on a team container, through its team leader);</li><li>the local player hears the faction's "ability off" sound (walk 8);</li><li>the recharge starts;</li><li>the ability-finished signal goes to the unit's AI TaskForce (WAB-34).</li></ul>The recharge length is R = trunc(`Recharge_Seconds` x (1 + the unit's ability-recharge modifiers) x 30) frames. The modifiers are the sum of the `Ability_Recharge_Bonus_Percentage` of the combat-bonus abilities that affect the unit. Only the Underworld's land upgrades author one (-0.15), so every M2 unit has R = trunc(`Recharge_Seconds` x 30). A recharge of 0 or less starts no recharge (FoC shows a data error). Every M2 ability recharges after it expires: the ability type table exempts only self-destruct. | debug build EAB-01, EAB-03, EAB-04, EAB-05; data |
-| WAB-12 | **Where the timer starts and what it counts (EAWR-670).** The expiration countdown starts in the frame the ability switches on and counts logical frames. It counts nothing else: no damage, no shield level, no game speed. `DEFEND` therefore runs E = 450 frames, 15.0 s of game time, on the MC80 and the Nebulon-B alike. The count gains its first frame in the first countdown service after the switch:<ul><li>if commands are processed before the unit's services in a frame, the count reaches 450, and `DEFEND` ends, 449 frames after the switch;</li><li>otherwise it ends 450 frames after the switch.</li></ul>The in-frame order was not traced (U-01). | debug build EAB-01, EAB-02 |
+| WAB-12 | **Where the timer starts and what it counts.** The expiration countdown starts in the frame the ability switches on and counts logical frames. It counts nothing else: no damage, no shield level, no game speed. `DEFEND` therefore runs E = 450 frames, 15.0 s of game time, on the MC80 and the Nebulon-B alike. The count gains its first frame in the first countdown service after the switch:<ul><li>when activation precedes the countdown service, the count reaches 450, and `DEFEND` ends, 449 frames after the switch;</li><li>otherwise it ends 450 frames after the switch.</li></ul>WFO-02/17 settles the ordinary admitted-frame command-before-countdown branch; object-script/late AI activation must use its actual caller position. Exact remake/original endpoint normalization remains frame-order UFO-02. | debug build EAB-01, EAB-02; WFO-02/17/21/22/31 |
 | WAB-13 | **Recharge.** While the ability recharges, the count falls by the elapsed frames, clamped at 0. When it reaches 0 and the ability is enabled, the ability-ready signal goes to the unit's AI TaskForce (WAB-34). The ability is ready from that frame (AB-13). | debug build EAB-01 |
 | WAB-14 | **Completion for display.** Each service also computes the timer's completion (1 - count / length) for the command bar's dial (AB-50, walk 8). | debug build EAB-01 |
 
@@ -111,12 +111,20 @@
 | Rule | Behaviour | Source |
 |---|---|---|
 | WAB-30 | Autofire is a per-ability flag that a command sets only on an ability with `Supports_Autofire` (AB-40). The flag switches nothing by itself. The engine reads it only for the ion shot (AB-68). Scripts read it through `Is_Ability_Autofire`. | debug build; AB-40, AB-68 |
+| WAB-35 | Newly created local units inherit the player's creation preference, enabled for a fresh profile; only abilities with `Supports_Autofire` are armed. Initial and mid-battle creation use the same rule. This supplies the human branch of WAB-31 without a manual activation command; AI shield use and plan-owned power modes retain their separate triggers. | debug build AF-R01 to AF-R04; AB-45, AB-46 |
 | WAB-31 | **The `DEFEND` object script** (`ObjectScript_PowerToShields`, `ServiceRate` 1 s; the Nebulon-B and the MC80) switches `DEFEND` on when all of these hold:<ul><li>the damage rate (WAB-32) is above 20.0;</li><li>`DEFEND` is ready;</li><li>the owner is not human, or it is human and `DEFEND` is on autofire.</li></ul>A human owner's unit without autofire never uses it. The script never switches `DEFEND` off (AB-41). | data; AB-41 |
 | WAB-32 | The damage rate is the hull and shield lost over the last 30 frames, per second, serviced every 30 frames per unit (AB-42, AB-U1). | debug build; AB-42 |
 | WAB-33 | **The AI plan library**. Every space TaskForce's default handlers use abilities through FoC's own library (`Try_Ability`, `Use_Ability_If_Able`). `Try_Ability` first draws a difficulty chance, 100 % at every difficulty. The uses:<ul><li>**Damage taken.** When a TaskForce unit is damaged, it tries `DEFEND` when its shield is below 0.8 (after `INVULNERABILITY` below 0.2, which no M2 unit has). The missile and laser defences it then tries don't exist in M2.</li><li>**A fighter shot on purpose by a fighter** switches `SPOILER_LOCK` off and attacks back.</li><li>**A unit about to die** (it would die within 20 s, or its hull is low as the library defines) switches `Power_To_Weapons` off before it looks for repair.</li><li>**The end of a diversion** switches `Turbo` and `SPOILER_LOCK` off.</li><li>**Plans** switch `Turbo` on for their moves: `turboattack`, `turboattacklocation`, `areasweep`, `spacescout`. `bombingrun`, `areasweep` and `movetolocationrush` use `SPOILER_LOCK`.</li></ul>No script uses `HUNT`, and no M2 plan uses `ION_CANNON_SHOT`. | data (scripts/library, scripts/ai/spacemode) |
 | WAB-34 | **Plan events from the ability signals.** The TaskForce turns a member's ability signals into plan events:<ul><li>`Unit_Ability_Ready` when a recharge counts down to 0 (WAB-13), and when a nebula's ability disable ends (not M2). An ability switched off in its first frame recharges 0 frames and sends none. `turboattack` and `turboattacklocation` switch `Turbo` back on on this event while their move still needs it. The library's handler switches back on a remembered cancelled `SPOILER_LOCK` or `Turbo`.</li><li>`Unit_Ability_Finished` when a timed ability expires (WAB-11) and when the ion shot ends (AB-65). The TaskForce's own `Activate_Ability` also sends it at once for each member whose switch fails, so a plan blocking on the command does not wait. An early switch-off of a power mode sends none. The library's handler does nothing.</li><li>`Unit_Ability_Cancelled` only when a nebula disables the unit's abilities. It never fires in M2, so the library's recovery of a cancelled ability never runs there.</li></ul> | debug build EAB-01, EAB-04, EAB-12, EAB-14; data |
 
 ### ION_CANNON_SHOT (targeted, per frame)
+
+The table above describes the starting fleet. The expanded production roster also includes
+the TIE Defender squadron and its team container, which author `ION_CANNON_SHOT` with the
+same override projectile and a 25-second recharge (the Y-wing's is 20 seconds). See the
+[ion inventory](../space-damage.md#inventory-of-the-starting-fleet-and-production-roster)
+for their ordinary ion weapons as well. The targeted shot and the ordinary energy-draining
+shots have separate projectile flags; the ability's stun does not drain energy.
 
 | Rule | Behaviour | Source |
 |---|---|---|
@@ -144,7 +152,9 @@
 | WAB-63 | A new order ends `ION_CANNON_SHOT` (WAB-40) and `HUNT` (WAB-51). It never ends a power mode: a moving corvette keeps `TURBO` (AB-10). | debug build EAB-06; AB-10 |
 | WAB-64 | Out of M2: a nebula cancels abilities (`Nebula_Ability_Disable_Time`), and an ion storm blocks `DEFEND`. No M2 map has either. | debug build; AB-14, AB-64 |
 
-## Finding for EAWR-670 (the MC80's DEFEND "lasts much too short")
+<a id="finding-for-670-the-mc80s-defend-lasts-much-too-short"></a>
+
+## Finding for MC80 shield-boost duration verification (legacy EAWR-670) (the MC80's DEFEND "lasts much too short")
 
 - **FoC's timer is ours.** FoC starts the countdown in the frame `DEFEND` switches on and counts
   logical frames only (WAB-12), so it ends about 450 frames later: 15.0 s of game time on the
@@ -161,7 +171,7 @@
   1. **The shield runs out sooner in ours.** An MC80 under the Imperial fleet's fire can reach 0
      while `DEFEND` restores 50 every 9 frames (about 167 per second, AB-22). Any excess of
      shield damage in ours against FoC ends `DEFEND` sooner. The open shield-routing tickets:
-     EAWR-700 (hits during the depletion effect) and EAWR-669 (the hull and hardpoint split); walk 2
+     depleted-shield collision gating (legacy EAWR-700) (hits during the depletion effect) and hardpoint-directed damage routing (the hull and hardpoint split); walk 2
      covers the shield damage itself.
   2. **Ion stuns.** Only the Rebel Y-wings fire ion shots, so a Rebel MC80 is stunned only in a
      Rebel-versus-Rebel battle; unlikely in the owner's preview.
@@ -191,6 +201,7 @@
 | AB-40 | same |
 | AB-41 | same, and missing one path. AI TaskForces also switch `DEFEND` on through the library's damage handler when the shield is below 0.8 (WAB-33); ours runs that library, so the remake does it too |
 | AB-42, AB-43, AB-44 | same |
+| AB-45, AB-46 | creation defaults and trigger ownership verified in the debug build; WAB-35 |
 | AB-60 to AB-67 | same, and missing one rule: **a new order ends the ion shot** (WAB-40, G-2) |
 | AB-68, AB-69 | not re-read (AB-U7 and AB-U8 stay open) |
 | IS-07, HD-11, HD-12 | same |
@@ -203,24 +214,25 @@ WAB-56, WAB-60 to WAB-64: 30 rules):
 
 | Rule | Ours | Verdict |
 |---|---|---|
-| WAB-01, WAB-02 | `session.cpp` (the ability command), `abilities.cpp` `activate_ability`, `ability_ready` | same |
+| WAB-01, WAB-02 | `session_step.cpp` (the ability command), `abilities.cpp` `activate_ability`, `ability_ready` | same |
 | WAB-03, WAB-11 | `abilities.cpp` `activate_ability` (`expires_tick`), `expire_abilities` | same (R without modifiers: none in M2) |
-| WAB-04 | `activate_ability`, `session.cpp` (speed re-plan, AB-43, the ion lock-on) | same for the power modes and the ion shot; the behaviour part is missing with `HUNT` (G-1) |
+| WAB-04 | `activate_ability`, `session_step.cpp` (speed re-plan, AB-43, the ion lock-on) | same for the power modes and the ion shot; the behaviour part is missing with `HUNT` (G-1) |
 | WAB-05 | `deactivate_ability` | same |
 | WAB-10, WAB-13 | tick arithmetic (`ready_tick`) | same |
 | WAB-12 | `expires_tick = tick + 450` | same within one frame (U-01) |
 | WAB-14 | snapshot ability status (AB-50) | same |
 | WAB-20, WAB-21 | `ability_multiplier`, `scaled_weapon_delay`, `scaled_interval`, the ion fire gate | same |
 | WAB-30, WAB-31, WAB-32 | the native stand-in (AB-41), `close_rate_window` | same |
-| WAB-33 | FoC's own library through the AI host (`src/script/foc/tactical_ai.cpp`) | same |
+| WAB-35 | `initial_abilities`, `session_abilities.cpp` creation, `unit_abilities.cpp` profile binding | same |
+| WAB-33 | FoC's own library through the AI host (`src/script/foc/tactical_ai_bindings.cpp`) | same |
 | WAB-34 | no ability plan events (`unsupported_plan_calls`: "no Unit_Ability_Ready plan event") | **missing** (G-3): `_Ready` and `_Finished`; `_Cancelled` does not arise in M2 |
-| WAB-40 | `session.cpp` ion lock (AB-63 re-orders the squadron onto the target whenever its target differs) | **differs** (G-2): a player's move or attack on another target is overridden back onto the ion target instead of ending the shot |
+| WAB-40 | `session_step.cpp` ion lock (AB-63 re-orders the squadron onto the target whenever its target differs) | **differs** (G-2): a player's move or attack on another target is overridden back onto the ion target instead of ending the shot |
 | WAB-50 to WAB-56 | the loader skips `HUNT` (AB-03); the Lua host reports it as cut | **missing** (G-1) |
-| WAB-60, WAB-61, WAB-62 | `session.cpp` `end_depleted_defend`, `ion_stun_unit`, the engine loss | same |
-| WAB-63 | `session.cpp` (power modes survive orders) | same for power modes; the ion shot differs (G-2), `HUNT` is missing (G-1) |
+| WAB-60, WAB-61, WAB-62 | `session_abilities.cpp` `end_depleted_defend`, `ion_stun_unit`, the engine loss | same |
+| WAB-63 | `session_step.cpp` (power modes survive orders) | same for power modes; the ion shot differs (G-2), `HUNT` is missing (G-1) |
 | WAB-64 | not modelled (no nebula or ion storm in M2) | same for M2 |
 
-Counts by rule: **same 21**, **differs 1** (WAB-40), **missing 8** (WAB-34 and the seven `HUNT`
+Counts by rule: **same 22**, **differs 1** (WAB-40), **missing 8** (WAB-34 and the seven `HUNT`
 rules WAB-50 to WAB-56). WAB-04 and WAB-63 count as same; their `HUNT` and ion parts are G-1
 and G-2.
 
@@ -229,26 +241,26 @@ and G-2.
 | G-1 | **Implement `HUNT`** (WAB-04 behaviour part, WAB-50 to WAB-56, WAB-51 cancel) for the TIE fighter and interceptor squadrons: player switch-on and switch-off, the 30-frame idle check on the leader, the destination draws in FoC's order on the sim RNG, the coordinated attack-move of the squadron, and the order cancel. It un-cuts AB-03 and FH-24's `HUNT`; the command bar button stops being disabled (walk 8). | M |
 | G-2 | **A new order ends the ion shot** (WAB-40): a move, attack, guard or Lua order on a squadron whose ion shot is on switches it off (recharging only when a craft had already fired, AB-65) instead of being overridden by the AB-63 re-order. Bug. | S |
 | G-3 | **Ability plan events** (WAB-34). Send `Unit_Ability_Ready` when a TaskForce member's recharge completes. Send `Unit_Ability_Finished` when a timed ability expires or the ion shot ends, and for each member whose switch fails in a TaskForce `Activate_Ability`. `turboattack`'s `Turbo` re-activation then works. `Unit_Ability_Cancelled` needs no work in M2 (nebulae only). | S |
-| EAWR-670 | No code gap in the timer (WAB-12). The update on EAWR-670 asks for the end cause in the trace and the replay of the owner's situation (see the EAWR-670 section). | (on EAWR-670) |
+| MC80 shield-boost duration verification (legacy EAWR-670) | No code gap in the timer (WAB-12). The update on the MC80 shield-boost investigation asks for the end cause in the trace and the replay of the owner's situation (see the MC80 shield-boost finding above). | duration investigation (legacy EAWR-670) |
 
 ### XML tags this subsystem reads
 
 | Tag | Where | tag-coverage status |
 |---|---|---|
-| `Unit_Abilities_Data`, `Unit_Ability`, `Type`, `Expiration_Seconds`, `Recharge_Seconds`, `Supports_Autofire`, `Mod_Multiplier` (the `SpaceUnit` and `Squadron` types) | AB-01, WAB-03, WAB-11, WAB-30 | read; `SpaceUnit/Unit_Abilities_Data/@SubObjectList` and `Squadron/Unit_Abilities_Data/@SubObjectList` listed **todo** (EAWR-650), the element rows are not listed |
-| `Container/Unit_Abilities_Data/Unit_Ability/Type`, `Recharge_Seconds`, `Supports_Autofire`, `Projectile_Types_Override`, `Container/Abilities/Ion_Cannon_Shot_Attack_Ability/Activation_Style`, `Applicable_Unit_Categories` | AB-60 (the Y-wing container) | read since EAWR-561, but listed **todo** (EAWR-650): the report is stale for these rows |
-| `Container/Unit_Abilities_Data/Unit_Ability/GUI_Activated_Ability_Name`, `Container/Abilities/Ion_Cannon_Shot_Attack_Ability/@Name` | AB-60 (the ability's name link) | **todo** (EAWR-653) |
-| `SpaceUnit/.../SFXEvent_GUI_Unit_Ability_Activated`, `SFXEvent_GUI_Unit_Ability_Deactivated`; `Faction/SFXEvent_GUI_Toggle_Non_Hero_Ability_On`/`_Off` and the `Enemy` pair | WAB-11 (sound on expiry; walk 8) | **todo** (EAWR-653) |
-| `Lua_Script` (`ObjectScript_PowerToShields`) | WAB-31 | `Container/Lua_Script` **todo** (EAWR-652); the ship rows are not listed |
+| `Unit_Abilities_Data`, `Unit_Ability`, `Type`, `Expiration_Seconds`, `Recharge_Seconds`, `Supports_Autofire`, `Mod_Multiplier` (the `SpaceUnit` and `Squadron` types) | AB-01, WAB-03, WAB-11, WAB-30 | read; `SpaceUnit/Unit_Abilities_Data/@SubObjectList` and `Squadron/Unit_Abilities_Data/@SubObjectList` listed **todo**: combat tag support (legacy EAWR-650), the element rows are not listed |
+| `Container/Unit_Abilities_Data/Unit_Ability/Type`, `Recharge_Seconds`, `Supports_Autofire`, `Projectile_Types_Override`, `Container/Abilities/Ion_Cannon_Shot_Attack_Ability/Activation_Style`, `Applicable_Unit_Categories` | AB-60 (the Y-wing container) | read since the ion weapons, energy drain and stun work (legacy EAWR-561), but still listed as **todo** in the combat tag report (legacy EAWR-650); the report is stale for these rows |
+| `Container/Unit_Abilities_Data/Unit_Ability/GUI_Activated_Ability_Name`, `Container/Abilities/Ion_Cannon_Shot_Attack_Ability/@Name` | AB-60 (the ability's name link) | **todo**: presentation tag support (legacy EAWR-653) |
+| `SpaceUnit/.../SFXEvent_GUI_Unit_Ability_Activated`, `SFXEvent_GUI_Unit_Ability_Deactivated`; `Faction/SFXEvent_GUI_Toggle_Non_Hero_Ability_On`/`_Off` and the `Enemy` pair | WAB-11 (sound on expiry; walk 8) | **todo**: presentation tag support (legacy EAWR-653) |
+| `Lua_Script` (`ObjectScript_PowerToShields`) | WAB-31 | `Container/Lua_Script` **todo**: AI tag support (legacy EAWR-652); the ship rows are not listed |
 | `Space_FOW_Reveal_Range` | WAB-54 | not listed |
 | `Ability_Recharge_Bonus_Percentage` (combat bonus abilities) | WAB-11 | not listed; no M2 space unit carries one |
-| `GameConstants/Nebula_Ability_Disable_Time` | WAB-64 | **todo** (EAWR-650); not in M2 |
+| `GameConstants/Nebula_Ability_Disable_Time` | WAB-64 | **todo**: combat tag support (legacy EAWR-650); not in M2 |
 
 ## Unverified, and what would settle it
 
 | ID | Unknown | Effect | What settles it |
 |---|---|---|---|
-| U-01 | Whether FoC processes an ability command before the unit's countdown service in the same frame (WAB-12) | `DEFEND` ends 449 or 450 frames after the switch; ours 450 | A retail Lua staging (the capture mod) that switches `DEFEND` on at a known frame and logs `Is_Ability_Active` every frame |
+| U-01 | **Settled schedule:** ordinary admitted-frame commands precede countdown (WAB-12); later object-script/AI activation has its own caller position | Command-before-countdown can count the activation frame; normalize clocks before judging the remake endpoint | [WFO-02/17/21/22/31](frame-order.md), debug build; UFO-02's debugger-harness stepping covers endpoint normalization, without a new log-scraping probe |
 | U-02 | Which switch-offs the TaskForce reports as `Unit_Ability_Cancelled` | **Settled** (WAB-34): only a nebula disabling abilities, never in M2 | none |
-| U-03 | Why the owner's MC80 lost `DEFEND` early (EAWR-670) | Which of the four candidates it is | Ours: the end cause in the trace, on the owner's preview situation |
+| U-03 | Why the owner's MC80 lost `DEFEND` early (legacy EAWR-670) | Which of the four candidates it is | Ours: the end cause in the trace, on the owner's preview situation |
 | U-04 | `HUNT` in retail: no recording yet | The destination draws (WAB-54) are read, not observed | A retail capture of an idle TIE squadron with `HUNT` on, over a minute: destinations in fog, on enemy ships, or 500 to 1000 units off |

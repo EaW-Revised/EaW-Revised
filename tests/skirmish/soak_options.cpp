@@ -68,6 +68,10 @@ std::variant<Options, std::string> parse_options(const std::vector<std::string>&
             options.invariants = false;
             continue;
         }
+        if (flag == "--check-schedule") {
+            options.check_schedule = true;
+            continue;
+        }
         if (!flag.starts_with("--")) return "unexpected argument '" + flag + "'";
         if (at + 1 >= arguments.size()) return "the flag " + flag + " needs a value";
         const std::string& value = arguments[++at];
@@ -107,6 +111,16 @@ std::variant<Options, std::string> parse_options(const std::vector<std::string>&
             const auto number = count(1, 10'000);
             if (!number) return fail("a tick interval from 1 to 10000");
             options.check_every = static_cast<std::size_t>(*number);
+        } else if (flag == "--ai-schedule") {
+            if (value != "faithful" && value != "staggered") return fail("faithful or staggered");
+            options.ai_faithful = value == "faithful";
+        } else if (flag == "--ai-attach-cap") {
+            const auto number = count(1, 1000);
+            if (!number) return fail("a plan count from 1 to 1000");
+            options.ai_attach_cap = static_cast<std::uint32_t>(*number);
+        } else if (flag == "--tick-trace") {
+            if (value.empty()) return fail("a directory");
+            options.tick_trace = std::filesystem::path(value);
         } else if (flag == "--out") {
             if (value.empty()) return fail("a directory");
             options.out = std::filesystem::path(value);
@@ -164,6 +178,9 @@ std::string reproduction_flags(const Options& options, const std::uint64_t seed)
     if (options.check_every != 1) flags << " --check-every " << options.check_every;
     if (options.require_decision) flags << " --require-decision";
     if (!options.invariants) flags << " --no-invariants";
+    if (options.check_schedule) flags << " --check-schedule";
+    if (options.ai_faithful) flags << " --ai-schedule " << (*options.ai_faithful ? "faithful" : "staggered");
+    if (options.ai_attach_cap) flags << " --ai-attach-cap " << *options.ai_attach_cap;
     const auto& limits = options.limits;
     if (limits.spawn_window != defaults.spawn_window) flags << " --spawn-window " << limits.spawn_window;
     if (limits.hull_penetration != defaults.hull_penetration) {

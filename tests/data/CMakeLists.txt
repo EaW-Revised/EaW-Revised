@@ -6,6 +6,12 @@ eawr_target_project_warnings(data_tests)
 
 add_test(NAME data_contracts COMMAND data_tests)
 
+add_executable(xml_namespace_tests xml_namespace_tests.cpp)
+target_link_libraries(xml_namespace_tests PRIVATE eawr::data)
+target_compile_features(xml_namespace_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(xml_namespace_tests)
+add_test(NAME xml_namespace_contracts COMMAND xml_namespace_tests)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(
     NAME data_schema_contract_generator
@@ -16,4 +22,11 @@ add_test(
 )
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+# Each file runs its CPU contracts; graphical exercises retain their opt-in gates.
+eawr_add_python_contract(python_data_acceptance_xml_acceptance_evaluator tests.data.acceptance.test_xml_acceptance_evaluator)
+
+add_test(NAME xml_scanner_acceptance_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/acceptance/test_p0_05_acceptance.py"
+            --xml-scan "$<TARGET_FILE:xml_scan>")
+
 eawr_label_tests()

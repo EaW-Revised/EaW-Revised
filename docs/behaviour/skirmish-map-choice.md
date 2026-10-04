@@ -1,16 +1,24 @@
 # Space skirmish selection
 
-Project lobby and camera policy requested by the owner in EAWR-908. These rules
+Project lobby and camera policy requested by the owner in space-skirmish map selection. These rules
 describe project choices; existing starts still apply SK-01 to SK-24 and
 space-movement PL-01/PL-03. No new claim about original-game behaviour is made.
 
-- **SC-01:** The selectable lobby has exactly two players. Maps with more spawn
-  slots may host those two players; unused markers remain unused. The default
+- **SC-01:** The local selectable lobby has two to eight occupied rows, bounded
+  by authored map capacity (WSS-08). Open rows have no player record. Team
+  bounds use authored start positions rather than capacity; at least two
+  homogeneous teams are required, and opposing teams may use the same faction
+  (WSS-17/18). Unused markers remain unused. The default
   map, factions, teams, controllers, fleets and seed are the unchanged M2 fixture.
   Explicit options replace the requested values and bind the selected map's
   actual SHA-256. The pinned Coruscant map still requires its original hash.
   Lobby factions must author `Is_Playable`; the existing station and spawn
   selection validates their team markers and station candidates.
+  Explicit CLI fixtures may retain arbitrary human seats and player IDs; the
+  local screen fixes the host to row one and permits only AI or Open elsewhere.
+  Both paths enforce capacity, authored start range and team homogeneity.
+  Explicit map paths may use any stem under `data/art/maps/`; the space battle
+  kind comes from the header, following WSS-03 rather than a filename prefix.
   Selectable sessions extend the pinned unit-table inputs only for missing
   selected fleet, faction free-force and station-candidate types, using the
   existing validated loader and its craft/hangar/projectile dependency loading.

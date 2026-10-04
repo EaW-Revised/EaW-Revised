@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -180,6 +181,57 @@ void test_rules() {
     expect(back && near(back.value(), decimal("-97.5"), 512), "yaw_rotation and yaw_degrees agree");
 }
 
+// MV-01/20/30: the three authored super capitals, including the smallest turn rate.
+void test_super_capital_math() {
+    for (const auto& [name, speed, turn, bank] : {
+            std::tuple{"Eclipse_Super_Star_Destroyer", "0.3", "0.01", 2},
+            std::tuple{"Executor_Super_Star_Destroyer", "0.5", "0.02", 3},
+            std::tuple{"UM12_SUPER_STAR_DESTROYER", "0.5", "0.02", 3}}) {
+        const auto scaled = [](const char* text) { return math::multiply(decimal(text), decimal("1.2")).value(); };
+        const tactical::MotionProfile profile{1014, scaled(speed), scaled("0.02"), scaled("0.02"), scaled(turn),
+            units(4), scaled("0.1"), units(bank)};
+        auto table = foc_table();
+        table.profiles = {profile};
+        expect(static_cast<bool>(tactical::validate_motion(table)), std::string(name) + " motion validates");
+        const auto face = tactical::plan_face(profile, 0, at(0, 0, 0), Fixed{}, at(-1000, 0, 0));
+        expect(face && face.value().kind == tactical::MotionKind::turn, std::string(name) + " faces 180 degrees");
+        if (face) {
+            const auto duration = math::multiply(math::divide(units(180), profile.rate_of_turn).value(), profile.turn_in_place_slowdown).value();
+            expect(face.value().nodes.back().frame == duration, "face duration uses authored rate and layer slowdown");
+            for (const std::uint64_t tick : {1U, 100U, 1000U}) {
+                const auto sample = tactical::sample_motion(face.value(), tick, Vec3{}, Fixed{});
+                const auto expected = math::divide(math::multiply(profile.rate_of_turn, units(static_cast<std::int64_t>(tick))).value(), profile.turn_in_place_slowdown).value();
+                expect(sample && !sample.value().finished && near(sample.value().yaw, Fixed::from_raw(-expected.raw()), 180),
+                    "face sample turns at the authored rate / slowdown");
+            }
+        }
+        // Extreme accepted coordinates, both directions, from rest and at maximum authored speed.
+        for (const auto start_speed : {Fixed{}, profile.max_speed}) for (const auto head : {units(0), units(90), units(180)}) {
+            const auto path = tactical::plan_move(profile, table.rules, 0, at(-262144, -262144, 0), head,
+                start_speed, at(262144, 262144, 0));
+            expect(path && path.value().kind == tactical::MotionKind::path, std::string(name) + " extreme move plans");
+            if (!path || path.value().nodes.size() < 2) continue;
+            const auto& nodes = path.value().nodes;
+            for (std::size_t i = 1; i < nodes.size(); ++i) {
+                const auto span = math::subtract(nodes[i].frame, nodes[i - 1].frame).value();
+                expect(span.raw() > 0 && span < units(1 << 23), "authored path obeys analytic span bound");
+                for (const auto part : {1, 2, 3}) {
+                    const auto tick = static_cast<std::uint64_t>((nodes[i - 1].frame.raw() + span.raw() * part / 4) / one);
+                    expect(static_cast<bool>(tactical::sample_motion(path.value(), tick, Vec3{}, Fixed{})),
+                        "exact Hermite samples inside the longest authored spans");
+                }
+            }
+        }
+        const auto arc = tactical::plan_move(profile, table.rules, 0, Vec3{}, Fixed{}, profile.max_speed, at(0, 10000, 0));
+        expect(arc && arc.value().nodes.size() > 2, "super capital plans turning arcs");
+        if (arc && arc.value().nodes.size() > 2) {
+            const auto frames = math::subtract(arc.value().nodes[1].frame, arc.value().nodes[0].frame).value();
+            expect(frames == math::divide(table.rules.arc_degrees, profile.rate_of_turn).value(),
+                "moving arc duration preserves the authored turn rate");
+        }
+    }
+}
+
 // #351 BK-02 to BK-05 against values worked by hand from the rule (Q24 rounding: a few raw).
 void test_bank_rules() {
     const auto bank = [](const tactical::MotionProfile& profile, const char* roll, const char* before, const char* after) {
@@ -310,6 +362,15 @@ struct Run {
         }
         result.hashes.push_back(std::to_string(stepped.value().completed_tick) + "," + stepped.value().state_sha256);
         result.units.push_back(session.units());
+        expect(session.tick_work().level_matrix_builds == result.units.back().size(),
+            "one level matrix per moved unit, including banking ships");
+        std::uint64_t rolling = 0;
+        for (const auto& unit : result.units.back()) {
+            const auto roll = session.roll_degrees(unit.entity_id);
+            rolling += roll && roll->raw() != 0 ? 1U : 0U;
+        }
+        expect(session.tick_work().banked_matrix_builds == rolling,
+            "only rolling ships build the distinct BK-05 snapshot matrix");
         for (const auto& event : stepped.value().snapshot->events()) {
             result.events.push_back(std::to_string(event.tick) + "," + std::to_string(event.unit) + ","
                 + std::string(tactical::to_string(event.kind)) + "," + std::string(tactical::to_string(event.order)));
@@ -531,6 +592,7 @@ int main(const int argc, char** argv) {
     }
     test_validation();
     test_rules();
+    test_super_capital_math();
     test_bank_rules();
     test_bank_session();
     test_fixtures(argv[1], regenerate);

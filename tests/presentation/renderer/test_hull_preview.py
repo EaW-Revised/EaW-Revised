@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "tools" / "validation" / "p1_capture"))
 
 import build_manifest  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
-from viewer_mode_sources import mode_source  # noqa: E402
+from viewer_mode_sources import mode_source, source_text  # noqa: E402
 
 PREVIEW_HEADER = ROOT / "apps/viewer/src/model_preview.hpp"
 HULL_TEXTURE_SHA256 = "456e88d85c9569d173c2b68bc4cc59a51e5a201aa2bf4cac8ee23afc26fab7cb"
@@ -48,7 +48,7 @@ class HullPreviewContract(unittest.TestCase):
         for file, environment in (("map_mode_scene.cpp", "environment"),
                                   ("space_populate.cpp", "options.environment")):
             with self.subTest(scene=file):
-                source = (ROOT / "apps/viewer/src" / file).read_text(encoding="utf-8")
+                source = source_text("apps/viewer/src/" + file)
                 self.assertIn(f"state.specular = lighting::sun_specular({environment});", source)
                 self.assertNotIn(f"state.specular = {{{environment}.specular.r", source)
 
@@ -79,6 +79,7 @@ class HullPreviewContract(unittest.TestCase):
 
     def test_viewer_selects_through_one_plan(self):
         source = mode_source("viewer_host")
+        physical = (ROOT / "apps/viewer/src/viewer_host_scene.cpp").read_text(encoding="utf-8")
         self.assertNotIn("default_scene_model", source)
         for token in ("model_preview::plan_for(", "model_preview::select_submesh(",
                       "model_preview::texture_path_for(", "model_preview::rest_placement(",
@@ -86,15 +87,16 @@ class HullPreviewContract(unittest.TestCase):
                       "adapt_snapshot(*fixed_capture_snapshot_)"):
             self.assertIn(token, source)
         # The frozen policy never writes the capture camera.
-        load_scene = source[source.index("bool ViewerHost::load_scene()"):
-                            source.index("bool ViewerHost::apply_animation_pose(")]
+        load_scene = physical[physical.index("bool ViewerHost::load_scene()"):
+                            physical.index("bool ViewerHost::apply_animation_pose(")]
         self.assertNotIn("CameraPolicy::frozen_fixed", load_scene)
         self.assertIn("CameraPolicy::legacy_mesh_bounds", load_scene)
         self.assertIn("CameraPolicy::hull_bounds_fit", load_scene)
 
     def test_only_the_exploratory_preview_reports_its_identity(self):
         source = mode_source("viewer_host")
-        writer = source[source.index("bool ViewerHost::write_report("):]
+        physical = (ROOT / "apps/viewer/src/viewer_host_report_scene.cpp").read_text(encoding="utf-8")
+        writer = physical[physical.index("void ViewerHost::write_report_scene("):]
         guard = writer.index("if (model_preview_ && model_preview_->plan.exploratory) {")
         self.assertLess(guard, writer.index('\\"model_preview\\"'))
         for token in ('\\"exploratory\\": true, \\"acceptance\\": false',

@@ -1,0 +1,174 @@
+{
+  "schema_version": 2,
+  "purpose": "Reviewed handler regions; moved or ambiguous fingerprints stop regeneration until re-reviewed (UC-03).",
+  "regions": {
+    "src/units/unit_abilities.cpp#ability_table": {
+      "path": "src/units/unit_abilities.cpp",
+      "start": "[[nodiscard]] std::uint32_t frames(",
+      "end": "} // namespace eawr::units",
+      "sha256_lf": "7c57d1fd117647c4d6a7286f9be898cc3bd1c03f49a49e0c798a082767527a12"
+    },
+    "src/units/unit_tables_profiles.cpp#load_spawner": {
+      "path": "src/units/unit_tables_profiles.cpp",
+      "start": "std::vector<SpawnEntry> Loader::spawn_list(",
+      "end": "void Loader::load_abilities(",
+      "sha256_lf": "9344205318ba136c7cb751ad54f8a203711ceb64a70014b02c75e09c62570ea5"
+    },
+    "src/units/unit_tables_profiles.cpp#load_abilities": {
+      "path": "src/units/unit_tables_profiles.cpp",
+      "start": "void Loader::load_abilities(",
+      "end": "void Loader::load_production(",
+      "sha256_lf": "d50a7a92b945397d3640e5da5350350b5ca0d57a9b4fac538b748e590a040afb"
+    },
+    "src/sim/tactical/abilities.cpp#ability_service": {
+      "path": "src/sim/tactical/abilities.cpp",
+      "start": "constexpr std::array<KindName, 13> kind_names",
+      "end": "} // namespace eawr::sim::tactical",
+      "sha256_lf": "d220a0c4fa5874b659825f440a95e507b6c7c05b3b49e42a359b9c79556c2cd6"
+    },
+    "src/skirmish/economy.cpp#economy_rules": {
+      "path": "src/skirmish/economy.cpp",
+      "start": "namespace eawr::skirmish {",
+      "end": "} // namespace eawr::skirmish",
+      "sha256_lf": "b135f65bb5e0ceee291dde5a2495866ae836bf4df05a03352a1e56913aaefa0d"
+    },
+    "src/data/xml_registry.cpp#layer_rank": {
+      "path": "src/data/xml_registry.cpp",
+      "start": "int layer_rank(",
+      "end": "std::string record_identity(",
+      "sha256_lf": "3ae9f2ad93c5e64d9dbf1e24536842779940630e4de668e2112f667ae3933bd5"
+    },
+    "src/data/xml_registry.cpp#index_winners": {
+      "path": "src/data/xml_registry.cpp",
+      "start": "void add_definition(",
+      "end": "} // namespace eawr::data",
+      "sha256_lf": "049562476e91a97a8c83b586610be5e443d407b2c32cf71d639c26474a65014a"
+    },
+    "src/data/xml.cpp#find": {
+      "path": "src/data/xml.cpp",
+      "start": "const Definition* Catalog::find(const std::string_view object_id) const noexcept {",
+      "end": "std::vector<const Definition*> Catalog::find_all(",
+      "sha256_lf": "d9591b0340173370607b568190352c8d483470beb5914e35ad18d0337aca6187"
+    },
+    "src/skirmish/start.cpp#build_start": {
+      "path": "src/skirmish/start.cpp",
+      "start": "class Builder final {",
+      "end": "\n} // namespace\n",
+      "sha256_lf": "08728cd410e667dc1790742f45501695a8689f7dd4d4cc1c1a293641caafb089"
+    },
+    "src/script/foc/tactical_ai_bindings.cpp#plan_bindings": {
+      "path": "src/script/foc/tactical_ai_bindings.cpp",
+      "start": "void register_globals(",
+      "end": "} // namespace tactical_ai_detail",
+      "sha256_lf": "de81bd16534c83ee9cf3606309017d07df35f493afb173211399a931b7b9d00c"
+    },
+    "src/script/foc/tactical_ai.cpp#unsupported_plan_calls": {
+      "path": "src/script/foc/tactical_ai.cpp",
+      "start": "std::vector<std::string> unsupported_plan_calls()",
+      "end": "} // namespace eawr::script::foc",
+      "sha256_lf": "f67b9023aad6c808d4ce5b8f0e1a8a7ad7a8f563bc01ecc7e11a1b330c6dce2b"
+    },
+    "src/sim/tactical/session_abilities.cpp#ability_helpers": {
+      "path": "src/sim/tactical/session_abilities.cpp",
+      "start": "std::optional<AbilityState> TacticalSession::Impl::entering_abilities(",
+      "end": "std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(",
+      "sha256_lf": "8e66e8a15cad5dddf54490c09ddf31bcd33cc0ab9cd10e970b829e19daca51e6"
+    },
+    "src/sim/tactical/session_step_commands.cpp#apply_ability": {
+      "path": "src/sim/tactical/session_step_commands.cpp",
+      "start": "    const auto apply_ability =",
+      "end": "    // Commands phase: serial, in canonical (tick, player, sequence) order.",
+      "sha256_lf": "2aea7cf8f2b5afa5620affd5f6c3749798813b21a3cf0e47e19d9f74894690ff"
+    },
+    "src/sim/tactical/session_step_combat.cpp#ion_team_service": {
+      "path": "src/sim/tactical/session_step_combat.cpp",
+      "start": "    const auto lock_ion_shot =",
+      "end": "    return core::Result<void>::success();\n}\n\ncore::Result<void> session_detail::Tick::projectile_inputs()",
+      "sha256_lf": "8e10ea5d1f946a46c15d56b79335edeeb37efe0253f22eeb1869c7d7465f9af0"
+    },
+    "src/sim/tactical/session_step_commands.cpp#ability_phase": {
+      "path": "src/sim/tactical/session_step_commands.cpp",
+      "start": "    auto& replans = tracked_.value().replans.emplace();",
+      "end": "    const auto& table = impl_->motion;\n    const auto& frame = tracked_.value().frame.emplace",
+      "sha256_lf": "2b74be99306ee18864e03cc813eb2615a3507b69f57a2408e1a146fcf95c35e9"
+    },
+    "src/sim/tactical/fighters_spawner.cpp#service_spawner": {
+      "path": "src/sim/tactical/fighters_spawner.cpp",
+      "start": "SpawnerState initial_spawner(",
+      "end": "bool squadron_move_arrived(",
+      "sha256_lf": "2b80ef44492e51e2980018012cf6ebdeedb89828d1293f2a618e15fa66cc6785"
+    },
+    "src/script/foc/ai_selection.cpp#economy_selection": {
+      "path": "src/script/foc/ai_selection.cpp",
+      "start": "bool Engine::select_units(",
+      "end": "bool Engine::test_target_contrast(",
+      "sha256_lf": "b14c92fd8a7095787029498e7afab50b90f17f40f75e9edccfd8fe6f0a95e500"
+    },
+    "src/script/foc/ai_execution.cpp#economy_execution": {
+      "path": "src/script/foc/ai_execution.cpp",
+      "start": "sim::EntityId Engine::producer(",
+      "end": "} // namespace eawr::script::foc::ai",
+      "sha256_lf": "219729c837b86f1427632c3f593b105a99ff9d73443764390ec0d487b09aa801"
+    },
+    "src/script/foc/ai_taskforces.cpp#guard_blocks": {
+      "path": "src/script/foc/ai_taskforces.cpp",
+      "start": "void Engine::service_blocks() {",
+      "end": "} // namespace eawr::script::foc::ai",
+      "sha256_lf": "487ef64887deab57c00fc62eafa84855d86e6405b97f6e1eaf6b46a3f1e17b6d"
+    },
+    "src/data/xml.cpp#find_game_object": {
+      "path": "src/data/xml.cpp",
+      "start": "const Definition* Catalog::find(const std::string_view object_id, const Category category) const noexcept {",
+      "end": "const std::vector<Definition>& Catalog::definitions()",
+      "sha256_lf": "867e5b7640d7386a83c97c8ff917bf88969816320d267d02a5b57cc053f309c6"
+    },
+    "src/data/xml_merge.cpp#resolve": {
+      "path": "src/data/xml_merge.cpp",
+      "start": "core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id) const {",
+      "end": "} // namespace eawr::data",
+      "sha256_lf": "3b4bf221d220dcef7d361ef5c5a2c6b17dbdea6c3d9d51c4fa85df4e0718c1d6"
+    },
+    "src/units/unit_support.cpp#resolve": {
+      "path": "src/units/unit_support.cpp",
+      "start": "std::optional<Object> resolve(const data::Catalog& catalog",
+      "end": "std::optional<std::size_t> bone_index(",
+      "sha256_lf": "69bc894f1ed06a7f363953c8d39ccfa73bd4fa09f6a33e4fc0bffb223a6956d3"
+    },
+    "src/sim/tactical/session_storage.cpp#commit_units": {
+      "path": "src/sim/tactical/session_storage.cpp",
+      "start": "void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units,",
+      "end": "} // namespace eawr::sim::tactical",
+      "sha256_lf": "8ce9b1bd88c07cd35cee7529c918c0c7b2f9b36447d9736ae762947d1dcfb88f"
+    },
+    "src/sim/tactical/pads.cpp#respawn_after_death": {
+      "path": "src/sim/tactical/pads.cpp",
+      "start": "std::optional<RespawnState> respawn_after_death(",
+      "end": "PlayerId service_capture(",
+      "sha256_lf": "84c2da4427806e392be8d1769b9ad0c5db4a8f3102c09b42b3bd29126bd58251"
+    },
+    "src/sim/tactical/session_step_economy.cpp#pad_lifecycle": {
+      "path": "src/sim/tactical/session_step_economy.cpp",
+      "start": "    // WBP-16/18/19: ordered lifecycle commit",
+      "end": "    mark(\"survivors\", false);",
+      "sha256_lf": "d276363d5764f6ecd0871702b9af9e662129be8c308f5830d9bac34d17e74c47"
+    },
+    "src/sim/tactical/session_step_economy.cpp#income_and_launch": {
+      "path": "src/sim/tactical/session_step_economy.cpp",
+      "start": "    std::erase_if(earners, [&](const auto& entry) {\n        const auto* source = survivor(entry.first);",
+      "end": "    return core::Result<void>::success();\n}\n\ncore::Result<void> session_detail::Tick::bonuses()",
+      "sha256_lf": "091f85609586c280f1039b61adc224cf68c600369dc7d00e987c562ea388280d"
+    },
+    "src/sim/tactical/session_step_fighters.cpp#hangar_lifecycle": {
+      "path": "src/sim/tactical/session_step_fighters.cpp",
+      "start": "    // Hangar phase (#75, FL-01 to FL-06):",
+      "end": "    return core::Result<void>::success();\n}\n\nconst LiveUnit* session_detail::Tick::survivor",
+      "sha256_lf": "eedd343b5c82ea8b2010d9c242972cf6fc45756343918e0ad3645b3952ad941e"
+    },
+    "src/sim/tactical/session_step_economy.cpp#upgrade_bonus_phase": {
+      "path": "src/sim/tactical/session_step_economy.cpp",
+      "start": "    // WPR-51: existing and newly created units, on disjoint partition slots.",
+      "end": "    return core::Result<void>::success();\n}\n\n} // namespace eawr::sim::tactical",
+      "sha256_lf": "2391e2eee1405bf1c391cd4dceaf6fc724acf28f3f52af701704e4672e6eb501"
+    }
+  }
+}

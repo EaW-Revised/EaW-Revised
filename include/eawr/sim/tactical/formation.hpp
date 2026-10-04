@@ -29,6 +29,8 @@ struct FormationMember {
     math::Fixed max_speed{};         // after the durability factor (MV-33)
     math::Fixed rate_of_turn{};      // degrees per frame
     math::Fixed soft_radius{};       // the footprint's soft radius (AV-19's query square)
+    bool asteroid_damage{};          // WHZ-08a: behavior opt-in selects field avoidance
+    bool through_hazards{};
 };
 
 // One ship's part of a group move: where it goes, the maximum speed it plans with and the

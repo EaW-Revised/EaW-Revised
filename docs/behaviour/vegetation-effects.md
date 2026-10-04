@@ -1,14 +1,16 @@
-# Vegetation effects: Tree.fx and Grass.fx (P1 EAWR-32, wind EAWR-147)
+<a id="vegetation-effects-treefx-and-grassfx-p1-32-wind-147"></a>
+
+# Vegetation effects: Tree.fx and Grass.fx (P1 XML unit placement, wind vegetation wind animation)
 
 ## Applicability
 
 The EaW `Tree.fx` and `Grass.fx` effects as published for mod tooling (knowledge only; no source
 text is reproduced), and the FoC engine's wind feed for them, read from the symbol-bearing FoC
-debug build (EAWR-147). Rules below are public-source or engine behaviour unless marked project
+debug build (vegetation wind animation). Rules below are public-source or engine behaviour unless marked project
 policy. The consumers are `src/presentation/godot/legacy/tree.hpp` and `grass.hpp`, the
 engine-free rule `include/eawr/presentation/lighting/wind.hpp` and the land map mode.
 
-The motion the owner saw on FoC Naboo (EAWR-147) is this vertex displacement. It is not a model idle
+The motion the owner saw on FoC Naboo (vegetation wind animation) is this vertex displacement. It is not a model idle
 animation: the trees and ground cover are rigid `Tree.fx` and `Grass.fx` meshes that no idle clip
 drives.
 
@@ -39,7 +41,9 @@ drives.
 | G-08 | Alpha test GREATER, reference 8; SRCALPHA/INVSRCALPHA blending with Z write, LESSEQUAL; point min/mag, linear mip. |
 | G-09 | Project policy: no distance fade or fog-of-war stage, and no clump billboard (G-03's centre rule is not established), so cards draw as authored with culling off. TIME and the wind follow W-09. |
 
-## Engine wind feed (EAWR-147)
+<a id="engine-wind-feed-147"></a>
+
+## Engine wind feed
 
 | Rule | Behaviour |
 |---|---|

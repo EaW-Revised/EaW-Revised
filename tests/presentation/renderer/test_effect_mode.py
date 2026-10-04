@@ -55,6 +55,7 @@ class EffectModeStructure(unittest.TestCase):
 
     def test_visibility_lifecycle_is_owned_by_the_mode(self):
         source = mode_source("effect_mode")
+        physical = (ROOT / "apps/viewer/src/effect_mode.cpp").read_text(encoding="utf-8")
         host = mode_source("viewer_host")
         helper = (ROOT / "include/eawr/presentation/particles/attachment_lifecycle.hpp").read_text(encoding="utf-8")
         for token in ("--eawr-effect-visibility", "particles::AttachmentLifecycle", "visibility_step(",
@@ -63,11 +64,11 @@ class EffectModeStructure(unittest.TestCase):
             self.assertIn(token, source, token)
         self.assertNotIn("visibility", host)
         # The trailing flag is scanned like the detach frame and rejected.
-        start = source.index("visibility_argument() {")
-        scan = source[start:source.index("\n}\n", start)]
+        start = physical.index("visibility_argument() {")
+        scan = physical[start:physical.index("\n}\n", start)]
         self.assertIn("index < arguments.size(); ++index", scan)
         self.assertIn("index + 1 < arguments.size() ? utf8(arguments[index + 1]) : std::string{}", scan)
-        guard = source[source.index("if (const auto requested_visibility = visibility_argument())"):]
+        guard = physical[physical.index("if (const auto requested_visibility = visibility_argument())"):]
         guard = guard[:guard.index("// Layer selection")]
         self.assertIn("return give_up(\"--eawr-effect-visibility expects respawn or stay-detached\")", guard)
         self.assertIn("cannot be combined with --eawr-effect-detach-frame", guard)
@@ -96,13 +97,14 @@ class EffectModeStructure(unittest.TestCase):
         # (which would silently run without a detach); it yields an empty value
         # that the frame-index parser rejects through give_up.
         source = mode_source("effect_mode")
-        start = source.index("detach_frame_argument() {")
-        scan = source[start:source.index("\n}\n", start)]
+        physical = (ROOT / "apps/viewer/src/effect_mode.cpp").read_text(encoding="utf-8")
+        start = physical.index("detach_frame_argument() {")
+        scan = physical[start:physical.index("\n}\n", start)]
         self.assertIn("index < arguments.size(); ++index", scan)
         self.assertNotIn("index + 1 < arguments.size(); ++index", scan)
         self.assertIn("index + 1 < arguments.size() ? utf8(arguments[index + 1]) : std::string{}", scan)
         self.assertIn("if (text.empty() || text.size() > 10) return std::nullopt;", source)
-        guard = source[source.index("if (const auto requested_detach = detach_frame_argument())"):]
+        guard = physical[physical.index("if (const auto requested_detach = detach_frame_argument())"):]
         guard = guard[:guard.index("state.detach_frame = *parsed;")]
         self.assertIn("if (!parsed || *parsed >= options.frames)", guard)
         self.assertIn("return give_up(\"--eawr-effect-detach-frame needs", guard)
@@ -134,7 +136,11 @@ class EffectModeStructure(unittest.TestCase):
                  ROOT / "src/presentation/particles/alo_particles.cpp",
                  ROOT / "src/presentation/particles/cpu_system.cpp",
                  ROOT / "src/presentation/particles/proxy_binding.cpp",
-                 ROOT / "src/presentation/particles/render.cpp"]
+                 ROOT / "src/presentation/particles/render.cpp",
+                 ROOT / "src/presentation/particles/render_plan.cpp",
+                 ROOT / "src/presentation/particles/render_stream.cpp",
+                 ROOT / "src/presentation/particles/effect_registry.cpp",
+                 ROOT / "src/presentation/particles/render_internal.hpp"]
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for token in ("godot_cpp", "#include <godot", "eawr/sim/", "fstream", "<filesystem>"):

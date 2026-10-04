@@ -1,6 +1,7 @@
 // The Empire AI's attack on the starbase after it has destroyed the Rebel fleet (#532,
 // docs/behaviour/foc-tactical-ai.md AI-24, FH-20, PL-45). The Rebel player sends every mobile
-// unit of the M2 fleet without the MC80 at the Empire station and loses them all. Once the game is 180 s old and the Rebel
+// unit of the M2 fleet without the MC80 at the Empire station; at 180 s scripted hull damage
+// destroys its remaining ships and craft (#847). Once the game is 180 s old and the Rebel
 // fighter, bomber, corvette and frigate force is below 500 (the last craft may still be alive),
 // the retail burn plan starts: it abandons the other plans (PL-45), sleeps 1 s, collects the free
 // units and attack-moves them at Find_Nearest's "Structure | Capital" (a category mask, FH-20),
@@ -82,10 +83,13 @@ struct Run {
     std::vector<std::string> journal;
     std::set<std::string> diagnostics;
     std::uint64_t last_loss{};            // the last Rebel ship or craft destroyed
+    std::uint64_t wipe{};                 // first verified snapshot with no Rebel ships or craft
+    std::size_t scripted_victims{};
     std::uint64_t three_near{};           // first tick after the wipe with three Empire units near the Rebel station
     std::uint64_t first_hit{};            // first hit on the Rebel station after the wipe
     std::optional<std::int64_t> power_at_burn;
     std::set<eawr::sim::EntityId> empire_ships_at_order; // Empire ships (not squadrons) alive at the first burn order
+    std::set<eawr::sim::EntityId> empire_squadrons_at_order;
     // #669 (space-damage DG-39): each death of a unit with destroyable hardpoints as it stood the
     // tick before, and how many died with over 0.2 of their hardpoint health left.
     std::vector<std::string> hardpoint_deaths;
@@ -95,6 +99,7 @@ struct Run {
 
 // The retail stage's "near" (docs/foc-original-capture.md, pause): within 3000 units of the station.
 constexpr std::int64_t near_range = 3000;
+constexpr std::uint64_t wipe_tick = 180 * 30;
 
 std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t ticks) {
     auto world = tactical::TacticalSession::create(battle.start.setup, battle.content.sensors, battle.content.durability,
@@ -126,8 +131,7 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
     expect(rebel_station != 0 && empire_station != 0, "both stations start");
     const auto& squadrons = battle.content.motion.squadrons;
     std::map<eawr::sim::EntityId, std::pair<std::string, double>> standing; // #669: last tick's units with hardpoints
-    // AI-24: the Rebel fighter, bomber, corvette and frigate force (AI_Combat_Power, before the
-    // perception's health attenuation) when the burn plan starts.
+    // AI-24 / PG-08: raw Rebel fighter, bomber, corvette and frigate AI_Combat_Power.
     std::uint64_t mobile_bits = 0;
     for (const char* name : {"FIGHTER", "BOMBER", "CORVETTE", "FRIGATE"}) {
         if (const auto bit = setup.content.categories.find(name); bit != setup.content.categories.end()) mobile_bits |= bit->second;
@@ -154,7 +158,21 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
         std::vector<eawr::sim::EntityId> fresh;
         for (const auto& instance : snapshot->instances()) {
             if (instance.owner != rebel || instance.entity_id == rebel_station) continue;
-            if (squadrons.find_squadron(instance.type_id) == nullptr) rebel_alive.insert(instance.entity_id);
+            // A craft also has a self SquadronProfile for parentless operation (FT-01).
+            // It remains a physical craft, not a squadron container.
+            if (squadrons.find_craft(instance.type_id) != nullptr || squadrons.find_squadron(instance.type_id) == nullptr) {
+                rebel_alive.insert(instance.entity_id);
+                if (tick + 1 == wipe_tick) {
+                    const auto* profile = battle.content.durability.find(instance.type_id);
+                    if (profile && instance.durability) {
+                        // Scripted damage still crosses shields (DG-20).
+                        const auto lethal = eawr::sim::math::Fixed::from_raw(profile->max_hull.raw() + profile->max_shields.raw());
+                        commands.push_back({{tick + 1, rebel, sequence++}, {instance.entity_id},
+                            tactical::DamagePayload{lethal, tactical::hull_target}});
+                        ++out.scripted_victims;
+                    }
+                }
+            }
             if (squadrons.find_craft(instance.type_id) != nullptr) continue;
             if (tick % 30 == 1 && !ordered.contains(instance.entity_id)) fresh.push_back(instance.entity_id);
         }
@@ -170,6 +188,9 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
         expect(static_cast<bool>(stepped), "step " + std::to_string(tick + 1));
         if (!stepped) return std::nullopt;
         const auto& result = stepped.value();
+        // Snapshots count completed steps; commands and events name the zero-based tick
+        // just executed (TacticalSession::step). Use that same clock for wipe/approach.
+        const auto observed_tick = result.world.snapshot->completed_tick() - 1;
         out.hashes.push_back(result.state_sha256);
         for (const auto& diagnostic : result.scripts.diagnostics) out.diagnostics.insert(diagnostic.code + " " + diagnostic.message);
         for (const auto& event : result.world.snapshot->events()) {
@@ -203,13 +224,26 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
                     + std::to_string(static_cast<int>(share * 100)) + " % of their health",
                 share};
         }
+        // Include craft born during this step: an event-only set can miss a simultaneous launch.
+        rebel_alive.clear();
+        for (const auto& instance : result.world.snapshot->instances()) {
+            if (instance.owner != rebel || instance.entity_id == rebel_station || structures.contains(instance.type_id)) continue;
+            if (squadrons.find_craft(instance.type_id) != nullptr || squadrons.find_squadron(instance.type_id) == nullptr) {
+                rebel_alive.insert(instance.entity_id);
+            }
+        }
         const bool wiped = rebel_alive.empty() && out.last_loss != 0;
+        if (wiped && out.wipe == 0) out.wipe = observed_tick;
         for (; journal_seen < setup.journal->plans.size(); ++journal_seen) {
             const auto& event = setup.journal->plans[journal_seen];
             if (event.plan == "burnunits" && event.event == "order" && out.empire_ships_at_order.empty()) {
                 for (const auto& instance : result.world.snapshot->instances()) {
                     if (instance.owner != empire || instance.entity_id == empire_station || structures.contains(instance.type_id)) continue;
-                    if (squadrons.find_squadron(instance.type_id) != nullptr || squadrons.find_craft(instance.type_id) != nullptr) continue;
+                    if (squadrons.find_craft(instance.type_id) != nullptr) continue;
+                    if (squadrons.find_squadron(instance.type_id) != nullptr) {
+                        out.empire_squadrons_at_order.insert(instance.entity_id);
+                        continue;
+                    }
                     out.empire_ships_at_order.insert(instance.entity_id);
                 }
             }
@@ -221,17 +255,17 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
             }
             out.power_at_burn = power;
         }
-        if (!wiped) continue;
+        if (out.wipe == 0 || observed_tick <= out.wipe) continue;
         if (out.three_near == 0) {
             std::size_t near = 0;
             for (const auto& instance : result.world.snapshot->instances()) {
                 if (instance.owner != empire || structures.contains(instance.type_id)) continue;
-                if (squadrons.find_squadron(instance.type_id) != nullptr) continue;
+                if (squadrons.find_craft(instance.type_id) == nullptr && squadrons.find_squadron(instance.type_id) != nullptr) continue;
                 const std::int64_t dx = (instance.fixed_transform.rows[0][3].raw() - rebel_station_at.x.raw()) >> 24;
                 const std::int64_t dy = (instance.fixed_transform.rows[1][3].raw() - rebel_station_at.y.raw()) >> 24;
                 if (dx * dx + dy * dy <= near_range * near_range) ++near;
             }
-            if (near >= 3) out.three_near = tick + 1;
+            if (near >= 3) out.three_near = observed_tick;
         }
         for (const auto& event : result.world.snapshot->combat_events()) {
             if (event.kind == tactical::CombatEventKind::projectile_hit && event.target == rebel_station && out.first_hit == 0) {
@@ -285,10 +319,8 @@ int main(int argc, char** argv) {
     fixture.seed = seed;
     // The battle needs a Rebel fleet the Empire destroys: without the MC80 (#537). With it, the MC80
     // is a Capital, so AI-24's fighter, bomber, corvette and frigate force ignores it and the burn plan's
-    // "Structure | Capital" search may answer it instead of the starbase (FH-20), as in FoC; in seed 6
-    // it and the frigate outlive the Empire station instead. With the ships at their Layer_Z_Adjust
-    // heights (#666) and the idle grid (#687) seeds 6 and 1 no longer bring three Empire units to the
-    // starbase together; seed 2 plays the scenario.
+    // "Structure | Capital" search may answer it instead of the starbase (FH-20), as in FoC.
+    // Scripted damage at wipe_tick makes the fleet loss independent of combat timing (#847).
     for (auto& slot : fixture.slots) {
         if (slot.faction == "Rebel") std::erase(slot.fleet, std::string("Calamari_Cruiser"));
     }
@@ -306,6 +338,8 @@ int main(int argc, char** argv) {
     if (!fog) return 1;
     content.value().fog = fog.value();
     auto ai = skirmish::ai_setup(start.value(), inputs.value(), tables.value());
+    // SAE-01: this fixed-force regression exercises the campaign burn branch.
+    ai.perception.campaign_game = true;
     expect(static_cast<bool>(skirmish::enable_goal_system(filesystem.value(), ai)), "the goal system's XML loads");
     auto modules = skirmish::ai_modules(filesystem.value(), ai);
     expect(static_cast<bool>(modules), "the AI's Lua files load");
@@ -344,7 +378,8 @@ int main(int argc, char** argv) {
         if (burn_start && event.event == "abandoned" && event.tick < *burn_start + 30) ++abandoned;
     }
     const auto seconds = [](std::uint64_t tick) { return std::to_string(tick / 30) + '.' + std::to_string(tick % 30 * 10 / 30) + " s"; };
-    std::cout << "seed " << seed << ": last Rebel loss " << seconds(first.last_loss) << ", burn plan " << (burn_start ? seconds(*burn_start) : "-")
+    std::cout << "seed " << seed << ": verified wipe " << seconds(first.wipe) << " (" << first.scripted_victims
+              << " scripted victims), last Rebel loss " << seconds(first.last_loss) << ", burn plan " << (burn_start ? seconds(*burn_start) : "-")
               << " (" << abandoned << " plans abandoned), first order " << (burn_order ? seconds(*burn_order) : "-") << " ("
               << burn_order_detail << "), Rebel mobile force then " << (first.power_at_burn ? std::to_string(*first.power_at_burn) : "-")
               << "; after the wipe: three Empire units near the starbase " << (first.three_near ? seconds(first.three_near) : "-")
@@ -352,12 +387,11 @@ int main(int argc, char** argv) {
     for (const auto& diagnostic : first.diagnostics) std::cout << "diagnostic: " << diagnostic << '\n';
     for (const auto& death : first.hardpoint_deaths) std::cout << "destroyed: " << death << '\n';
 
-    expect(first.last_loss != 0, "the Empire destroys every Rebel ship and craft");
+    expect(first.scripted_victims > 0 && first.wipe == wipe_tick, "scripted damage destroys every remaining Rebel ship and craft at 180 s");
     // AI-24: the burn trigger needs a game age above 180 s (5,400 ticks) and a Rebel fighter, bomber,
-    // corvette and frigate force below 500 after the health attenuation; before it, the fleet
-    // (5,325 with every launch) must be mostly gone.
+    // corvette and frigate raw force below 500 (PG-08); this equation has no health attenuation.
     expect(burn_start.has_value() && *burn_start > 5400, "the burn plan starts after 180 s");
-    expect(first.power_at_burn.has_value() && *first.power_at_burn < 1000, "the burn plan starts once the Rebel fleet is nearly gone");
+    expect(first.power_at_burn.has_value() && *first.power_at_burn < 500, "the burn plan starts with Rebel raw mobile force below 500");
     // PL-45: Purge_Goals abandons the other running plans.
     expect(abandoned > 0, "the burn plan abandons the other plans");
     // FH-20: Find_Nearest(MainForce, "Structure | Capital", ...) finds the Rebel starbase; the plan
@@ -388,7 +422,10 @@ int main(int argc, char** argv) {
         if (!burn_order || event.tick > *burn_order || event.plan == "burnunits") continue;
         const auto key = std::to_string(event.player) + '/' + event.plan + '/' + event.goal + '/' + event.target;
         if (event.event == "started") held_by_running_plan[key].clear();
-        if (event.event == "produced") held_by_running_plan[key] = bracketed(event.detail);
+        if (event.event == "produced") {
+            const auto members = bracketed(event.detail);
+            held_by_running_plan[key].insert(members.begin(), members.end());
+        }
         if (event.event == "finished" || event.event == "failed" || event.event == "abandoned") held_by_running_plan.erase(key);
     }
     std::set<eawr::sim::EntityId> kept;
@@ -397,15 +434,26 @@ int main(int argc, char** argv) {
     for (const auto id : first.empire_ships_at_order) {
         if (!ordered_units.contains(id) && !kept.contains(id)) missing += ' ' + std::to_string(id);
     }
-    std::size_t free_ships = 0;
-    for (const auto id : first.empire_ships_at_order) free_ships += kept.contains(id) ? 0 : 1;
-    expect(!first.empire_ships_at_order.empty() && missing.empty() && ordered_units.size() > free_ships,
-        "the burn plan collects every Empire ship and free squadrons; ships not ordered:" + missing);
+    // EX-12 / PL-21 / PL-45: collect the available population; neither the call nor
+    // the burn plan requires a surviving free squadron. Retained TaskForces keep
+    // all their produced teams, including the bombing run's bombers and fighters.
+    std::string missing_squadrons;
+    std::size_t free_squadrons = 0;
+    for (const auto id : first.empire_squadrons_at_order) {
+        if (kept.contains(id)) continue;
+        ++free_squadrons;
+        if (!ordered_units.contains(id)) missing_squadrons += ' ' + std::to_string(id);
+    }
+    std::cout << "EX-12: " << free_squadrons << " free squadrons at the burn order; "
+              << first.empire_squadrons_at_order.size() - free_squadrons << " held by retained plans\n";
+    expect(!first.empire_ships_at_order.empty() && missing.empty() && missing_squadrons.empty(),
+        "the burn plan collects every free Empire ship and squadron; ships not ordered:" + missing
+            + "; squadrons not ordered:" + missing_squadrons);
     for (const auto& diagnostic : first.diagnostics) {
         expect(diagnostic.find("Find_Nearest") == std::string::npos, "no Find_Nearest filter is rejected: " + diagnostic);
     }
-    expect(first.three_near > first.last_loss, "three Empire units come near the Rebel starbase after the wipe");
-    expect(first.first_hit > first.last_loss, "the Empire hits the Rebel starbase after the wipe");
+    expect(first.three_near > first.wipe, "three Empire units come near the Rebel starbase after the verified wipe");
+    expect(first.first_hit > first.wipe, "the Empire hits the Rebel starbase after the verified wipe");
     if (failures != 0) {
         std::cerr << failures << " FoC burn check(s) failed\n";
         return 1;

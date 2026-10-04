@@ -1,9 +1,10 @@
 """Runs `python -m unittest <module>` for CTest, or skips (exit 77, SKIP_RETURN_CODE) when a Python package the
 module needs is not installed on this host.
 
-    run_module_tests.py [--needs PIL numpy] <dotted.module>
+    run_module_tests.py [--entrypoint] [--needs PIL numpy] <dotted.module>
 
-The adapter tests import the P1-12 evidence code, which needs Pillow; the CTest hosts do not all carry it."""
+The adapter tests import the P1-12 evidence code, which needs Pillow; the CTest hosts do not all carry it.
+--entrypoint runs a module's own script entry point, including legacy suites that assemble split test classes."""
 
 import importlib.util
 import subprocess
@@ -13,6 +14,9 @@ SKIP = 77
 
 
 def main(argv: list[str]) -> int:
+    entrypoint = bool(argv and argv[0] == "--entrypoint")
+    if entrypoint:
+        argv = argv[1:]
     needs: list[str] = []
     if argv and argv[0] == "--needs":
         argv = argv[1:]
@@ -25,7 +29,10 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"SKIPPED {argv[0]}: not installed here: {', '.join(missing)}")
         return SKIP
-    return subprocess.call([sys.executable, "-m", "unittest", argv[0]])
+    command = [sys.executable, "-m"]
+    if not entrypoint:
+        command.append("unittest")
+    return subprocess.call([*command, argv[0]])
 
 
 if __name__ == "__main__":

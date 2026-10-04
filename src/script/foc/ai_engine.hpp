@@ -2,9 +2,10 @@
 
 // The FoC tactical AI engine side (#449, docs/behaviour/foc-tactical-ai.md "Goal system",
 // "Perception", "Plans and TaskForces"): the per-player perception, goal, planning, execution
-// and learning systems that decide which plans run and with which units. Everything here runs
-// serially on the tick barrier (ScriptEngine::before_service / after_service); the bindings only
-// read it, between those serial steps. Rule IDs are those of the behaviour note.
+// and learning systems that decide which plans run and with which units. Decisions commit
+// serially on the tick barrier (ScriptEngine::before_service / after_service); independent
+// perception contributions may prepare on workers. Bindings read between those barrier steps.
+// Rule IDs are those of the behaviour note.
 
 #include "ai_data.hpp"
 #include "host.hpp"
@@ -16,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace eawr::script::foc::ai {
@@ -35,6 +37,11 @@ inline constexpr std::string_view verb_ai = "foc.ai";
 
 // Plan script instances: 100000 + n, n counting from 0 over the battle.
 inline constexpr std::uint64_t first_plan_instance = 100000;
+
+// SAE-10: one requested point, then expanding ten-angle rings; one ring per service.
+[[nodiscard]] std::optional<math::Vec3> reinforcement_candidate(const math::Vec3& requested,
+    std::uint32_t attempt, math::Fixed yaw = {},
+    const std::optional<std::array<math::Fixed, 4>>& bounds = std::nullopt);
 
 [[nodiscard]] constexpr std::uint64_t block_id(std::uint64_t instance, std::uint64_t sequence) noexcept {
     return (instance << 32) | (sequence & 0xffffffffULL);
@@ -61,6 +68,21 @@ struct ThreatEntry {
 
 class ThreatGrid {
 public:
+    // Only the ordered engine preparation owns this scope. It ends before Lua's parallel
+    // readers; those readers use the original const query path without shared cache writes.
+    class Preparation final {
+    public:
+        ~Preparation();
+        Preparation(const Preparation&) = delete;
+        Preparation& operator=(const Preparation&) = delete;
+    private:
+        friend class ThreatGrid;
+        Preparation(ThreatGrid& grid, const sim::PartitionExecutor* executor, const Host& host, const WorldView& view);
+        ThreatGrid& grid_;
+    };
+    [[nodiscard]] Preparation prepare(const sim::PartitionExecutor* executor, const Host& host, const WorldView& view) {
+        return Preparation(*this, executor, host, view);
+    }
     void partition(const AiBounds& bounds, std::int32_t x_cells, std::int32_t y_cells, const Constants& constants);
     [[nodiscard]] bool ready() const noexcept { return x_cells_ > 0; }
     // PG-03: each object's entries are refreshed on the object's own cadence.
@@ -104,6 +126,18 @@ private:
     // Per cell, the (object, entry index) pairs whose zone covers it, in insertion order.
     std::vector<std::vector<std::pair<sim::EntityId, std::size_t>>> cells_;
     std::map<sim::EntityId, Tracked> tracked_;
+    using TotalKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t>;
+    using ForceKey = std::tuple<std::uint64_t, tactical::PlayerId, bool, std::uint64_t,
+        std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, sim::EntityId>;
+    [[nodiscard]] bool preparing(const Host& host, const WorldView& view) const noexcept {
+        return executor_ != nullptr && preparation_host_ == &host && preparation_view_ == &view;
+    }
+    void clear_queries() noexcept;
+    const sim::PartitionExecutor* executor_{};
+    const Host* preparation_host_{};
+    const WorldView* preparation_view_{};
+    mutable std::map<TotalKey, Real> total_queries_;
+    mutable std::map<ForceKey, Real> force_queries_;
 };
 
 // ---- Targets (GS-10) ------------------------------------------------------------------------
@@ -172,11 +206,27 @@ struct PotentialPlan {
     bool reserved{};
     std::vector<tactical::TypeId> units;       // instantiated units' types
     std::vector<sim::EntityId> freestore;      // the free store object of each, 0 when none
+    // SAE-03: 0 existing object, 1 pooled reinforcement, 2 new production.
+    std::vector<std::uint8_t> sources;
+    std::vector<sim::EntityId> producers;
+    std::vector<std::uint64_t> pool_tokens;
+    Real cost{};
     std::vector<std::size_t> taskforce_of_unit; // the TaskForce each unit joins
+    std::vector<std::size_t> team_of_unit; // its authored team within that TaskForce
     std::vector<Contrast> target_contrast;     // PL-31: the target's contrast list
     std::vector<Contrast> current_contrast;    // what the selected units leave of it
     Real threshold{};
 };
+// SAE-05: one activation gate; SAE-09's tactical activation estimate is zero.
+[[nodiscard]] inline Real production_time_limit(const GoalType& goal, const std::optional<Real> linear,
+    const Real adjustment = Real{}) {
+    return linear ? to_single((*linear + adjustment) * goal.build_time_delay_tolerance)
+                  : to_single(goal.time_limit + adjustment);
+}
+[[nodiscard]] inline bool production_time_allowed(const GoalType& goal, const Real linear, const Real estimate) {
+    const auto limit = production_time_limit(goal, linear);
+    return !(Real{} < limit && limit < estimate);
+}
 
 // ---- Goals (GS) -----------------------------------------------------------------------------
 
@@ -198,13 +248,20 @@ struct BuildTask {
     std::uint64_t block{};
     tactical::TypeId type{};
     sim::EntityId object{};                 // the free store object assigned
+    std::uint8_t source{};
+    sim::EntityId producer{};
+    std::uint64_t completion{};
+    std::uint64_t issued{};
+    sim::EntityId child_floor{};
+    std::uint64_t pool_token{};
+    bool pad_build{};
     bool finished{};
     bool failed{};
 };
 
 // A blocking object a plan script waits on (EX-20).
 struct Block {
-    enum class Kind : std::uint8_t { produce, move, ambush } kind{Kind::move};
+    enum class Kind : std::uint8_t { produce, move, ambush, reinforce } kind{Kind::move};
     std::uint64_t id{};
     std::uint64_t instance{};
     std::uint64_t taskforce{};
@@ -224,6 +281,12 @@ struct Block {
     bool ready{};
     bool finished{};
     bool result{true};
+    tactical::TypeId reinforcing{};
+    sim::EntityId entity_floor{};
+    std::uint64_t issued{};
+    std::uint32_t reinforcement_attempt{};
+    std::uint64_t pool_token{};
+    std::uint64_t waiting_on{}; // SAE-11: another Lua handle for the same live operation
 };
 
 struct TaskForce {
@@ -233,6 +296,14 @@ struct TaskForce {
     std::string name;
     std::vector<sim::EntityId> units;         // members, in joining order
     std::vector<tactical::TypeId> types;      // what Produce_Force builds
+    std::vector<std::uint8_t> sources;
+    std::vector<sim::EntityId> producers;
+    struct Purchase {
+        tactical::TypeId type{};
+        std::uint64_t token{};
+    };
+    std::vector<Purchase> pooled;
+    std::vector<std::uint64_t> pool_tokens;
     std::int64_t thread{-1};                  // thread slot of <name>_Thread
     bool had_units{};
     bool damaged_pending{};                   // one Unit_Damaged queued since the last pump
@@ -254,6 +325,8 @@ struct Plan {
     bool exited{};
     bool purge{}; // PL-45: Purge_Goals was called; applied at the next planning service
     std::uint64_t start_tick{};
+    bool requires_production{};
+    std::vector<sim::EntityId> reserved_pads;
 };
 
 // A line of the plan timeline (#449 eye check, headless test).
@@ -273,6 +346,15 @@ struct TickCost {
     std::int64_t freestore{};
     std::int64_t plans{};
     std::uint32_t plan_instances{};
+    std::uint32_t freestore_runs{};
+    // #957: the tick's scheduled work.
+    std::uint32_t goals_evaluated{};
+    std::uint32_t maintenances{};
+    std::uint32_t plans_attached{};
+    std::uint32_t plans_deferred{};
+    std::uint32_t plans_pumped{};
+    std::uint32_t reinforcement_candidates{};
+    std::uint64_t reinforcement_search_ns{};
 };
 
 // ---- Perception evaluation (PE) -------------------------------------------------------------
@@ -307,6 +389,9 @@ struct PlayerAi {
     std::vector<GoalFunctionEntry> functions;
     std::vector<std::uint64_t> targets;            // goal target list (GS-10), in list order
     std::int64_t next_goal{}, next_planning{}, next_execution{}, next_learning{};
+    // #957 (SCH-02): the player's position among the AI players, in ascending ID; its phase, in
+    // frames, under the staggered schedule.
+    std::int64_t phase{};
     // Goal system (GS-02 to GS-05).
     std::int64_t sleep_frames{};
     std::int64_t per_frame{1};
@@ -325,8 +410,17 @@ struct PlayerAi {
     // Execution: free store reservations (EX-01) and build tasks (EX-10).
     std::map<sim::EntityId, std::uint64_t> reserved; // object -> goal ID
     std::map<sim::EntityId, std::uint64_t> assigned; // object -> TaskForce ID
+    std::map<tactical::TypeId, std::uint32_t> reserved_pool;
+    std::map<std::uint64_t, std::uint64_t> reserved_pool_tokens; // purchase token -> goal
+    std::map<std::uint64_t, Real> reserved_credits;
     std::vector<BuildTask> tasks;
     std::uint64_t next_goal_id{1};
+};
+
+// #957 (SCH-04): a goal whose plan script waits for an attach budget.
+struct PendingAttach {
+    tactical::PlayerId player{};
+    std::uint64_t goal{};
 };
 
 // ---- The engine -----------------------------------------------------------------------------
@@ -339,7 +433,8 @@ public:
     // player in ascending player ID (GS-01). Engine events for the scripts are submitted to
     // `scripts` with keys from `sequence`.
     [[nodiscard]] core::Result<void> before_service(const tactical::TacticalSession& world,
-        const tactical::TacticalSnapshot& snapshot, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence);
+        const tactical::TacticalSnapshot& snapshot, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
+        const sim::PartitionExecutor* executor = nullptr);
     // Serial, after the script service: takes the plan scripts' engine requests out of the
     // report and adds the engine's unit orders.
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport& report);
@@ -370,15 +465,32 @@ public:
     [[nodiscard]] bool in_freestore(const ViewUnit& unit, tactical::PlayerId player) const;
     // GS-11: whether a target matches application flags (upper-case names) for the player.
     [[nodiscard]] bool target_matches(tactical::PlayerId player, const std::set<std::string>& flags, const Target* target) const;
+    [[nodiscard]] sim::EntityId producer(tactical::PlayerId player, tactical::TypeId type,
+        sim::EntityId preferred = 0) const;
+    [[nodiscard]] const tactical::BuildOption* build_option(tactical::PlayerId player, tactical::TypeId type,
+        sim::EntityId producer) const;
+    struct ProducerWork {
+        std::uint64_t entities{};
+        std::uint64_t candidates{};
+    };
+    [[nodiscard]] ProducerWork producer_work() const noexcept { return producer_work_; }
 
 private:
+    friend struct EngineContractAccess;
+    void prepare_producers() const;
     struct Evaluator;
     // Perception.
     void build_targets(PlayerAi& player);
     void update_targets();
     [[nodiscard]] std::optional<Real> run_equation(const Equation& equation, const Context& context) const;
     // Goal system.
+    void initialize_goals(PlayerAi& player);
+    [[nodiscard]] std::int64_t proposal_budget(std::int64_t count) const;
     void service_goals(PlayerAi& player);
+    // #957: the schedule's counters, and the plans waiting for their attach budget.
+    [[nodiscard]] bool staggered() const noexcept { return host_->setup.schedule.mode == AiSchedule::Mode::staggered; }
+    void queue_attach(PlayerAi& player, const Goal& goal);
+    [[nodiscard]] core::Result<void> drain_attaches(authoritative::ScriptScheduler& scripts, std::uint64_t& sequence);
     void propose(PlayerAi& player);
     void maintain(PlayerAi& player);
     void maintain_category(PlayerAi& player, const std::string& category, std::vector<Goal>& kept);
@@ -387,6 +499,7 @@ private:
     [[nodiscard]] bool like(const PlayerAi& player, const Goal& a, const Goal& b) const;
     [[nodiscard]] bool plan_goal(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool select_units(PlayerAi& player, const Goal& goal, PotentialPlan& potential);
+    [[nodiscard]] bool production_time_allowed(const PlayerAi& player, const Goal& goal) const;
     [[nodiscard]] bool test_valid(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool test_target_contrast(PlayerAi& player, Goal& goal);
     void reserve(PlayerAi& player, Goal& goal);
@@ -406,6 +519,7 @@ private:
         std::uint64_t& sequence);
     void finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative::ScriptScheduler& scripts, bool abandoned = false);
     void service_execution(PlayerAi& player);
+    void service_reinforcements(PlayerAi& player);
     void service_blocks();
     void service_taskforce_events();
     void track_damage(const tactical::TacticalSnapshot& snapshot);
@@ -430,6 +544,9 @@ private:
         const math::Vec3& destination);
 
     std::shared_ptr<Host> host_;
+    mutable bool producers_prepared_{};
+    mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
+    mutable ProducerWork producer_work_{};
     AiData data_;
     std::vector<PlanDef> plans_;
     ThreatGrid grid_;
@@ -446,6 +563,9 @@ private:
     std::map<std::string, Real, std::less<>> globals_;
     std::vector<PlanRecord> records_;
     std::vector<TickCost> costs_;
+    // #957: counters of the barrier step in progress and the plans waiting to be attached.
+    TickCost work_{};
+    std::vector<PendingAttach> pending_attach_;
     // Pending script events of this barrier and the engine's own orders for the next tick.
     std::vector<authoritative::ScriptEvent> events_;
     std::vector<authoritative::ScriptCommand> orders_;

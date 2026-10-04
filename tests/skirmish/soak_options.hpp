@@ -8,6 +8,8 @@
 //                  [--check-every N] [--spawn-window N] [--hull-penetration F] [--hull-ticks N]
 //                  [--slot-radius F] [--slot-ticks N] [--map-margin F] [--speed-factor F] [--craft-speed-factor F]
 //                  [--require-decision] [--no-invariants]
+//                  [--ai-schedule faithful|staggered] [--ai-attach-cap N]
+//                  [--tick-trace DIR] [--check-schedule]
 
 #include "soak_invariants.hpp"
 
@@ -34,6 +36,11 @@ struct Options {
     std::size_t check_every{1};             // invariants are checked every Nth tick
     bool require_decision{false};           // a seed that reaches the cap without a decided battle fails
     bool invariants{true};                  // false: only sim failures (and the worker comparison) fail a seed
+    // #957: the AI's schedule. Unset: the project's (staggered, one plan attach a tick).
+    std::optional<bool> ai_faithful;        // true: FoC's own schedule, for the before/after measurement
+    std::optional<std::uint32_t> ai_attach_cap;
+    std::optional<std::filesystem::path> tick_trace; // seed-N-ticks.csv per seed: each tick's cost and AI work
+    bool check_schedule{false};             // #957: per seed, count the AI's work per tick under both schedules and check the caps
     Limits limits;
 };
 

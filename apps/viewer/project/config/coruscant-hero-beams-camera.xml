@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-authored G7 test camera: source ships at (-400,-1500) and (400,-1500). -->
+<map_camera schema="eawr-space-map-camera" version="1" provenance="project-authored"
+  map_path="data/art/maps/_mp_space_coruscant.ted"
+  map_sha256="91a1fd50ae8ac521e43773f60a3743d64eceb3a00736d80f0ae2234d95108286">
+  <bounds min_x="-6100" max_x="6100" min_y="-6100" max_y="6100"
+    source_id="coruscant-source-volume-1" authority="project-authored"/>
+  <initial target_x="0" target_y="-1500" target_height="0" zoom="0.85" yaw_degrees="0"/>
+  <bindings path="space-live-camera-bindings.json"/>
+  <constant_overrides schema="eawr-map-camera-overrides" version="1"
+    source_id="space-camera-owner-deviations" authority="project-authored">
+    <override tag="Distance_Min" value="100"/>
+    <override tag="Tactical_Min_Scroll_Speed" value="823.529412"/>
+    <override tag="Pitch_Min" value="-60"/>
+    <override tag="Tactical_Overview_Clicks" value="5"/>
+  </constant_overrides>
+</map_camera>

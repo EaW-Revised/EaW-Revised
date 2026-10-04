@@ -1,7 +1,7 @@
 # Authoritative Lua numeric profile
 
-Contract for EAWR-246,
-2026-09-26. Owner decision EAWR-254
+Contract for the Lua numeric profile (legacy EAWR-246),
+2026-09-26. Owner decision on the Lua numeric policy (legacy EAWR-254)
 selected option B: authoritative Lua numbers are IEEE 754 binary64 values computed by
 integer-only code. The policy is in [multiplayer readiness](multiplayer-readiness.md); this
 note fixes the rules later code relies on. The [P0 host](lua-runtime.md) keeps its hardware
@@ -135,10 +135,12 @@ cost 6–26 ns (add 15, multiply 7, divide 26) against about 1–3 ns in hardwar
 far heavier in arithmetic than FoC's closure, which has 29 additions and subtractions and
 5 multiplications or divisions in 33 files. The design's starting budget (soft-float p99
 ≤ 1 ms, total Lua p99 ≤ 3 ms per 30 Hz tick) therefore holds up to roughly 200 such steps
-per tick. EAWR-79 must measure the real FoC AI load per tick against it; the first lever
+per tick. The FoC tactical AI host must measure the real AI load per tick against it; the first lever
 beyond that is exact fast paths (integer-valued operands), not option A.
 
-## Retail confirmation (EAWR-376)
+<a id="retail-confirmation-376"></a>
+
+## Retail confirmation
 
 On 2026-09-27 the retail Steam FoC `StarWarsG.exe` ran the probe
 `tools/validation/p1_capture/lua_number_probe.lua` in a Naboo land skirmish on the rig (fog
@@ -186,7 +188,7 @@ lexer and `tonumber` parse like UCRT `strtod`, subnormals included (O, Q, T); an
 
 ## Open items
 
-- Negating the canonical NaN prints `-nan(ind)`, where FoC prints `nan`. The EAWR-376 probe did
+- Negating the canonical NaN prints `-nan(ind)`, where FoC prints `nan`. The retail numeric probe did
   not cover `-(0/0)`; a probe version 2 can record it with other NaN sign cases.
 - Table iteration order, `tostring` of tables and functions, GC metrics and the sandbox
-  are in [Lua sandbox](lua-sandbox.md) (EAWR-247).
+  are in [Lua sandbox](lua-sandbox.md).

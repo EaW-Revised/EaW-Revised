@@ -1,5 +1,9 @@
 # Documentation
 
+References written (legacy #N), rendered as (legacy EAWR-N) in the public copy, point
+to the project's earlier private issue tracker. They are kept for maintainers and are
+not links.
+
 Contracts, file-format facts, behaviour notes and how-tos for the remake. Start with
 [build.md](build.md) to build and test, [clean-room.md](clean-room.md) for how original
 behaviour is researched and implemented, and [behaviour/README.md](behaviour/README.md)
@@ -15,11 +19,11 @@ a test, a tool or a provenance reference still needs it.
 - [behaviour/lua-api-declarations.md](behaviour/lua-api-declarations.md) — Lua-visible Declaration Inventory Contract.
 - [behaviour/lua-script-model.md](behaviour/lua-script-model.md) — Lua Script Host Behaviour Contract.
 - [behaviour/map-effect-admission.md](behaviour/map-effect-admission.md) — Map attached-effect admission snapshot.
-- [behaviour/meshadditive-sun-billboard.md](behaviour/meshadditive-sun-billboard.md) — MeshAdditive sun billboard (P1 EAWR-27 source research).
-- [behaviour/meshadditive-sun-mode7-retail.md](behaviour/meshadditive-sun-mode7-retail.md) — Retail mode-7 (`sun`) billboard placement (P1 EAWR-27, gate G-01).
+- [behaviour/meshadditive-sun-billboard.md](behaviour/meshadditive-sun-billboard.md) — MeshAdditive sun billboard (P1 environment rendering source research).
+- [behaviour/meshadditive-sun-mode7-retail.md](behaviour/meshadditive-sun-mode7-retail.md) — Retail mode-7 (`sun`) billboard placement (P1 environment rendering, gate G-01).
 - [behaviour/meshadditive-mode6-glow.md](behaviour/meshadditive-mode6-glow.md) — FoC sunlight glow placement and Coruscant material facts.
 - [behaviour/meshgloss-programmable.md](behaviour/meshgloss-programmable.md) — MeshGloss programmable behavior and prototype lighting.
-- [behaviour/p1-effective-environment.md](behaviour/p1-effective-environment.md) — Effective TED environment, lighting, fog and sky inputs (P1 EAWR-25/#26/#27, WP-13).
+- [behaviour/p1-effective-environment.md](behaviour/p1-effective-environment.md) — Effective TED environment, lighting, fog and sky inputs (P1 lighting, map loading and environment rendering, WP-13).
 - [behaviour/particle-attachment-visibility.md](behaviour/particle-attachment-visibility.md) — Particle attachment visibility.
 - [behaviour/particle-mesh-emission.md](behaviour/particle-mesh-emission.md) — V1 EnhancedMesh CPU emission.
 - [behaviour/particle-parent-lifecycle.md](behaviour/particle-parent-lifecycle.md) — V1 particle parent lifecycle.
@@ -54,11 +58,11 @@ a test, a tool or a provenance reference still needs it.
 - [research/source-inputs.md](research/source-inputs.md) — Source inputs and bounded findings.
 - [shaders.md](shaders.md) — Shader translation spike.
 - [simulation.md](simulation.md) — Deterministic simulation harness.
-- [skirmish-start.md](skirmish-start.md) — M2 skirmish tick zero: start rules, census, the m2-start replay (EAWR-67).
-- [tag-coverage.md](tag-coverage.md) — XML tag registry: every FoC (class, tag) has a status and a target in our code or a sourced reason it has none; the gate, the load trace (EAWR-628).
+- [skirmish-start.md](skirmish-start.md) — M2 skirmish tick zero: start rules, census, the m2-start replay.
+- [tag-coverage.md](tag-coverage.md) — XML tag registry: every FoC (class, tag) has a status and a target in our code or a sourced reason it has none; the gate, the load trace.
 - [traces.md](traces.md) — Behaviour traces, fidelity scenarios and the trace comparer.
-- [ui/mod-hud-survey.md](ui/mod-hud-survey.md) — How six mods change the FoC HUD; D2 recommendation and mod-compat fixtures (EAWR-192).
-- [ui/ui-layer.md](ui/ui-layer.md) — UI layer: retail sources, layout rules, architecture and plan (EAWR-155).
-- [unit-data.md](unit-data.md) — M2 unit tables: loading rules, hardpoint positions in Q24, content identity (EAWR-65).
+- [ui/mod-hud-survey.md](ui/mod-hud-survey.md) — How six mods change the FoC HUD; D2 recommendation and mod-compat fixtures.
+- [ui/ui-layer.md](ui/ui-layer.md) — UI layer: retail sources, layout rules, architecture and plan.
+- [unit-data.md](unit-data.md) — M2 unit tables: loading rules, hardpoint positions in Q24, content identity.
 - [vfs.md](vfs.md) — Virtual file system contract.
 - [xml-model.md](xml-model.md) — XML object model and variant resolution.

@@ -12,10 +12,12 @@
 #include "harness.hpp"
 
 #include <cstdint>
+#include <array>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -263,6 +265,59 @@ Run run_battle(const eawr::sim::PartitionExecutor& executor, std::shared_ptr<eaw
     return run;
 }
 
+void run_engine_preparation() {
+    struct Legacy final : auth::ScriptEngine {
+        unsigned calls{};
+        Result<auth::ServiceOptions> before_service(const tactical::TacticalSession&,
+            const tactical::TacticalTick&, auth::ScriptScheduler&) override {
+            ++calls;
+            return Result<auth::ServiceOptions>::success({});
+        }
+    };
+    const eawr::sim::InlineExecutor inline_executor;
+    auto legacy = std::make_shared<Legacy>();
+    auto legacy_battle = make_battle();
+    expect(legacy_battle.set_engine(legacy).has_value() && legacy_battle.step(inline_executor).has_value(),
+        "executor-aware bridge retains legacy engine preparation");
+    expect(legacy->calls == 1, "forwarding default invokes the legacy method once");
+
+    struct Prepared final : auth::ScriptEngine {
+        std::array<unsigned, eawr::sim::tick_partition_count> rows{};
+        unsigned legacy_calls{}, prepared_calls{};
+        bool fail{};
+        Result<auth::ServiceOptions> before_service(const tactical::TacticalSession&,
+            const tactical::TacticalTick&, auth::ScriptScheduler&) override {
+            ++legacy_calls;
+            return Result<auth::ServiceOptions>::success({});
+        }
+        Result<auth::ServiceOptions> before_service(const eawr::sim::PartitionExecutor& executor,
+            const tactical::TacticalSession&, const tactical::TacticalTick&, auth::ScriptScheduler&) override {
+            ++prepared_calls;
+            if (fail) throw std::runtime_error("preparation refused");
+            const auto result = executor.execute_phase("engine-preparation", rows.size(),
+                [&](const std::size_t partition) { ++rows[partition]; });
+            if (!result) return Result<auth::ServiceOptions>::failure(result.error());
+            return Result<auth::ServiceOptions>::success({});
+        }
+    };
+    const eawr::platform::ThreadWorkerAdapter executor(4);
+    auto prepared = std::make_shared<Prepared>();
+    auto battle = make_battle();
+    expect(battle.set_engine(prepared).has_value() && battle.step(executor).has_value(),
+        "executor-aware engine prepares on the supplied tick executor");
+    expect(prepared->prepared_calls == 1 && prepared->legacy_calls == 0,
+        "bridge selects the executor-aware override");
+    for (const unsigned count : prepared->rows) expect(count == 1, "each preparation partition runs exactly once");
+    prepared = std::make_shared<Prepared>();
+    prepared->fail = true;
+    auto failing = make_battle();
+    expect(failing.set_engine(prepared).has_value(), "failing preparation engine registers");
+    auto failed = failing.step(executor);
+    expect(!failed && failed.error().code == auth::codes::session_abort, "preparation exception aborts the script barrier");
+    expect(!failing.step(executor) && prepared->prepared_calls == 1,
+        "a failed preparation stays terminal rather than servicing Lua on retry");
+}
+
 void run_routing() {
     const eawr::sim::InlineExecutor inline_executor;
     const Run run = run_battle(inline_executor);
@@ -436,6 +491,7 @@ void run_workers() {
 int main(int argc, char** argv) {
     const std::string_view mode = argc > 1 ? argv[1] : "";
     if (mode == "routing") {
+        run_engine_preparation();
         run_routing();
         run_malformed();
     } else if (mode == "workers") {

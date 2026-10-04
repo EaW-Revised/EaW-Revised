@@ -62,7 +62,7 @@ SpaceObjectTags space_object_tags(const data::EffectiveObject& object, const Obj
                 HardpointAttachment attachment;
                 attachment.hardpoint = std::string(text.substr(start, end - start));
                 if (resolve) {
-                    if (const auto hardpoint = resolve(attachment.hardpoint)) {
+                    if (const auto hardpoint = resolve(attachment.hardpoint, data::Category::hardpoint)) {
                         attachment.resolved = true;
                         attachment.model = text_of(*hardpoint, "Model_To_Attach");
                         attachment.bone = text_of(*hardpoint, "Attachment_Bone");
@@ -189,6 +189,15 @@ bool is_shadow_volume_shader(const std::string_view shader) noexcept {
     return ieq(shader, "MeshShadowVolume.fx");
 }
 
+bool drawable_projectile_effects(const Placement& placement) noexcept {
+    if (placement.asset_id == 0 || !placement.transform || !placement.surfaces.empty()
+        || placement.effects.empty()) return false;
+    return std::all_of(placement.effects.begin(), placement.effects.end(),
+               [](const AttachedEffect& effect) { return !effect.resolved.empty(); })
+        && std::all_of(placement.issues.begin(), placement.issues.end(),
+               [](const Issue& issue) { return issue.cause == Cause::model_has_no_surface; });
+}
+
 std::vector<SpacePlacementDecision> classify_space_placements(
     const Scene& scene,
     const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of) {
@@ -201,6 +210,8 @@ std::vector<SpacePlacementDecision> classify_space_placements(
         std::optional<SpaceObjectTags> tags;
         if (!placement.object_id.empty() && tags_of) tags = tags_of(placement.object_id);
         if (tags) decision.type_name = tags->type_name;
+        const bool effect_projectile = tags && tags->type_name == "Projectile"
+            && drawable_projectile_effects(placement);
         for (const Surface& surface : placement.surfaces) {
             if (is_shadow_volume_shader(surface.shader)) ++decision.shadow_volume_surfaces;
         }
@@ -208,7 +219,7 @@ std::vector<SpacePlacementDecision> classify_space_placements(
             decision.role = SpaceRole::marker;
         } else if (tags && (tags->nebula || tags->background)) {
             decision.role = SpaceRole::environment;
-        } else if (placement.drawable()) {
+        } else if (placement.drawable() || effect_projectile) {
             decision.role = SpaceRole::drawn;
             if (tags) decision.hardpoints = tags->hardpoints;
             const auto decal = [&](const std::string_view mesh) {
@@ -228,9 +239,12 @@ std::vector<SpacePlacementDecision> classify_space_placements(
                 decision.drawn_surfaces.push_back(index);
             }
             for (const Issue& issue : placement.issues) {
-                if (!shadow_volume_issue(issue)) decision.missing.push_back(describe(issue));
+                if (!shadow_volume_issue(issue)
+                    && !(effect_projectile && issue.cause == Cause::model_has_no_surface)) {
+                    decision.missing.push_back(describe(issue));
+                }
             }
-            if (decision.drawn_surfaces.empty()) {
+            if (decision.drawn_surfaces.empty() && !effect_projectile) {
                 // Only damage decals were supported: nothing of the intact
                 // object would draw.
                 decision.role = SpaceRole::not_drawable;

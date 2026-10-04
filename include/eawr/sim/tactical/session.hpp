@@ -19,14 +19,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::sim::tactical {
+
+// SAE-10: requested point, then ten-angle rings, clamped to playable XY bounds.
+[[nodiscard]] std::optional<math::Vec3> reinforcement_search_candidate(const math::Vec3& requested,
+    std::uint32_t attempt, math::Fixed yaw = {},
+    const std::optional<std::array<math::Fixed, 4>>& bounds = std::nullopt);
+
+namespace session_detail { class Tick; }
 
 struct TacticalTick {
     std::uint64_t completed_tick{};
@@ -41,8 +50,30 @@ struct TacticalTick {
     // that reached the exact collision tests.
     std::uint64_t projectile_candidates{};
     std::uint64_t projectile_exact_tests{};
+    // #893: follow-cone calls in chase pairing; deterministic work, never hashed.
+    std::uint64_t dogfight_cone_tests{};
     // The same hash either way (#637): ready, or pending on the session's state hasher.
     sim::StateHash state_hash;
+    // Deterministic commit work (#892), excluded from canonical state and replay hashes.
+    std::uint64_t registry_emplacements{};
+    std::uint64_t registry_component_writes{};
+    std::uint64_t staged_map_copies{};
+    // WPR-55: deterministic production budgets, presentation diagnostics only, never hashed.
+    std::uint64_t production_census_visits{};
+    std::uint64_t bonus_profile_evaluations{};
+    std::uint64_t capture_candidates{}; // WBP-04 deterministic broad-phase work, never hashed
+    std::uint64_t capture_index_bodies{}; // additional index entries built in worker partitions
+    std::uint64_t capture_prepare_bodies{}; // immutable capture inputs filled in worker partitions
+    std::uint64_t capture_serial_bodies{}; // whole-world capture preparation on the stepping thread
+    std::uint64_t blast_detonations{};
+    std::uint64_t blast_recipients_examined{}; // WAD work contract: copied candidates per detonation
+    std::uint64_t reinforcement_collision_queries{}; // diagnostics only, excluded from hashes
+    std::uint64_t reinforcement_placement_ns{};
+    // WR-21..28: fog, prevention, bounds, moving collision, static collision (diagnostics only).
+    std::array<std::uint64_t, 5> reinforcement_rejections_by_check{};
+    std::vector<AsteroidImpact> asteroid_impacts; // ordered service diagnostics, never hashed
+    std::uint64_t asteroid_queries{};
+    std::uint64_t asteroid_candidates{};
 };
 
 // Deterministic home of one tactical session. Commands are queued by submit() in
@@ -101,7 +132,17 @@ public:
     // the digest the synchronous path returns in state_sha256. Null (the default) hashes on the
     // stepping thread. The hasher is not state: it never changes a hash or a replay.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
+    // Optional caller-owned profiling clock: begin/end of serial commit sections, never state.
+    void set_commit_observer(std::function<void(std::string_view, bool)> observer);
 
+    // Diagnostics only: actual placement matrix builds, excluding yaw extraction and spin poses.
+    struct TickWork {
+        std::uint64_t level_matrix_builds{};
+        std::uint64_t banked_matrix_builds{}; // BK-05 uses a distinct quaternion
+        std::uint64_t pad_death_membership_work{}; // WBP-27: queries/comparisons, never hashed
+        std::uint64_t concentrate_queries{}, concentrate_candidates{}, concentrate_batches{};
+    };
+    [[nodiscard]] TickWork tick_work() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] EntityId next_entity_id() const noexcept;
     [[nodiscard]] std::uint64_t rng_state() const noexcept;
@@ -116,12 +157,40 @@ public:
     // #530: each economy player's credits, queues and pool, ascending player ID; empty without
     // economy rules.
     [[nodiscard]] std::span<const PlayerEconomy> ledgers() const noexcept;
+    // SAE-03: read-only admission uses the same menu, availability and requirements as buy.
+    [[nodiscard]] bool build_allowed(PlayerId player, EntityId producer, TypeId type) const;
+    [[nodiscard]] const BuildOption* build_option(PlayerId player, EntityId producer, TypeId type) const;
+    [[nodiscard]] ProductionCounts production_counts(PlayerId player, TypeId type) const;
+    [[nodiscard]] const std::map<EntityId, PadState>& pads() const noexcept;
+    [[nodiscard]] const std::map<EntityId, ConstructionState>& construction() const noexcept;
+    [[nodiscard]] bool pad_sale_allowed(PlayerId player, EntityId child, bool single_step = false) const;
+    [[nodiscard]] core::Result<bool> pad_build_allowed(PlayerId player, EntityId pad) const;
     // #530: the arriving units (PU-35), by ID.
     [[nodiscard]] const std::map<EntityId, ArrivalState>& arrivals() const noexcept;
     // WR-13/15: read-only point verdict for a preview; the command rechecks before creation.
     struct PlacementWork {
         std::uint64_t predictions{}; // diagnostics only: samples materialized for this query
+        std::uint64_t collision_queries{};
+        std::uint64_t nanoseconds{};
+        std::array<std::uint64_t, 5> rejections{};
     };
+    // SAE-10: live AI search input; the replay records the resolved ordinary point only.
+    struct ReinforcementSearch {
+        std::uint64_t token{};
+        std::uint32_t attempt{}; // 0 requested point, 1 + ten candidates per 500-unit ring
+    };
+    struct ReinforcementSearchResult {
+        std::uint32_t next_attempt{};
+        std::uint32_t candidates{};
+        std::uint64_t predictions{}; // extra predictions materialized by the ring, diagnostics only
+        std::uint64_t nanoseconds{}; // diagnostics only, never used by search decisions
+        math::Vec3 position{};
+        bool valid{};
+    };
+    [[nodiscard]] core::Result<void> submit_reinforcement_search(const PlayerCommand& command,
+        ReinforcementSearch search);
+    [[nodiscard]] std::optional<ReinforcementSearchResult> reinforcement_search_result(
+        PlayerId player, std::uint64_t token) const;
     [[nodiscard]] core::Result<bool> reinforcement_point(PlayerId player, TypeId type, const math::Vec3& point,
         PlacementWork* work = nullptr) const;
     // The decided battle (#77, docs/behaviour/space-victory.md), or nothing while undecided.
@@ -134,6 +203,8 @@ public:
     [[nodiscard]] const FogCells* fog_cells() const noexcept;
     // Projectiles in flight, ascending ID; always empty without damage rules (#74).
     [[nodiscard]] std::span<const Projectile> projectiles() const noexcept;
+    // WAD-05: a deterministic service request; processed once on the next step at current position.
+    [[nodiscard]] bool request_projectile_explosion(std::uint64_t projectile_id) noexcept;
     // The unit's health, or nothing when it is not live or its type has no durability profile.
     [[nodiscard]] std::optional<DurabilityState> durability_state(EntityId unit) const;
     // The unit's abilities (#76), or nothing when it is not live or its type has none.
@@ -180,6 +251,7 @@ public:
     [[nodiscard]] core::Result<void> stage_remove(EntityId unit);
 
 private:
+    friend class session_detail::Tick;
     class Impl;
     explicit TacticalSession(std::unique_ptr<Impl> impl) noexcept;
     std::unique_ptr<Impl> impl_;

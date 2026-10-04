@@ -35,13 +35,20 @@ If you enjoy the project and want to support its development, you can do so on
 
 ## Status
 
-The M2 space skirmish is playable: a human player fights one AI opponent with fixed
-starting forces. The project targets Forces of Corruption only for now.
+Local space skirmish is playable: choose a map, factions, teams and match options,
+then fight AI opponents with the installed starting forces. Team games and
+free-for-all games are available where the map supports them. The project targets Forces of
+Corruption only for now.
 
 What works today:
 
-- Selecting ships and squadrons, movement and attack orders, combat, station purchasing,
-  unit abilities, tactical HUD, fog of war, battle audio, victory and defeat in M2.
+- Selecting ships and squadrons, movement and attack orders, combat, station purchasing
+  and upgrades, reinforcements, unit and hero abilities, tactical HUD, fog of war,
+  battle audio, victory and defeat.
+- Capturing space build pads, constructing mining facilities and defense satellites,
+  earning mining income, and purchasing units from captured mercenary stations.
+- Space-map hazards, including asteroid fields, nebulae and ion storms, with their
+  effects on ships and visibility.
 - Reading a FoC installation: MEG archives and loose files through a virtual file system,
   the XML object registry, maps, models, textures and animations.
 - A Godot viewer that renders FoC space and land maps from map and XML data.
@@ -49,9 +56,18 @@ What works today:
   replays recorded commands with identical state hashes on every platform.
 - A Lua 5.0.2 script host and a sandboxed, deterministic Lua VM for gameplay scripts.
 
-Limits: FoC only, two players (human versus AI), one demo map. Space hazards, playable
-land battles, galactic campaigns and multiplayer are not implemented yet. Land maps
-can be viewed, and the full interface and gameplay are still under development.
+Limits: FoC only, one local human player with AI opponents or allies; the map's
+authored start positions limit the available teams. Playable land battles, galactic
+campaigns and network multiplayer are not implemented yet. Land maps can be viewed,
+and the full interface and gameplay are still under development. Unsupported units
+are filtered from starting forces and purchasing rather than offered as complete.
+
+The AI economy now follows more of FoC's rules. Please report AI opponents that
+stop purchasing units or constructing mines.
+
+Known issues: combat balance, some abilities, fog transitions and visual effects
+still need comparison with the original game. Frame-time spikes can occur in
+larger battles; please use the reporting steps below when they do.
 The [roadmap](plan/backlog.md) and [phase plans](plan/) say what comes next.
 
 ## Try the space battle
@@ -72,9 +88,14 @@ installation; the viewer itself runs natively.
 3. Double-click **`play-demo.cmd`** on Windows, or run **`sh ./play-demo.sh`** on Linux.
    The launcher finds Steam libraries or asks for the install folder containing
    `GameData/` and `corruption/`. It remembers both paths under `out/`, validates and
-   extracts the HUD fonts from your own expansion executable, and starts the lit M2
-   battle with audio, shadows and the tactical HUD enabled. No game data or fonts
+   extracts the HUD fonts from your own expansion executable, and opens space skirmish
+   setup. Choose an installed map, factions, teams and match options, then press
+   **Start Battle**.
+   Battles use audio, shadows and the tactical HUD. No game data or fonts
    are included in the download. Close the window to quit.
+
+Use `play-demo.cmd --m2` or `sh ./play-demo.sh --m2` to start the fixed M2
+demonstration battle directly. A finished setup battle returns to the setup screen.
 
 For explicit paths (quotes handle spaces), either script accepts
 `--game-root "<install>" --godot "<executable>"`. The environment variables
@@ -91,11 +112,50 @@ Controls:
   a group; 1..9 recalls it.
 - **Buy:** select your station, open its reinforcement/production button, then
   click a unit's build icon. Available units depend on the station and credits.
+- **Earn income:** move ships close to a neutral mining pad to capture it, select
+  the pad, and build a mining facility from its build palette. Completed mines
+  add credits over time. Captured mercenary stations offer their own units.
 - **Abilities:** select a ship with an ion shot, click its ion shot button or
   press **Shift+I**, then left-click an enemy target. Right-click or Esc cancels.
 - **Camera:** arrows or screen edges pan, middle-drag pans, Ctrl+middle-drag
   rotates/tilts, the wheel zooms, and a middle click resets. **Insert** opens
   the overview. **F3** toggles the performance overlay.
+
+### Reporting lag or stutter
+
+If the battle drops frames or hitches, a trace and a recording of that battle let us
+find the cause on our machines:
+
+1. **Quick look:** press **F3** during the battle. The overlay shows the frame rate,
+   the frame time and the slowest simulation tick. A screenshot taken during a hitch
+   already helps.
+2. **Record a trace and the battle:** create an empty folder (for example
+   `C:\EawrReport` or `~/eawr-report`), then start the launcher with two extra
+   options and play until the problem has happened:
+
+   ```
+   play-demo.cmd --eawr-perf-trace "C:\EawrReport\trace.csv" --eawr-live-replay-out "C:\EawrReport\battle.eawr-replay"
+   sh ./play-demo.sh --eawr-perf-trace "$HOME/eawr-report/trace.csv" --eawr-live-replay-out "$HOME/eawr-report/battle.eawr-replay"
+   ```
+
+   `trace.csv` has one row per drawn frame: the frame time, the simulation ticks and
+   their cost, render CPU and GPU time, and how many units, projectiles and particles
+   were active. It shows whether a hitch comes from the simulation, from preparing
+   the frame, or from the GPU. The battle is deterministic, so `battle.eawr-replay`
+   (written when you close the window, with `battle.eawr-replay.time.csv` beside it)
+   lets us replay exactly your battle and measure it tick by tick. Both files contain
+   only timings, unit counts and your in-game commands: no game data and no personal
+   information.
+3. **Open an issue** on [GitHub](https://github.com/EaW-Revised/EaW-Revised/issues/new/choose)
+   and attach the folder's files (zip them if GitHub refuses a file type). Include
+   your CPU, GPU and driver version, RAM, the resolution, the release version, and
+   roughly when the problem happened (for example "two minutes in, when the fighters
+   launched").
+
+If the battle stops with an error, the viewer saves a replay up to the failing tick on
+its own. It is in `%APPDATA%\Godot\app_userdata\EAWR Viewer\logs\` on Windows and in
+`~/.local/share/godot/app_userdata/EAWR Viewer/logs/` on Linux, next to `godot.log`.
+Please attach both.
 
 ## Quick start
 

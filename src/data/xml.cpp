@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "xml_internal.hpp"
 #include <atomic>
 #include <unordered_map>
@@ -44,6 +45,18 @@ std::vector<const Definition*> Catalog::find_all(const std::string_view object_i
     return result;
 }
 
+const Definition* Catalog::find(const std::string_view object_id, const Category category) const noexcept {
+    if (!impl_) return nullptr;
+    const auto found = impl_->by_id.find(ascii_lower(object_id));
+    if (found == impl_->by_id.end()) return nullptr;
+    // by_id is already ordered by layer and registry precedence.
+    for (const auto index : found->second) {
+        const auto& definition = definition_at(index);
+        if (definition.category == category) return &definition;
+    }
+    return nullptr;
+}
+
 const std::vector<Definition>& Catalog::definitions() const noexcept {
     static const std::vector<Definition> empty;
     return impl_ ? impl_->definitions : empty;
@@ -74,6 +87,7 @@ core::Result<LoadResult> load_catalog(
     const Profile profile,
     const LoadOptions& options
 ) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::catalog);
     struct RegistrySpec {
         Category category;
         std::string_view path;
@@ -211,10 +225,11 @@ core::Result<LoadResult> load_catalog(
                     }
                 }
                 add_definition(*impl, definition, included_bytes.value(), included_record.value(), profile,
-                               category, schema_type, global_registry_order, definition_order++, diagnostics, options);
+                               category, schema_type, global_registry_order, definition_order++, diagnostics, options,
+                               included.value().offsets);
                 if (registry.category == Category::game_object) {
                     add_nested_abilities(*impl, definition, included_bytes.value(), included_record.value(), profile,
-                                         global_registry_order, definition_order, diagnostics, options);
+                                         global_registry_order, definition_order, diagnostics, options, included.value().offsets);
                 }
             }
             impl->registry_files.push_back(std::move(registry_file));
@@ -278,7 +293,7 @@ core::Result<XmlDocument> load_document(const vfs::Vfs& vfs, const std::string_v
     auto parsed = parse_document(bytes.value(), record.value());
     if (!parsed) return core::Result<XmlDocument>::failure(parsed.error());
     const auto& found = record.value();
-    auto root = build_node(parsed.value().root, bytes.value(), found);
+    auto root = build_node(parsed.value().root, bytes.value(), found, parsed.value().offsets);
     apply_document_overrides(root, found.canonical_path);
     return core::Result<XmlDocument>::success(XmlDocument{
         .root = std::move(root),

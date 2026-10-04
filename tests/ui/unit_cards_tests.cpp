@@ -5,6 +5,7 @@
 
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/presentation/ui/battle_results.hpp"
 #include "ui_test_support.hpp"
 
 #include <cmath>
@@ -81,6 +82,19 @@ void test_card_units_fold_squadrons() {
     expect(std::abs(cards[0].health - 0.8) < 1e-9 && !cards[0].shield, "a squadron shows team health and no shield");
     expect(cards[1].id == 10 && cards[1].shield && std::abs(*cards[1].shield - 0.25) < 1e-9, "a ship keeps its shield");
     expect(!cards[2].squadron && cards[2].id == 951 && cards[2].type == "Y-Wing", "a mixed squadron's craft show as themselves");
+
+    // WHE-SQ-01 / L-2: homogeneity is authored, not inferred from craft type names.
+    ui::SquadronOf hero{960, "Hero_Squadron", ui::ability_index("REPLENISH_WINGMEN"), true,
+        {961, 962, 963, 964, 965, 966, 967}, 0.75};
+    std::vector<ui::SelectedUnit> hero_selection;
+    for (const auto member : hero.members)
+        hero_selection.push_back({member, member == 961 ? "Leader_Craft" : "Escort_Craft",
+            ui::ability_none, 1.0, std::nullopt, hero});
+    const auto hero_cards = ui::card_units(hero_selection);
+    expect(hero_cards.size() == 1 && hero_cards.front().id == hero.container
+        && hero_cards.front().members == hero.members && hero_cards.front().type == hero.type
+        && hero_cards.front().ability == hero.ability && hero_cards.front().health == hero.health,
+        "WHE-SQ-01: seven differently named craft retain one parent card, ability and team health");
 }
 
 void test_one_ship() {
@@ -256,6 +270,38 @@ void test_selection_replace() {
     expect(selection.replace({}) && selection.empty(), "an empty list clears it");
 }
 
+void test_battle_results() {
+    namespace tactical = sim::tactical;
+    const std::vector<tactical::SnapshotPlayer> players{{1, 10, false}, {2, 10, false}, {3, 20, false}, {4, 10, true}};
+    std::vector<tactical::BattleLoss> losses{{1, 10, 3, 1, 0}, {1, 10, 3, 2, 1}, {2, 10, 3, 7, 1}, {3, 20, 1, 4, 2},
+        {3, 99, 1, 8, 3}, {4, 10, 1, 5, 4}, {3, 30, 1, 1, 5}};
+    const tactical::TacticalSnapshot snapshot(600, players, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        std::make_shared<const std::vector<tactical::BattleLoss>>(std::move(losses)));
+    const auto result = ui::battle_results(snapshot, 1, [](const tactical::TypeId type) {
+        return ui::ResultType{std::to_string(type), type != 99, type == 30,
+            sim::math::Fixed::from_raw(100 * sim::math::Fixed::scale), 2.0};
+    });
+    expect(result.losses[0] == std::vector<ui::ResultLoss>{{10, "10", 3}},
+        "WBF-45: local losses merge by type, including earlier ticks without current events");
+    expect(result.losses[1] == std::vector<ui::ResultLoss>{{20, "20", 4}}
+        && result.heroes[1] == std::vector<ui::ResultLoss>{{30, "30", 1}},
+        "WBF-45: named heroes use their own slots and zero-score craft do not occupy loss rows");
+    expect(result.totals == std::array<std::uint64_t, 2>{3, 5},
+        "WBF-45: allied and neutral losses are excluded and hero deaths remain in side totals");
+    expect(result.score_cost == std::array<double, 2>{300.0, 500.0}
+        && result.combat_power == std::array<double, 2>{6.0, 10.0},
+        "WBF-45: every scored loss contributes authored cost and combat power, including heroes");
+    expect(ui::battle_results(snapshot, 9, [](auto) { return ui::ResultType{}; }).totals[0] == 0,
+        "an absent local player cannot classify losses");
+    expect(ui::loss_scroll_max(0) == 0 && ui::loss_scroll_max(12) == 0 && ui::loss_scroll_max(15) == 3,
+        "WBF-45: scrolling exposes overflow beyond the twelve visible entries");
+    expect(ui::battle_time_text(1'234) == "00:00:01" && ui::battle_time_text(3'723'999) == "01:02:03",
+        "WBF-44: milliseconds floor seconds and format hours, minutes and seconds");
+    const tactical::TacticalSnapshot without_results(600, players, {} , {});
+    expect(snapshot.canonical_bytes() == without_results.canonical_bytes(),
+        "derived lifetime loss rows do not change canonical snapshot bytes");
+}
+
 } // namespace
 
 int main() {
@@ -268,6 +314,7 @@ int main() {
     test_stacking_when_the_slots_overflow();
     test_card_click();
     test_selection_replace();
+    test_battle_results();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " unit card check(s) failed\n";
         return 1;

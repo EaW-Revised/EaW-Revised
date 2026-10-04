@@ -172,6 +172,33 @@ void identity_frames_budget_seed() {
     f.placement.transform->matrix.rows[0][3] = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
     expect(f.run().records[0].cause == MapEffectCause::frame_overflow, "fixed composition overflow diagnosed");
 }
+void attached_model_frame() {
+    Fixture f{"Pulse"};
+    // A rotated, scaled attachment bone in the owner's model space, rather than the hull origin.
+    auto& attachment = f.placement.transform->matrix;
+    attachment = translated(10, 20, 30);
+    attachment.rows[0][0] = integer(0);
+    attachment.rows[0][1] = integer(-2);
+    attachment.rows[1][0] = integer(2);
+    attachment.rows[1][1] = integer(0);
+    attachment.rows[2][2] = integer(2);
+    const auto p = f.run();
+    expect(p.records[0].status == MapEffectStatus::admitted && p.records[0].emitter_frame,
+        "attached-model pulse is admitted at its proxy bone");
+    const auto& local = *p.records[0].emitter_frame;
+    expect(local.rows[0][3] == integer(4) && local.rows[1][3] == integer(24)
+        && local.rows[2][3] == integer(38), "attachment rotation and scale reach the proxy origin");
+    const auto world = sim::math::compose(translated(100, -200, 300), local);
+    expect(world && world.value().rows[0][3] == integer(104)
+        && world.value().rows[1][3] == integer(-176) && world.value().rows[2][3] == integer(338),
+        "live ship placement composes with attachment and proxy frames");
+    f.model.proxies[0].visible = false;
+    expect(f.run().records[0].cause == MapEffectCause::hidden_proxy,
+        "attached model retains its authored proxy visibility");
+    f.code_shown = {1};
+    expect(f.run().records[0].status == MapEffectStatus::admitted,
+        "recursive emitter-type visibility can show an attached proxy");
+}
 } // namespace
 
 int main() {
@@ -180,5 +207,6 @@ int main() {
     hardpoint_states();
     code_shown_proxies();
     identity_frames_budget_seed();
+    attached_model_frame();
     std::cout << "map effect plan contracts passed\n";
 }

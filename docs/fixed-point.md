@@ -1,8 +1,8 @@
 # Fixed-point arithmetic contract
 
-Coordinator decision, 2026-09-21. This freezes P0-03's new-engine arithmetic
+Coordinator decision, 2026-09-21. This freezes the fixed-point math library's new-engine arithmetic
 interface before operator implementation. It does not establish original-game
-numeric equivalence. Range data is `plan/inventories/numeric-ranges.json`; ADR-010 records the decision.
+numeric equivalence. Range data is `plan/inventories/numeric-ranges.json`; [checked Q24 math decision](architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations) records the decision.
 
 ## Representation and measured capacity
 
@@ -36,12 +36,12 @@ errors are explicit. This representation covers the measured large duration
 without sacrificing subsecond precision. Tick/deadline comparisons use widened
 integer cross-products. It is not implicitly convertible to `Fixed`.
 
-P0-03 supplies the common scalar/vector library; this extended duration interface
+The fixed-point math library supplies the common scalar/vector library; this extended duration interface
 is reserved for the first actual duration consumer, whose arithmetic and hashing
 must be specified before use. Until then XML preserves the lexeme and checked
 Fixed conversion reports overflow. No consumer may replace an overflow with zero,
 saturation or an unlimited state. Negative sentinel meanings require field-specific
-evidence; unproved meanings remain unresolved. This explicitly refines ADR-003's
+evidence; unproved meanings remain unresolved. This explicitly refines [integer-only simulation decision](architecture-decisions.md#adr-003-integer-only-authoritative-simulation)'s
 single-storage suggestion while preserving integer-only authoritative arithmetic.
 
 ## Exact arithmetic and errors

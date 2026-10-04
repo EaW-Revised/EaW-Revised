@@ -14,7 +14,9 @@
 -- several values joins them with commas. Keep ids and cases stable: a changed case
 -- is a new probe version.
 
-function EaWR_Lua_Number_Probe()
+-- The debugger reads this table directly; numeric results stay strings so JSON
+-- cannot round a conversion or lose negative zero and non-finite spellings.
+function EaWR_Lua_Number_Probe_State()
 	-- PGBase.lua's Dirty_Floor and Simple_Mod: FoC has no math library.
 	local function dirty_floor(value)
 		return string.format("%d", value)
@@ -59,6 +61,7 @@ function EaWR_Lua_Number_Probe()
 		{"Z", function() return join(string.format("%x", 255.9), string.format("%05.1f", 1.25)) end, "ff,001.2"},
 	}
 	local values = {}
+	local results = {}
 	local bad = {}
 	for i = 1, table.getn(cases) do
 		local case = cases[i]
@@ -67,6 +70,7 @@ function EaWR_Lua_Number_Probe()
 			value = "FAIL:" .. tostring(value)
 		end
 		values[i] = case[1] .. "=" .. value
+		results[case[1]] = value
 		if value ~= case[3] then
 			table.insert(bad, case[1])
 		end
@@ -75,5 +79,12 @@ function EaWR_Lua_Number_Probe()
 	if table.getn(bad) > 0 then
 		verdict = "BAD=" .. table.concat(bad, ",")
 	end
-	return "LNP1 " .. verdict .. " n=" .. table.getn(cases) .. " " .. table.concat(values, " ")
+	return {version = 1, count = table.getn(cases), ok = table.getn(bad) == 0,
+	        values = results,
+	        line = "LNP1 " .. verdict .. " n=" .. table.getn(cases) .. " " .. table.concat(values, " ")}
+end
+
+-- Keep the existing retail display and soft-float oracle byte for byte.
+function EaWR_Lua_Number_Probe()
+	return EaWR_Lua_Number_Probe_State().line
 end

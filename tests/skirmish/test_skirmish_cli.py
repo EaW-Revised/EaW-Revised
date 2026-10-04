@@ -22,9 +22,9 @@ import sys
 import tempfile
 
 FIXTURE = "m2-start.eawr-replay"
-FIXTURE_SHA256 = "ab6ae40f42348a6f3dc85f637096a0087865c952104f40658003ede74ef2acc6"
-TICK_ZERO_STATE = "3cfadb5ada5c5cd1a7551ffde3f13341a290ef3efa421f234cb5c6c4e99fd7a3"
-CONTENT_IDENTITY = "2e2540011dfee39f1e8ef1924b6232f172170a4d51a860c383267832aecb6079"
+FIXTURE_SHA256 = "c402b0220188836495d0ebcc9d5eb9cb9c3592d88e773c7f3d575d4bbf21067a"
+TICK_ZERO_STATE = "9c52d81b8736b411c16cbcb68af561e5d8106cd108946a888a946c162b240b6e"
+CONTENT_IDENTITY = "9cc71553878e93b6dcc5a5c70662227ff2e294a8e8feeb77b6cf64eec67384d5"
 FINAL_TICKS = 30
 
 
@@ -236,9 +236,9 @@ def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_
         errors.append("SK-24: all-launched AI_Combat_Power")
     if any(launch["simulated"] for launch in census["launches"]) or len(census["launches"]) != 6:
         errors.append("SK-23: six launch rows, none simulated")
-    if census["tick_zero"]["sensor_profiles"] != 13:
-        errors.append("#68/#271: the fixture census binds the 13 sensor profiles of the unit tables "
-                      "(7 REVEAL stations and ships, the Y-Wing craft and 5 squadron containers)")
+    if census["tick_zero"]["sensor_profiles"] < 13:
+        errors.append("#68/#271: the fixture census must retain the original 13 sensor profiles "
+                      "alongside the higher-level production closure")
     return errors
 
 

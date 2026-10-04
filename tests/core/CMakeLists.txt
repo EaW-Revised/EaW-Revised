@@ -234,4 +234,8 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
 endif()
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+add_test(NAME headless_missing_replay_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_cli.py"
+            --program "$<TARGET_FILE:sim_headless>")
+
 eawr_label_tests()

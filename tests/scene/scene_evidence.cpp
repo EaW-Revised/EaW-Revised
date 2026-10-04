@@ -75,8 +75,8 @@ bool verify(const eawr::scene::Scene& scene, const eawr::scene::BuildInput& inpu
             const eawr::assets::Map& source_map) {
     using eawr::sim::math::Fixed;
     if (scene.placements.size() != 7 || scene.assets.size() != 4
-        || scene.resolved_count() != 3 || scene.drawable_count() != 4
-        || scene.instances().size() != 4) return false;
+        || scene.resolved_count() != 4 || scene.drawable_count() != 5
+        || scene.instances().size() != 5) return false;
     for (std::size_t index = 0; index < scene.placements.size(); ++index) {
         if (scene.placements[index].record_ordinal != index
             || scene.placements[index].entity_id != index + 1) return false;

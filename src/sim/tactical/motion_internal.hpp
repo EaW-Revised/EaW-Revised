@@ -30,6 +30,7 @@ inline constexpr std::int64_t coordinate_limit_raw = max_motion_coordinate * mat
 // Q24 arithmetic whose first failure is sticky; callers check it once at the end.
 class Calc final {
 public:
+    explicit Calc(math::TrigCache* trig = nullptr) noexcept : trig_(trig) {}
     // The hot operations skip the Result on success (#503); a failure takes the Result form for
     // its diagnostic, out of line (motion.cpp) so that the success path inlines (#520).
     math::Fixed add(math::Fixed left, math::Fixed right) {
@@ -68,8 +69,14 @@ public:
     }
 
     // Degrees in and out; the math library works in turns.
-    math::Fixed sin_deg(math::Fixed degrees) { return math::sin_turn(div(degrees, whole(360))); }
-    math::Fixed cos_deg(math::Fixed degrees) { return math::cos_turn(div(degrees, whole(360))); }
+    math::Fixed sin_deg(math::Fixed degrees) {
+        const auto turns = div(degrees, whole(360));
+        return trig_ != nullptr ? trig_->sample(turns).sine : math::sin_turn(turns);
+    }
+    math::Fixed cos_deg(math::Fixed degrees) {
+        const auto turns = div(degrees, whole(360));
+        return trig_ != nullptr ? trig_->sample(turns).cosine : math::cos_turn(turns);
+    }
     math::Fixed atan2_deg(math::Fixed y, math::Fixed x) { return mul(take(math::atan2_turn(y, x)), whole(360)); }
 
     [[nodiscard]] bool ok() const noexcept { return !error_; }
@@ -111,6 +118,7 @@ private:
     void record(const core::Diagnostic& failure, std::string_view operation);
     std::optional<core::Diagnostic> error_;
     const char* site_{};
+    math::TrigCache* trig_{};
 };
 
 // Get_Nearest_Open_Position (AV-19): 40 rings of (int)(2 pi r / occupation) + 1 points; a zero

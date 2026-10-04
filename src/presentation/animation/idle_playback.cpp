@@ -110,11 +110,19 @@ std::optional<ClipPosition> idle_position(const IdlePlayback& playback, const st
 
 core::Result<Pose> sample_idle(const Player& player, const IdlePlayback& playback, const std::uint32_t start_frame,
                                const std::uint64_t tick, const std::uint32_t ticks_per_second) {
+    Pose output;
+    auto sampled = sample_idle(player, playback, start_frame, tick, ticks_per_second, output);
+    if (!sampled) return core::Result<Pose>::failure(std::move(sampled.error()));
+    return core::Result<Pose>::success(std::move(output));
+}
+
+core::Result<void> sample_idle(const Player& player, const IdlePlayback& playback, const std::uint32_t start_frame,
+    const std::uint64_t tick, const std::uint32_t ticks_per_second, Pose& output) {
     const auto refuse = [](std::string message) {
         core::Diagnostic diagnostic;
         diagnostic.code = std::string(diagnostic_codes::invalid_request);
         diagnostic.message = std::move(message);
-        return core::Result<Pose>::failure(std::move(diagnostic));
+        return core::Result<void>::failure(std::move(diagnostic));
     };
     const float rate = player.frames_per_second();
     if (!(rate >= 1.0F) || rate >= static_cast<float>(std::numeric_limits<std::uint32_t>::max())
@@ -124,7 +132,7 @@ core::Result<Pose> sample_idle(const Player& player, const IdlePlayback& playbac
     const auto position = idle_position(playback, start_frame, player.playable_frames(),
                                         static_cast<std::uint32_t>(rate), tick, ticks_per_second);
     if (!position) return refuse("idle clip position does not fit 64 bits or the tick rate is zero");
-    return player.sample_position(position->position, position->subdivisions);
+    return player.sample_position(position->position, position->subdivisions, output);
 }
 
 } // namespace eawr::presentation::animation

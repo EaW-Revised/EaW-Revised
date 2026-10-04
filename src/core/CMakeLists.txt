@@ -1,10 +1,6 @@
-add_library(
-    eawr_core
-    STATIC
-        diagnostic.cpp
-        sha256.cpp
-        warning_probe.cpp
-)
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+add_library(eawr_core STATIC ${EAWR_CORE_SOURCES} ${EAWR_CORE_ROOT_ONLY_SOURCES})
 add_library(eawr::core ALIAS eawr_core)
 
 target_include_directories(

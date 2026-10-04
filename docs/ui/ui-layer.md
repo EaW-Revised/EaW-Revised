@@ -1,7 +1,9 @@
-# UI layer: retail sources, architecture and plan (EAWR-155)
+<a id="ui-layer-retail-sources-architecture-and-plan-155"></a>
+
+# UI layer: retail sources, architecture and plan
 
 Status: design, 2026-09-25. There is no production code yet. The tickets are filed after review;
-the owner decisions (section 5) are filed under EAWR-128.
+the owner decisions (section 5) are tracked in the owner-question list.
 
 The facts below come from the effective FoC VFS profile (`corruption` over `GameData`,
 `Patch2.meg` winning) and from observing the retail game. The symbolised debug build was used
@@ -18,7 +20,7 @@ retail code. Captures and extracted files stay under ignored `out/`.
 | `Resources/GUIDialog/guidialogs.rc` + `resource.h` | `Patch2.meg` | Text of a Visual C++ `DIALOGEX` resource script, parsed by the game at start-up; `resource.h` supplies the numeric IDs | 111 dialogs. Controls: 954 `CONTROL` (718 `PETROGLYPH_DIALOG_IMAGE`, 155 `Button`, 51 progress, 28 trackbar, 2 IME), 630 `LTEXT`, 339 push buttons, 150 `EDITTEXT`, 124 `RTEXT`, 120 `COMBOBOX`, 93 `LISTBOX`, 80 `CTEXT`, 65 `GROUPBOX` | Same dialogs as above. Control captions are text-DB keys (`TEXT_*`): 891 resolve, 15 key-shaped ones are missing, and 841 are placeholders set at run time. Dialog `CAPTION`s are never keys. `resource.h` defines 2,336 symbols; one control id (`IDC_TEXT_AUDIO_3D_TECHNOLOGY`) is missing, and `IDC_STATIC` (−1) comes from the Windows headers. |
 | `CommandBarComponents.xml` (listed by `CommandBarComponentFiles.xml`) | `Config.meg` | XML | 846 components (621 `TextButton`, 114 `Button`, 85 `Bar`, 18 `Shell`, 8 `Icon`), about 95 tags | The whole command bar: look, textures, fonts, SFX, tooltips and groups |
 | Shell models | `Models.meg` | ALO; mesh and bone names are the component names | `i_tactical_controls.alo` has 153 meshes; `i_galactic_controls.alo` and 16 other shells exist; idle `.ala` animations | Tactical HUD layout (section 1.3). No XML references `i_main_tactical_space.alo`. |
-| `MT_CommandBar.mtd` | `Textures.meg` | Mega-texture index (EAWR-31) | 1,107 entries on one 2048² page: use `load_mega_texture_atlas` to pair the same-stem `.tga`/`.dds`; `MT_CommandBarCompressed.dds` can be stale under mods and is not an automatic alternative | Every UI texture name resolves here; 219 XML references are unresolved (`plan/inventories/mtd-icons.json`) |
+| `MT_CommandBar.mtd` | `Textures.meg` | Mega-texture index | 1,107 entries on one 2048² page: use `load_mega_texture_atlas` to pair the same-stem `.tga`/`.dds`; `MT_CommandBarCompressed.dds` can be stale under mods and is not an automatic alternative | Every UI texture name resolves here; 219 XML references are unresolved (`plan/inventories/mtd-icons.json`) |
 | Fonts | No font files ship | TrueType: four faces embedded in the executable and registered in memory at start-up (`EmpireAtWar-Bold`, `-Light`, `-Medium` and `-Stencil`; 65,684 to 67,632 bytes in the pinned FoC build, identical in the base EaW executable). Game data names them by their sfnt full name (name ID 4); their family names (ID 1) are `Empire At War Bold` and so on. The rest are Windows system faces (`Arial`, `Arial Bold`, `Arial Black`, `Arial Unicode MS`). | `GUIDialogs` usage: EaW-Bold 128, EaW-Medium 122, Arial Bold 20, Arial Unicode MS 13, Arial Black 4. Command bar: EaW-Medium 6 pt 247 times, 7 pt 38 times. Game constants define 13 name/size pairs. | All HUD text |
 | Text DB | Loose file `corruption/Data/Text/MasterTextFile_English.dat` (not in a MEG); `CreditsText_English.dat` uses the same layout but is in display order (not CRC-sorted) and repeats its style keys | Binary format, rule UI-T1 | 19,224 entries; one key (`TEXT_END_OF_DATA`) appears 7 times, i.e. 6 excess duplicate records; longest value 769 characters | Every caption and tooltip |
 | Cursors | `MousePointers.xml` + frame textures in `Textures.meg` | XML: `Base_Texture`, `Hot_X`, `Hot_Y`, `Anim_Frame_Delay`; frames are numbered `_00…` textures | 53 pointers, 83 frame textures. The names map to a fixed enum in the game, so entries can be added but never removed. | Select, move, attack, cannot, grab and similar pointers |
@@ -53,7 +55,7 @@ Units are reference pixels (UI-L1), origin bottom-left, y up. Suffixes `_ALT0`, 
 | Ability buttons | `special_button_00…23`, `special_border_00…11` | 24 × 25; borders 54 × 119 | `TextButton`, animated | yes |
 | Orders | `c_button00…05` | 34 × 34 | Attack, Attack Move, Move, Set waypoint, Stop, Guard | yes |
 | Options | `b_option_t` | 205, 7, 24, 24 | Opens the in-game options/pause dialog | yes |
-| Pause, fast forward | `b_play_pause_t`, `b_fast_forward_t` | 2, 206.5 (34 × 35); 36.5, 206.5 | Toggles | yes (EAWR-459, [time controls](../behaviour/tactical-time-controls.md)) |
+| Pause, fast forward | `b_play_pause_t`, `b_fast_forward_t` | 2, 206.5 (34 × 35); 36.5, 206.5 | Toggles | yes ([time controls](../behaviour/tactical-time-controls.md)) |
 | Planet name | `Text_Planet_tactical` | 84, 228, 190, 22 | EaW-Bold 10, `255,212,33`, outline | yes |
 | Credits, pop, tech | `Text_Credits_tactical`, `Text_Planetary_Pop`, `Text_Tactical_Tech` | about 20 high at y 206 | Text with icon | decision D7 |
 | Retreat, reinforce, superweapons | `b_retreat`, `b_reinforcement`, `b_special_weapon[2]`; `*_switch` | 36 × 36 at x 200; switches 50 × 105 at x 350 | | no |
@@ -67,7 +69,7 @@ reticles, tooltips, countdowns, in-game and event messages, the win/lose message
 Options leads to `IDD_IN_GAME_OPTIONS_DIALOG` and then the audio, video, keyboard, network and
 gameplay pages. M2 needs only Resume and Quit.
 
-As built (P2-20a EAWR-83, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud tactical`):
+As built (HUD shell, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud tactical`):
 
 - The shell is the Model_Name of the `i_main_skirmish` Shell component, so a mod's shell wins.
   The shell draws, farthest z first, the variant's visible decorative meshes with a MeshAlpha or
@@ -94,7 +96,7 @@ As built (P2-20a EAWR-83, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud ta
   recorded.
 - The HUD's hit mask is `HudViewModel::hit_test_screen`, so every bound component rect stops
   the pointer, including the slots later tickets fill.
-- Button art keeps its texture's size (EAWR-349). In the debug build, each state quad of a button
+- Button art keeps its texture's size. In the debug build, each state quad of a button
   takes its size from its `MT_CommandBar` entry's texel width and height, times the component's
   `Scale` (default 1). The engine draws that quad centred on the component's position, and the
   position is the translation of the component's bone in the shell model, not the mesh centre.
@@ -106,12 +108,12 @@ As built (P2-20a EAWR-83, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud ta
 - The faction faceplate's texture draws divider lines across the time panel left of the planet
   name. FoC hides them under the panel's four buttons: help (`b_droid_help_tactical`), holocron
   (`b_story_arc_t`), pause (`b_play_pause_t`) and fast forward (`b_fast_forward_t`). Their
-  opaque art covers the whole panel. P2-20a draws these four buttons as inert art in their
-  normal (icon) state. Since EAWR-459 pause and fast forward are toggle buttons with their four
+  opaque art covers the whole panel. The HUD shell draws these four buttons as inert art in their
+  normal (icon) state. With the time controls, pause and fast forward are toggle buttons with their four
   state textures that drive the live battle ([time controls](../behaviour/tactical-time-controls.md));
   help and holocron stay inert art.
 
-Unit cards as built (EAWR-425, part of P2-20b; rules in
+Unit cards as built (selected-unit command-bar cards; rules in
 [docs/behaviour/foc-unit-cards.md](../behaviour/foc-unit-cards.md)):
 
 - `hud_shell` reads the card slots `s_select_NN` in order with their `s_health_NN` and
@@ -172,11 +174,11 @@ the small label.
 | UI-T4 | The language file is `MasterTextFile_<LANGUAGE>.dat` in the FoC text folder. | Path test |
 | UI-C1 | UI never mutates the simulation. Every gameplay action goes through the same command sink as world input and is stamped (tick, player, sequence) by the scheduler. | Replay hash unchanged with and without the UI; UI-issued and world-issued orders give equal command streams |
 | UI-C2 | Selection, hover, tooltips, open dialogs and cursor state are presentation-local and never enter replay or hash. | Hash test |
-| UI-I1 | Controls see pointer and key events before world and camera input; world and camera handlers take only unhandled events. Order: modal dialog → HUD → world (EAWR-82) → camera. | Godot routing test |
+| UI-I1 | Controls see pointer and key events before world and camera input; world and camera handlers take only unhandled events. Order: modal dialog → HUD → world → camera. | Godot routing test |
 | UI-I2 | "Over HUD" means over a component rect or an opaque faceplate pixel; transparent faceplate pixels pass through to the world. | Hit test on faceplate alpha |
 | UI-I3 | A focused edit box suppresses hotkeys and camera keys. | Routing test |
 | UI-R1 | UI draws on the 2D canvas after 3D, with HDR 2D off, in both Compatibility and Forward+. Texel colours display as stored and never pass the stored-value decode (FP-1). | Colour probe in both renderers |
-| UI-R2 | Shell materials map `MeshAlpha` → alpha blend and `MeshAdditive` → additive. MTD subrects follow the EAWR-31 origin contract. | Golden capture |
+| UI-R2 | Shell materials map `MeshAlpha` → alpha blend and `MeshAdditive` → additive. MTD subrects follow the texture-atlas origin contract. | Golden capture |
 | UI-S1 | The in-game menu (`IDD_GAME_OPTIONS_DIALOG`) pauses a single-player skirmish while it is open. Pausing stops tick advance, so the replay is unchanged. | Replay test: ticks and hash equal with and without a pause |
 
 Open observations (fidelity list until observed):
@@ -191,10 +193,10 @@ Open observations (fidelity list until observed):
   armed; retail issues no action there.
 - Whether retail hotkeys are suppressed while an edit box has focus (UI-I3 is a design rule; the
   code reading did not trace it).
-- The idle animation of the tactical shell (P2-20a draws the bind pose).
+- The idle animation of the tactical shell (the HUD shell draws the bind pose).
 - `Max_Text_Width` 110 on `Text_Planet_tactical`: its unit and what retail does past it. The
   HUD does not clip the planet name.
-- `Click_Shift` and `Selected_Alpha` on the options button; P2-20a draws only its four state
+- `Click_Shift` and `Selected_Alpha` on the options button; the HUD shell draws only its four state
   textures.
 - UI-F3 on a PC without `Arial Unicode MS`: the rig's FoC skirmish capture shows list and combo
   text in a sans face (the GDI font mapper's substitute), where the chain lands on EaW-Medium.
@@ -221,7 +223,7 @@ Open observations (fidelity list until observed):
 | Viewer | `apps/viewer` | Mode and flags, hosting and captures | no |
 
 Snapshot → HUD view-model → Controls. Control action → `UiAction` → command sink → sim queue
-(UI-C1). This is the same sink EAWR-82 uses for clicks in the world.
+(UI-C1). This is the same sink the battle controls use for clicks in the world.
 
 ### 3.2 Godot Controls versus a custom canvas renderer
 
@@ -232,7 +234,7 @@ Snapshot → HUD view-model → Controls. Control action → `UiAction` → comm
 | Retail absolute layout | Anchors and offsets in pixels from the UI model; custom `_draw` for the 16-piece frame, 3-piece buttons and gradient text | Natural (retail draws quads) |
 | Renderer independence (Compatibility and Forward+) | Canvas pipeline is shared | Shared |
 | Tests | Control rects are queryable; golden captures | Own hit/draw test surface |
-| ADR-011 fit ("prefer Godot UI behind project-owned adapters") | yes | Against the ADR |
+| [Godot presentation decision](../architecture-decisions.md#adr-011-godot-presentation) fit ("prefer Godot UI behind project-owned adapters") | yes | Against the ADR |
 | Cost of all screens (§4.3) | Lower: lists, scroll, edit, combo, slider exist | High: every widget is custom |
 | Pixel parity with GDI text | Close, not exact | Close, not exact |
 
@@ -257,7 +259,7 @@ Reasons:
 - The HUD root uses `mouse_filter` STOP only on component rects and on the opaque-faceplate
   mask (UI-I2). Modal dialogs cover the viewport and block the world.
 
-As built (UI-07 EAWR-304):
+As built (UI-07 input routing and command sink):
 
 - The policy is engine-free in `eawr/presentation/ui/input_routing.hpp`. After the GUI, a
   modal dialog blocks keys, presses, wheel and motion from the world. A focused edit box blocks
@@ -267,7 +269,7 @@ As built (UI-07 EAWR-304):
   host's `_input` passes motion and that button's release straight to the world, even over the
   HUD. Retail behaves the same way: a drag-select, map scroll or rotate keeps its state while the
   pointer is over the command bar.
-- The world layer runs before the camera. EAWR-82's selection and orders plug into
+- The world layer runs before the camera. The selection and order handlers plug into
   `ViewerHost::route_world_input` ahead of the camera path.
 - `EawrUiHitMask` is the HUD root. Its `_has_point` is `HudViewModel::hit_test_screen`.
   `EawrUiModalLayer` is a modal backdrop; a visible one sets the policy's `modal_open`. Both turn
@@ -289,7 +291,7 @@ As built (UI-07 EAWR-304):
     it at once with (open tick, local player, sequence). The sequence is the issue order. The
     open tick is the earliest tick not yet taken.
   - `take(next_tick)` is the consumer side. The thread that steps the session calls it at the
-    tick boundary, before it steps `next_tick`; in the live session (EAWR-80) that is the simulation
+    tick boundary, before it steps `next_tick`; in the live session that is the simulation
     thread. It returns the due commands in sequence order and closes the tick. An intent issued
     after it returns lands in a later tick.
   - A mutex guards the queue and the open tick, so each command reaches exactly one `take` and
@@ -300,7 +302,7 @@ As built (UI-07 EAWR-304):
 
 ### 3.4 Resolution and aspect
 
-Decision D4 (EAWR-166), implemented by UI-04b (EAWR-195) in `src/presentation/ui/layout.cpp`:
+Decision D4, implemented by UI-04b in `src/presentation/ui/layout.cpp`:
 
 - The UI lays out in a safe area: the whole screen up to 16:9, and a centred 16:9 area on wider
   screens. The HUD sits at the safe area's lower-left corner at the UI-L1 scale. Dialogs scale
@@ -308,7 +310,7 @@ Decision D4 (EAWR-166), implemented by UI-04b (EAWR-195) in `src/presentation/ui
 - `LayoutRules::retail` keeps the original rules for comparison captures against the rig: the HUD
   in the screen's corner and dialogs stretched on both axes.
 - There is no user UI scale.
-- HudViewModel (presentation/ui/hud.hpp, MOD-3 EAWR-235) supplies the visible right extent to
+- HudViewModel (presentation/ui/hud.hpp, MOD-3 shell layout) supplies the visible right extent to
   place_shell and uses that same placement for screen hit tests. Faceplate alpha masks are
   top-left and sample with nearest repeat, including negative UVs. Their texel areas are clipped
   against the transformed triangles for extent; transparent card margins never block input.
@@ -338,7 +340,7 @@ and the HUD keeps its retail position inside it.
 **Shells wider than the safe area or the screen.** A shell that is wider than the safe area but
 fits the screen moves left until its right edge meets the screen's (the Remake galactic faceplate
 on 1920×1061). A shell wider than the screen is placed by `overwide_shell`, which alone holds the
-answer to owner question OD-1 (EAWR-205, open). It implements option A: the retail corner at the
+answer to owner question OD-1 (mod HUD scope decision, open). It implements option A: the retail corner at the
 UI-L1 scale, clipped on the right. That includes FoC's own HUD on 4:3 and 5:4, as in retail.
 Option B (scale down uniformly to fit) would replace that one function; it would also shrink
 FoC's own HUD on 4:3 and 5:4 by 1024/1077.
@@ -356,7 +358,7 @@ controller's `test_viewport_aspect` pin this.
 - Language is a start-up setting (UI-T4). Changing it rebuilds the catalogue and the fonts
   (retail reloads fonts per language).
 - Fonts come from decision D1. The size rules are UI-F1 to UI-F3.
-- Font provisioning (UI-05 EAWR-191):
+- Font provisioning (UI-05):
   - The player extracts the four faces with `tools/fonts/extract_eaw_fonts.py` (setup in
     `docs/build.md`). The cache holds `<face>.ttf` and a `fonts.json` manifest.
   - The UI mounts the cache as a loose VFS layer at `fonts/`, so the files are read as
@@ -379,7 +381,7 @@ controller's `test_viewport_aspect` pin this.
   `camera-bindings.json`.
 - Mods override through the VFS like every other asset.
 
-The UI kit (UI-06 EAWR-229) implements this. Code that builds screens from the kit relies on these
+The UI kit (UI-06) implements this. Code that builds screens from the kit relies on these
 facts:
 
 - **Theme types.**
@@ -437,7 +439,7 @@ facts:
 ## 4. Work breakdown
 
 "Now" means it can start during M1.5 without touching `apps/viewer` or the serial viewer lane
-(milestone 8). "After FP-1" means after EAWR-149 lands, or after EAWR-125 if Forward+ is declined.
+(milestone 8). "After FP-1" means after Forward+ stored-colour switch lands, or after flat-terrain texture rotation if Forward+ is declined.
 Agent-days follow the scale in `docs/estimate.md`.
 
 ### 4.1 Foundation
@@ -445,36 +447,38 @@ Agent-days follow the scale in `docs/estimate.md`.
 | ID | Outcome | Acceptance evidence | Size | Days | Depends | When |
 |---|---|---|---|---|---|---|
 | UI-01 | Text DB loader | UI-T1 to UI-T4 fixtures; FoC corpus: 19,224 records, the 6 excess `TEXT_END_OF_DATA` duplicates reported | S | 0.14 | VFS | Now |
-| UI-02 | Dialog catalogue: `.rc`/`.h` tokenizer and `GUIDialogs.xml` override resolution | All 111 dialogs parse; every texture and font resolves or is listed; captions map to text keys | M | 0.37 | UI-01, EAWR-31 | Now |
+| UI-02 | Dialog catalogue: `.rc`/`.h` tokenizer and `GUIDialogs.xml` override resolution | All 111 dialogs parse; every texture and font resolves or is listed; captions map to text keys | M | 0.37 | UI-01, texture and icon atlas loading (legacy EAWR-31) | Now |
 | UI-03 | Command-bar catalogue and shell anchors | 846 components typed; `i_tactical_controls` anchors equal §1.3; ALT variants | M | 0.37 | ALO reader | Now |
 | UI-04 | Layout, scaling and font-size model | UI-L1 to UI-L5 and UI-F1 to UI-F2 table tests | S | 0.31 | UI-03 | Now |
 | UI-05 | Font provisioning per D1, with fallback chain | UI-F3 test; faces load on Windows and Linux | S | 0.31 | D1, UI-04 | Engine part now; Godot part after FP-1 |
 | UI-06 | Godot UI kit and theme builder | Frame, 3-piece button, gradient label, bar, list, combo, slider, check/radio, edit; a gallery capture | L | 1.00 | UI-02, 04, 05 | After FP-1 |
-| UI-07 | Input routing, focus and command sink | UI-I1 to UI-I3 and UI-C1 to UI-C2 tests; camera unchanged | M | 0.44 | T5 EAWR-102; shared with EAWR-82 | After T5 (before EAWR-82) |
+| UI-07 | Input routing, focus and command sink | UI-I1 to UI-I3 and UI-C1 to UI-C2 tests; camera unchanged | M | 0.44 | T5 viewer host and camera input split (legacy EAWR-102); shared with battle controls (legacy EAWR-82) | After T5 (before battle controls (legacy EAWR-82)) |
 | UI-08 | UI test harness | `--eawr-ui` fixtures; pinned hashes. Rig HUD route with focus retry and selection, plus a second-resolution profile that is not clamped (a larger rig desktop or an admitted borderless launch) | M | 0.15 | UI-06; rig part none | Rig part now; Godot part after FP-3 |
-| UI-09 | Cursors | 53 pointers load; hot spot and animation; state hook for select, move, attack and cannot | S | 0.31 | UI-06 | Loader now; Godot after FP-1 |
-| UI-10 | UI sound events | Hover and click SFX via the EAWR-84 adapter | S | 0.31 | EAWR-84 | With EAWR-84 |
+| UI-09 | Cursors | VFS pointer definitions, hot spots and hardware animation; battle input state hook (CU-01..11) | S | 0.31 | UI-06 | Battle pointers (legacy EAWR-578) |
+| UI-10 | UI sound events | Hover and click SFX via the battle audio (legacy EAWR-84) adapter | S | 0.31 | battle audio (legacy EAWR-84) | With battle audio (legacy EAWR-84) |
 
 Days are midpoint agent-days by the calibrated method in `docs/estimate.md` (task count × class
-median to × p80, worker-hours ÷ 24; recomputed in the EAWR-158 review). Foundation total: **3.7 agent-days**
+median to × p80, worker-hours ÷ 24; recomputed in the UI scope and design note review). Foundation total: **3.7 agent-days**
 (range 1.5–5.9; 36–141 worker-hours). Work that can run during M1.5: UI-01 to UI-04 and parts of UI-05,
 UI-08 and UI-09, about 1.4 agent-days.
 
-### 4.2 Phase 2 HUD (rescopes EAWR-82 and EAWR-83)
+<a id="42-phase-2-hud-rescopes-82-and-83"></a>
+
+### 4.2 Phase 2 HUD (rescopes battle controls and tactical HUD)
 
 | ID | Outcome | Acceptance evidence | Size | Days | Depends |
 |---|---|---|---|---|---|
-| EAWR-82 P2-19 (unchanged scope) | Camera range; click, box, type and group selection; orders as commands; drag-box drawing | Existing checklist, plus orders flow through the UI-07 sink | M | 0.44 | EAWR-66, EAWR-70, EAWR-80, UI-07 |
-| P2-20a (EAWR-83) | Tactical HUD shell: faction faceplate, minimap frame, planet name, options button | Eye-check next to the rig at 1280×720 and 1920×1080; UI-L1/L2 hold | M | 0.34 | UI-03, 04, 06 |
-| P2-20b | Unit cards, bars, abilities with recharge, order buttons, tooltips | Selecting fills the cards; buttons emit the same commands as the world; tooltip after 330 ms | M | 0.71 | EAWR-82, EAWR-76, UI-06, 07 |
-| P2-20c | Minimap: backdrop, blips, FOW, view box, click to pan or move | Blips follow units; clicks give commands or a camera pan | M | 0.47 | EAWR-67, UI-06, 07 |
-| P2-20d | FoC team colours on the HUD and units (existing EAWR-83 core) | Existing EAWR-83 checklist item | S | 0.23 | EAWR-32 |
-| P2-20e | Victory/defeat message, pause/options dialog with Quit, battle-end dialog (minimal) | End state visible; Quit returns cleanly | M | 0.47 | EAWR-77, UI-02, 06 |
-| P2-20f | In-world feedback: selection brackets and health bars, move/attack acknowledgements, hardpoint reticles | Eye-check next to the rig | M | 0.22 | EAWR-82, EAWR-72 |
+| Battle controls (unchanged scope) (legacy EAWR-82) | Camera range; click, box, type and group selection; orders as commands; drag-box drawing | Existing checklist, plus orders flow through the UI-07 sink | M | 0.44 | tactical world, commands and replay v2 (legacy EAWR-66), ship movement (legacy EAWR-70), live battle presentation (legacy EAWR-80), UI-07 |
+| HUD shell (tactical HUD (legacy EAWR-83)) | Tactical HUD shell: faction faceplate, minimap frame, planet name, options button | Eye-check next to the rig at 1280×720 and 1920×1080; UI-L1/L2 hold | M | 0.34 | UI-03, 04, 06 |
+| Unit cards and ability buttons | Unit cards, bars, abilities with recharge, order buttons, tooltips | Selecting fills the cards; buttons emit the same commands as the world; tooltip after 330 ms | M | 0.71 | battle controls (legacy EAWR-82), space ability handling (legacy EAWR-76), UI-06, 07 |
+| Minimap | Minimap: backdrop, blips, FOW, view box, click to pan or move | Blips follow units; clicks give commands or a camera pan | M | 0.47 | pinned skirmish startup (legacy EAWR-67), UI-06, 07 |
+| HUD team colours | FoC team colours on the HUD and units (existing tactical HUD (legacy EAWR-83) core) | Existing tactical HUD (legacy EAWR-83) checklist item | S | 0.23 | XML map placements (legacy EAWR-32) |
+| Battle dialogs | Victory/defeat message, pause/options dialog with Quit, battle-end dialog (minimal) | End state visible; Quit returns cleanly | M | 0.47 | battle victory handling (legacy EAWR-77), UI-02, 06 |
+| World feedback | In-world feedback: selection brackets and health bars, move/attack acknowledgements, hardpoint reticles | Eye-check next to the rig | M | 0.22 | battle controls (legacy EAWR-82), hardpoint state handling (legacy EAWR-72) |
 
-Phase 2 HUD total, including EAWR-82: **2.9 agent-days** (range 1.25–4.5). The calibrated Phase 2 estimate
-(`docs/estimate.md`) already budgets a 1.07-day UI-foundation placeholder, EAWR-82 at 0.44 and EAWR-83 at 0.63.
-Replacing the placeholder and EAWR-83 with the rows above adds about **4.4 agent-days** (48–165 worker-hours),
+Phase 2 HUD total, including battle controls: **2.9 agent-days** (range 1.25–4.5). The calibrated Phase 2 estimate
+(`docs/estimate.md`) already budgets a 1.07-day UI-foundation placeholder, battle controls at 0.44 and tactical HUD at 0.63.
+Replacing the placeholder and tactical HUD with the rows above adds about **4.4 agent-days** (48–165 worker-hours),
 taking Phase 2 from 12.2 to about 16.6 agent-days. Decision D7 sets the M2 minimum.
 
 ### 4.3 Later phases (one line each)
@@ -487,19 +491,21 @@ taking Phase 2 from 12.2 to about 16.6 agent-days. Decision D7 sets the M2 minim
 | M3 encyclopedia | `Encyclopedia_*` tooltips and pages, tech tree and summary screens | 3–5 |
 | M6 multiplayer | LAN/internet lobby, staging, chat, IME edit | 4–6 |
 
-## 5. Open owner decisions (file under EAWR-128)
+<a id="5-open-owner-decisions-file-under-128"></a>
+
+## 5. Open owner decisions (track in the owner-question list)
 
 Owner answers (2026-09-26):
 
 | ID | Decision | Follow-up |
 |---|---|---|
-| D1 | Use the original faces, extracted from the player's own FoC executable by a local script; never committed or shipped; may be swapped later (EAWR-164). | UI-05 EAWR-191 |
-| D2 | Decided by mod HUD compatibility: Godot Controls if they can represent how mods draw the HUD, otherwise a custom renderer (EAWR-165). | Mod HUD survey EAWR-192 (blocks UI-06) |
-| D3 | A simple HUD for now; first learn how existing mods change the HUD and hook the same data (EAWR-165). | EAWR-192 |
-| D4 | B: retail HUD with aspect-correct layout, centred on ultrawide, never stretched. Do not reproduce the base game's ultrawide squashing of models (EAWR-166). | UI-04b EAWR-195 (§3.4), UI-06 |
-| D5 | A: English only in Phase 2; the loader stays language-agnostic (EAWR-166). | — |
-| D6 | A: OS hardware cursor with frame swapping (EAWR-166). | UI-09 |
-| D7 | Open (EAWR-167). | — |
+| D1 | Use the original faces, extracted from the player's own FoC executable by a local script; never committed or shipped; may be swapped later (font provenance decision (legacy EAWR-164)). | UI-05 local font extraction (legacy EAWR-191) |
+| D2 | Decided by mod HUD compatibility: Godot Controls if they can represent how mods draw the HUD, otherwise a custom renderer (UI technology and fidelity decision (legacy EAWR-165)). | Mod HUD customisation survey (legacy EAWR-192) (blocks UI-06) |
+| D3 | A simple HUD for now; first learn how existing mods change the HUD and hook the same data (UI technology and fidelity decision (legacy EAWR-165)). | mod HUD customisation survey (legacy EAWR-192) |
+| D4 | B: retail HUD with aspect-correct layout, centred on ultrawide, never stretched. Do not reproduce the base game's ultrawide squashing of models (UI aspect, language and cursor defaults (legacy EAWR-166)). | UI-04b aspect-correct HUD layout (legacy EAWR-195) (§3.4), UI-06 |
+| D5 | A: English only in Phase 2; the loader stays language-agnostic (UI aspect, language and cursor defaults (legacy EAWR-166)). | — |
+| D6 | A: OS hardware cursor with frame swapping (UI aspect, language and cursor defaults (legacy EAWR-166)). | UI-09 |
+| D7 | Open (tactical HUD scope decision (legacy EAWR-167)). | — |
 
 The option table below is kept for reference.
 
@@ -508,7 +514,7 @@ The option table below is kept for reference.
 | D1 | Source of the four EmpireAtWar faces | A: load them at run time from the user's own FoC executable (located by an sfnt signature scan, kept in memory, never written or shipped) | Exact retail look; nothing redistributed | Reads data out of the executable; depends on the pinned build; licence of the embedded faces is unclear |
 | | | B: ship an OFL look-alike | Clean licence, cross-platform | Visible difference in every caption |
 | | | C: system fonts by name, falling back to Arial or Liberation | Trivial | Wrong look; Linux has no Arial |
-| D2 | UI technology | A: Godot Controls with a retail-data adapter (§3.2) | Input, text and IME free; ADR-011 | Some custom leaf widgets |
+| D2 | UI technology | A: Godot Controls with a retail-data adapter (§3.2) | Input, text and IME free; [Godot presentation decision](../architecture-decisions.md#adr-011-godot-presentation) | Some custom leaf widgets |
 | | | B: custom canvas renderer | Retail draw model | Weeks of widget work |
 | D3 | M2 HUD fidelity target | A: retail layout from data, eye-check next to FoC | One path, no rework | Needs UI-02 to UI-06 first |
 | | | B: simple project HUD now, retail skin later | Faster first playable | Throwaway work; two looks |
@@ -521,4 +527,4 @@ The option table below is kept for reference.
 | | | B: software cursor on the top canvas layer | Exact scale and animation | Frame latency |
 | D7 | M2 HUD scope | A: §4.2 rows a–e; f reduced to brackets and health bars; credits, pop and tech hidden; pause/fast-forward shown | Playable and readable | About 4 agent-days over plan |
 | | | B: full §4.2 | Closest to FoC | About 4.4 agent-days over plan |
-| | | C: EAWR-83 as filed (command bar, cards, minimap only) | Plan holds | No pause/quit, end dialog or tooltips |
+| | | C: tactical HUD (legacy EAWR-83) as filed (command bar, cards, minimap only) | Plan holds | No pause/quit, end dialog or tooltips |

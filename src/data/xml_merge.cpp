@@ -18,10 +18,10 @@ namespace {
 
 // #628: every definition of a resolved object's variant chain is part of what the loaders touch,
 // and its variant link is read, on every resolve (a cached one too).
-void trace_chain(const Catalog& catalog, const EffectiveObject& object) {
+void trace_chain(const Catalog& catalog, const EffectiveObject& object, const std::optional<Category> category) {
     if (!tag_trace::enabled()) return;
     for (const auto& name : object.chain) {
-        const auto* definition = catalog.find(name);
+        const auto* definition = category ? catalog.find(name, *category) : catalog.find(name);
         if (definition == nullptr) continue;
         tag_trace::object(definition->root, object.object_id);
         tag_trace::used(child_named(definition->root, "Variant_Of_Existing_Type"));
@@ -31,9 +31,18 @@ void trace_chain(const Catalog& catalog, const EffectiveObject& object) {
 } // namespace
 
 core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id) const {
+    return resolve_in(object_id, std::nullopt);
+}
+
+core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id, const Category category) const {
+    return resolve_in(object_id, category);
+}
+
+core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_id,
+    const std::optional<Category> category) const {
     if (!impl_) return core::Result<EffectiveObject>::failure(diagnostic(
         diagnostic_codes::object_not_found, "catalog is empty"));
-    const auto key = ascii_lower(object_id);
+    const auto key = (category ? std::string(to_string(*category)) : std::string("untyped")) + ":" + ascii_lower(object_id);
     // An overlay (with_overrides) caches apart from the load it shares.
     auto& cache_mutex = overlay_ ? overlay_->cache_mutex : impl_->cache_mutex;
     auto& resolve_cache = overlay_ ? overlay_->resolve_cache : impl_->resolve_cache;
@@ -44,10 +53,10 @@ core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id)
         if (found != resolve_cache.end()) cached = found->second;
     }
     if (cached) {
-        trace_chain(*this, *cached);
+        trace_chain(*this, *cached, category);
         return core::Result<EffectiveObject>::success(std::move(*cached));
     }
-    const Definition* current = find(object_id);
+    const Definition* current = category ? find(object_id, *category) : find(object_id);
     if (current == nullptr) return core::Result<EffectiveObject>::failure(diagnostic(
         diagnostic_codes::object_not_found, "object not found: " + std::string(object_id)));
 
@@ -68,7 +77,7 @@ core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id)
         const auto* parent = child_named(current->root, "Variant_Of_Existing_Type");
         if (parent == nullptr || trim(parent->raw_text).empty()) break;
         const auto parent_id = trim(parent->raw_text);
-        current = find(parent_id);
+        current = category ? find(parent_id, *category) : find(parent_id);
         if (current == nullptr) {
             chain_names.push_back(parent_id);
             return core::Result<EffectiveObject>::failure(diagnostic(
@@ -144,7 +153,7 @@ core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id)
         const std::scoped_lock lock(cache_mutex);
         resolve_cache.insert_or_assign(key, result);
     }
-    trace_chain(*this, result);
+    trace_chain(*this, result, category);
     return core::Result<EffectiveObject>::success(std::move(result));
 }
 

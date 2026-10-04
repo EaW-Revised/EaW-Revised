@@ -6,7 +6,7 @@
   2026-09-30 (walk 4 of the coordinator's list): every rule the FoC debug build applies each
   frame to move a ship (any unit with a space layer: corvette, frigate, capital, super capital),
   in evaluation order, with the gaps against the remake. It also settles the formation questions
-  the squadrons walk left open ([squadrons](squadrons.md) U-02, U-04, EAWR-692).
+  the squadrons walk left open ([squadrons](squadrons.md) U-02, U-04, squadron escort formation moves (legacy EAWR-692)).
 - Sources: **debug build** (the FoC debug executable with symbols, read under the clean-room
   rule; evidence IDs EMV-nn are opaque and their map stays private), **recording** (the fidelity
   traces), **data** (the FoC XML), **unverified**. Most of this subsystem was read before, rule by
@@ -64,7 +64,7 @@
   `Max_Speed` (clamped 0..1) while the engines are online, flickering while they come back online
   (presentation). The engine sound switches from its idle loop to its moving loop once the speed
   reaches 1.1 times `Space_Idle_Movement_Speed` (audio; the FoC data does not set that constant).
-- **WMV-06** (LZ-01 to LZ-04, the EAWR-666 worker's read) Heights: a ship is created at its placed
+- **WMV-06** (LZ-01 to LZ-04, the per-unit flight heights worker's read) Heights: a ship is created at its placed
   height plus its type's `Layer_Z_Adjust`, and nothing in space changes its height afterwards
   (MV-11). Move targets and follow points are taken at the mover's own height.
 
@@ -91,7 +91,7 @@
   never asked for more than the maximum plus sqrt(2 x deceleration x |deviance|). **An escort's slow speed** is the least
   of the formation's minimum speed, half the escorted unit's actual maximum speed and, when the
   escorted unit is itself moving under an order, half that order's override speed; its forward
-  deviance compares it with the escorted unit (squadrons U-04, EAWR-692). In space a ship's formation
+  deviance compares it with the escorted unit (squadrons U-04, squadron escort formation moves (legacy EAWR-692)). In space a ship's formation
   has one member (FM-01), so a ship's speed comes from FM-09's planning speed alone.
 - **WMV-13** (debug build, EMV-07) *Done*, for an order on a unit (attack, guard) the ship can no
   longer see (the unit is fogged, or stealthed and the ship cannot target stealth): the order's
@@ -100,14 +100,16 @@
   attack target; otherwise the formation re-plans toward the point. So a ship that loses sight of
   its target flies to where it last saw it and gives up there. (This settles space-orders OR-U3.)
 - **WMV-14** (debug build, EMV-07; U-04 of space-movement) *Done*, otherwise: with FoC's
-  `Should_Use_Space_Idle_Movement` (not in the FoC data; the code default was not read, and no
-  recording shows a drift) a lone ship with a layer and no target takes an idle drift of
-  `Idle_Movement_Frames` plus a synchronized random of up to half that. Otherwise WMV-15.
+  `Should_Use_Space_Idle_Movement` (code default **false**, not overridden in the FoC data) a
+  lone ship with a layer and no target takes an idle drift of `Idle_Movement_Frames` (default
+  **5**) plus a synchronized random of up to half that. A position base is replaced by the
+  advanced idle destination; an object base retains an idle override. Otherwise WMV-15.
 - **WMV-15** (debug build, EMV-08) *The done check*, once a second (every trunc(30 + 0.5)
   frames): when not every member is in range of the destination, a formation that may re-plan
   resets its speed override and plans again; one that may not cancels its diversion (the
-  squadrons' only leash: it applies only to a diversion stacked over a base order; the EAWR-607
-  worker's retail S-99 shows that an idle, never-ordered squadron has none).
+  squadrons' only leash: it applies only to a diversion stacked over a base order). Retail S-99
+  shows a never-ordered squadron chasing for 4150 units; WMV-18's creation read establishes
+  that this observation alone does not prove absence of a formation.
 - **WMV-16** (debug build, EMV-05, EMV-10; FO-05) *The attack-move tether*: an attack-move keeps a
   tether point that advances along the move's path at the formation's maximum speed; it is reset
   60 frames after the last cancelled diversion. A diversion from an attack-move is measured from
@@ -125,20 +127,25 @@
   allowance circle toward it.
 - **WMV-18** (debug build, EMV-11; squadrons U-02) The scan range a unit's targeting uses is its
   `Targeting_Max_Attack_Distance` plus WMV-17's allowance **only while the unit has a formation**.
-  A squadron that never received an order (a starting squadron, no formation) scans its attack
-  distance only; one launched to escort its carrier, or one whose move ended (its formation
-  persists, done), gets the allowance.
+  Team creation registers a position destination at the team's current position, so a starting
+  squadron can have a completed formation before receiving a player order. Completion preserves
+  that formation while it has members and a valid base destination. A squadron that actually
+  lacks a formation scans its attack distance only; a present formation contributes the allowance
+  when WMV-17 admits diversion. Splitting a completed formation for one team copies completion
+  history and resets a position base destination to that team's current position.
 - **WMV-19** (debug build, EMV-13; WSQ-12) A formation's override maximum speed is set when the
   coordinator maps its layers (FM-09's planning speed) and when it finds an updated path, and
   reset (none) when it re-plans (WMV-15).
 
 ### Turning toward a target (the ship's targeting, every frame)
 
-- **WMV-20** (debug build, EMV-12; A-04, A-06) A single ship holding on a unit destination (an
-  attack order) that is not moving turns in place (WMV-03) toward the target plus its firepower
+- **WMV-20** (debug build, EMV-12; A-04, A-06) A single ship holding on a unit destination
+  that is not moving turns in place (WMV-03) toward the destination's centre plus its firepower
   angle (A-06: 0, +90 or -90 degrees, whichever side carries the most weapon power), when that
-  heading differs from its yaw by 10 degrees or more. The ship's targeting makes the same turn for
-  its own target (A-04 documents that path and its conditions).
+  heading differs from its yaw by 10 degrees or more. This destination turn applies to a unit
+  attack-move or guard independently of the scanned combat target, direct targeting and attack
+  range. A position destination does not supply this turn. The ship's targeting has a separate
+  turn toward its combat aim point (A-04 documents that path and its conditions).
 - **WMV-21** (debug build, EMV-14) Turning toward a squadron target faces the squadron's best
   craft for this ship (the targeting's team-member choice), not the squadron's container.
 
@@ -148,9 +155,9 @@
   approach slots, the group move, the per-layer stagger and the re-evaluation stand as
   documented; OR-U1 and OR-U2 (FoC maps and checks a coordinator's ships by layer together) stay
   the remake's project choices OP-02.
-- **WMV-31** (debug build, E662-01; EAWR-662, PR EAWR-677) The approach check reads the end of the ship's
+- **WMV-31** (debug build, E662-01; stable capital-ship attack approach (legacy EAWR-662), planned attack-approach paths) The approach check reads the end of the ship's
   submitted path (its prediction past its end), not a re-plan.
-- **WMV-32** (not re-read) EAWR-613's group-move fallback (PR EAWR-639, PC-09) is that ticket's; this walk
+- **WMV-32** (not re-read) the group-move formation fallback (legacy EAWR-613) (sliced-search and group-clipping correction, PC-09) is that ticket's; this walk
   found nothing in the formation's per-frame service that contradicts it.
 
 ## The existing rules against this walk
@@ -162,33 +169,33 @@
 | AV-01 to AV-20 | same; **missing there**: the statement that nothing else keeps ships apart (WMV-04) |
 | FM-01 to FM-12 | same (WMV-10, WMV-11) |
 | PC-01 to PC-08 | same (project choices stand) |
-| LZ-01 to LZ-04 | same (WMV-06; PR EAWR-718) |
+| LZ-01 to LZ-04 | same (WMV-06; authored ship flight heights) |
 | OR-01 to OR-17 | same; **OR-U3 settled** by WMV-13 |
 | A-04, A-06 | same (WMV-20) |
 | U-04 (idle drift) | still unverified (WMV-14) |
 | space-fighters FO-05 | **differs**: the tether is a point advancing along the path, not the leader (WMV-16) |
-| space-fighters FM-21 | **differs**: the escort's speed (WMV-12), EAWR-692 |
+| space-fighters FM-21 | **differs**: the escort's speed (WMV-12), squadron escort formation moves (legacy EAWR-692) |
 | squadrons U-02, U-04 | settled (WMV-18, WMV-12) |
 
 ## Gaps against the remake
 
-Our code: `src/sim/tactical/motion.cpp` (the locomotor and the search), `session.cpp` (orders,
-approaches, groups, squadrons), `combat.cpp` (A-04, A-06).
+Our code: `src/sim/tactical/motion.cpp` (the locomotor and the search), `session_step.cpp` (orders, groups, squadrons),
+`session_tracking.cpp` (approaches), `combat.cpp` (A-04, A-06).
 
 | Rules | Ours | Verdict |
 | --- | --- | --- |
 | WMV-01 to WMV-03 | `sample_motion`, the motion phase | same |
 | WMV-04 | no runtime collision; plans avoid same-layer predictions | same: the owner's Nebulon-B through an MC80 is FoC's behaviour |
 | WMV-05 | BP-45 glow; engine loops not played (battle-audio) | same for the glow; audio out of scope here |
-| WMV-06 | LZ rules, PR EAWR-718 | same once EAWR-718 merges |
+| WMV-06 | LZ rules, authored ship flight heights | same once authored ship flight heights merges |
 | WMV-10, WMV-11, WMV-19 | FM and OR rules | same |
-| WMV-12 | none for squadron escorts (FM-21: the carrier's exact position at `Max_Speed`) | **differs**, filed as EAWR-692 |
+| WMV-12 | none for squadron escorts (FM-21: the carrier's exact position at `Max_Speed`) | **differs**, filed as squadron escort formation moves (legacy EAWR-692) |
 | **WMV-13** | OR-08: a fogged target ends the approach and the ship keeps its movement | **differs**: FoC flies to the last seen position and drops the target within 40 units |
-| WMV-14 | none (U-04) | unverified; nothing to do until a recording shows a drift |
+| WMV-14 | none | same for FoC's disabled default; enabled idle drift is not implemented |
 | **WMV-15, WMV-16, WMV-17** | squadrons: FT-01 keeps a target, FO-05 measures from the leader, no cancel check | **differs** (squadron diversions) |
-| **WMV-18** | FT-02: every idle squadron scans with `Idle_Chase_Range` | **differs**: a squadron without a formation scans its attack distance only (EAWR-690) |
-| WMV-20, WMV-21 | `combat.cpp` A-04/A-06 | same (the team-member choice follows FO-04) |
-| WMV-30, WMV-31 | OR rules, PR EAWR-677 | same once EAWR-677 merges |
+| **WMV-18** | optional formation presence, base destination and completion history; member scans add allowance only when diversion is admitted | same for creation/presence and completed position bases; full destination stacks and attack-move tethers remain incomplete |
+| WMV-20, WMV-21 | `session_world.cpp` destination snapshot; `combat_aim.cpp` A-04/A-06 | destination centre and combat aim are separate; the team-member choice follows FO-04 |
+| WMV-30, WMV-31 | OR rules, planned attack-approach paths | same once planned attack-approach paths merges |
 
 ### XML tags this subsystem reads
 
@@ -208,8 +215,8 @@ Ships: `Max_Speed`, `OverrideAcceleration`, `OverrideDeceleration`, `Max_Rate_Of
 Marked `todo` in `docs/tag-coverage/statuses.json`: `Container`/`SpaceUnit`/`Squadron`
 `Attack_Move_Response_Range`, `Autonomous_Move_Extension_Vs_Attacker`, `Guard_Chase_Range`,
 `Formation_Priority`, `FormationOrder`, `Container/Max_Speed`, `Container/Min_Speed`,
-`SpaceUnit/Min_Speed_Fraction_For_Turn`, `SpaceProp/Layer_Z_Adjust` (EAWR-649), `Idle_Chase_Range`
-(EAWR-653). `deferred` (EAWR-626): `GameConstants/BetweenFormationSpacing`,
+`SpaceUnit/Min_Speed_Fraction_For_Turn`, `SpaceProp/Layer_Z_Adjust` movement tag coverage (legacy EAWR-649), `Idle_Chase_Range`
+Presentation tag coverage (legacy EAWR-653). `deferred` movement-constant coverage audit (legacy EAWR-626): `GameConstants/BetweenFormationSpacing`,
 `FinalFormationFacingDeltaCoefficient`, `FinalFormationFacingMinimumAngle`,
 `FormationMaximumSideError`, `FormationMinimumSideError`, `Max_Formation_Area`,
 `Rotate_Formation_Facing_Moves`, `Short_Range_Attack_Formation_Coefficient`. The two side errors
@@ -219,9 +226,8 @@ matter only to formations of several members (land, squadron escorts, WMV-12).
 
 - **U-01** The order of the coordinator system's service against the objects' services within a
   frame (Scope). Ghidra: the space mode's per-frame service.
-- **U-02** `Should_Use_Space_Idle_Movement`'s and `Idle_Movement_Frames`' code defaults
-  (WMV-14). Ghidra: the constants' initialisers; or a retail recording of a ship resting 60 s
-  after a move (no drift in the P2-06 recordings suggests it is off).
+- **U-02** Settled by the debug build's constant initializers: `Should_Use_Space_Idle_Movement`
+  defaults to false and `Idle_Movement_Frames` to 5 (WMV-14).
 - **U-03** A retail capture of a ship ordered to attack a unit that then goes into fog
   (WMV-13): the ship should fly to the last seen point and stop there.
 - **U-04** A retail capture of a Nebulon-B ordered through a held MC80 (WMV-04) would show the

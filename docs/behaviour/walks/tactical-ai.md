@@ -18,7 +18,7 @@
   - the data the AI reads.
 - Sources:
   - **debug build**: the FoC debug executable with symbols, read under the clean-room rule. The
-    evidence IDs ETA-nn are opaque, and their map stays private. Earlier evidence (the EAWR-449 and EAWR-79
+    evidence IDs ETA-nn are opaque, and their map stays private. Earlier evidence (the AI goals, perception and TaskForces and tactical AI host
     reads behind [foc-tactical-ai](../foc-tactical-ai.md)) keeps its IDs there.
   - **data**: a tag, value or Lua call in the FoC XML and scripts, named here but not quoted.
   - **unverified**: settled by neither of the above.
@@ -34,7 +34,7 @@
   - the squadron's own chase and retaliation (walk 1, [squadrons](squadrons.md); space-fighters FD-04);
   - weapons (walk 3);
   - ability internals (walk 7, [space-abilities](../space-abilities.md));
-  - the idle and AI facing gate (EAWR-668, which owns the "does the ship turn" rule).
+  - the idle and AI facing gate (AI ship facing before combat (legacy EAWR-668), which owns the "does the ship turn" rule).
   - Galactic-conquest AI: no rule of the galactic layer runs in a tactical battle (AI-20).
 
 ## Scope
@@ -46,10 +46,10 @@
 - **Cadence.** The AI players' systems run once a frame in ascending player ID (GS-01). The
   per-unit AI service runs every frame for each unit that has one (ETA-01). Damage tracking runs
   every 30 frames per unit (ETA-07).
-- **The M2 fixture** ([m2-skirmish](../../../plan/phase-2/m2-skirmish.md)): the GC context
-  (`IsCampaignGame` 1, SK-41), 0 credits (SK-30), Normal difficulty (SK-42), the AI attacking
-  (SK-43), retreat off (SK-34, SK-44) and AI fog off (SK-45). Several rules below are inert under
-  these inputs; each such rule says so.
+- **The M2 fixture** ([m2-skirmish](../../../plan/phase-2/m2-skirmish.md)): skirmish context
+  (`IsCampaignGame` 0, SK-41), the live economy (SK-30), Normal difficulty (SK-42), the AI attacking
+  (SK-43), retreat off (SK-34, SK-44) and AI fog off (SK-45). The
+  [skirmish economy rules](../skirmish-ai-economy.md) describe the production host.
 
 ## Rules, in evaluation order
 
@@ -252,7 +252,7 @@
     layer retaliates only while it has no formation**: a craft may, and so may a ship that was
     never ordered. Whether a ship keeps its formation after its order ends is walk 4's (U-07).
   - **The attack order is not direct.** It sets the target but does not turn the unit to face
-    (EAWR-668).
+    AI ship facing before combat (legacy EAWR-668).
 - **WTA-30** (debug build ETA-07; WCC-82) **Damage tracking**, every 30 frames per unit.
   - Each hit adds the hull and shield it took to the unit's window.
   - For an attacker that is a valid target and can be hit by projectiles, the hit also adds the
@@ -338,7 +338,7 @@ executed by our host as scripts. What matters for this walk is what the engine c
   enemy structure or capital ship.
 - **WTA-43** (data) **Hold.** Units that no plan holds stay on the free store, whose
   `On_Unit_Service` (FH-11, FH-13) moves them. No FoC rule makes an idle AI unit turn by itself;
-  that rule is EAWR-668's.
+  that rule belongs to AI ship facing before combat (legacy EAWR-668).
 
 ### Credits and production (the AI side)
 
@@ -350,9 +350,10 @@ executed by our host as scripts. What matters for this walk is what the engine c
   - `Skirmish_Upgrade_Space_Station`;
   - the magic cash drop.
 
-  In the GC context the skirmish-only ones score 0. The rest need credits and pads, and M2 has
-  0 credits (SK-30). **Under the M2 fixture no AI credit is spent and no AI unit is built.** The
-  AI's purchases go through walk 5's buy rule (WPR-30); AI buying is EAWR-603 (WPR-60).
+  In the GC context the skirmish-only ones score 0. M2 supplies skirmish context and
+  live credits, population, pools and pads (SAE-01/02). The AI's purchases go through
+  walk 5's buy rule (WPR-30), with the production and waiting policy in mounted Lua
+  (SAE-03/06/07).
 - **WTA-45** (debug build ETA-05) Where production does run (skirmish context), the difficulty's
   `Space_Build_Time_Multiplier` scales the tactical build queue's production time and the plan's
   build-time estimate. `Credit_Multiplier` scales every credit the AI player gains (walk 5,
@@ -392,21 +393,21 @@ executed by our host as scripts. What matters for this walk is what the engine c
 | DT-01 to DT-03 | same (WTA-30, WTA-33) |
 | DT-04 | **wrong**. `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` are tracked (WTA-30, WTA-32), and the time till death counts destroyable hardpoints before the hull |
 | FT-01 to FT-11 | same (WTA-40) |
-| Fidelity list, "Abilities … are not simulated" | stale since EAWR-76: `Activate_Ability` switches the simulated abilities (FH-24, WTA-25) |
+| Fidelity list, "Abilities … are not simulated" | stale since the space ability implementation work (legacy EAWR-76): `Activate_Ability` switches the simulated abilities (FH-24, WTA-25) |
 | Fidelity list, "time-to-death is not estimated" | differs (WTA-32, G-05) |
-| The EAWR-79 host's `Enable_Attack_Positioning`, `Set_Targeting_Priorities` and `Lock_Current_Orders` (accepted, no effect) | differ (WTA-21 to WTA-24; G-01, G-03, G-04) |
+| The tactical AI host's `Enable_Attack_Positioning`, `Set_Targeting_Priorities` and `Lock_Current_Orders` (accepted, no effect) | differ (WTA-21 to WTA-24; G-01, G-03, G-04) |
 | AI-G03 difficulty "Normal" | same for M2; the other levels are missing (G-07) |
 | space-fighters FD-04 (squadron retaliation) | same; the unit-AI retaliation (WTA-29) is a separate rule, and applies to the squadron container too |
-| capital-combat WCC-82 | same as WTA-30 (the gap is EAWR-701) |
+| capital-combat WCC-82 | same as WTA-30; the gap is target stickiness and damage tracking (legacy EAWR-701) |
 
 ## Gap list against the remake
 
 Ours:
-- `src/script/foc/ai_engine.cpp` (goal loop, plans, `track_damage`);
+- `src/script/foc/ai_goals.cpp` (goal loop and plans), `src/script/foc/ai_taskforces.cpp` (`track_damage`);
 - `ai_perception.cpp` (grid);
 - `ai_plans.cpp`;
 - `plan_bindings.cpp` (TaskForce calls);
-- `tactical_ai.cpp` (game object and player calls);
+- `tactical_ai_bindings.cpp` (game object and player calls);
 - `ai_data.cpp` (the data);
 - `src/sim/tactical/` (unit behaviour).
 
@@ -416,13 +417,13 @@ Ours:
 | WTA-03 | Normal's sleep 0 | same for M2 |
 | WTA-04 to WTA-06 | `ai_perception.cpp` | same |
 | WTA-07 | AI fog off (SK-45) | same for M2 |
-| WTA-08 to WTA-20 | `ai_engine.cpp`, `ai_plans.cpp` | same |
+| WTA-08 to WTA-20 | `ai_goals.cpp`, `ai_selection.cpp`, `ai_plans.cpp` | same |
 | WTA-21, WTA-22 | `Set_Targeting_Priorities` accepted with no effect: members keep their type's set | **missing (G-01)** |
 | WTA-23, WTA-26 to WTA-28 | `Enable_Attack_Positioning` accepted with no effect; no positioning | **missing (G-03)** |
 | WTA-24 | `Lock_Current_Orders` accepted with no effect: a released fleeing unit is at once free for the free store and for new plans | **missing (G-04)** |
 | WTA-25 | FH-24, AB-44 | same |
 | WTA-29 | squadrons retaliate (FD-04); a ship, a station or a squadron container does not retarget on damage | **missing (G-02)** |
-| WTA-30 | the AI engine keeps the threat lists (DT-01, DT-02); the rate is tracked only for units running `DEFEND`'s script (EAWR-701) | same (threat); differs (rate, EAWR-701) |
+| WTA-30 | the AI engine keeps the threat lists (DT-01, DT-02); the rate is tracked only for units running `DEFEND`'s script; broader damage tracking is pending (legacy EAWR-701) | same (threat); differs rate, target stickiness and damage tracking (legacy EAWR-701) |
 | WTA-31 | `last_hits_` → `Unit_Damaged` | same |
 | WTA-32 | `Get_Time_Till_Dead` answers 1,000,000 and `Get_Rate_Of_Damage_Taken` answers 0, always | **differs (G-05)** |
 | WTA-33 | DT-03 | same |
@@ -444,13 +445,13 @@ which no M2 input reaches).
 
 | Gap | Rules | What | Size |
 |---|---|---|---|
-| G-01 (EAWR-729) | WTA-21, WTA-22 | `Set_Targeting_Priorities`. Plans give their units the `*_Attack_Move` and `Bomber_Hit_And_Run` sets as a runtime override. In the four common M2 plans, AI fighters, bombers and corvettes stop taking frigates and capitals as opportunity targets. AI frigates stop taking capitals. Every attack-moving AI ship ranks the target's shield generator first when it picks a hardpoint (together with EAWR-702). | M |
-| G-02 (EAWR-730) | WTA-29 | Unit-AI retaliation. A damaged unit with no target, or whose attacker outranks its target, attacks the attacker (non-direct: no turn, EAWR-668). This applies to every `UNIT_AI` unit, human-owned ones included, but a ship in a formation never does (WMV-17, U-07). | S to M |
-| G-03 (EAWR-731) | WTA-23, WTA-26 to WTA-28 | Attack positioning. In `destroyunit`, `destroyunitminimal` and `flankplan`, each unit moves every 150 frames to the least-defended quadrant around its target when that point is beyond its attack distance, and otherwise at the target. | M |
-| G-04 (EAWR-732) | WTA-24 | `Lock_Current_Orders`. A kiting unit keeps its flee move, and the free store does not take it back until the move ends. | S |
-| G-05 (EAWR-733) | WTA-30, WTA-32, WTA-36 | Answer `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` from the unit's damage tracking (after EAWR-701). A ship whose destroyable hardpoints are about to fall then flees. | S (after EAWR-701) |
-| G-06 (EAWR-734) | WTA-38, WTA-39 | `Get_Most_Defended_Position`: the kite point is the best-defended cell near the unit, not the nearest friendly. | S |
-| G-07 (EAWR-735) | WTA-45, WTA-46 | Difficulty levels other than Normal: health, shield, damage, build-time and credit multipliers on the AI's objects, the 15 s Easy sleep, and AI production in skirmish context. | M (nice-to-have) |
+| G-01 AI plan targeting priorities (legacy EAWR-729) | WTA-21, WTA-22 | `Set_Targeting_Priorities`. Plans give their units the `*_Attack_Move` and `Bomber_Hit_And_Run` sets as a runtime override. In the four common M2 plans, AI fighters, bombers and corvettes stop taking frigates and capitals as opportunity targets. AI frigates stop taking capitals. Every attack-moving AI ship ranks the target's shield generator first when it picks a hardpoint together with best-hardpoint priority and distance selection (legacy EAWR-702). | M |
+| G-02 unit-AI damage retaliation (legacy EAWR-730) | WTA-29 | Unit-AI retaliation. A damaged unit with no target, or whose attacker outranks its target, attacks the attacker non-direct: no turn, AI ship facing before combat (legacy EAWR-668). This applies to every `UNIT_AI` unit, human-owned ones included, but a ship in a formation never does (WMV-17, U-07). | S to M |
+| G-03 least-defended attack positioning (legacy EAWR-731) | WTA-23, WTA-26 to WTA-28 | Attack positioning. In `destroyunit`, `destroyunitminimal` and `flankplan`, each unit moves every 150 frames to the least-defended quadrant around its target when that point is beyond its attack distance, and otherwise at the target. | M |
+| G-04 locked fleeing-unit orders (legacy EAWR-732) | WTA-24 | `Lock_Current_Orders`. A kiting unit keeps its flee move, and the free store does not take it back until the move ends. | S |
+| G-05 damage-rate and time-to-death queries (legacy EAWR-733) | WTA-30, WTA-32, WTA-36 | Answer `Get_Time_Till_Dead` and `Get_Rate_Of_Damage_Taken` from the unit's damage tracking after the target stickiness and damage tracking work (legacy EAWR-701). A ship whose destroyable hardpoints are about to fall then flees. | S after the target stickiness and damage tracking work (legacy EAWR-701) |
+| G-06 best-defended kite position (legacy EAWR-734) | WTA-38, WTA-39 | `Get_Most_Defended_Position`: the kite point is the best-defended cell near the unit, not the nearest friendly. | S |
+| G-07 AI difficulty multipliers (legacy EAWR-735) | WTA-45, WTA-46 | Difficulty levels other than Normal: health, shield, damage, build-time and credit multipliers on the AI's objects, the 15 s Easy sleep, and AI production in skirmish context. | M (nice-to-have) |
 
 ### XML tags and data this subsystem reads
 
@@ -462,7 +463,7 @@ which no M2 input reaches).
   `AI_SpaceThreatDecayStep`, `DesiredSpaceFOWCellSize`, `Object_Max_Health_Multiplier_Space`. All
   are read.
 - `spaceunittargetingpriorities.xml`: the `*_Attack_Move` and `Bomber_Hit_And_Run` sets. They are
-  loaded but no unit uses them (G-01). Their `Hard_Point_Priorities` are EAWR-702.
+  loaded but no unit uses them (G-01). Their `Hard_Point_Priorities` are best-hardpoint priority and distance selection (legacy EAWR-702).
 - Unit types: `Keep_Moving_In_Battle` (no M2 type; G-03), `Targeting_Max_Attack_Distance`,
   `Has_Space_Evaluator`, `AI_Combat_Power`, `Property_Flags` (`Fodder`: no space type) and the
   `UNIT_AI` behaviour.
@@ -473,23 +474,23 @@ which no M2 input reaches).
 
 - Walk 1 (squadrons): the squadron's own retaliation (FD-04) runs in its service. The unit-AI
   retaliation (WTA-29) works on the container.
-- Walk 2 (capital combat): the priority set that WTA-21 overrides feeds WCC-11 to WCC-18. EAWR-702
-  loads `Hard_Point_Priorities`, which G-01 makes matter. EAWR-701 adds damage tracking for every
+- Walk 2 (capital combat): the priority set that WTA-21 overrides feeds WCC-11 to WCC-18. Best-hardpoint priority and distance selection (legacy EAWR-702)
+  loads `Hard_Point_Priorities`, which G-01 makes matter. Target stickiness and damage tracking (legacy EAWR-701) adds damage tracking for every
   unit, which G-05 reads.
 - Walk 4 (movement): the formation's divert allowance (WMV-17) gates WTA-29, and a
   movement lock (WTA-24) refuses diverts. Attack positioning (WTA-27) sets a formation
   destination that walk 4's formation then flies.
 - Walk 5 (production): the AI's purchases use WPR-30, and its credits WPR-12 (the difficulty's
-  credit multiplier, walk 5 G-5). AI buying is EAWR-603.
+  credit multiplier, walk 5 G-5). AI buying is purchasing-capable skirmish AI setup (legacy EAWR-603).
 - Walk 7 (abilities): WTA-25, WTA-34 and WTA-37 call the abilities; the internals are AB-.
-- EAWR-668: facing and the direct attack. WTA-29's order is non-direct, and WTA-27 needs a formation
-  attack target. Neither turns an idle ship; EAWR-668 lists both as "see walk 6".
+- AI ship facing before combat (legacy EAWR-668): facing and the direct attack. WTA-29's order is non-direct, and WTA-27 needs a formation
+  attack target. Neither turns an idle ship; AI ship facing before combat (legacy EAWR-668) lists both as "see walk 6".
 
 ## Symptoms
 
 - AI fighters and corvettes in a sweep or a destroy plan shoot at frigates and capitals that FoC's
   would pass by. The AI's capital ships go for the nearest hardpoint instead of the shield
-  generator (G-01, EAWR-702).
+  generator G-01, best-hardpoint priority and distance selection (legacy EAWR-702).
 - An idle ship that is shot does not answer the attacker until its own scan finds it (G-02).
 - AI ships in a destroy or flank plan all attack from where they arrive. FoC's work round to the
   quiet side (G-03).
@@ -513,7 +514,7 @@ which no M2 input reaches).
 
 - **G-01**: a retail skirmish with an AI `areasweep` or `destroyunit`, logging the targets of the
   AI's corvettes and fighters while an enemy frigate is in range. Capture-mod Lua staging works
-  here (EAWR-391).
+  here (hardpoint breakoff debris).
 - **G-03**: a retail capture of an AI `destroyunit` attack on a station, showing where the ships
   settle around it.
 - U-01: a ship shot from behind by a unit outside its scan, tick by tick.

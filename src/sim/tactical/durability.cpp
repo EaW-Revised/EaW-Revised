@@ -6,6 +6,7 @@
 #include "tactical_internal.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace eawr::sim::tactical {
@@ -87,7 +88,7 @@ struct HardpointTotals {
             continue;
         }
         present = true;
-        if (!hardpoint_destroyed(profile, state, index)) {
+        if (!hardpoint_destroyed(profile, state, index) && !hardpoint_disabled(state, index)) {
             return true;
         }
     }
@@ -162,6 +163,27 @@ bool hardpoint_destroyed(const DurabilityProfile& profile, const DurabilityState
     return profile.hardpoints[index].destroyable && state.hardpoints[index].raw() <= 0;
 }
 
+bool hardpoint_disabled(const DurabilityState& state, const std::size_t index) noexcept {
+    return index < state.disabled.size() && state.disabled[index];
+}
+
+void carry_station_hardpoints(const DurabilityProfile& previous_profile, const DurabilityState& previous,
+    DurabilityState& replacement) {
+    replacement.disabled.resize(replacement.hardpoints.size());
+    replacement.repairing_players.resize(replacement.hardpoints.size());
+    const auto count = std::min(previous.hardpoints.size(), replacement.hardpoints.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index < previous.repairing_players.size() && !previous.repairing_players[index].empty()) {
+            replacement.hardpoints[index] = previous.hardpoints[index];
+            replacement.repairing_players[index] = previous.repairing_players[index];
+            replacement.disabled[index] = true;
+        } else if (hardpoint_destroyed(previous_profile, previous, index) || hardpoint_disabled(previous, index)) {
+            replacement.hardpoints[index] = math::Fixed::from_decimal("0.1").value(); // WPR-52, debug build
+            replacement.disabled[index] = true;
+        }
+    }
+}
+
 HardpointState hardpoint_state(const DurabilityProfile& profile, const DurabilityRules& rules,
     const DurabilityState& state, const std::size_t index) noexcept {
     const auto& hardpoint = profile.hardpoints[index];
@@ -180,11 +202,25 @@ HardpointState hardpoint_state(const DurabilityProfile& profile, const Durabilit
 }
 
 bool weapon_enabled(const DurabilityProfile& profile, const DurabilityState& state, const std::size_t index) noexcept {
-    return profile.hardpoints[index].role == HardpointRole::weapon && !hardpoint_destroyed(profile, state, index);
+    return profile.hardpoints[index].role == HardpointRole::weapon && !hardpoint_destroyed(profile, state, index)
+        && !hardpoint_disabled(state, index);
 }
 
 bool engines_online(const DurabilityProfile& profile, const DurabilityState& state) noexcept {
-    return role_alive(profile, state, HardpointRole::engine, true);
+    return !state.engines_disabled_until && role_alive(profile, state, HardpointRole::engine, true);
+}
+
+void disable_engines(DurabilityState& state, const std::uint32_t frames, const std::uint64_t frame) noexcept {
+    // EN-08: reapplication extends to the later end, rather than stacking durations.
+    const auto until = frame > std::numeric_limits<std::uint64_t>::max() - frames
+        ? std::numeric_limits<std::uint64_t>::max() : frame + frames;
+    state.engines_disabled_until = std::max(state.engines_disabled_until.value_or(0), until);
+}
+
+bool service_disabled_engines(DurabilityState& state, const std::uint64_t frame) noexcept {
+    if (!state.engines_disabled_until || frame < *state.engines_disabled_until) return false;
+    state.engines_disabled_until.reset();
+    return true;
 }
 
 bool shields_online(const DurabilityProfile& profile, const DurabilityState& state) noexcept {
@@ -321,6 +357,7 @@ core::Result<RepairOutcome> repair_frame(
     const auto raised = std::min(
         state.hardpoints[index].raw() + hardpoint.repair_amount_per_frame.raw(), hardpoint.max_health.raw());
     state.hardpoints[index] = math::Fixed::from_raw(raised);
+    if (raised == hardpoint.max_health.raw() && index < state.disabled.size()) state.disabled[index] = false;
 
     // HR-04: a hull below the combined hardpoint fraction rises to H x (1 + S / T - H / M).
     const auto sums = totals(profile, state);

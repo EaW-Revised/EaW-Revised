@@ -87,7 +87,7 @@ def _emitter(name: str, *, blend: int, texture: str, position, velocity, rgb,
     if start_delay is not None:
         # Legacy emitter start delay (seconds); absent unless requested.
         properties += _mini(0x24, struct.pack("<f", start_delay))
-    groups = velocity + _group(0) + position
+    groups = velocity + _group(0, point=(lifetime, 0.0, 0.0)) + position
     tracks = b"".join([
         _track(rgb[0], rgb[0], True), _track(rgb[1], rgb[1], True),
         _track(rgb[2], rgb[2], True), _track(1.0, 0.0, True, keys=((0.5, 0.8),)),
