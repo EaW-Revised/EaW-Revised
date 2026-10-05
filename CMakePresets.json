@@ -59,6 +59,9 @@
         "value": "x64",
         "strategy": "external"
       },
+      "cacheVariables": {
+        "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT": "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+      },
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -67,7 +70,7 @@
     },
     {
       "name": "windows-msvc-ninja",
-      "displayName": "Windows x64 / MSVC, Ninja (x64 developer environment; build hosts' --iterate)",
+      "displayName": "Windows x64 / MSVC, Ninja (x64 developer environment)",
       "inherits": "windows-ninja",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "cl",
@@ -76,7 +79,7 @@
     },
     {
       "name": "windows-clang-ninja",
-      "displayName": "Windows x64 / clang-cl, Ninja (x64 developer environment; build hosts' --iterate)",
+      "displayName": "Windows x64 / clang-cl, Ninja (x64 developer environment)",
       "inherits": "windows-ninja",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "clang-cl",

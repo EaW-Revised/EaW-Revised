@@ -20,6 +20,8 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
 SRC = ROOT / "apps/viewer/src"
 KIT = ROOT / "src/presentation/godot/ui"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
@@ -35,11 +37,11 @@ EMBEDDED = ("EmpireAtWar-Bold", "EmpireAtWar-Light", "EmpireAtWar-Medium", "Empi
 
 class UiGalleryStructure(unittest.TestCase):
     def test_the_mode_and_the_kit_are_wired_into_the_host_and_the_build(self):
-        host = (SRC / "viewer_host.cpp").read_text(encoding="utf-8")
+        host = source_text("apps/viewer/src/viewer_host.cpp")
         self.assertIn("UiGalleryMode::requested()", host)
         self.assertIn("ui_gallery_mode_->process()", host)
         self.assertIn("register_ui_kit_classes()", (SRC / "register_types.cpp").read_text(encoding="utf-8"))
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/ui_gallery_mode.cpp", "src/presentation/godot/ui/kit.cpp",
                        "src/presentation/godot/ui/theme_builder.cpp", "src/presentation/godot/ui/dialog_builder.cpp",
                        "src/presentation/ui/theme.cpp", "src/data/ui/dialog_catalog.cpp",
@@ -47,15 +49,20 @@ class UiGalleryStructure(unittest.TestCase):
             self.assertIn(source, build)
 
     def test_the_skin_comes_from_game_data_and_fonts_from_the_cache(self):
-        mode = (SRC / "ui_gallery_mode.cpp").read_text(encoding="utf-8")
+        mode = source_text("apps/viewer/src/ui_gallery_mode.cpp")
         self.assertIn("load_dialog_catalog(", mode)
         self.assertIn("load_mega_texture_atlas(", mode)
         self.assertIn("load_font_cache(", mode)
         for path in [SRC / "ui_gallery_mode.cpp", *KIT.glob("*.cpp")]:
-            text = path.read_text(encoding="utf-8")
+            text = source_text(path.relative_to(ROOT).as_posix())
             self.assertNotIn("res://fonts", text, path)
             self.assertNotIn(".ttf\"", text, path)
-            self.assertNotIn(".tga\"", text, path)
+            # Atlas entry names (including the production fallback icon) are
+            # allowed; packaged image paths would bypass the game-data kit.
+            self.assertNotRegex(text, r'res://[^"\n]*\.(?:tga|dds|mtd)', str(path))
+        production = (KIT / "production_view.cpp").read_text(encoding="utf-8")
+        self.assertIn("if (icon.empty()) icon = fallback_icon;", production)
+        self.assertIn("setup_.texture(icon)", production)
         self.assertEqual(sorted(path.name for path in (ROOT / "apps/viewer/project").rglob("*")
                                 if path.suffix.lower() in (".ttf", ".otf", ".tga", ".dds", ".mtd")), [])
 

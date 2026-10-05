@@ -5,6 +5,7 @@
 #include "font_mode.hpp"
 #include "input_routing_mode.hpp"
 #include "map_mode.hpp"
+#include "skirmish_setup_mode.hpp"
 #include "ui_gallery_mode.hpp"
 #include "unit_mode.hpp"
 
@@ -15,10 +16,12 @@
 #include "eawr/presentation/ui/input_routing.hpp"
 #include "eawr/sim/snapshot.hpp"
 
+#include <iosfwd>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/variant/rid.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -55,6 +58,7 @@ protected:
 
 private:
     struct Options;
+    void read_host_options(const godot::PackedStringArray& arguments);
     // Presentation-only screen-space atlas overlay. It owns its own canvas
     // RIDs and never contributes to the 3D scenario or the material routes.
     struct AtlasOverlay;
@@ -71,13 +75,16 @@ private:
     struct ModelPreview;
     bool load_scene();
     bool load_replay();
-    bool start_renderer_runtime_exercise();
+    bool start_renderer_runtime_exercise(const std::shared_ptr<GodotShaderCache>& shaders);
     bool start_atlas_overlay();
     bool start_tactical_camera();
     bool start_camera_interaction();
     void publish_camera_viewport(float width, float height);
     void on_viewport_size_changed();
     void on_map_viewport_size_changed();
+    void on_skirmish_start();
+    void on_battle_frame_drawn();
+    void on_setup_frame_drawn();
     // The world layer, then the camera: #82's selection and orders go before
     // the camera path here.
     void route_world_input(const godot::Ref<godot::InputEvent>& event);
@@ -102,6 +109,8 @@ private:
     [[nodiscard]] bool verify_draw_capture(const CaptureResult& capture);
     [[nodiscard]] bool verify_preview_capture(const CaptureResult& capture);
     [[nodiscard]] bool write_report(std::string_view status);
+    void write_report_camera(std::ostream& output);
+    void write_report_scene(std::ostream& output);
     void stop(int exit_code);
 
     std::unique_ptr<Options> options_;
@@ -109,6 +118,8 @@ private:
     // `--eawr-map` is a self-contained mode that owns its own renderer and
     // frame loop; this host only parses the option and hands over.
     std::unique_ptr<MapMode> map_mode_;
+    std::unique_ptr<SkirmishSetupMode> skirmish_setup_;
+    godot::Node3D* skirmish_battle_host_{};
     // `--eawr-effect` is likewise self-contained and parses its own options.
     std::unique_ptr<EffectMode> effect_mode_;
     // `--eawr-unit` (P1-03 whole-unit animation strips) is self-contained too.

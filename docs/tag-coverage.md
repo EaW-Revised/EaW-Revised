@@ -1,13 +1,13 @@
 # XML tag registry
 
-EAWR-628. FoC is data-driven: very little is hardcoded, and
+XML tag coverage (legacy EAWR-628). FoC is data-driven: very little is hardcoded, and
 a tag the remake does not apply is a behaviour it cannot have. Owner rule (2026-09-30): every XML definition has a target
 in the code, or it is known to have none. The registry (`docs/tag-coverage/statuses.json`) gives every (object class, tag
 path) of the FoC XML exactly one status, and a gate fails when one has none.
 
-It replaces EAWR-655's table, which listed only the M2-scene tags nobody reads: a tag read once for any object type dropped
-out as covered. That is how `Layer_Z_Adjust` slipped (EAWR-666: craft applied it, ships did not) and how
-`Targeting_Stickiness_Time_Threshold` and `Special_Ability_Name` (EAWR-797) counted as consumed while nothing applied them.
+It replaces the loader tag-trace table, which listed only the M2-scene tags nobody reads: a tag read once for any object type dropped
+out as covered. That is how `Layer_Z_Adjust` slipped (per-unit flight height: craft applied it, ships did not) and how
+`Targeting_Stickiness_Time_Threshold` and `Special_Ability_Name` counted as consumed while nothing applied them.
 
 ## The universe
 
@@ -40,8 +40,8 @@ class it lists:
 | Status | Meaning | The row must have |
 |---|---|---|
 | `applied` | Our code applies the value: it reaches the simulation or the presentation, not only the loader's table. | `applied`: the code (`path#identifier`, checked to exist), the rule IDs (checked to exist in `docs/behaviour`), `types` where the sim splits by kind |
-| `partial` | Applied for some types FoC applies it to, not others (the `Layer_Z_Adjust` class of bug, EAWR-666, fixed by EAWR-718). | as `applied`, `types` naming where it applies, `missing_types`, and a ticket |
-| `todo` | FoC applies it and we do not. | a ticket: the tracking issue of the mechanic or subsystem (#649-#654, a `[Walk]` or logic-review issue), one issue per missing mechanic, not per tag |
+| `partial` | Applied for some types FoC applies it to, not others (the `Layer_Z_Adjust` gap: craft applied it, ships did not; fixed by per-unit placement). | as `applied`, `types` naming where it applies, `missing_types`, and a ticket |
+| `todo` | FoC applies it and we do not. | a ticket: the tracking issue of the mechanic or subsystem (movement, combat, fighter, AI, presentation and economy tag coverage, a `[Walk]` or logic-review issue), one issue per missing mechanic, not per tag |
 | `foc-ignores` | FoC's parsers do not read it. | evidence citing the debug build (an id of the table at the top of the file) |
 | `land-or-galactic`, `multiplayer`, `presentation-later`, `deferred` | Out of scope for now. | a ticket, or the reason as evidence |
 
@@ -76,12 +76,12 @@ The scan is a text scan. Rows it produced are `basis: auto`; they are the rows t
 (`out/specs/tag-applied-check.md`, tools/soak) proves or refutes mechanically. Hand decisions the scan cannot make are in
 the `OVERRIDES` table of `tag_registry_build.py`.
 
-The EAWR-842 reassessment of #850-#853 distinguishes an unchanged battle hash from a missing application. Reviewed
+The tag perturbation reassessment of AI, combat, economy and movement application fixes distinguishes an unchanged battle hash from a missing application. Reviewed
 rows cite `CHECK-842` and retain `applied` when the consumer exists but the 9000-tick M2 scenario does not prove
 its effect. A missing baseline XML node means not authored, not a failed read. `SpaceUnit/Damage_Type` applies
 to an object's own weapon (WWP-48), not its ship hardpoints; `SpaceUnit/Space_Layer` lists authored ship layers,
 while craft preserve the debug build's default of no layer (AV-21). Neither default creates a missing mechanic.
-`SpaceUnit/Victory_Relevant` is deferred with EAWR-650 for other victory conditions: the M2 default uses only stations
+`SpaceUnit/Victory_Relevant` is deferred with combat tag coverage (legacy EAWR-650) for other victory conditions: the M2 default uses only stations
 (VT-01 to VT-03). The station row remains applied even though the perturbation run did not change its result.
 
 ## The gate
@@ -97,8 +97,8 @@ while craft preserve the debug build's default of no layer (AV-21). Neither defa
   `tag_registry.py check-data`.
 
 The gate does not run the code. It cannot see a PR that starts applying a tag whose row still says `todo` (the row goes
-stale until a reviewer or the perturbation check, EAWR-842, notices), and it cannot tell whether an `applied` location is the
-right one: the identifier check is a substring test in the file (EAWR-855).
+stale until a reviewer or the perturbation check notices), and it cannot tell whether an `applied` location is the
+right one: the identifier check is a substring test in the file; the registry code check needs a more robust match (legacy EAWR-855).
 
 ### Changing a row
 

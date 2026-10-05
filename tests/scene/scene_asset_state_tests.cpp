@@ -3,7 +3,7 @@
 namespace eawr::tests::scene_tests {
 
 void selector_contracts() {
-    expect(eawr::scene::legacy_selectors().size() == 14, "the selector table matches the accepted legacy list");
+    expect(eawr::scene::legacy_selectors().size() == 15, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",
            "MeshAlpha is the fixed transparent-phase pass");
@@ -22,6 +22,10 @@ void selector_contracts() {
     const auto* additive = eawr::scene::find_legacy_selector("MeshAdditive.fx");
     expect(additive != nullptr && additive->transparent && additive->technique == "t0",
            "MeshAdditive is scene-admitted as its t0 transparent pass");
+    const auto* vertex_additive = eawr::scene::find_legacy_selector("MeshAdditiveVColor.fx");
+    expect(vertex_additive != nullptr && vertex_additive->transparent && vertex_additive->technique == "t0"
+               && vertex_additive->pass == "t0_p0",
+           "vertex-colour additive is scene-admitted as its sourced t0 pass");
     const auto* tree = eawr::scene::find_legacy_selector("Tree.fx");
     expect(tree != nullptr && !tree->transparent && tree->technique == "sph_t1" && tree->pass == "sph_t1_p0",
            "Tree is the alpha-tested sph_t1 pass, drawn with opaque work");
@@ -65,6 +69,25 @@ void selector_contracts() {
 }
 
 void static_mesh_state_contracts() {
+    {
+        eawr::assets::Model attached;
+        attached.proxies = {{"Glow", 2, true, false}, {"Glow_ALT12", 3, true, false},
+                            {"Glow_ALT1x", 4, true, false}, {"Glow_ALT0", 5, true, false}};
+        eawr::scene::AssetAccess access;
+        access.exists = [](const std::string_view path) {
+            return path == "data/art/models/glow.alo" || path == "data/art/models/glow_alt0.alo";
+        };
+        const auto effects = eawr::scene::model_proxy_effects(access, attached);
+        expect(effects.size() == 4 && effects[0].bone == 2 && effects[1].bone == 3,
+               "runtime attachment references preserve ordinal and bone identity");
+        expect(effects[0].resolved == "data/art/models/glow.alo"
+            && effects[1].resolved == effects[0].resolved && effects[1].alternate_suffix_removed,
+               "runtime attached models use the scene's trailing ALT-number fallback");
+        expect(effects[2].resolved.empty() && !effects[2].alternate_suffix_removed,
+               "malformed ALT suffix stays unresolved");
+        expect(effects[3].resolved == "data/art/models/glow_alt0.alo" && !effects[3].alternate_suffix_removed,
+               "literal attached effect wins over fallback");
+    }
     eawr::assets::Model construction;
     for (const std::string_view name : {
              "Body_ALT0", "Body_ALT1", "Body_ALT2", "Body_ALT3", "girder1x06", "Trim"}) {
@@ -86,6 +109,20 @@ void static_mesh_state_contracts() {
     expect(eawr::scene::static_mesh_visible(construction, named("Trim")), "unmarked trim remains visible");
     construction.meshes.front().visible = false;
     expect(!eawr::scene::static_mesh_visible(construction, construction.meshes.front()), "ALO hidden flag wins");
+    for (auto& mesh : construction.meshes) {
+        eawr::assets::Submesh submesh;
+        submesh.shader = "MeshGloss.fx";
+        mesh.submeshes.push_back(std::move(submesh));
+    }
+    Assets assets;
+    assets.models.emplace("data/art/models/construction.alo", construction);
+    const auto surfaces = eawr::scene::construction_surfaces(assets.access(), "data/art/models/construction.alo");
+    expect(surfaces.size() == 5, "WBP-17 runtime surfaces retain scaffold and all visible damage alternates");
+    expect(std::any_of(surfaces.begin(), surfaces.end(), [](const auto& surface) {
+        return eawr::scene::mesh_alternate(surface.mesh_name) == 3U;
+    }), "the damaged construction state survives scene preparation");
+    expect(!eawr::scene::mesh_alternate("Trim") && !eawr::scene::mesh_alternate("Body_ALTx"),
+        "unmarked and malformed surfaces do not invent alternates");
     construction.meshes.erase(std::find_if(construction.meshes.begin(), construction.meshes.end(),
         [](const eawr::assets::Mesh& mesh) { return mesh.name == "Body_ALT0"; }));
     expect(eawr::scene::static_mesh_visible(construction, named("girder1x06")),

@@ -1,4 +1,8 @@
-add_executable(ui_data_tests main.cpp text_database_tests.cpp dialog_catalog_tests.cpp command_bar_tests.cpp shell_anchor_tests.cpp movie_tests.cpp)
+add_executable(ui_data_tests main.cpp text_database_tests.cpp dialog_catalog_tests.cpp
+    dialog_catalog_fixture.cpp
+    dialog_script_tests.cpp
+    dialog_skin_tests.cpp
+    dialog_corpus_tests.cpp command_bar_tests.cpp shell_anchor_tests.cpp movie_tests.cpp)
 target_link_libraries(ui_data_tests PRIVATE eawr::ui_data)
 target_compile_features(ui_data_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_data_tests)
@@ -96,4 +100,10 @@ eawr_target_project_warnings(ui_ability_buttons_tests)
 add_test(NAME ui_ability_buttons_contracts COMMAND ui_ability_buttons_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+add_executable(ui_cursor_tests cursor_tests.cpp)
+target_link_libraries(ui_cursor_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_cursor_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_cursor_tests)
+add_test(NAME ui_cursor_contracts COMMAND ui_cursor_tests)
+
 eawr_label_tests()

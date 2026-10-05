@@ -18,6 +18,99 @@ using test::ui::expect;
 
 bool close_to(const float a, const float b) { return std::abs(a - b) <= 1.0e-3F; }
 
+void ability_overlays() {
+    const auto foils = ui::ability_index("SPOILER_LOCK");
+    const auto defend = ui::ability_index("DEFEND");
+    const auto turbo = ui::ability_index("TURBO");
+    struct State final : ui::AbilityState {
+        ui::UnitAbilityState value;
+        bool present{true};
+        mutable std::size_t queries{};
+        std::optional<ui::UnitAbilityState> state(sim::EntityId, std::uint32_t) const override {
+            ++queries;
+            return present ? std::optional<ui::UnitAbilityState>(value) : std::nullopt;
+        }
+    } state;
+    ui::WorldOverlayUnit unit{2, {foils, turbo}, true, true, true, true, false};
+    for (const auto status : {ui::AbilityStatus::ready, ui::AbilityStatus::active,
+                              ui::AbilityStatus::recharging, ui::AbilityStatus::disabled}) {
+        for (const bool autofire : {false, true}) {
+            state.value = {status, 0.5, autofire};
+            auto shown = ui::world_ability_overlays(unit, state);
+            expect(shown[0] == (status == ui::AbilityStatus::active ? foils : ui::ability_none)
+                       && shown[1] == ui::ability_none,
+                   "WSU-33: only active, including timed active, shows; autofire alone does not");
+        }
+    }
+    state.value.status = ui::AbilityStatus::active;
+    unit.abilities[0] = ui::ability_none;
+    expect(ui::world_ability_overlays(unit, state)[1] == turbo, "an active second slot substitutes on a squadron icon");
+    unit = {6, {defend, turbo}, true, true, true, false, true};
+    const auto both = ui::world_ability_overlays(unit, state);
+    expect(both[0] == defend && both[1] == turbo, "WU-44: a bracket can show both active slots");
+    for (int hidden = 0; hidden < 4; ++hidden) {
+        auto copy = unit;
+        if (hidden == 0) copy.ally = false;
+        if (hidden == 1) copy.visible = false;
+        if (hidden == 2) copy.on_screen = false;
+        if (hidden == 3) copy.bracket = false;
+        state.queries = 0;
+        expect(ui::world_ability_overlays(copy, state) == std::array<std::uint32_t, 2>{},
+               "enemy, fogged, off-screen or hidden bracket draws no ability");
+        expect(state.queries == 0, "hidden overlays do no state work");
+        copy.squadron = true;
+        if (hidden != 3) {
+            expect(ui::world_ability_overlays(copy, state) == std::array<std::uint32_t, 2>{},
+                   "enemy, fogged and off-screen squadron also draws no ability");
+        }
+    }
+    state.present = false;
+    expect(ui::world_ability_overlays(unit, state) == std::array<std::uint32_t, 2>{}, "a missing ability state draws nothing");
+    state.present = true;
+    state.queries = 0;
+    static_cast<void>(ui::world_ability_overlays(unit, state));
+    expect(state.queries == 2, "world overlay state work is bounded to the two authored slots");
+    expect(close_to(ui::bracket_ability_y(100.0F, 4.0F, 24.0F, 1.0F), 83.0F),
+           "WU-44: icon bottom is three reference pixels above the bar top");
+    // WU-43 / #983: retail st_grab_bar Lower_Effect_Offset 0 30, native 26px art,
+    // independent of the frame's 0.6 scale; the 30px squadron identity remains uncovered.
+    for (const float scale : {1.0F, 720.0F / 768.0F, 2.0F}) {
+        const auto rect = ui::world_ability_rect({510.0F, 221.0F}, {26.0F, 26.0F}, {0.0F, 30.0F}, 1.0F, scale);
+        expect(close_to(rect.x + rect.width * 0.5F, 510.0F)
+                   && close_to(rect.y + rect.height * 0.5F, 221.0F - 30.0F * scale)
+                   && close_to(rect.width, 26.0F * scale) && close_to(rect.height, 26.0F * scale),
+               "WU-43: lower effect keeps native size and authored reference offset at every viewport scale");
+        expect(rect.y + rect.height < 221.0F - 15.0F * scale,
+               "#983: ability art lies entirely above the squadron identity");
+    }
+    const auto modded = ui::world_ability_rect({100.0F, 200.0F}, {20.0F, 12.0F}, {7.0F, -9.0F}, 1.0F, 2.0F);
+    expect(close_to(modded.x, 94.0F) && close_to(modded.y, 206.0F)
+               && close_to(modded.width, 40.0F) && close_to(modded.height, 24.0F),
+           "WU-43: mod-authored lower effect offset is applied with +Y up, never a fixed 30px literal");
+}
+
+void group_numbers() {
+    ui::Selection selection;
+    const std::array<sim::EntityId, 2> units{2, 6};
+    selection.replace(units);
+    selection.assign_group(3); // The battle input's Ctrl+3 path.
+    expect(selection.group_of(2) == 3 && selection.group_of(6) == 3,
+           "#768: Ctrl+3 labels both a squadron icon and a frigate bracket with 3");
+    expect(!selection.group_of(4), "WSU-33, WSU-55: an ungrouped unit has no number");
+    const std::array<sim::EntityId, 1> frigate{6};
+    selection.replace(frigate);
+    selection.assign_group(0);
+    expect(selection.group_of(6) == 0 && selection.group_of(2) == 3, "0 is a visible number; reassignment moves only its units");
+    selection.assign_group(3);
+    expect(!selection.group_of(2) && selection.group_of(6) == 3, "replacing a group clears its old members' numbers");
+    const std::array<sim::EntityId, 1> squadron{2};
+    selection.replace(squadron);
+    selection.add_to_group(3, 1.0, {});
+    expect(selection.group_of(2) == 3 && selection.group_of(6) == 3, "Alt+3 updates the same membership index");
+    selection.retain(frigate);
+    expect(!selection.group_of(2) && selection.group_of(6) == 3, "a lost squadron leaves no stale group number");
+}
+
 void circles() {
     // WU-02: Nebulon-B (Select_Box_Scale 300, Scale_Factor 0.7) and a fighter (70, 0.7).
     const auto nebulon = ui::selection_circle_side(300.0F, 0.7F);
@@ -265,6 +358,26 @@ void reticle_anchor() {
 } // namespace
 
 int main() {
+    ui::SquadronIconAnchor arrival_anchor{{-3300.0F, 20.0F, -90.0F}, 12.0F, false};
+    const std::array<float, 3> landing{300.0F, 20.0F, -90.0F};
+    for (const float flight_x : {-3300.0F, -2000.5F, -100.25F, 300.0F}) {
+        expect(ui::place_squadron_arrival_icon(arrival_anchor, landing, {flight_x, 20.0F, -90.0F}),
+               "WU-49: arrival owns the icon despite zero ordinary craft velocity");
+        expect(arrival_anchor.position == landing && arrival_anchor.speed == 0.0F,
+               "WU-49: the icon waits at the destination while the craft approach");
+    }
+    const std::array<float, 3> formation{301.25F, 24.5F, -90.0F};
+    expect(ui::place_squadron_arrival_icon(arrival_anchor, std::nullopt, formation)
+               && arrival_anchor.position == formation && arrival_anchor.speed == 0.0F,
+           "WU-49: landing hands off at the presented formation without residual slide");
+    expect(!ui::place_squadron_arrival_icon(arrival_anchor, std::nullopt, {400.0F, 24.5F, -90.0F})
+               && arrival_anchor.position == formation,
+           "WU-49: subsequent movement belongs to ordinary smoothing");
+    expect(ui::hero_world_identity(true, false), "WU-47: a named space hero needs no explicit head tag");
+    expect(ui::hero_world_identity(false, true), "WU-47: an explicit head admits an unnamed hero");
+    expect(!ui::hero_world_identity(false, false), "WU-47: ordinary ships and generic identity alone get no head");
+    ability_overlays();
+    group_numbers();
     circles();
     bars();
     candidates();

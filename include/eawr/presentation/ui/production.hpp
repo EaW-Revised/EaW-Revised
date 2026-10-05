@@ -3,6 +3,7 @@
 #include "eawr/sim/tactical/economy.hpp"
 #include "eawr/data/xml.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,34 @@
 // the selection; the two build queues are the `tqueue` slots (upgrades 00 to 04, units 05 to 09);
 // the reinforcement pool is the pane `i_main_reinforce` with its `r_RRCC` slots (CommandBarComponents.xml).
 namespace eawr::presentation::ui {
+
+// PU-71: consume authoritative addition metadata, including arrivals consumed between frames.
+// No pool or snapshot history is visited, even when presentation skips simulation ticks.
+struct PoolNotifications {
+    std::uint64_t additions{};
+    std::uint64_t frame{};
+    void observe(const sim::tactical::EconomyView& economy) noexcept {
+        additions = economy.pool_additions;
+        // Production services zero-based frames; snapshots count completed ticks.
+        frame = additions != 0 ? economy.pool_addition_frame + 1 : 0;
+    }
+};
+
+struct PoolLayoutCache {
+    std::optional<std::uint64_t> version;
+    std::uint32_t population{};
+    std::uint32_t cap{};
+    std::uint64_t rebuilds{};
+    [[nodiscard]] bool refresh(const sim::tactical::EconomyView& economy) noexcept {
+        if (version && *version == economy.pool_version && population == economy.population && cap == economy.population_cap)
+            return false;
+        version = economy.pool_version;
+        population = economy.population;
+        cap = economy.population_cap;
+        ++rebuilds;
+        return true;
+    }
+};
 // WR-14: stored RGB times 1.5; authored alpha is validated but never used as opacity.
 using ReinforcementColours = std::array<std::array<float, 3>, 2>; // good, bad
 [[nodiscard]] core::Result<ReinforcementColours> reinforcement_colours(const vfs::Vfs& filesystem);
@@ -29,21 +58,106 @@ using ReinforcementColours = std::array<std::array<float, 3>, 2>; // good, bad
 // 2 unaffordable). A button that cannot be produced is disabled without its own state.
 enum class BuildButtonState : std::uint8_t { queue_full = 0, unaffordable = 2, normal = 3 };
 
+struct BuildOptionState {
+    bool visible{true};
+    bool enabled{true};
+};
+
+// WPR-61..63: the same core query supplies visibility (completed ownership) and
+// reservation feedback (completed plus queued). No world or pool census in presentation.
+template <typename Counts>
+[[nodiscard]] BuildOptionState build_option_state(const sim::tactical::BuildOption& option, Counts&& counts) {
+    const auto count = counts(option.type);
+    const auto within = [](const std::optional<std::uint32_t>& limit, const std::uint64_t value) {
+        return !limit || value < *limit;
+    };
+    const auto held = [](const std::uint64_t current, const std::uint64_t queued) {
+        return current - std::min(current, queued);
+    };
+    const auto& r = option.requirements;
+    BuildOptionState result;
+    result.visible = within(r.lifetime_player, count.lifetime_player)
+        && within(r.lifetime_allies, count.lifetime_allies)
+        && within(r.current_player, held(count.current_player, count.queued_player))
+        && within(r.current_allies, held(count.current_allies, count.queued_allies));
+    result.enabled = option.available && result.visible && within(r.current_player, count.current_player)
+        && within(r.current_allies, count.current_allies);
+    for (const auto type : r.prerequisites) {
+        const auto prerequisite = counts(type);
+        result.visible = result.visible && held(prerequisite.current_allies, prerequisite.queued_allies) != 0;
+        // Preserve WPR-33's existing buyer-owned purchase permission.
+        result.enabled = result.enabled && prerequisite.owned_player != 0;
+    }
+    for (const auto type : option.higher_upgrades) {
+        const auto higher = counts(type);
+        result.visible = result.visible && held(higher.current_allies, higher.queued_allies) == 0;
+    }
+    result.enabled = result.enabled && result.visible;
+    return result;
+}
+using BuildOptionStateOf = std::function<BuildOptionState(const sim::tactical::BuildOption&)>;
+
 struct BuildButton {
     std::size_t slot{};                 // s_select_<slot>
     std::size_t option{};               // index into the station menu's options
     sim::tactical::TypeId type{};
     std::int64_t price{};               // PU-62: the price shown, whole credits rounded to nearest
+    std::uint32_t build_frames{};       // WPR-50: authored duration for the build tooltip
     bool enabled{};                     // PU-61: producible, affordable and its queue has room
     bool room{};                        // PU-62: its queue has room (the price's colour)
     BuildButtonState state{BuildButtonState::normal};
+    std::string disabled_reason{};       // RG-04: the reason carried to its tooltip
+    bool pad{};                        // WBP-36: full-alpha white/gray, independent of queue state
+    double cooldown_progress{1.0};
+    friend bool operator==(const BuildButton&, const BuildButton&) = default;
 };
 
-// PU-60, PU-61: one button per menu option in list order, in `slots` card slots. An option the
+// Retain button storage and distinguish card layout changes from scalar state.
+// The card sync checks this before constructing names or temporary card vectors.
+struct BuildMenuCache {
+    std::vector<BuildButton> buttons;
+    bool active{};
+    bool layout_changed{};
+    std::uint64_t layout_rebuilds{};
+    std::uint64_t state_updates{};
+    [[nodiscard]] bool refresh(std::span<const BuildButton> next) {
+        layout_changed = false;
+        if (active && std::equal(next.begin(), next.end(), buttons.begin(), buttons.end())) return false;
+        layout_changed = !active || !std::equal(next.begin(), next.end(), buttons.begin(), buttons.end(),
+            [](const auto& a, const auto& b) { return a.slot == b.slot && a.type == b.type && a.pad == b.pad; });
+        buttons.assign(next.begin(), next.end());
+        if (layout_changed) ++layout_rebuilds;
+        else ++state_updates;
+        active = true;
+        return true;
+    }
+    void close() noexcept { active = false; }
+};
+
+// WBP-36: six authored card slots, UC menu order, no producer queue/population gates.
+// Availability comes from the shared menu gate. Occupancy/proximity are opening/request gates.
+inline constexpr std::size_t pad_slot_count = 6;
+[[nodiscard]] std::vector<BuildButton> layout_pad_buttons(const sim::tactical::StationMenu& menu,
+    sim::math::Fixed credits, std::uint64_t frame, std::uint64_t cooldown_until,
+    std::size_t slots = pad_slot_count, std::span<const std::uint32_t> rows = {},
+    std::uint64_t cooldown_start = 0);
+
+// Keep the six-button storage across snapshots, including unchanged owned reasons.
+void update_pad_buttons(std::vector<BuildButton>& buttons, const sim::tactical::StationMenu& menu,
+    sim::math::Fixed credits, std::uint64_t frame, std::uint64_t cooldown_until,
+    std::size_t slots = pad_slot_count, std::span<const std::uint32_t> rows = {},
+    std::uint64_t cooldown_start = 0);
+
+// PU-60, PU-61, WPR-60..63: visible options in authored order, in `slots` card slots. An option the
 // session never builds (PU-20) shows disabled. `credits` and `queue_sizes` are the local player's.
 [[nodiscard]] std::vector<BuildButton> layout_build_buttons(const sim::tactical::StationMenu& menu,
     sim::math::Fixed credits, const std::array<std::size_t, sim::tactical::build_queue_count>& queue_sizes,
-    std::size_t max_queue, std::size_t slots);
+    std::size_t max_queue, std::size_t slots, const BuildOptionStateOf& state_of = {});
+
+// Update existing storage across snapshots without copying unchanged owning reasons.
+void update_build_buttons(std::vector<BuildButton>& buttons, const sim::tactical::StationMenu& menu,
+    sim::math::Fixed credits, const std::array<std::size_t, sim::tactical::build_queue_count>& queue_sizes,
+    std::size_t max_queue, std::size_t slots, const BuildOptionStateOf& state_of = {});
 
 inline constexpr std::size_t queue_slot_count = 5; // per queue: tqueue00..04, tqueue05..09
 

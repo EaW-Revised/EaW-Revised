@@ -2,6 +2,7 @@
 
 #include "eawr/assets/map.hpp"
 #include "eawr/skirmish/placement.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "skirmish_internal.hpp"
 
@@ -204,8 +205,16 @@ public:
         }
         start_.map = fixture_.map;
         start_.map_sha256 = fixture_.map_sha256;
+        start_.match = fixture_.match.value_or(inputs_.match_defaults);
+        if (!fixture_.match) {
+            // Preserve explicit fixture controls; space prebuilt semantics remain SS-U3.
+            start_.match.pre_built_base = fixture_.pre_built_base;
+            start_.match.free_starting_units = fixture_.free_starting_units;
+        }
         start_.setup.seed = fixture_.seed;
         start_.setup.content_identity = units::content_identity(*inputs_.tables);
+        const auto policy = replay_policy(start_.match);
+        if (policy.disabled_flags() != 0) start_.setup.match_policy = policy;
         for (std::size_t index = 0; index < fixture_.slots.size(); ++index) {
             if (auto added = add_lobby_player(index); !added) return Result::failure(added.error());
         }
@@ -230,6 +239,10 @@ private:
         }
         std::uint32_t within_team = 0;
         for (std::size_t other = 0; other < index; ++other) {
+            if (fixture_.slots[other].team == slot.team
+                && !detail::iequals(fixture_.slots[other].faction, slot.faction)) {
+                return Void::failure(fixture_error("Players sharing a team must choose the same faction."));
+            }
             within_team += fixture_.slots[other].team == slot.team ? 1U : 0U;
         }
         const std::string prefix = team_prefix(slot.team);
@@ -252,18 +265,18 @@ private:
         player.income = true;
         player.production_queue = true;
         player.population_cap = true;
-        // SK-12: slot k takes the k-th MP_Color_* constant.
-        if (slot.slot - 1U >= inputs_.lobby_colours.size()) {
+        // WSS-20/47: selected palette index; SK-12 remains the omitted preset default.
+        const auto colour = slot.colour_index.value_or(slot.slot - 1U);
+        if (colour >= inputs_.lobby_colours.size()) {
             return Void::failure(fixture_error("no MP_Color_* constant for lobby slot " + std::to_string(slot.slot)));
         }
-        player.colour = inputs_.lobby_colours[slot.slot - 1U];
+        player.colour = inputs_.lobby_colours[colour];
 
         const auto stations = markers_named(inputs_, prefix + "Space_Station");
         const auto bases = markers_named(inputs_, prefix + "Base_Position_Marker");
         const auto spawns = markers_named(inputs_, prefix + "Spawn_Point_Marker");
-        // The k-th player of a team takes the team's k-th spawn (SK-11) and station marker in
-        // search order.
-        if (spawns.size() <= within_team || (fixture_.pre_built_base && stations.size() <= within_team)) {
+        // WSS-54/61: spawns are per player; station markers belong to the team.
+        if (spawns.size() <= within_team || (start_.match.pre_built_base && stations.empty())) {
             return Void::failure(fixture_error(player.start_side + " has too few "
                 + (spawns.size() <= within_team ? "spawn" : "station") + " markers for slot "
                 + std::to_string(slot.slot)));
@@ -290,22 +303,25 @@ private:
             }
         }
 
-        if (fixture_.pre_built_base) {
-            const MapPlacement& station = *stations[within_team];
-            if (auto added = add_marker(station, MarkerUse::station, slot.slot); !added) return added;
-            // SK-20: the candidate whose Affiliation names the slot's faction.
-            const auto& candidates = station.marker_for;
-            const auto match = std::find_if(candidates.begin(), candidates.end(),
-                [&](const MarkerCandidate& candidate) { return affiliated(candidate.affiliation, slot.faction); });
-            if (match == candidates.end()) {
-                return Void::failure(fixture_error("station marker record " + std::to_string(station.record)
-                    + " names no " + slot.faction + " station"));
+        if (start_.match.pre_built_base && within_team == 0) {
+            // WSS-61: replace each authored station once, owned by the team's first player.
+            for (const auto* station_marker : stations) {
+                const MapPlacement& station = *station_marker;
+                if (auto added = add_marker(station, MarkerUse::station, slot.slot); !added) return added;
+                // SK-20: the candidate whose Affiliation names the slot's faction.
+                const auto& candidates = station.marker_for;
+                const auto match = std::find_if(candidates.begin(), candidates.end(),
+                    [&](const MarkerCandidate& candidate) { return affiliated(candidate.affiliation, slot.faction); });
+                if (match == candidates.end()) {
+                    return Void::failure(fixture_error("station marker record " + std::to_string(station.record)
+                        + " names no " + slot.faction + " station"));
+                }
+                if (auto added = add_unit(slot.slot, match->type, UnitRole::station, station); !added) return added;
             }
-            if (auto added = add_unit(slot.slot, match->type, UnitRole::station, station); !added) return added;
         }
 
         std::vector<std::pair<std::string, UnitRole>> companies;
-        if (fixture_.free_starting_units) {
+        if (start_.match.free_starting_units) {
             const auto forces = std::find_if(inputs_.faction_forces.begin(), inputs_.faction_forces.end(),
                 [&](const FactionForces& entry) { return detail::iequals(entry.faction, slot.faction); });
             if (forces == inputs_.faction_forces.end()) {
@@ -315,6 +331,8 @@ private:
         }
         for (const auto& type : slot.fleet) companies.emplace_back(type, UnitRole::fleet);
         for (const auto& [type, role] : companies) {
+            // RG-05: skip unsupported default and authored fleet ships; keep the station.
+            if (roster_disabled_types().contains(type_id(type))) continue;
             if (auto added = add_unit(slot.slot, type, role, *spawns[within_team]); !added) return added;
         }
         start_.players.push_back(std::move(player));
@@ -514,6 +532,9 @@ private:
                     [&](const units::ObstacleType& entry) { return detail::iequals(entry.id, unit.type); });
                 if (obstacle != obstacles.end() && !detail::iequals(obstacle->space_layer, "SuperCapital")) {
                     if (auto added = block(placement_box(*obstacle), unit); !added) return added;
+                } else if (const auto* type = inputs_.tables->find(unit.type)) {
+                    // WBP-01: a promoted live pad keeps blocking initial fleet placement (PL-02).
+                    if (auto added = block(box_of(*type), unit); !added) return added;
                 }
             } else if (unit.role == UnitRole::station) {
                 const auto* type = inputs_.tables->find(unit.type);
@@ -702,7 +723,9 @@ core::Result<Vec3> layer_position(Vec3 at, const std::optional<Fixed> layer_z_ad
 }
 
 bool is_map_object_placement(const MapPlacement& placement) noexcept {
-    return !placement.marker && !placement.type.empty() && !detail::iequals(placement.element, "SpaceProp");
+    // WHZ-01: authored hazard participation admits space props to the simulation.
+    return !placement.marker && !placement.type.empty()
+        && (placement.space_hazard || !detail::iequals(placement.element, "SpaceProp"));
 }
 
 std::map<sim::tactical::TypeId, std::string> map_object_type_names(const std::vector<MapPlacement>& placements) {
@@ -733,7 +756,60 @@ std::vector<sim::tactical::SensorProfile> revealed_sensor_table(const std::span<
 }
 
 core::Result<SkirmishStart> build_start(const Fixture& fixture, const StartInputs& inputs) {
-    return Builder(fixture, inputs).run();
+    auto start = Builder(fixture, inputs).run();
+    if (start) start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+    return start;
+}
+
+sim::tactical::TacticalSetup recording_setup(const Fixture& fixture, const SkirmishStart& start) {
+    auto setup = start.setup;
+    sim::tactical::ReplaySkirmishSetup metadata;
+    metadata.map = start.map;
+    metadata.map_sha256 = start.map_sha256;
+    metadata.match = start.match;
+    metadata.victory_condition = static_cast<std::uint32_t>(start.victory_condition);
+    for (const auto& slot : fixture.slots)
+        metadata.slots.push_back({slot.slot, slot.human, slot.colour_index, slot.fleet});
+    setup.skirmish = std::move(metadata);
+    return setup;
+}
+
+core::Result<Fixture> replay_fixture(const Fixture& base, const StartInputs& inputs,
+    const sim::tactical::TacticalSetup& setup) {
+    auto fixture = base;
+    fixture.seed = setup.seed;
+    fixture.match = replay_match_options(setup, inputs.match_defaults);
+    if (setup.skirmish) {
+        fixture.map = setup.skirmish->map;
+        fixture.map_sha256 = setup.skirmish->map_sha256;
+        fixture.victory_condition = static_cast<sim::tactical::VictoryCondition>(setup.skirmish->victory_condition);
+    }
+    fixture.slots.clear();
+    const auto humans = human_slots(base);
+    for (const auto& player : setup.players) {
+        if (!player.commandable()) continue;
+        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(), [&](const auto& entry) {
+            return faction_id(entry.name) == player.faction_id;
+        });
+        if (faction == inputs.factions.end()) {
+            return core::Result<Fixture>::failure(detail::error(diagnostic_codes::fixture,
+                "replay lobby faction is absent from the selected map's content"));
+        }
+        LobbySlot slot{player.player_id, faction->name, player.team_id,
+            std::find(humans.begin(), humans.end(), player.player_id) != humans.end(), {}, std::nullopt};
+        if (setup.skirmish) {
+            const auto recorded = std::find_if(setup.skirmish->slots.begin(), setup.skirmish->slots.end(),
+                [&](const auto& entry) { return entry.player == player.player_id; });
+            if (recorded == setup.skirmish->slots.end()) {
+                return core::Result<Fixture>::failure(detail::error(diagnostic_codes::fixture, "SKSU lacks a lobby slot"));
+            }
+            slot.human = recorded->human;
+            slot.colour_index = recorded->colour_index;
+            slot.fleet = recorded->fleet;
+        }
+        fixture.slots.push_back(std::move(slot));
+    }
+    return core::Result<Fixture>::success(std::move(fixture));
 }
 
 } // namespace eawr::skirmish

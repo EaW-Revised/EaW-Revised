@@ -4,7 +4,7 @@
 
 - Product: Star Wars Empire at War: Forces of Corruption, multiplayer-style space skirmish with
   the lobby's default win condition, the M2 fixture ([m2-skirmish.md](../../plan/phase-2/m2-skirmish.md),
-  SK-33; [skirmish start](../skirmish-start.md)). P2-14 (EAWR-77).
+  SK-33; [skirmish start](../skirmish-start.md)). Fixed-force victory and defeat (legacy EAWR-77).
 - Bounded question: which objects decide a fixed-force space battle, when a player wins or loses,
   what happens with more players and teams, and in which order destructions within one frame are
   judged. The outcome comes from battle state alone: no production, credits, income or
@@ -27,7 +27,7 @@
 - State, once decided: the outcome (`BattleOutcome`: condition, winner, winner's team, the frame
   of the deciding destruction, the star base whose destruction decided it, and the frame the
   retail battle ends). It is a tagged block of the state hash and of the snapshot
-  ([replay format](../replay-format.md)); an undecided session hashes exactly as before EAWR-77.
+  ([replay format](../replay-format.md)); an undecided session hashes exactly as before the fixed-force victory and defeat work.
 - Outputs: a `victory` event in the frame that decides (player: the winner; unit: the deciding
   star base) and the outcome in that and every later snapshot. `sim_headless --replay` prints it
   (`outcome ... winner ...`) and the viewer's live-session report lists it with the local
@@ -48,7 +48,7 @@
 | VT-08 | Destructions in one frame are judged one at a time in the order they happen. When a destruction is judged, the star bases destroyed later in the same frame are still standing. In the remake the order is the tick's event order: projectile hits in ascending projectile ID, then commands in canonical order and each command's units in list order, then the durability service in ascending unit ID. | research VE-04; project (the remake's event order stands for retail's destruction order) |
 | VT-09 | The first winner decides. A pending victory rejects every later one, so a later destruction, in the same frame or after, never changes the outcome. There is no draw: when both star bases fall in one frame, the player whose star base was destroyed first loses and the other wins. | research VE-08 |
 | VT-10 | The winner's allies win with it and every player that is its enemy loses: retail shows the local player the win text when it is the winner or the winner's ally and the lose text when it is the winner's enemy. The outcome names the winner and its team. | research VE-08 |
-| VT-11 | The battle ends 210 frames (7 s) after the deciding destruction (`end_tick`). The simulation records that frame and keeps stepping; the viewer's live session halts at it and shows the end of the battle ([battle end](battle-end.md), EAWR-453). Anything else that happens during the countdown (FoC also scales damage while a victory is pending, space-damage DG-02) is not modelled. | research VE-01, VE-09; project |
+| VT-11 | The battle ends 210 frames (7 s) after the deciding destruction (`end_tick`). The simulation records that frame and keeps stepping; the viewer's live session halts at it and shows the end of the battle ([battle end](battle-end.md), victory display and battle-end delay). Anything else that happens during the countdown (FoC also scales damage while a victory is pending, space-damage DG-02) is not modelled. | research VE-01, VE-09; project |
 | VT-12 | A unit removed by scenario staging (`stage_remove`, the recorder's deletion) is not destroyed and decides nothing; a staged star base counts from the tick it is staged. | project |
 
 ### Project choices

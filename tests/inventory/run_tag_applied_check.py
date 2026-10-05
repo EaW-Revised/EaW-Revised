@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The tag perturbation check end to end on the FoC data (docs/tag-applied-check.md).
 
-Runs tag_applied_check.py on a four-row registry: a changed ship Max_Speed and a changed
-MaxRotationsSpace must change the M2 battle, a changed Score_Cost_Credits (no headless loader
-reads it) must not and must be a finding, and a presentation row is not checkable headless.
+Runs tag_applied_check.py on a small registry: ship Max_Speed, Tech_Level (PL-20),
+SpaceBehavior and MaxRotationsSpace must change the M2 battle. An unread
+Score_Cost_Credits must be a finding, and presentation rows are not checkable headless.
 Prints SKIPPED: without EAWR_EAW_GAME_ROOT.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ EXPECTED = {
     ("GameConstants/AI_SpaceAreaThreatScaleFactor", "constants"): ("not checkable", None),
     ("SpaceUnit/Behavior", "ship"): ("not checkable", None),
     ("SpaceUnit/Damage_Type", "ship"): ("no change", "no change on an applied type"),
-    ("SpaceUnit/Tech_Level", "ship"): ("no change", "no change on an applied type"),
+    ("SpaceUnit/Tech_Level", "ship"): ("changes", None),
     ("SpaceUnit/SpaceBehavior", "ship"): ("changes", None),
 }
 
@@ -57,8 +57,8 @@ def main() -> int:
         elif (row["verdict"], row["finding"]) != (verdict, finding):
             failures.append(f"{key}: {row['verdict']} / {row['finding']} ({row['reason']}), expected {verdict} / {finding}")
     tech = seen[("SpaceUnit/Tech_Level", "ship")]
-    if not tech.get("tables_changed") or tech["evidence"] != "unproven":
-        failures.append("Tech_Level must change full tables and remain unproven in this window")
+    if not tech.get("tables_changed") or tech["evidence"] != "proven":
+        failures.append("Tech_Level must change full tables and prove its PL-20 battle consumer")
     unauthored = seen[("SpaceUnit/Damage_Type", "ship")]
     if not unauthored["reason"].startswith("not authored; read unknown") or unauthored["evidence"] != "unproven":
         failures.append("unauthored Damage_Type must not claim a baseline read")

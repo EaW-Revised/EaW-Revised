@@ -1,18 +1,18 @@
 # Multiplayer readiness
 
-Design for EAWR-239,
+Design for the multiplayer-readiness audit (legacy EAWR-239),
 parts 2–3, 2026-09-26, with the owner's Lua numeric decision
-EAWR-254. This
-selects the authoritative Lua policy before EAWR-79 and
-EAWR-236, and defines
+The Lua numeric policy (legacy EAWR-254). This
+selects the authoritative Lua policy before the tactical AI host (legacy EAWR-79) and
+Lua HUD event and state bridge (legacy EAWR-236), and defines
 the M6 recovery boundary. It implements no runtime changes and does not qualify
-the current Lua host for lockstep. ADR-005/010 in
+the current Lua host for lockstep. The [headless replay decision](architecture-decisions.md#adr-005-headless-replay-determinism) and the [checked Q24 math decision](architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations) in
 [architecture decisions](architecture-decisions.md), [fixed point](fixed-point.md),
 [simulation](simulation.md), and [replay format](replay-format.md) remain binding.
 
 ## Part 1: existing simulation
 
-The audit findings on EAWR-239
+The multiplayer-readiness audit findings (legacy EAWR-239)
 summarize the read-only scan at `eb60877a0e0d785ac9295dbe2f475ac367398125`.
 No would-desync defect was found on Windows x64, Linux x64 or Linux ARM64.
 That is a bounded source review, not proof of arbitrary gameplay determinism.
@@ -25,7 +25,7 @@ That is a bounded source review, not proof of arbitrary gameplay determinism.
 | Coverage | Float scanner does not cover upstream runtime loaders | Extend scanner with a narrow converter allow-list |
 | Coverage | UI-07 currently holds by inspection | Architecture test for command-only writes |
 
-All five are tracked in EAWR-241.
+All five are tracked in determinism hardening (legacy EAWR-241).
 The audit ran root CTest: 104 passed, one optional asset test skipped; this document
 does not claim to rerun those tests. Neither 32-bit nor big-endian targets are qualified.
 
@@ -40,16 +40,16 @@ identified profile; never silently change L-15 or bless P0 hashes as gameplay ha
 
 ### Numbers: software binary64, not Q24 or hardware doubles
 
-Owner decision EAWR-254
+Owner decision on the Lua numeric policy (legacy EAWR-254)
 (option B): authoritative Lua numbers are IEEE 754 binary64 values, as in FoC's
 VM, but every operation on them runs in an integer-only soft-float core
 (Berkeley SoftFloat style) that rounds to nearest, ties to even. Script maths is
 then bit-exact binary64 and identical on every target. Q24 for script numbers
 (option A) is not bit-exact with FoC: branches near a rounding boundary and very
 large or small values can go the other way. Hardware doubles (option C) differ
-across compilers, CPUs and libm and break ADR-010; build flags do not fix that.
+across compilers, CPUs and libm and break the [checked Q24 math decision](architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations); build flags do not fix that.
 
-**How this keeps ADR-010.** A script number is a 64-bit integer bit pattern and
+**How this keeps the [checked Q24 math decision](architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations).** A script number is a 64-bit integer bit pattern and
 all maths on it is integer code, so the integer-only rule holds and no compiler
 or FPU setting can change a result. The authoritative VM build makes its number
 an opaque 64-bit type, so a leftover native float operator fails to compile, and
@@ -65,7 +65,7 @@ The committed [script inventory](../plan/inventories/lua-manifest.json) reports
 `GameRandom.Free_Random` calls, plus object-distance queries. These are call-site
 counts, not runtime frequencies or proof of signatures. They establish timing,
 scores, randomness and distance as relevant numeric consumers; the inventory is
-not a complete literal-range or arithmetic-opcode census. EAWR-79 must pin its actual
+not a complete literal-range or arithmetic-opcode census. The tactical AI host must pin its actual
 FoC dependency closure and inventory its numeric literals, operators and math
 calls before admitting it. The P0 retail smoke is EaW, not a qualified FoC AI script.
 
@@ -92,10 +92,10 @@ calls before admitting it. The P0 retail smoke is EaW, not a qualified FoC AI sc
   fixed documented algorithm with a stated error bound. The original C runtime
   may differ in the last bit; record any such difference that changes a script
   branch. Unsupported calls fail deterministically, naming module and function,
-  and are EAWR-79's explicit fallback trigger.
+  and are the tactical AI host's explicit fallback trigger.
 - *Effective precision of the original.* The Steam FoC executables are x64, and
   their Lua VM computes with SSE2 binary64; the x87 precision control that
-  Direct3D 9 changes is not used; a retail rig probe (EAWR-376) confirmed the
+  Direct3D 9 changes is not used; a retail rig probe confirmed the
   arithmetic and the UCRT formatting. Details are in the
   [numeric profile](lua-numeric-profile.md); report any mismatch to the owner
   rather than patching it silently.
@@ -114,7 +114,7 @@ extended durations follow the separate type in fixed-point.md. In the other
 direction, a Q24 value rounds once to the nearest binary64, ties to even; this is
 exact for magnitudes below 2^29.
 The P0 host's binary32 step (L-15) is not part of this profile; where FoC
-behavior depends on a binding's binary32 rounding, EAWR-79 may reproduce that
+behavior depends on a binding's binary32 rounding, the tactical AI host may reproduce that
 rounding in soft-float for that binding and documents it.
 
 ### The door to Q24 (option A)
@@ -132,7 +132,7 @@ binary64 backend is built now. Fixtures that are not about number bits
 (iteration, scheduling, persistence) go through the interface so a second
 backend can reuse them.
 
-**Load budget.** EAWR-246 measures soft-float cost per tick: time inside backend
+**Load budget.** The Lua numeric profile measures soft-float cost per tick: time inside backend
 operations and the math library, and its share of total Lua time, for FoC AI and
 story scripts in a representative skirmish with AI in every slot. Measure on the
 slowest x64 machine in the test pool (currently the rig) and report median, p99
@@ -154,7 +154,7 @@ one-time rounding of compiled binary64 constants to Q24 with module/prototype
 diagnostics for nonfinite or out-of-range values. Scripts are then no longer
 bit-exact with FoC: branches near a rounding boundary, values beyond 2^39 or
 below 2^-24, infinities and NaN (which become faults) and `tostring` output
-differ, so EAWR-79's closure and mod scripts need requalification. It is a new
+differ, so the tactical AI host's closure and mod scripts need requalification. It is a new
 numeric ABI: saves, hashes and replays made with binary64 stay tied to it and
 are not converted. Sandbox, iteration, RNG, scheduling and persistence rules
 stay as written because they use the interface.
@@ -235,7 +235,9 @@ bypasses; `collectgarbage(limit)` is an accepted no-op (amendment 3). Host resou
 collector callbacks may reclaim memory but cannot issue commands or events.
 Canonical saved state excludes unreachable garbage and allocator statistics.
 
-### Amendments from FoC's own scripts (EAWR-247)
+<a id="amendments-from-focs-own-scripts-247"></a>
+
+### Amendments from FoC's own scripts
 
 The sandbox is built in [Lua sandbox](lua-sandbox.md). Four rules above changed there,
 because FoC's shipped library depends on the original behavior; compatibility with it wins
@@ -279,9 +281,9 @@ script state and scheduler/RNG state with world state under a new explicitly
 versioned authoritative encoding. Existing v1/v2 replay goldens stay unchanged.
 Test cross-target save/load/continue, cyclic/shared graphs, yielded loops and skewed
 event queues against uninterrupted execution, not just byte round-trips. Implemented
-for the scheduler by EAWR-248: [Lua persistence](lua-persistence.md).
+for the scheduler by Lua persistence: [Lua persistence](lua-persistence.md).
 
-For EAWR-236, HUD outputs are immutable presentation messages. Hover, local animation
+For the Lua HUD event and state bridge, HUD outputs are immutable presentation messages. Hover, local animation
 and camera state never affect gameplay scripts; an authoritative click/force-click
 effect must enter the ordinary validated player command path once. Separate local
 UI state from gameplay state and test against headless execution. No renderer
@@ -396,7 +398,7 @@ advertised session limits may be revised through versioned qualification.
 ### Lessons and acceptance
 
 The owner reports Galactic Conquest desyncs and worse online experience after the
-GameSpy-to-Steam transition in EAWR-239. That motivates diagnostics and recovery; it
+GameSpy-to-Steam transition in the multiplayer-readiness audit. That motivates diagnostics and recovery; it
 does not establish Steam as the cause of state divergence. The private research
 notes' 2026-09-07 timing reassessment supersedes their older claims: frame-lead
 limits are not fixed wall-clock timeouts, Steam adaptation has conditional paths,
@@ -419,18 +421,18 @@ smoke or visual capture is not a multiplayer qualification.
 
 ## Engineering follow-ups
 
-M2 work must land before EAWR-79/#236 claim authoritative scripting; M6 work does not
+M2 work must land before the tactical AI host and Lua HUD bridge claim authoritative scripting; M6 work does not
 block their offline fixtures. The dependency order is numeric profile, sandbox
-and scheduler, then graph persistence/hash integration; EAWR-79 owns the selected
-gameplay APIs and EAWR-236 owns the presentation bridge.
+and scheduler, then graph persistence/hash integration; the tactical AI host owns the selected
+gameplay APIs and the Lua HUD bridge owns the presentation bridge.
 
 | Milestone | Engineering item |
 | --- | --- |
-| M2 | EAWR-241: existing simulation hardening |
-| M2 | EAWR-246: soft-float binary64 numeric profile, backend interface, load budget and FoC qualification |
-| M2 | EAWR-247: sandbox, iteration, RNG and tick scheduler |
-| M2 | EAWR-248: canonical Lua persistence and state hashing |
-| M3 | EAWR-252: measure GC checkpoint capacity |
-| M6 | EAWR-249: per-tick detection and first-divergence diagnostics |
-| M6 | EAWR-250: restorable checkpoints, resync, join and reconnect |
-| M6 | EAWR-251: transport/session boundary and lobby integration |
+| M2 | existing simulation hardening (legacy EAWR-241) |
+| M2 | soft-float binary64 numeric profile, backend interface, load budget and FoC qualification (legacy EAWR-246) |
+| M2 | sandbox, iteration, RNG and tick scheduler (legacy EAWR-247) |
+| M2 | canonical Lua persistence and state hashing (legacy EAWR-248) |
+| M3 | measure GC checkpoint capacity (legacy EAWR-252) |
+| M6 | per-tick detection and first-divergence diagnostics (legacy EAWR-249) |
+| M6 | restorable checkpoints, resync, join and reconnect (legacy EAWR-250) |
+| M6 | transport/session boundary and lobby integration (legacy EAWR-251) |

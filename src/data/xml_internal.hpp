@@ -2,8 +2,13 @@
 #include "eawr/data/xml.hpp"
 #include "pugixml.hpp"
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
+#include <span>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace eawr::data {
 
@@ -36,9 +41,19 @@ struct Catalog::Overlay {
 };
 
 extern std::atomic<std::uint64_t> next_generation;
+// Original byte offsets are retained even when the parser accepts a compatibility form.
+class SourceOffsets {
+public:
+    explicit SourceOffsets(std::span<const std::byte> bytes = {});
+    [[nodiscard]] std::pair<std::uint64_t, std::uint64_t> line_column(std::ptrdiff_t offset) const;
+private:
+    std::size_t size_{};
+    std::vector<std::size_t> line_starts_{0};
+};
 struct ParsedDocument {
     pugi::xml_document document;
     pugi::xml_node root;
+    SourceOffsets offsets;
 };
 
 std::string input_hash(std::span<const std::byte> bytes);
@@ -46,7 +61,8 @@ std::string unavailable_outcome(const core::Diagnostic& error);
 std::optional<std::string> canonical_object_type(std::string_view element_name);
 bool is_ability_type(std::string_view type_name);
 core::Result<ParsedDocument> parse_document(std::span<const std::byte> bytes, const vfs::AssetRecord& record);
-XmlNode build_node(pugi::xml_node source, std::span<const std::byte> bytes, const vfs::AssetRecord& record);
+XmlNode build_node(pugi::xml_node source, std::span<const std::byte> bytes, const vfs::AssetRecord& record,
+                  const SourceOffsets& offsets);
 std::string included_path(std::string_view registry_path, std::string value);
 // DocumentOverrides of this thread for the document at `canonical_path`, applied to its root.
 void apply_document_overrides(XmlNode& root, std::string_view canonical_path);
@@ -54,11 +70,11 @@ std::string record_identity(const vfs::AssetRecord& record);
 void add_definition(Catalog::Impl& catalog, pugi::xml_node source, std::span<const std::byte> bytes,
     const vfs::AssetRecord& record, Profile profile, Category category, std::string schema_type,
     std::size_t registry_order, std::size_t definition_order,
-    std::vector<core::Diagnostic>& diagnostics, const LoadOptions& options);
+    std::vector<core::Diagnostic>& diagnostics, const LoadOptions& options, const SourceOffsets& offsets);
 void add_nested_abilities(Catalog::Impl& catalog, pugi::xml_node source,
     std::span<const std::byte> bytes, const vfs::AssetRecord& record, Profile profile,
     std::size_t registry_order, std::size_t& definition_order,
-    std::vector<core::Diagnostic>& diagnostics, const LoadOptions& options,
+    std::vector<core::Diagnostic>& diagnostics, const LoadOptions& options, const SourceOffsets& offsets,
     bool inside_abilities = false);
 void index_winners(Catalog::Impl& catalog, std::vector<core::Diagnostic>& diagnostics);
 std::string ascii_lower(std::string_view value);

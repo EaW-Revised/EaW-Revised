@@ -1,6 +1,7 @@
 // P2-21 (#84): FoC's sound-event rules (presentation::audio, docs/behaviour/battle-audio.md).
 // Synthetic inputs only; no game data.
 #include "eawr/presentation/audio/sfx.hpp"
+#include "eawr/presentation/audio/announcements.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -232,6 +233,23 @@ void voice_rules() {
     }
 }
 
+void attached_voice_positions() {
+    audio::Random random(7);
+    audio::Voices voices;
+    const audio::Vec3 listener{};
+    auto spin = event("Spin", true, 2);
+    const auto near_start = voices.start({&spin, audio::Vec3{100.0, 0.0, 0.0}, false}, listener, random);
+    const auto far_start = voices.start({&spin, audio::Vec3{300.0, 0.0, 0.0}, false}, listener, random);
+    // SP-03/BA-05: the initially nearer spinning copy has flown beyond the other voice.
+    voices.set_position(near_start.voice, {500.0, 0.0, 0.0});
+    const auto replacement = voices.start({&spin, audio::Vec3{400.0, 0.0, 0.0}, false}, listener, random);
+    expect(replacement.result == Result::playing && replacement.stopped == near_start.voice,
+           "an attached voice is culled at its current position, not its starting position");
+    expect(voices.playing(far_start.voice) == &spin && voices.playing_count() == 2,
+           "moving the copy keeps the other voice and the instance count");
+    voices.set_position(audio::Voices::voices_3d + audio::Voices::voices_2d, {});
+}
+
 void speakers() {
     const std::vector<std::string> rankings{"Hero", "Super", "Capital", "Frigate", "Corvette", "Transport",
                                             "Bomber", "Fighter"};
@@ -278,6 +296,73 @@ void music() {
     expect(cue && cue->file == "B.MP3", "battle resumes where it stopped");
 }
 
+void announcements() {
+    using Cue = audio::SightingAnnouncements::Cue;
+    audio::SightingAnnouncements sightings;
+    bool hero_seen = false;
+    expect(sightings.observe(hero_seen, true, false, true, true) == Cue::type,
+           "type cue wins its first service call");
+    expect(hero_seen && !sightings.enemy_seen(), "type retained, enemy still eligible");
+    expect(sightings.observe(hero_seen, true, false, true, true) == Cue::enemy,
+           "still-visible object can trigger first enemy without a new reveal");
+    expect(sightings.observe(hero_seen, true, false, true, true) == Cue::none,
+           "refog/reveal never resets type or first enemy eligibility");
+    bool another_type = false;
+    expect(sightings.observe(another_type, true, false, true, true) == Cue::type,
+           "type sighting remains independent of first enemy");
+    audio::SightingAnnouncements busy;
+    bool busy_type = false;
+    expect(busy.observe(busy_type, true, true, true, true) == Cue::enemy,
+           "busy 2D consumes type but does not block first enemy");
+    expect(busy_type && busy.observe(busy_type, true, false, true, true) == Cue::none,
+           "busy type is not retried after WAV completion");
+    audio::SightingAnnouncements absent;
+    bool absent_type = false;
+    expect(absent.observe(absent_type, true, false, false, true) == Cue::enemy,
+           "missing type cue still permits first enemy");
+    expect(absent.observe(absent_type, true, false, true, true) == Cue::none,
+           "missing enemy/type cue does not restore consumed eligibility");
+    bool friendly_type = false;
+    audio::SightingAnnouncements friendly;
+    expect(friendly.observe(friendly_type, true, false, true, false) == Cue::type,
+           "type handler has no enemy-owner gate");
+    bool unannounced = false;
+    expect(friendly.observe(unannounced, false, false, true, false) == Cue::none && !unannounced,
+           "unflagged allied or neutral object remains silent");
+
+    const int one = 1, two = 2;
+    audio::SpeechQueue<int, 3> queue;
+    expect(queue.push(&one, "first") && queue.push(&one, "duplicate") && queue.push(&two, "last"),
+           "FIFO retains duplicates without priority or cooldown");
+    expect(!queue.push(&two, "overflow") && queue.size() == 3, "bounded storage reports overflow");
+    expect(queue.front()->event == &one && queue.front()->reason == "first", "first speech at front");
+    queue.pop();
+    expect(queue.front()->reason == "duplicate", "completion/failure removes exactly one front");
+    expect(queue.push(&two, "wrapped"), "queue reuses released storage");
+    queue.pop();
+    expect(queue.front()->reason == "last", "wrapped insertion preserves FIFO");
+    queue.pop(); queue.pop(); queue.pop();
+    expect(!queue.front() && !queue.push(nullptr, "missing"), "empty and missing event are safe");
+
+    audio::SpeechStream stream;
+    expect(stream.admit(3), "normal speech admitted");
+    stream.opened();
+    const auto old = stream.handle();
+    expect(!stream.admit(4) && stream.contains(old), "less important newcomer preserves playing stream");
+    expect(stream.admit(3) && !stream.contains(old) && !stream.active(),
+           "equal priority retires old before replacement file opens");
+    stream.opened();
+    stream.finished(true);
+    expect(stream.active(), "paused stream remains retained for ducking");
+    expect(stream.admit(1) && !stream.active(), "higher priority interrupts, failed file leaves no stream");
+    stream.opened(); stream.finished(false);
+    expect(!stream.active(), "unpaused completion releases stream");
+    expect(near(audio::speech_sfx_gain(0.8, true, false), 0.3), "speech uses absolute ceiling, not multiplication");
+    expect(near(audio::speech_sfx_gain(0.2, true, false), 0.2), "quiet SFX stays quiet");
+    expect(near(audio::speech_sfx_gain(0.8, true, true), 0.8), "GUI dialog bypasses cap");
+    expect(near(audio::speech_sfx_gain(0.8, false, false), 0.8), "WAV VO or queued-only speech does not duck");
+}
+
 } // namespace
 
 int main() {
@@ -285,8 +370,10 @@ int main() {
     wave_files();
     falloff_and_listener();
     voice_rules();
+    attached_voice_positions();
     speakers();
     music();
+    announcements();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

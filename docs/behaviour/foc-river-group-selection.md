@@ -11,7 +11,7 @@ A family-zero header still produces no map-wide water plane. Mode 5 uses the
 header tint and alpha and the group's flow mini `0x03` to scroll its texture.
 
 Retail classification, from the FoC debug build
-([audit](debug-build-audit.md#river-groups), EAWR-265): each group is a terrain track.
+([audit](debug-build-audit.md#river-groups), debug-build behaviour audit): each group is a terrain track.
 Mini `0x01` is the track's draw mode. Water, road and river are a separate track
 type in mini `0x10` (0 water, 1 road, 2 river). Retail draws water-type tracks in
 the water-decoration pass and every other track in the track pass. Over a river-type

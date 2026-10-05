@@ -53,6 +53,7 @@ struct AbilityRequest {
     // #561 (AB-11): the target unit a targeted activation was aimed at; none while it still
     // waits for one.
     sim::EntityId target{sim::invalid_entity_id};
+    std::optional<sim::math::Vec3> position{}; // world-point abilities; zero retains owner-position fallback
 };
 [[nodiscard]] std::string_view to_string(AbilityRequest::Kind kind) noexcept;
 class AbilityCommands {
@@ -77,6 +78,7 @@ struct AbilityButton {
     double recharge{1.0};        // the dial's completion; 1 draws no dial
     bool autofire{};             // every unit on autofire: the animated outline
     std::vector<sim::EntityId> units; // the group's card units
+    std::string_view disabled_reason{}; // RG-03: borrowed from immutable process-lifetime policy text
 };
 // AB-08: an ability mark on a unit card.
 struct CardAbilityMark {

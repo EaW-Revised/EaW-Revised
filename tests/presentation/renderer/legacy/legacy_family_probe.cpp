@@ -339,6 +339,8 @@ void EawrLegacyFamilyProbe::fail_closed() {
         {"additive_fixed_function", legacy("MeshAdditive.fx", "t1", "t1_p0", presentation::RenderPass::transparent)},
         {"additive_opaque_pass", legacy("MeshAdditive.fx", "t0", "t0_p0", presentation::RenderPass::opaque)},
         {"additive_scalar_color", additive({{"Color", 0.5F}})},
+        {"vertex_additive_scalar_rate", legacy("MeshAdditiveVColor.fx", "t0", "t0_p0",
+            presentation::RenderPass::transparent, {{"UVScrollRate", 0.5F}})},
         {"offset_texture_offset", offset({{"UVOffset", std::string("offset.tga")}})},
         {"solid_transparent_pass", legacy("MeshSolidColor.fx", "t0", "t0_p0", presentation::RenderPass::transparent)},
         {"colorize_distinct_gloss", legacy("MeshGlossColorize.fx", "sph_t0", "sph_t0_p0",
@@ -413,6 +415,36 @@ void EawrLegacyFamilyProbe::_ready() {
     scene("additive_defaults", [this, quadrants, center] {
         fresh(); backdrop();
         upload(1, center(), quadrants, additive({}), "additive defaults");
+        submit({100, 1});
+    });
+    // AVC-02..04: use actual uploaded vertex colour, ignore both alpha and
+    // the ordinary additive family's Color, and advance the authored UV clock.
+    const auto vertex_model = [center](const float alpha) {
+        auto result = center();
+        for (auto& vertex : result.meshes.front().submeshes.front().vertices) {
+            vertex.color = {0.5F, 0.75F, 1.0F, alpha};
+        }
+        return result;
+    };
+    const auto vertex_material = legacy("MeshAdditiveVColor.fx", "t0", "t0_p0",
+        presentation::RenderPass::transparent, {
+            {"UVScrollRate", assets::Vec4f{1.0F, 0.0F, 7.0F, 9.0F}},
+            {"eawr_effect_time", 0.0F},
+            {"Color", assets::Vec4f{0.0F, 0.0F, 0.0F, 0.0F}}});
+    scene("vertex_additive", [this, quadrants, vertex_model, vertex_material] {
+        fresh(); backdrop();
+        upload(1, vertex_model(0.0F), quadrants, vertex_material, "vertex additive alpha zero");
+        submit({100, 1});
+    });
+    scene("vertex_additive_alpha_one", [this, quadrants, vertex_model, vertex_material] {
+        fresh(); backdrop();
+        upload(1, vertex_model(1.0F), quadrants, vertex_material, "vertex additive alpha one");
+        submit({100, 1});
+    });
+    scene("vertex_additive_scrolled", [this, quadrants, vertex_model, vertex_material] {
+        fresh(); backdrop();
+        upload(1, vertex_model(0.0F), quadrants, vertex_material, "vertex additive clock");
+        check(renderer_->set_material_scalar(1, "eawr_effect_time", 0.5F).has_value(), "set vertex additive clock");
         submit({100, 1});
     });
     scene("additive_culled", [this, quadrants, authored] {

@@ -9,6 +9,7 @@
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/types.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
@@ -20,6 +21,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -92,6 +94,7 @@ struct LiveTickEvents {
     std::uint64_t tick{};
     std::vector<sim::tactical::Event> events;
     std::vector<sim::tactical::CombatEvent> combat_events;
+    std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
 };
 
 // What events_after() hands back: the ticks with presented events in (after, through], oldest
@@ -135,7 +138,8 @@ public:
 
     // Keeps the presented events of the snapshot's tick, then applies the bounds. Snapshots
     // come in completed-tick order.
-    void record(const sim::tactical::TacticalSnapshot& snapshot);
+    void record(const sim::tactical::TacticalSnapshot& snapshot,
+        std::span<const sim::tactical::AsteroidImpact> asteroid_impacts = {});
     // The kept ticks in (after, through], and the newest dropped tick in that range, if any.
     [[nodiscard]] LiveEvents after(std::uint64_t after, std::uint64_t through) const;
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
@@ -146,6 +150,8 @@ private:
 
     Bounds bounds_;
     std::deque<LiveTickEvents> records_; // oldest first
+    // Sparse presentation-only due ticks, bounded by Bounds::ticks and erased after delivery.
+    std::set<std::uint64_t> ability_due_ticks_;
     std::size_t bytes_{};
     // The oldest and the newest dropped tick that had events: a range asked after the log
     // dropped them lost what lies between, conservatively.
@@ -155,10 +161,17 @@ private:
 
 class LiveSession final {
 public:
+    // TM-02: target rates clamp to 1..1000 and use whole millisecond intervals.
+    // Exposed so pacing contracts can check the decision without measuring host speed.
+    [[nodiscard]] static std::chrono::milliseconds tick_interval(std::uint32_t target_rate) noexcept;
+
     // WR-13: nonblocking preview query. Busy simulation returns no verdict; presentation
     // keeps its last preview until the next frame. The authoritative command always rechecks.
     [[nodiscard]] std::optional<bool> reinforcement_point(sim::tactical::PlayerId player,
         sim::tactical::TypeId type, const sim::math::Vec3& point) const;
+    // WHE-40: counts retain the logical purchase identity after deployment.
+    [[nodiscard]] sim::tactical::ProductionCounts production_counts(sim::tactical::PlayerId player,
+        sim::tactical::TypeId type) const;
     enum class Pacing : std::uint8_t {
         // The simulation thread keeps one tick due every wall-clock interval of the target rate
         // (1000 / target whole milliseconds, docs/behaviour/tactical-time-controls.md TM-02).
@@ -196,6 +209,9 @@ public:
         std::shared_ptr<const LiveScripts> scripts{};
         // #494: the player whose fog cells each kept tick carries (fog_at()); none keeps no fog history.
         std::optional<sim::tactical::PlayerId> fog_player{};
+        // WBF-05/10: publish tick zero while presentation finishes loading. This
+        // gate is installed before the simulation thread starts, avoiding a first-tick race.
+        bool initially_paused{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render

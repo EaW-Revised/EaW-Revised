@@ -5,8 +5,8 @@
 - Product: Star Wars Empire at War: Forces of Corruption, a space skirmish decided by the
   lobby's win condition ([space victory](space-victory.md), VT-01 to VT-12). The claims come from
   the FoC debug build, read on 2026-09-28 under the [clean-room rule](../clean-room.md); the
-  private evidence map (IDs BX-01 to BX-08) is under the ignored `out/research/`. EAWR-453, gap 2 of
-  the Phase 2 plan, and the victory/defeat part of EAWR-83's acceptance.
+  private evidence map (IDs BX-01 to BX-08) is under the ignored `out/research/`. This covers the victory display and battle-end delay, gap 2 of
+  the Phase 2 plan, and the victory/defeat part of the tactical HUD and team-colour acceptance criteria.
 - Bounded question: what the local player sees and hears when the battle is decided, what the
   7-second countdown (VT-11) is counted in, and what "the battle ends" means in a skirmish.
 - Source tags: **research** (debug build), **data** (a FoC file), **project** (a remake choice)
@@ -27,7 +27,7 @@
 | BE-02 | The message is `TEXT_WIN_TACTICAL` ("WE ARE VICTORIOUS!") when the local player is the winner or the winner's ally, and `TEXT_LOSE_TACTICAL` ("WE HAVE BEEN DEFEATED!") when it is the winner's enemy (VT-10). A player that is neither sees none. | research BX-01, BX-04; data (text) |
 | BE-03 | The message is one line of text in `Win_Lose_Message_Font` (EmpireAtWar-Bold) at `Win_Lose_Message_Font_Size` 24, in `Win_Message_Color` (223, 243, 255, 255) or `Lose_Message_Color` (255, 244, 223, 255) (`GameConstants.xml`). It is centred horizontally (its left edge at half the screen width less half its width) and placed at 0.4 of the screen height from the top. A new message replaces the old one; it stays up until the battle ends. | research BX-04; data |
 | BE-04 | The countdown is `end_tick` minus the deciding frame, 210 logical frames (VT-11). It counts logical frames, so a pause holds it and the game speed changes how long it lasts on the wall clock ([time controls](tactical-time-controls.md) TM-07). The battle goes on while it runs. | research BX-05 |
-| BE-05 | When the countdown reaches zero in a skirmish, the tactical mode pauses and the full-screen battle end dialog (`IDD_BATTLE_END_DIALOG`) opens: the result, the units of each side and the battle's figures, with its own summary-screen win or lose music. In a campaign battle the game returns to the galaxy instead. The rig's retail stills (fog off, Coruscant, EAWR-453 staging probe) show the dialog titled `TEXT_WIN_BATTLE` ("You have won the battle!") or `TEXT_LOST_BATTLE` ("You have lost the battle!") with `TEXT_BATTLE_TIME`, `TEXT_YOUR_LOSSES` and `TEXT_ENEMY_LOSSES` panes listing the lost units, and one Exit button. | research BX-06, BX-07, BX-08; rig capture |
+| BE-05 | When the countdown reaches zero in a skirmish, the tactical mode pauses and the full-screen battle end dialog (`IDD_BATTLE_END_DIALOG`) opens: the result, the units of each side and the battle's figures, with its own summary-screen win or lose music. In a campaign battle the game returns to the galaxy instead. The rig's retail stills (fog off, Coruscant, battle-end staging probe) show the dialog titled `TEXT_WIN_BATTLE` ("You have won the battle!") or `TEXT_LOST_BATTLE` ("You have lost the battle!") with `TEXT_BATTLE_TIME`, `TEXT_YOUR_LOSSES` and `TEXT_ENEMY_LOSSES` panes listing the lost units, and one Exit button. | research BX-06, BX-07, BX-08; rig capture |
 
 ### Project choices
 
@@ -50,11 +50,11 @@
 
 | ID | Unknown | Effect |
 |---|---|---|
-| BE-U1 | Whether BE-03's 0.4 is the text's top edge or its baseline. | The remake takes the top edge; the line may sit up to one line height off. The owner capture (EAWR-311) settles it. |
+| BE-U1 | Whether BE-03's 0.4 is the text's top edge or its baseline. | The remake takes the top edge; the line may sit up to one line height off. The queued owner capture settles it (legacy EAWR-311). |
 | BE-U2 | The battle end dialog's layout and figures (BE-05). | The minimal panel stands in for it (BEP-03). |
 
 ## Fidelity list
 
 - The full battle end dialog (BE-05, BE-U2): its own ticket later. Until then the panel's title and button
   (Victory!/Defeat!, Quit Game) differ from the dialog's (You have won/lost the battle!, Exit).
-- The win/lose music and sound events (BE-01), with the battle audio (EAWR-443).
+- The win/lose music and sound events (BE-01), with the battle audio foundation.

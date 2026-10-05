@@ -98,6 +98,8 @@ EaWR_Stage = {
 	sample_every = 0.4,   -- seconds between the speeds listed in a turbo line
 	sample_count = 9,
 	samples = {},
+	speed_samples = {},
+	ability_states = {},
 	samples_taken = 0,
 	ability_lead = 4,     -- seconds flying (or standing) before the ability goes on
 	ability_hold = 9,     -- seconds the ability stays on
@@ -331,6 +333,7 @@ end
 -- next battle starts from the first ship with the AI suspended again.
 function EaWR_Stage_Reset()
 	local d = EaWR_Stage
+	ER = nil
 	EaWR_Stage_Dispose(EaWR_Stage_Owned())
 	d.service = 0
 	d.started = nil
@@ -344,6 +347,18 @@ function EaWR_Stage_Reset()
 	d.post_wait = 0
 	d.camera_wait = 0
 	d.history = {}
+	d.timeline_sample = nil
+	d.ability_states = {}
+	d.speed_samples = {}
+	d.samples = {}
+	d.samples_taken = 0
+	d.mask_answers = nil
+	d.mask_unknown_answer = nil
+	d.mask_unknown_requested = nil
+	d.mask_unknown_hold = nil
+	d.mask_debugger = nil
+	d.at_sample = nil
+	d.at_good_against = nil
 	d.victims = {}
 	d.ship = nil
 	d.subject = nil
@@ -625,7 +640,9 @@ function EaWR_Stage_Samples(age)
 	local d = EaWR_Stage
 	while d.samples_taken < d.sample_count and (d.samples_taken + 1) * d.sample_every <= age do
 		d.samples_taken = d.samples_taken + 1
-		d.samples[d.samples_taken] = string.format("%.1f", EaWR_Stage_Speed_Over(2))
+		local speed = EaWR_Stage_Speed_Over(2)
+		d.samples[d.samples_taken] = string.format("%.1f", speed)
+		d.speed_samples[d.samples_taken] = speed
 	end
 	local text = ""
 	for i = 1, table.getn(d.samples) do
@@ -701,11 +718,17 @@ function EaWR_Stage_Abilities()
 		return
 	end
 	local turbo = d.scenario == "turbo"
+	local speed = EaWR_Stage_Speed()
 	d.line = "AB " .. d.tag .. " " .. d.phase .. " +" .. string.format("%.1f", age) ..
-		" v" .. string.format("%.2f", EaWR_Stage_Speed())
+		" v" .. string.format("%.2f", speed)
 	if turbo and (d.phase == "on" or d.phase == "off") then
 		d.line = d.line .. " s" .. EaWR_Stage_Samples(age)
 	end
+	d.timeline_sample = {scenario = d.scenario, phase = d.phase, service = d.service,
+	                     now = now, age = age, tag = d.tag, ability = d.entry[2],
+	                     speed = speed, samples = d.speed_samples, samples_taken = d.samples_taken}
+	d.ability_states[d.tag] = d.ability_states[d.tag] or {}
+	d.ability_states[d.tag][d.phase] = d.timeline_sample
 	local lead = turbo and d.turbo_lead or d.ability_lead
 	local hold = turbo and d.turbo_hold or d.ability_hold
 	local after = turbo and d.turbo_after or d.ability_after
@@ -716,6 +739,7 @@ function EaWR_Stage_Abilities()
 				return
 			end
 			d.samples = {}
+			d.speed_samples = {}
 			d.samples_taken = 0
 			EaWR_Stage_Set_Phase("on")
 		end
@@ -726,6 +750,7 @@ function EaWR_Stage_Abilities()
 				return
 			end
 			d.samples = {}
+			d.speed_samples = {}
 			d.samples_taken = 0
 			EaWR_Stage_Set_Phase("off")
 		end
@@ -800,17 +825,28 @@ EaWR_Stage_Mask_Filters = {
 	{"FrC", "Frigate | Capital"}, {"Fr", "Frigate"},
 }
 
-function EaWR_Stage_Mask_Probe(station, localp, filter)
+function EaWR_Stage_Mask_Value(station, localp, filter)
 	local ok, found = pcall(Find_Nearest, station, filter, localp, false)
 	if not ok then
-		return "E"
+		return {kind = "error"}
 	end
 	if not EaWR_Stage_Valid(found) then
-		return "nil"
+		return {kind = "nil"}
 	end
 	local okT, name = pcall(function() return found.Get_Type().Get_Name() end)
 	local okD, distance = pcall(function() return station.Get_Distance(found) end)
-	return (okT and tostring(name) or "?") .. "@" .. (okD and type(distance) == "number" and string.format("%d", distance) or "?")
+	return {kind = "object", name = okT and tostring(name) or nil,
+	        distance = okD and type(distance) == "number" and distance or nil}
+end
+
+function EaWR_Stage_Mask_Text(value)
+	if value.kind == "error" then return "E" end
+	if value.kind == "nil" then return "nil" end
+	return (value.name or "?") .. "@" .. (value.distance and string.format("%d", value.distance) or "?")
+end
+
+function EaWR_Stage_Mask_Probe(station, localp, filter)
+	return EaWR_Stage_Mask_Text(EaWR_Stage_Mask_Value(station, localp, filter))
 end
 
 function EaWR_Stage_Find_Mask()
@@ -828,19 +864,30 @@ function EaWR_Stage_Find_Mask()
 			return
 		end
 		local parts = {}
+		d.mask_answers = {}
 		for i = 1, table.getn(EaWR_Stage_Mask_Filters) do
 			local entry = EaWR_Stage_Mask_Filters[i]
-			table.insert(parts, entry[1] .. "=" .. EaWR_Stage_Mask_Probe(station, localp, entry[2]))
+			local value = EaWR_Stage_Mask_Value(station, localp, entry[2])
+			d.mask_answers[entry[1]] = value
+			table.insert(parts, entry[1] .. "=" .. EaWR_Stage_Mask_Text(value))
 		end
 		d.mask_result = table.concat(parts, " ")
-		pcall(DebugMessage, "EAWR FM " .. d.mask_result)
+		if not d.mask_debugger then pcall(DebugMessage, "EAWR FM " .. d.mask_result) end
 		EaWR_Stage_Set_Phase("known")
-	elseif d.phase == "known" and now - d.phase_start >= 1 then
-		d.mask_unknown = EaWR_Stage_Mask_Probe(station, localp, "Eawr_Unknown_Name")
-		pcall(DebugMessage, "EAWR FM X=" .. d.mask_unknown)
+	elseif d.phase == "known" and not d.mask_unknown_hold and now - d.phase_start >= 1 then
+		d.mask_unknown_requested = true
+		d.mask_unknown_answer = EaWR_Stage_Mask_Value(station, localp, "Eawr_Unknown_Name")
+		d.mask_unknown = EaWR_Stage_Mask_Text(d.mask_unknown_answer)
+		if not d.mask_debugger then pcall(DebugMessage, "EAWR FM X=" .. d.mask_unknown) end
 		EaWR_Stage_Set_Phase("done")
 	end
-	d.line = "FM s" .. d.service .. " " .. tostring(d.mask_result) .. " X=" .. tostring(d.mask_unknown)
+	if d.mask_debugger then
+		-- The joined legacy label can exceed the debug build's output limit.
+		-- Keep the full typed results and a short visual phase label instead.
+		d.line = "FM s" .. d.service .. " " .. d.phase .. " X=" .. tostring(d.mask_unknown)
+	else
+		d.line = "FM s" .. d.service .. " " .. tostring(d.mask_result) .. " X=" .. tostring(d.mask_unknown)
+	end
 end
 
 -- #532: the enemy ships and craft (not structures) within pause_near of the local station.
@@ -981,6 +1028,10 @@ function EaWR_Stage_Pause()
 	local function at(value)
 		return value and string.format("%.0f", value) or "-"
 	end
+	d.timeline_sample = {scenario = d.scenario, phase = d.phase, service = d.service, now = now,
+	                     fleet_alive = alive, near = near, last_kill = d.last_kill,
+	                     near_time = d.near_time, near3_time = d.near3_time, hit_time = d.hit_time,
+	                     wiped = d.wiped, after_near3 = d.after_near3, after_hit = d.after_hit}
 	d.line = "PZ t" .. at(now) .. " f" .. alive .. " k" .. at(d.last_kill) .. " n" .. at(d.near_time) ..
 		" m" .. at(d.near3_time) .. " h" .. at(d.hit_time) .. " c" .. near .. " a" .. at(d.after_near3) ..
 		" d" .. at(d.after_hit)
@@ -1060,9 +1111,11 @@ EaWR_Stage_Good_Against_Types = {
 
 function EaWR_Stage_Good_Against(ship, localp)
 	local parts = {}
+	local state = {queries = {}}
 	for i = 1, table.getn(EaWR_Stage_Good_Against_Types) do
 		local entry = EaWR_Stage_Good_Against_Types[i]
 		local answer = "-"
+		local record = {kind = "missing"}
 		local ok, all = pcall(Find_All_Objects_Of_Type, entry[2])
 		if ok and all then
 			for j = 1, table.getn(all) do
@@ -1071,28 +1124,36 @@ function EaWR_Stage_Good_Against(ship, localp)
 				if answer == "-" and EaWR_Stage_Valid(object) and okOwner and owner == localp then
 					local okG, good = pcall(function() return object.Is_Good_Against(ship) end)
 					answer = okG and tostring(good) or "E"
+					record.kind = okG and "result" or "error"
+					if okG then record.value = good end
 				end
 			end
 		elseif not ok then
 			answer = "E"
+			record.kind = "error"
 		end
+		state.queries[entry[1]] = record
 		table.insert(parts, entry[1] .. "=" .. answer)
 	end
 	local okH, hull = pcall(function() return ship.Get_Hull() end)
 	local okS, shield = pcall(function() return ship.Get_Shield() end)
+	state.hull, state.shield = okH and hull or nil, okS and shield or nil
+	state.hull_error, state.shield_error = not okH, not okS
 	table.insert(parts, "hu" .. (okH and string.format("%.3f", hull) or "E"))
 	table.insert(parts, "sh" .. (okS and string.format("%.3f", shield) or "E"))
 	local deadly = "E"
 	local okD, enemy = pcall(FindDeadlyEnemy, ship)
+	state.deadly = {kind = okD and "nil" or "error"}
 	if okD then
 		deadly = "nil"
 		if enemy then
 			local okN, name = pcall(function() return enemy.Get_Type().Get_Name() end)
 			deadly = okN and tostring(name) or "?"
+			state.deadly = {kind = okN and "object" or "error", name = okN and tostring(name) or nil}
 		end
 	end
 	table.insert(parts, "DE=" .. deadly)
-	return table.concat(parts, " ")
+	return table.concat(parts, " "), state
 end
 
 function EaWR_Stage_Arrived(ship, x, y)
@@ -1213,6 +1274,8 @@ function EaWR_Stage_Ai_Turn()
 				target0 = okN0 and tostring(name0) or "?"
 			end
 			local okO0, orders0 = pcall(function() return d.ship.Has_Active_Orders() end)
+			d.at_sample = {cycle = cycle, age = 0, heading0 = d.at_h0, x = d.at_x0, y = d.at_y0,
+			               target = target0, orders = okO0 and orders0}
 			pcall(DebugMessage, "EAWR AT c" .. cycle .. " t0 now " .. string.format("%.1f", now) ..
 				" h0 " .. string.format("%.1f", d.at_h0 and EaWR_Stage_Degrees(d.at_h0) or 999) ..
 				" tg" .. target0 .. " ao" .. tostring(okO0 and orders0) ..
@@ -1261,6 +1324,10 @@ function EaWR_Stage_Ai_Turn()
 				target = okN and tostring(name) or "?"
 			end
 			local okO, orders = pcall(function() return d.ship.Has_Active_Orders() end)
+			-- Preserve the same half-second observations as raw values for debugger reads.
+			d.at_sample = {cycle = cycle, age = age, angle = a, moved = moved,
+			               target = target, orders = okO and orders, shield = shield, hull = hull,
+			               x = x, y = y, tt = d.at_tt, tm = d.at_tm, th = d.at_th}
 			pcall(DebugMessage, "EAWR AT c" .. cycle .. " t" .. at(age) .. " a" .. at(a) .. " d" .. at(moved) ..
 				" tg" .. target .. " ao" .. tostring(okO and orders) .. " sh" .. at(shield) .. " hu" .. at(hull) ..
 				" x" .. at(x) .. " y" .. at(y) ..
@@ -1268,7 +1335,9 @@ function EaWR_Stage_Ai_Turn()
 			d.at_ga = (d.at_ga or 0) - 1
 			if d.at_ga <= 0 then
 				d.at_ga = 4
-				pcall(DebugMessage, "EAWR GA c" .. cycle .. " t" .. at(age) .. " " .. EaWR_Stage_Good_Against(d.ship, localp))
+				local text, state = EaWR_Stage_Good_Against(d.ship, localp)
+				d.at_good_against = state
+				pcall(DebugMessage, "EAWR GA c" .. cycle .. " t" .. at(age) .. " " .. text)
 			end
 		end
 		if age >= d.aiturn_watch then
@@ -1633,6 +1702,9 @@ function EaWR_Stage_Melee_Line(now)
 	local d = EaWR_Stage
 	local rs, rq = EaWR_Stage_Melee_Count(d.melee_sides[1])
 	local es, eq = EaWR_Stage_Melee_Count(d.melee_sides[2])
+	d.timeline_sample = {scenario = d.scenario, phase = d.phase, service = d.service, now = now,
+	                     age = now - d.phase_start, cycle = d.cycle, form = d.melee_form,
+	                     rebel_ships = rs, rebel_squadrons = rq, empire_ships = es, empire_squadrons = eq}
 	d.line = "ML c" .. d.cycle .. " " .. d.phase .. " +" .. EaWR_Stage_Seconds(d.phase_start) .. " R" .. rs .. "/" ..
 		rq .. " E" .. es .. "/" .. eq .. " " .. tostring(d.melee_form) .. " t" .. string.format("%.0f", now)
 	return rs + rq, es + eq
@@ -1772,6 +1844,45 @@ function EaWR_Stage_Melee()
 	end
 end
 
+-- A stationary authored generator model for the attached-particle eye check (BP-67).
+-- The local player owns the subject so the normal capture lobby can stay Rebel versus Empire.
+function EaWR_Stage_Shield_Generator()
+	local d = EaWR_Stage
+	if d.err then return end
+	if EaWR_Stage_Now() - d.phase_start < d.start_wait then return end
+	if not EaWR_Stage_Valid(d.ship) then
+		local units = Spawn_Unit(Find_Object_Type("Underworld_Star_Base_1"),
+			Create_Position(-2200, 1500, 0), Find_Player("local"))
+		if not units or not EaWR_Stage_Valid(units[1]) then error("generator spawn failed") end
+		d.ship = units[1]
+		if d.ship.Prevent_Opportunity_Fire(true) == false then error("generator fire suppression refused") end
+	end
+	EaWR_Stage_Camera(d.ship, false)
+	d.line = "FX shieldgen intact " .. EaWR_Stage_Seconds(d.phase_start)
+end
+
+-- The owner's upward MC80-versus-Acclamator shot geometry, held for repeated captures.
+function EaWR_Stage_Bolts()
+	local d = EaWR_Stage
+	if d.err or EaWR_Stage_Now() - d.phase_start < d.start_wait then return end
+	local localp, enemy = EaWR_Stage_Players()
+	if not localp or not enemy then error("bolt players unavailable") end
+	if not EaWR_Stage_Valid(d.ship) then
+		local units = Spawn_Unit(Find_Object_Type("Calamari_Cruiser"), Create_Position(-2200, 1500, 0), localp)
+		if not units or not EaWR_Stage_Valid(units[1]) then error("bolt shooter spawn failed") end
+		d.ship = units[1]
+	end
+	if not EaWR_Stage_Valid(d.victims[1]) then
+		local units = Spawn_Unit(Find_Object_Type("Acclamator_Assault_Ship"), Create_Position(-2200, 2300, 0), enemy)
+		if not units or not EaWR_Stage_Valid(units[1]) then error("bolt target spawn failed") end
+		d.victims = {units[1]}
+		if d.victims[1].Prevent_Opportunity_Fire(true) == false then error("bolt target fire suppression refused") end
+		if d.ship.Attack_Target(d.victims[1]) == false then error("bolt attack refused") end
+	end
+	EaWR_Stage_Camera(d.ship, false)
+	d.line = "FX bolts north " .. EaWR_Stage_Seconds(d.phase_start)
+end
+
 function EaWR_Stage_Service()
 	local d = EaWR_Stage
 	d.service = d.service + 1
@@ -1782,7 +1893,7 @@ function EaWR_Stage_Service()
 		d.line = "STG " .. tostring(d.scenario) .. " start"
 		d.phase_start = EaWR_Stage_Now()
 	end
-	if not d.ai_suspended and d.scenario ~= "pause" and d.scenario ~= "pause_wings" then
+	if not d.ai_suspended and d.scenario ~= "pause" and d.scenario ~= "pause_wings" and d.scenario ~= "reinforce_observe" then
 		-- The AI player keeps its fleet home, so no fight crosses the staging; nothing is
 		-- staged until that call goes through.
 		if not EaWR_Stage_Call("suspend-ai", Suspend_AI, 1) then
@@ -1819,9 +1930,248 @@ function EaWR_Stage_Step()
 		EaWR_Stage_Find_Mask()
 	elseif d.scenario == "melee" then
 		EaWR_Stage_Melee()
+	elseif d.scenario == "bolts" then
+		EaWR_Stage_Bolts()
+	elseif d.scenario == "shieldgen" then
+		EaWR_Stage_Shield_Generator()
 	elseif d.scenario == "aiturn" then
 		EaWR_Stage_Ai_Turn()
+	elseif d.scenario == "reinforce_observe" then
+		EaWR_Reinforce_Service()
+	elseif d.scenario == "blast_cap" then
+		EaWR_Cap_Service()
 	else
 		EaWR_Stage_Error("unknown scenario " .. tostring(d.scenario))
 	end
+end
+
+-- Observe autonomous AI additions after an explicitly recorded resume. These are
+-- object-creation observations; a capture must establish which show hyperspace arrival.
+function EaWR_Reinforce_Inventory(player)
+	local all = Find_All_Objects_Of_Type(player)
+	local records = {}
+	for i = 1, table.getn(all) do
+		local object = all[i]
+		local mobile = EaWR_Stage_Valid(object) and (object.Is_Category("Fighter") or object.Is_Category("Bomber") or
+			object.Is_Category("Transport") or object.Is_Category("Corvette") or object.Is_Category("Frigate") or object.Is_Category("Capital"))
+		if mobile and not object.Is_Category("Structure") then
+			local x, y, z = EaWR_Stage_XY(object)
+			local name = object.Get_Type().Get_Name()
+			-- Space starbases have the Capital category. Their upgrades are not
+			-- mobile fleet additions; the probe excludes the stock starbase names.
+			if not string.find(string.upper(name), "STAR_BASE", 1, true) then
+				local id = tostring(object)
+				if ER and ER.objects then ER.objects[id] = object end
+				table.insert(records, {id = id, name = name, x = x, y = y, z = z, mobile = true})
+			end
+		end
+	end
+	return records
+end
+
+function EaWR_Reinforce_Credits(player)
+	local ok, value = pcall(function() return player.Get_Credits() end)
+	if ok and type(value) == "number" then return {available = true, value = value, time = GetCurrentTime()} end
+	return {available = false, reason = "credit lookup unavailable"}
+end
+
+function EaWR_Reinforce_Start()
+	EaWR_Stage_Reset()
+	local d = EaWR_Stage
+	d.scenario = "reinforce_observe"
+	d.ai_suspended = true
+	d.service_rate = 1 / 30
+	local player, enemy = EaWR_Stage_Players()
+	local station = Find_First_Object(d.enemy_station)
+	assert(enemy and EaWR_Stage_Valid(station), "reinforcement subject missing")
+	ER = nil
+	local baseline = EaWR_Reinforce_Inventory(enemy)
+	ER = {difficulty = enemy.Get_Difficulty(), baseline = baseline, additions = {},
+		seen = {}, enemy = enemy, previous = GetCurrentTime(), origin = GetCurrentTime(),
+		service = 0, error = nil, dropped = 0, objects = {}, snapshots = {}, start_mode = "battle_start", complete = false}
+	ER.initial_credits = EaWR_Reinforce_Credits(enemy)
+	for i = 1, table.getn(baseline) do
+		ER.seen[baseline[i].id] = true
+	end
+	Point_Camera_At(station)
+	Suspend_AI(0)
+	d.phase = "observe"
+end
+
+function EaWR_Reinforce_Service()
+	if not ER then EaWR_Reinforce_Start(); return end
+	if ER.error then return end
+	local ok, message = pcall(EaWR_Reinforce_Sample)
+	if not ok then ER.error = tostring(message) end
+end
+
+function EaWR_Reinforce_Sample()
+	if ER.complete then return end
+	local now = GetCurrentTime()
+	local all = EaWR_Reinforce_Inventory(ER.enemy)
+	ER.service = ER.service + 1
+	for i = 1, table.getn(all) do
+		local record = all[i]
+		if not ER.seen[record.id] then
+			ER.seen[record.id] = true
+			record.previous = ER.previous
+			record.now = now
+			record.service = ER.service
+			if table.getn(ER.additions) < 100 then
+				table.insert(ER.additions, record)
+			else
+				ER.dropped = ER.dropped + 1
+			end
+			if not ER.first then ER.first = now; ER.first_credits = EaWR_Reinforce_Credits(ER.enemy) end
+		end
+	end
+	ER.previous = now
+	ER.now = now
+	local offsets = {0, 1, 3, 5}
+	local next_index = table.getn(ER.snapshots) + 1
+	if ER.first and next_index <= table.getn(offsets) and now >= ER.first + offsets[next_index] then
+		local snapshot = {offset = offsets[next_index], now = now, units = {}}
+		for i = 1, table.getn(ER.additions) do
+			local entry = ER.additions[i]
+			local object = ER.objects[entry.id]
+			local valid = EaWR_Stage_Valid(object)
+			local x, y, z = EaWR_Stage_XY(object)
+			table.insert(snapshot.units, {id = entry.id, name = entry.name, valid = valid,
+				x = x, y = y, z = z, hull = valid and object.Get_Hull() or nil,
+				shield = valid and object.Get_Shield() or nil})
+		end
+		table.insert(ER.snapshots, snapshot)
+	end
+	EaWR_Stage.line = "RF s" .. ER.service .. " n" .. table.getn(ER.additions)
+	-- Seal the recorded window before the debugger reads its fields. A native
+	-- suspension can still service commands between expression evaluations.
+	if ER.first and table.getn(ER.snapshots) == 4 and now >= ER.first + 6 then ER.complete = true end
+end
+
+-- Private single-shot cap-order payload. All generated types are probes, not stock.
+function EaWR_Cap_Dispose()
+	if not CP then return end
+	for i = 1, table.getn(CP.objects) do
+		local object = CP.objects[i]
+		if EaWR_Stage_Valid(object) then object.Despawn() end
+	end
+end
+
+function EaWR_Cap_Spawn(name, owner, x, y)
+	local units = Spawn_Unit(Find_Object_Type(name), Create_Position(x, y, 0), owner)
+	assert(units and units[1] and EaWR_Stage_Valid(units[1]), "private probe spawn failed")
+	local object = units[1]
+	table.insert(CP.objects, object)
+	local form = EaWR_Stage_Melee_Place(object, x, y)
+	local px, py = EaWR_Stage_XY(object)
+	assert(form ~= "M" and px and (px-x)*(px-x)+(py-y)*(py-y) < 0.0001, "probe position refused")
+	return object
+end
+
+function EaWR_Cap_Clear_Fleet(owner)
+	local all = Find_All_Objects_Of_Type(owner)
+	for i = 1, table.getn(all) do
+		local object = all[i]
+		local mobile = EaWR_Stage_Valid(object) and (object.Is_Category("Fighter") or object.Is_Category("Bomber") or
+			object.Is_Category("Transport") or object.Is_Category("Corvette") or object.Is_Category("Frigate") or object.Is_Category("Capital"))
+		if mobile and not object.Is_Category("Structure") and not string.find(string.upper(object.Get_Type().Get_Name()), "STAR_BASE", 1, true) then
+			object.Despawn()
+		end
+	end
+end
+
+function EaWR_Cap_Start(cap, reversed, shifted)
+	EaWR_Stage_Reset()
+	EaWR_Cap_Dispose()
+	local d = EaWR_Stage
+	d.scenario = "blast_cap"
+	d.ai_suspended = true
+	d.service_rate = 1 / 30
+	Suspend_AI(0)
+	local player, enemy = EaWR_Stage_Players()
+	-- Only our owned probe battle: clear stock mobile fleets before each case
+	-- while retaining stations. Native AI services stay enabled for the shooter.
+	EaWR_Cap_Clear_Fleet(player)
+	EaWR_Cap_Clear_Fleet(enemy)
+	local ok, other = pcall(Find_Player, "Underworld")
+	if not ok or not other or tostring(other) == tostring(player) then other = enemy end
+	CP = {cap = cap, reversed = reversed, shifted = shifted, objects = {}, victims = {},
+		owners = {}, history = {}, projectile_ids = {}, projectile_total = 0, started = GetCurrentTime(),
+		status = "launch", error = nil, dropped = 0, samples = 0, two_owners = tostring(other) ~= tostring(enemy)}
+	local order = reversed and {3,2,1,0} or {0,1,2,3}
+	local positions = shifted and {0,100,600,300} or {0,600,300,100}
+	for i = 1, table.getn(order) do
+		local index = order[i]
+		local owner = index == 2 and other or enemy
+		local object = EaWR_Cap_Spawn("EAWR_BLAST_VICTIM" .. index, owner, positions[index+1], 0)
+		CP.victims[index+1] = object
+		CP.owners[index+1] = object.Get_Owner().Get_Faction_Name()
+	end
+	CP.shooter = EaWR_Cap_Spawn("EAWR_BLAST_SHOOTER" .. cap, player, -1500, 0)
+	Point_Camera_At(CP.victims[1])
+	EaWR_Cap_Snapshot(0, {})
+	local result = CP.shooter.Attack_Target(CP.victims[1])
+	assert(result ~= false, "probe attack refused")
+end
+
+function EaWR_Cap_Snapshot(count, projectiles)
+	local record = {now = GetCurrentTime(), projectile_count = count, projectiles = projectiles, victims = {}}
+	assert(EaWR_Stage_Valid(CP.shooter), "probe shooter disappeared")
+	local sx, sy, sz = EaWR_Stage_XY(CP.shooter)
+	local ok, projectile_name = pcall(function() return CP.shooter.Get_Current_Projectile_Type().Get_Name() end)
+	local target = CP.shooter.Get_Attack_Target()
+	record.shooter = {id = tostring(CP.shooter), name = CP.shooter.Get_Type().Get_Name(),
+		x = sx, y = sy, z = sz, hull = CP.shooter.Get_Hull(), orders = CP.shooter.Has_Active_Orders(),
+		projectile_lookup_ok = ok, projectile_name = tostring(projectile_name),
+		target = EaWR_Stage_Valid(target) and target.Get_Type().Get_Name() or nil}
+	for i = 1, table.getn(CP.victims) do
+		local object = CP.victims[i]
+		assert(EaWR_Stage_Valid(object), "probe victim disappeared")
+		local x, y, z = EaWR_Stage_XY(object)
+		table.insert(record.victims, {name = object.Get_Type().Get_Name(), id = tostring(object),
+			hull = object.Get_Hull(), shield = object.Get_Shield(), x = x, y = y, z = z})
+	end
+	if table.getn(CP.history) < 100 then table.insert(CP.history, record) else CP.dropped = CP.dropped + 1 end
+	CP.latest = record
+end
+
+function EaWR_Cap_Service()
+	if not CP or CP.error or CP.status == "done" or CP.status == "unavailable" then return end
+	local ok, message = pcall(EaWR_Cap_Sample)
+	if not ok then CP.error = tostring(message); CP.status = "error" end
+end
+
+function EaWR_Cap_Sample()
+	local now = GetCurrentTime()
+	local projectiles = Find_All_Objects_Of_Type("EAWR_BLAST_CAP" .. CP.cap)
+	local records = {}
+	for i = 1, table.getn(projectiles) do
+		local object = projectiles[i]
+		if EaWR_Stage_Valid(object) then
+			local id = tostring(object)
+			if not CP.projectile_ids[id] then
+				CP.projectile_ids[id] = true
+				CP.projectile_total = CP.projectile_total + 1
+			end
+			local x, y, z = EaWR_Stage_XY(object)
+			table.insert(records, {id = id, x = x, y = y, z = z})
+		end
+	end
+	local count = table.getn(records)
+	local changed = count ~= CP.latest.projectile_count
+	for i = 1, table.getn(CP.victims) do
+		changed = changed or CP.victims[i].Get_Hull() ~= CP.latest.victims[i].hull
+		changed = changed or CP.victims[i].Get_Shield() ~= CP.latest.victims[i].shield
+	end
+	if changed then EaWR_Cap_Snapshot(count, records) end
+	CP.samples = CP.samples + 1
+	CP.now = now
+	if count > 0 then CP.last_projectile_time = now; CP.last_projectiles = records end
+	if CP.projectile_total > 1 then error("private probe emitted multiple projectiles") end
+	if CP.last_projectile_time and count == 0 then
+		if not CP.ended then CP.ended = now end
+		if now >= CP.ended + 2 then EaWR_Cap_Snapshot(count, records); CP.status = "done" end
+	end
+	if now >= CP.started + 60 and CP.status ~= "done" then EaWR_Cap_Snapshot(count, records); CP.status = "unavailable" end
+	EaWR_Stage.line = "BC cap" .. CP.cap .. " " .. CP.status
 end

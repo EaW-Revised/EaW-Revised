@@ -2,6 +2,10 @@
 
 #include "eawr/sim/math/fixed.hpp"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
 namespace eawr::sim::math {
 
 [[nodiscard]] constexpr Fixed wrap_turn(Fixed angle) noexcept {
@@ -23,6 +27,19 @@ struct SinCos {
     Fixed cosine;
 };
 [[nodiscard]] SinCos sin_cos_turn(Fixed angle) noexcept;
+
+// Exact paired trig for recently used headings. Scratch only; never authoritative state.
+class TrigCache final {
+public:
+    [[nodiscard]] SinCos sample(Fixed angle) noexcept;
+    [[nodiscard]] std::uint64_t builds() const noexcept { return builds_; }
+private:
+    struct Entry { Fixed angle{}; SinCos value{}; };
+    std::array<Entry, 8> entries_{};
+    std::size_t size_{};
+    std::size_t next_{};
+    std::uint64_t builds_{};
+};
 [[nodiscard]] core::Result<Fixed> atan2_turn(Fixed y, Fixed x) noexcept;
 
 } // namespace eawr::sim::math

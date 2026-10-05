@@ -25,8 +25,10 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
 
 from viewer_mode_sources import mode_source  # noqa: E402
+from host_source_reads import host_source  # noqa: E402
 
 SRC = ROOT / "apps/viewer/src"
 GODOT_UI = ROOT / "src/presentation/godot/ui"
@@ -52,26 +54,26 @@ def function_body(source, signature):
 class InputRoutingStructure(unittest.TestCase):
     def test_world_input_runs_after_the_gui(self):
         source = mode_source("viewer_host")
-        before_gui = function_body(source, "void ViewerHost::_input(")
+        before_gui = function_body(host_source("void ViewerHost::_input("), "void ViewerHost::_input(")
         # Before the GUI only a world hold takes the pointer.
         self.assertIn("world_takes_before_gui(", before_gui)
         # A modal opening or closing ends world holds before the event is routed, and every
         # frame (#314 review P1).
         self.assertLess(before_gui.index("sync_modal_holds();"), before_gui.index("world_takes_before_gui("))
-        sync = function_body(source, "void ViewerHost::sync_modal_holds(")
+        sync = function_body(host_source("void ViewerHost::sync_modal_holds("), "void ViewerHost::sync_modal_holds(")
         self.assertIn("world_capture_.clear();", sync)
         self.assertIn("cancel_held_world_input();", sync)
-        self.assertIn("sync_modal_holds();", function_body(source, "void ViewerHost::_process("))
+        self.assertIn("sync_modal_holds();", function_body(host_source("void ViewerHost::_process("), "void ViewerHost::_process("))
         self.assertIn("set_input_as_handled()", before_gui)
-        after_gui = function_body(source, "void ViewerHost::_unhandled_input(")
+        after_gui = function_body(host_source("void ViewerHost::_unhandled_input("), "void ViewerHost::_unhandled_input(")
         self.assertIn("world_accepts(", after_gui)
         self.assertIn("input_focus(", after_gui)
-        route = function_body(source, "void ViewerHost::route_world_input(")
+        route = function_body(host_source("void ViewerHost::route_world_input("), "void ViewerHost::route_world_input(")
         # The world layer comes before the camera.
         self.assertLess(route.index("input_routing_mode_"), route.index("camera_interaction_"))
         self.assertIn('"gui_focus_changed"', source)
         for name in ("map_mode.cpp", "space_environment.cpp", "space_environment_view.cpp"):
-            text = (SRC / name).read_text(encoding="utf-8")
+            text = source_text("apps/viewer/src/" + name)
             self.assertEqual(text.count("set_process_input(true);"), text.count("set_process_unhandled_input(true);"), name)
 
     def test_hud_roots_stop_the_wheel_and_modals_join_their_group(self):
@@ -90,12 +92,12 @@ class InputRoutingStructure(unittest.TestCase):
             self.assertNotIn(".submit(", text, path)
 
     def test_the_mode_and_sources_are_in_the_build(self):
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/input_routing_mode.cpp", "src/presentation/godot/ui/input_routing.cpp",
                        "src/presentation/ui/input_routing.cpp", "src/presentation/ui/command_sink.cpp",
                        "src/presentation/ui/hud.cpp", "src/presentation/ui/shell_alpha.cpp"):
             self.assertIn(source, build)
-        host = (SRC / "viewer_host.cpp").read_text(encoding="utf-8")
+        host = source_text("apps/viewer/src/viewer_host.cpp")
         self.assertIn("InputRoutingMode::requested()", host)
         self.assertIn("input_routing_mode_->process()", host)
 

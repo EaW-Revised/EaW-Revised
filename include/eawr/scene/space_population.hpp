@@ -21,6 +21,9 @@
 // background objects, which the space environment composition owns.
 namespace eawr::scene {
 
+// MD-06: a mesh-free projectile model may draw entirely through resolved particle proxies.
+[[nodiscard]] bool drawable_projectile_effects(const Placement& placement) noexcept;
+
 // One entry of an object's HardPoints list, as the hardpoint's own XML object
 // declares it. Its art is selected by its state (hardpoint_art below):
 // Model_To_Attach is drawn at the bind frame of the owner's Attachment_Bone,
@@ -85,12 +88,12 @@ struct SpaceObjectTags final {
     std::vector<HardpointAttachment> hardpoints{};
 };
 
-using ObjectResolver = std::function<std::optional<data::EffectiveObject>(std::string_view object_id)>;
+using ObjectResolver = std::function<std::optional<data::EffectiveObject>(std::string_view object_id, data::Category category)>;
 
 // Reads the tags above from a resolved object. XML booleans are accepted as
 // yes/true/1 in any case, with surrounding whitespace. HardPoints is a comma
 // or whitespace separated id list; each id is resolved through `resolve`
-// (when given) for its attachment fields.
+// (when given) in the hardpoint registry for its attachment fields.
 [[nodiscard]] SpaceObjectTags space_object_tags(const data::EffectiveObject& object,
                                                 const ObjectResolver& resolve = {});
 

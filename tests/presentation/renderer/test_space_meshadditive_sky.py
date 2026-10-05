@@ -121,7 +121,8 @@ class MeshAdditiveStructure(unittest.TestCase):
 
     def test_adapter_declares_its_state_policy(self):
         source = mode_source("space_environment")
-        shader = shader_source(source, "meshadditive_sky_shader")
+        physical = (ROOT / "apps/viewer/src/space_environment_internal.hpp").read_text(encoding="utf-8")
+        shader = shader_source(physical, "meshadditive_sky_shader")
         # A-08: additive, no depth write; engine depth test; the sky preview's cull and fog.
         self.assertIn("render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never, blend_add;", shader)
         self.assertNotIn("depth_test_disabled", shader)

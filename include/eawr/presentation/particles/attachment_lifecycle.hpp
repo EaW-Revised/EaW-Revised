@@ -70,6 +70,7 @@ inline void merge_frame_stats(EffectFrameStats& total, const EffectFrameStats& n
         return (left ^ right) * 0x100000001b3ULL;
     };
     total.advance.spawned += next.advance.spawned;
+    total.advance.requested += next.advance.requested;
     total.advance.killed += next.advance.killed;
     total.advance.dropped_at_capacity += next.advance.dropped_at_capacity;
     total.advance.child_instances_started += next.advance.child_instances_started;
@@ -83,6 +84,7 @@ inline void merge_frame_stats(EffectFrameStats& total, const EffectFrameStats& n
         const EmitterFrameStats& from = next.emitters[index];
         into.particles += from.particles;
         into.quads += from.quads;
+        into.triangles += from.triangles;
         into.hash = chain(into.hash, from.hash);
         into.drawn = into.drawn || from.drawn;
         into.maximum_alpha = std::max(into.maximum_alpha, from.maximum_alpha);
@@ -125,6 +127,15 @@ struct AttachmentStep final {
     EffectFrameStats stats;
 };
 
+// Main-thread visibility decisions and frames, ready for a registry batch. Each handle gets
+// its own delta so a newly spawned generation stays at age zero while existing drains age.
+// Keep its lifecycle alive and unchanged until complete_step consumes the batch's statistics.
+struct PreparedAttachmentStep final {
+    AttachmentStep result;
+    std::vector<EffectHandle> handles;
+    std::vector<float> deltas;
+};
+
 // Owns the attachment's instances in one EffectRegistry: at most one active
 // generation that follows the host, plus detached generations that drain. It
 // never releases anything the caller did not hand it, and it is not RAII:
@@ -150,20 +161,38 @@ public:
     [[nodiscard]] core::Result<AttachmentStep> step(const bool visible, const EmitterFrame& frame,
                                                     const MeshFrame* mesh, const float delta_seconds,
                                                     const CameraFrame& camera) {
-        AttachmentStep result;
+        auto prepared = prepare_step(visible, frame, mesh, delta_seconds);
+        if (!prepared) return core::Result<AttachmentStep>::failure(prepared.error());
+        std::vector<EffectFrameStats> stats;
+        stats.reserve(prepared.value().handles.size());
+        for (std::size_t index = 0; index < prepared.value().handles.size(); ++index) {
+            auto advanced = registry_->advance(prepared.value().handles[index], prepared.value().deltas[index], camera);
+            if (!advanced) return core::Result<AttachmentStep>::failure(advanced.error());
+            stats.push_back(std::move(advanced.value()));
+        }
+        return complete_step(std::move(prepared.value()), stats);
+    }
+
+    // Performs only main-thread ownership and frame changes; no CPU advance or backend upload.
+    // Owners prepare attachments in their usual order, advance their handles in one registry
+    // batch, then complete them in that same order. Do not prepare a lifecycle twice at once.
+    [[nodiscard]] core::Result<PreparedAttachmentStep> prepare_step(const bool visible, const EmitterFrame& frame,
+                                                                   const MeshFrame* mesh, const float delta_seconds) {
+        PreparedAttachmentStep prepared;
+        AttachmentStep& result = prepared.result;
         result.visible = visible;
         bool fresh = false;
         if (active_ && !visible) {
             const EffectHandle hidden = *active_;
             auto detached = registry_->detach(hidden);
-            if (!detached) return core::Result<AttachmentStep>::failure(detached.error());
+            if (!detached) return core::Result<PreparedAttachmentStep>::failure(detached.error());
             active_.reset();
             ++detaches_;
             result.detached = detached.value();
             if (detached.value() == EffectDetachState::draining) {
                 if (draining_.size() >= max_draining_) {
                     auto cut = registry_->release(draining_.front());
-                    if (!cut) return core::Result<AttachmentStep>::failure(cut.error());
+                    if (!cut) return core::Result<PreparedAttachmentStep>::failure(cut.error());
                     draining_.erase(draining_.begin());
                     ++drains_cut_short_;
                     ++result.drains_cut_short;
@@ -174,49 +203,70 @@ public:
             if (policy_ == ReappearancePolicy::reset) {
                 for (const EffectHandle drain : draining_) {
                     auto dropped = registry_->release(drain);
-                    if (!dropped) return core::Result<AttachmentStep>::failure(dropped.error());
+                    if (!dropped) return core::Result<PreparedAttachmentStep>::failure(dropped.error());
                     ++drains_reset_;
                     ++result.drains_reset;
                 }
                 draining_.clear();
             }
             auto spawned = spawn_(*registry_, generation_seed(seed_, generations_));
-            if (!spawned) return core::Result<AttachmentStep>::failure(spawned.error());
+            if (!spawned) return core::Result<PreparedAttachmentStep>::failure(spawned.error());
             active_ = spawned.value();
             ++generations_;
             result.spawned = spawned.value();
             fresh = true;
         }
 
-        std::vector<std::pair<EffectHandle, EffectFrameStats>> advanced;
-        std::vector<EffectHandle> live(draining_.begin(), draining_.end());
-        if (active_) live.push_back(*active_);
-        for (const EffectHandle handle : live) {
+        prepared.handles.assign(draining_.begin(), draining_.end());
+        if (active_) prepared.handles.push_back(*active_);
+        prepared.deltas.reserve(prepared.handles.size());
+        for (const EffectHandle handle : prepared.handles) {
             auto applied = registry_->set_frame(handle, frame);
-            if (!applied) return core::Result<AttachmentStep>::failure(applied.error());
+            if (!applied) return core::Result<PreparedAttachmentStep>::failure(applied.error());
             if (mesh) {
                 auto meshed = registry_->set_mesh_frame(handle, *mesh);
-                if (!meshed) return core::Result<AttachmentStep>::failure(meshed.error());
+                if (!meshed) return core::Result<PreparedAttachmentStep>::failure(meshed.error());
             }
             // A generation's first advance is zero-delta, like the owner's first frame.
             const float delta = fresh && active_ && handle == *active_ ? 0.0F : delta_seconds;
-            auto stats = registry_->advance(handle, delta, camera);
-            if (!stats) return core::Result<AttachmentStep>::failure(stats.error());
-            advanced.emplace_back(handle, std::move(stats.value()));
+            prepared.deltas.push_back(delta);
         }
-        for (const auto& [handle, stats] : advanced) {
-            if (!stats.finished) continue;
+        return core::Result<PreparedAttachmentStep>::success(std::move(prepared));
+    }
+
+    // Consumes the statistics for this prepared sample, releases finished drains, and folds
+    // statistics in handle order. Lifecycle ownership and all backend release calls stay here
+    // on the calling thread, after the worker batch has joined.
+    [[nodiscard]] core::Result<AttachmentStep> complete_step(PreparedAttachmentStep prepared,
+                                                            const std::span<const EffectFrameStats> stats) {
+        if (prepared.handles.size() != stats.size()) {
+            return core::Result<AttachmentStep>::failure({std::string(diagnostic_codes::batch), core::Severity::error,
+                "the attachment needs statistics for every prepared effect", {}, {}, {}, {}});
+        }
+        AttachmentStep result = std::move(prepared.result);
+        for (std::size_t index = 0; index < stats.size(); ++index) {
+            if (!stats[index].finished) continue;
+            const EffectHandle handle = prepared.handles[index];
+            const auto drain = std::find(draining_.begin(), draining_.end(), handle);
+            if (drain == draining_.end()) {
+                return core::Result<AttachmentStep>::failure({std::string(diagnostic_codes::batch), core::Severity::error,
+                    "a finished attachment effect is not a live drain", {}, {}, {}, {}});
+            }
             // A completed drain is released exactly once, by its owner.
             auto released = registry_->release(handle);
             if (!released) return core::Result<AttachmentStep>::failure(released.error());
-            draining_.erase(std::find(draining_.begin(), draining_.end(), handle));
+            draining_.erase(drain);
             ++drains_released_;
             ++result.drains_released;
         }
-        std::sort(advanced.begin(), advanced.end(),
-                  [](const auto& left, const auto& right) { return left.first < right.first; });
-        for (std::size_t index = 0; index < advanced.size(); ++index) {
-            merge_frame_stats(result.stats, advanced[index].second, index == 0);
+        std::vector<std::size_t> order;
+        order.reserve(stats.size());
+        for (std::size_t index = 0; index < stats.size(); ++index) order.push_back(index);
+        std::sort(order.begin(), order.end(), [&](const auto left, const auto right) {
+            return prepared.handles[left] < prepared.handles[right];
+        });
+        for (std::size_t index = 0; index < order.size(); ++index) {
+            merge_frame_stats(result.stats, stats[order[index]], index == 0);
         }
         result.active = active_.has_value();
         result.live_instances = draining_.size() + (active_ ? 1U : 0U);

@@ -1,6 +1,7 @@
 #include "eawr/script/authoritative/tactical_bridge.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <optional>
 #include <utility>
 
@@ -41,6 +42,9 @@ struct ScriptedTacticalSession::Impl {
     std::shared_ptr<ScriptEngine> engine;
     std::shared_ptr<sim::StateHasher> hasher; // #637: null hashes on the stepping thread
     bool authoritative_hash{true};            // #895: off, the tick's combined hash stays empty
+    std::function<std::uint64_t()> clock;     // #957: measurement only, null without one
+
+    [[nodiscard]] std::uint64_t now() const { return clock ? clock() : 0; }
     // The last service's commands, submitted with the next step.
     std::vector<ScriptCommand> pending;
     // Per issuer: (tick, one past the sequence) of the latest key the world
@@ -83,7 +87,10 @@ struct ScriptedTacticalSession::Impl {
         player_command.key = {tick, order.value().issuer, next_sequence(order.value().issuer)};
         player_command.units = std::move(order.value().units);
         player_command.payload = std::move(order.value().payload);
-        if (auto submitted = world.submit(player_command); !submitted) {
+        const auto submitted = order.value().reinforcement_search
+            ? world.submit_reinforcement_search(player_command, *order.value().reinforcement_search)
+            : world.submit(player_command);
+        if (!submitted) {
             routed.dropped = make_error(codes::command_unroutable,
                 command_label(routed.command) + ": " + submitted.error().code + " " + submitted.error().message);
             return routed;
@@ -150,17 +157,23 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
     out.script_input.reserve(pending.size());
     for (ScriptCommand& command : pending) out.script_input.push_back(impl.route(std::move(command), tick));
 
+    const std::uint64_t world_started = impl.now();
     auto world = impl.world.step(executor);
     if (!world) {
         impl.failure = world.error();
         return core::Result<ScriptedTick>::failure(world.error());
     }
     out.world = std::move(world).value();
+    const std::uint64_t engine_started = impl.now();
+    out.timing.world_ns = engine_started - world_started;
     ServiceOptions options;
     if (impl.engine) {
         auto prepared = [&]() -> core::Result<ServiceOptions> {
             try {
-                return impl.engine->before_service(impl.world, out.world, impl.scripts);
+                return impl.engine->before_service(executor, impl.world, out.world, impl.scripts);
+            } catch (const std::exception& error) {
+                return core::Result<ServiceOptions>::failure(
+                    make_error(codes::session_abort, "script preparation threw: " + std::string(error.what())));
             } catch (...) {
                 return core::Result<ServiceOptions>::failure(
                     make_error(codes::session_abort, "the script engine threw an exception"));
@@ -172,16 +185,22 @@ core::Result<ScriptedTick> ScriptedTacticalSession::step(
         }
         options = std::move(prepared).value();
     }
+    const std::uint64_t service_started = impl.now();
+    out.timing.engine_ns = service_started - engine_started;
     auto service = impl.scripts.service(executor, options);
     if (!service) {
         impl.failure = service.error();
         return core::Result<ScriptedTick>::failure(service.error());
     }
+    out.timing.service_ns = impl.now() - service_started;
     out.scripts = std::move(service).value();
     if (impl.engine) {
         auto taken = [&]() -> core::Result<void> {
             try {
                 return impl.engine->after_service(out.scripts);
+            } catch (const std::exception& error) {
+                return core::Result<void>::failure(
+                    make_error(codes::session_abort, "script command processing threw: " + std::string(error.what())));
             } catch (...) {
                 return core::Result<void>::failure(make_error(codes::session_abort, "the script engine threw an exception"));
             }
@@ -219,6 +238,8 @@ void ScriptedTacticalSession::set_state_hasher(std::shared_ptr<sim::StateHasher>
 void ScriptedTacticalSession::set_authoritative_hash(const bool every_tick) noexcept {
     impl_->authoritative_hash = every_tick;
 }
+
+void ScriptedTacticalSession::set_step_clock(std::function<std::uint64_t()> clock) { impl_->clock = std::move(clock); }
 
 const tactical::TacticalSession& ScriptedTacticalSession::world() const noexcept { return impl_->world; }
 

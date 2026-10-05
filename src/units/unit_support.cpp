@@ -71,6 +71,10 @@ void record(Report& report, const data::XmlDocument& document) {
 // (Diminishing_Firepower) keeps its text.
 constexpr std::string_view combat_scalars[] = {
     "Diminishing_Firepower",              // #74
+    "Asteroid_Field_Damage",
+    "Asteroid_Field_Damage_Rate",
+    "Nebula_Ability_Disable_Time",
+    "Ion_Storm_Shield_Disable_Time",
     "ShieldRechargeIntervalInSecs",
     "EnergyRechargeIntervalInSecs",
     "EnergyToShieldExchangeRate",
@@ -109,6 +113,8 @@ constexpr std::string_view combat_scalars[] = {
     "SpaceObjectTrackingTreeCount",       // #71
     "DestinationSearchRadiusIncrementSpace", // #266
     "MP_Default_Credits",                 // #530 PU-01
+    "MP_Default_Start_Tech_Level",        // WPR-02
+    "MP_Default_Max_Tech_Level",          // WPR-02
     "Tactical_Build_Time_Multiplier",     // #530 PU-13
     "Allow_Reinforcement_Percentage_Normalized", // #530 PU-21
     "FormationMinimumSideError",          // #599
@@ -334,15 +340,16 @@ void Object::note_duplicates(Report& report) const {
 }
 
 std::optional<Object> resolve(const data::Catalog& catalog, const std::string_view id,
-                              const std::string_view owner, const std::string_view field, Report& report) {
-    auto resolved = catalog.resolve(id);
+                              const data::Category category, const std::string_view owner,
+                              const std::string_view field, Report& report) {
+    auto resolved = catalog.resolve(id, category);
     if (!resolved) {
         report.missing(std::string(owner), std::string(field), std::string(id), resolved.error().message);
         return std::nullopt;
     }
     Object result{std::move(resolved).value(), {}, {}};
     for (const auto& name : result.effective.chain) {
-        const auto* definition = catalog.find(name);
+        const auto* definition = catalog.find(name, category);
         if (definition != nullptr) result.layers.push_back(definition);
     }
     return result;
@@ -539,6 +546,7 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     for (const auto tag : combat_scalars) {
         NamedConstant constant{std::string(tag), std::nullopt, {}};
         const auto* node = last_child(root, tag);
+        if (node == nullptr && (tag == "MP_Default_Start_Tech_Level" || tag == "MP_Default_Max_Tech_Level")) continue;
         if (node == nullptr) {
             report.missing("GameConstants", constant.tag, {}, "required constant is absent");
         } else {

@@ -88,6 +88,7 @@ enum class SceneRoute : std::uint8_t {
     meshadditive_vcolor,  // MeshAdditiveVColor.fx: additive times vertex colour
     planet,               // Planet.fx: plan_environment_effect t0
     nebula,               // Nebula.fx: plan_environment_effect t0
+    legacy_mesh,          // companion surfaces, using the ordinary scene selector
     unsupported,
 };
 [[nodiscard]] std::string_view to_string(SceneRoute route) noexcept;

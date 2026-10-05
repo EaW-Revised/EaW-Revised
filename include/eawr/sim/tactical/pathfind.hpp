@@ -21,6 +21,10 @@ namespace eawr::sim::tactical {
 // SpaceCollisionType bits a query reports (research E71-19).
 inline constexpr std::uint8_t collision_moving = 0x01;
 inline constexpr std::uint8_t collision_static = 0x02;
+inline constexpr std::uint8_t collision_field = 0x04;
+inline constexpr std::uint8_t collision_storm = 0x08;
+inline constexpr std::uint8_t collision_nebula = 0x10;
+inline constexpr std::uint8_t collision_impassable = 0x20;
 inline constexpr std::uint8_t collision_all = 0x3f;
 
 // One tracked object in one time window (AV-03): a straight move from `start` to `end` with a
@@ -91,6 +95,15 @@ struct Prediction {
     math::Vec3 position{};
     math::Fixed yaw{};
 };
+// WHZ-04: one tracking category; independent type flags remain available to effects.
+[[nodiscard]] std::uint8_t tracking_category(const Footprint& footprint, bool moving) noexcept;
+// WHZ-03/05: tracking geometry uses the soft radius and the unscaled, yaw-rotated offset.
+[[nodiscard]] core::Result<TrackedLeaf> tracking_leaf(
+    EntityId entity, const Footprint& footprint, const Prediction& from, const Prediction& to);
+// WHZ-08a: endpoint hazards and units without asteroid damage do not block a move.
+[[nodiscard]] core::Result<std::uint8_t> movement_collision_filter(const CollisionWorld& world,
+    const Footprint& footprint, EntityId entity, std::uint64_t tick, math::Vec3 position,
+    math::Vec3 destination, bool through_hazards = false);
 [[nodiscard]] core::Result<Prediction> predict(
     const MotionState& state, std::uint64_t frame, math::Vec3 position, math::Fixed yaw);
 
@@ -102,7 +115,7 @@ struct Prediction {
 // move passes none. Fails only on arithmetic overflow.
 [[nodiscard]] core::Result<math::Vec2> nearest_open_position(const AvoidanceRules& rules, const Footprint& footprint,
     const CollisionWorld& world, EntityId entity, std::uint64_t tick, math::Vec2 position, math::Vec2 destination,
-    std::span<const EntityId> ignore_group = {});
+    std::span<const EntityId> ignore_group = {}, std::uint8_t filter = collision_all);
 
 // What a PathSearchStats reports (PC-08): a whole search; a budgeted search that stopped at
 // its budget (plan_space_move_within), whose result is dropped; one slice of a sliced search;
@@ -156,14 +169,16 @@ enum class PathSearchMode : std::uint8_t { bounded, exact };
 [[nodiscard]] core::Result<MotionState> plan_space_move(const MotionTable& table, const MotionProfile& limits,
     const Footprint& footprint, const CollisionWorld& world, EntityId entity, std::uint64_t tick,
     math::Vec3 position, math::Fixed yaw, math::Fixed speed, math::Vec3 target, PathSearchStats* stats = nullptr,
-    PathSearchMode mode = PathSearchMode::bounded);
+    PathSearchMode mode = PathSearchMode::bounded, bool through_hazards = false,
+    std::optional<math::Vec3> filter_destination = std::nullopt);
 
 // PC-08 (#520): the bounded plan_space_move, given up once its expansions reach `budget`
 // (checked between two parents): nullopt then, else the plan_space_move result.
 [[nodiscard]] core::Result<std::optional<MotionState>> plan_space_move_within(const MotionTable& table,
     const MotionProfile& limits, const Footprint& footprint, const CollisionWorld& world, EntityId entity,
     std::uint64_t tick, math::Vec3 position, math::Fixed yaw, math::Fixed speed, math::Vec3 target, std::uint64_t budget,
-    PathSearchStats* stats = nullptr);
+    PathSearchStats* stats = nullptr, bool through_hazards = false,
+    std::optional<math::Vec3> filter_destination = std::nullopt);
 
 // PC-08 (#520): the bounded plan_space_move run in slices over several ticks. It copies the
 // unit's layer view and the static layer of `world` when it is made, and reads only those
@@ -173,7 +188,8 @@ class SlicedPathSearch final {
 public:
     SlicedPathSearch(const MotionTable& table, const MotionProfile& limits, const Footprint& footprint,
         const CollisionWorld& world, EntityId entity, std::uint64_t tick, math::Vec3 position, math::Fixed yaw,
-        math::Fixed speed, math::Vec3 target);
+        math::Fixed speed, math::Vec3 target, bool through_hazards = false,
+        std::optional<math::Vec3> filter_destination = std::nullopt);
     SlicedPathSearch(SlicedPathSearch&&) noexcept;
     SlicedPathSearch& operator=(SlicedPathSearch&&) noexcept;
     SlicedPathSearch(const SlicedPathSearch&) = delete;

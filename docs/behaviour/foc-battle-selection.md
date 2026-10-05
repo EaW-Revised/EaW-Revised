@@ -1,4 +1,6 @@
-# FoC battle selection, orders and tactical overview (EAWR-82)
+<a id="foc-battle-selection-orders-and-tactical-overview-82"></a>
+
+# FoC battle selection, orders and tactical overview (battle camera, selection and orders)
 
 ## Applicability
 
@@ -18,7 +20,7 @@ contemporary scheme is FoC's default; the classic one is the options dialog's al
 controls (debug build: the battle UI starts contemporary, and only that checkbox switches it). In
 the contemporary scheme a left click never gives an order, also with the Attack mode armed: over
 an enemy it neither attacks nor disarms the mode, and the next right click on the enemy attacks
-(EAWR-497; debug build: the left release runs neither the attack nor the guard action, O-3).
+(live attack-order input; debug build: the left release runs neither the attack nor the guard action, O-3).
 
 ## Interface
 
@@ -32,7 +34,7 @@ orders, as next-tick commands.
 
 - P-1 (SEL-8). The pointer casts a ray from the camera through the cursor. Every unit whose pick
   volume the ray enters is a candidate; the candidate with the highest contact height (world Z)
-  wins. EAWR-665 (walk [WSU-10 to WSU-12](walks/sensors-ui.md)): a unit's pick volume is its type's
+  wins. Fighter double-click picking (walk [WSU-10 to WSU-12](walks/sensors-ui.md)): a unit's pick volume is its type's
   collision meshes (the collidable meshes projectiles hit, space-damage DG-36, including those of
   the hardpoints' attached models), tested triangle by triangle after a bounds check, in the
   unit's model space turned and scaled with it. When the ray misses them and the type sets
@@ -41,7 +43,7 @@ orders, as next-tick commands.
   beside a capital ship's hull usually has the higher contact and wins. The same pick serves the
   click, the double click (S-4), the right click's target (O-1), the hover and so the hover bars
   and reticles, and a targeted ability's aim; the box select (S-2) does not use it. Debug build
-  (EAWR-665): the per-frame mouse-over check runs this pick at the cursor and hands its object to the
+  (fighter double-click picking): the per-frame mouse-over check runs this pick at the cursor and hands its object to the
   bars' unit under the pointer (walk WSU-50) and to the hardpoint reticles; a left click computes
   its action, a targeted ability's included, on the object this pick returns. Click and hover
   run the same pick. A type with no collision mesh falls back to
@@ -66,20 +68,26 @@ orders, as next-tick commands.
   is a click at the release point. The box is drawn once it passes that distance, or at once while
   nothing is selected. Outline RGBA (200, 50, 50, 255), fill RGBA (200, 50, 50, 50), at least
   3 pixels.
-- S-3 (SEL-4). A box selects the local player's selectable units inside it. Without Shift the old
-  selection is replaced only when the box finds a unit, so an empty box keeps the selection; with
-  Shift the units are added. Project policy: a unit is inside when the projection of its box centre
-  is; FoC asks the renderer for the models in the rectangle.
+- S-3 (SEL-4; walk WSU-19, WSU-21, WSU-22). A box adds the local player's selectable squadron
+  icons whose entire quads are inside it first. Its model pass then selects own selectable
+  non-decoration models with locomotion behaviour, by their projected model origins in the
+  half-open rectangle (min <= p < max). Without Shift the first eligible model replaces the old
+  selection, including the icons just added; with Shift it adds. An icon-only box adds even
+  without Shift. A station-only or empty box keeps the prior selection, since static stations
+  lack locomotion behaviour.
 - S-4 (SEL-7). A left double click on an own unit adds every own unit of its type on screen (Ctrl
   and a double click: of its class, not implemented). The release after a double click does
   nothing. On a squadron's craft the type is the craft type (walk
   [WSU-18](walks/sensors-ui.md)): every own squadron with a craft of that type on screen joins.
   The double click re-picks at its own point (P-1), so a double click on a fighter over a capital
-  ship adds fighters, not the ship (EAWR-665).
+  ship adds fighters, not the ship (fighter double-click picking).
+  On screen uses the half-open projection of the model origin, excluding hidden models and
+  decorations (WSU-15). Unlike the box, click and type selection allow stations (WSU-23);
+  deliberate mixed selections retain the first producer's build menu (WSU-24, PU-60).
 - S-5 (GRP-1). Ctrl+Q (select like) selects the own units on screen of the type under the
   pointer; Ctrl+A selects all. Not implemented yet.
 - S-6. Only the local player's units are selectable.
-- S-7 (EAWR-424; debug build: the selection and team code). A fighter or bomber squadron is one unit, its
+- S-7 (battle world UI and squadron selection; debug build: the selection and team code). A fighter or bomber squadron is one unit, its
   team container: clicking, boxing or type-selecting one of its craft selects the squadron, and its
   orders go to the container (space-fighters.md FO-01 to FO-03). Clicking its icon selects it too
   ([foc-battle-world-ui.md](foc-battle-world-ui.md) WU-23), and double-clicking the icon selects the
@@ -118,7 +126,7 @@ orders, as next-tick commands.
   count toward the overview; `Tactical_Overview_Clicks` of them within
   `Tactical_Overview_Click_Time` seconds enter it (FoC space: 10 clicks within 1.8 s). A zoom out
   that still moved the camera restarts the count, and clicks within 26 frames of it do not count.
-- V-1a (owner, EAWR-413). The project space map and live battle use five outward clicks within the
+- V-1a (owner, overview wheel-step adjustment). The project space map and live battle use five outward clicks within the
   same 1.8 s window for each overview stage. Owner: "you have to scroll a bit too much out to get
   into the X1 and X2 zoom out stages. maybe half it's requirement." Both space camera configs
   override `Tactical_Overview_Clicks`; FoC's ten-click XML value and land's four-click value remain
@@ -130,8 +138,8 @@ orders, as next-tick commands.
   `Tactical_Overview_Distance2` (space 2900), at most the distance at which the map's larger half
   extent fills `Tactical_Overview_FOV2`, pitch `Tactical_Overview_Pitch2` (space 80) and yaw 0; the
   field of view stays the overview's. One click inward steps back one level; from the overview it
-  leaves to the tactical camera at `Distance_Max`. Retail may disagree (EAWR-857, see Unverified).
-- V-3a (EAWR-350). The yaw 0 is the camera controller's own yaw, not only the drawn view: FoC saves pitch,
+  leaves to the tactical camera at `Distance_Max`. Retail may disagree (overview exit distance (legacy EAWR-857), see Unverified).
+- V-3a (overview orientation and pan correction). The yaw 0 is the camera controller's own yaw, not only the drawn view: FoC saves pitch,
   yaw, field of view and distance on entering the overview from the tactical camera, writes yaw 0 on
   entering the map overview, leaves it at 0 when a click steps back to the overview, and restores
   the saved values when the overview is left. Pan and translate read the controller's yaw, so in
@@ -146,15 +154,17 @@ orders, as next-tick commands.
 - V-6. Project policy: the map extent is the camera's target bounds; the retail map box is not
   read. The pitch is capped at 89 degrees.
 
-### The battle UI in the overview (EAWR-848)
+<a id="the-battle-ui-in-the-overview-848"></a>
 
-The owner calls the two overview levels x1 (the overview) and x2 (the map overview) (EAWR-413, EAWR-849),
-and asked for the HUD to hide in both (EAWR-848). FoC does this itself. Sources: the debug build (the
+### The battle UI in the overview
+
+The owner calls the two overview levels x1 (the overview) and x2 (the map overview) (overview wheel-step adjustment, overview zoom-level clarification),
+and asked for the HUD to hide in both (overview HUD hiding). FoC does this itself. Sources: the debug build (the
 overview's enter, exit and level-change code, and every reader of the overview state) and retail
-stills of a Coruscant Siege skirmish, fog off (EAWR-848's `-OverviewStills` series): the start view
+stills of a Coruscant Siege skirmish, fog off (the overview HUD check's `-OverviewStills` series): the start view
 with an X-wing squadron selected and the pointer on the local station, then 30 notches out (the
 burst runs on into x2: near top-down, yaw 0), one notch in (x1) and one more (the tactical
-camera). EAWR-202's full zoom-out still agrees.
+camera). the close-up minimap camera capture's full zoom-out still agrees.
 
 - V-5a (debug build). Entering the overview from the tactical camera hides the tactical command
   bar and switches the radar off; leaving the overview for the tactical camera shows both again.
@@ -206,7 +216,7 @@ camera). EAWR-202's full zoom-out still agrees.
   change during a running fade, and how the two-update delay lines up with the drawn frames.
 - V-5h. **No close-zoom rule.** Nothing in FoC hides UI by the tactical camera's distance within
   `Distance_Min`..`Distance_Max`; only the overview levels do. The owner's reading of x1 and x2 as
-  the overview levels (EAWR-849) needs no project deviation.
+  the clarified overview levels needs no project deviation.
 
 **Tags.** No XML or GameConstants tag names what hides or how long the fade is: the shell, radar,
 brackets and the 0.25 / 0.025 fade are fixed in code (debug build). The tags that reach this
@@ -223,7 +233,7 @@ behaviour, with FoC's values:
 | `CommandBarComponent` `i_main_skirmish` `Model_Name`, `Type` | `i_tactical_controls.alo`, `Shell` | The shell V-5b hides; the hide picks the component by its fixed role, not by a tag |
 | `CommandBarComponent` `i_main_reinforce`, `pause_shell` | shells | Hidden by V-5b as above |
 
-**The remake's live battle, element by element** (EAWR-848 implements the column; the model is
+**The remake's live battle, element by element** (overview HUD hiding implements the column; the model is
 `presentation::ui::overview_ui`, the viewer applies it once per frame after the camera took the level):
 
 | Element (viewer) | FoC at x1 and x2 | Rule |
@@ -297,10 +307,10 @@ new held image.
   when they arrive they belong on the shell that hides.
 - Why the hover popup is gone in the overview (V-5e1) was not read: the stills show it, the code
   path was not traced.
-- Retail disagrees with V-3's exit distance (EAWR-857): in the EAWR-848 stills, one click in from x2 and
+- Retail disagrees with V-3's exit distance (overview exit distance): in the overview HUD hiding stills, one click in from x2 and
   one more from x1 came back to the tactical camera at the start view's distance, not at
-  `Distance_Max`. Not part of EAWR-848; the debug-build reading stands until a capture that zooms to a
+  `Distance_Max`. Not part of overview HUD hiding (legacy EAWR-848); the debug-build reading stands until a capture that zooms to a
   known distance first settles it.
 - FoC's right double click (a faster move, `DoubleClickMoveMaxSpeedRatio`) and the move and attack
   acknowledgement sounds and effects are not implemented.
-- The selection is drawn as FoC's circle and bars since EAWR-424 ([foc-battle-world-ui.md](foc-battle-world-ui.md)).
+- The selection is drawn as FoC's circle and bars since the battle world UI and squadron selection work ([foc-battle-world-ui.md](foc-battle-world-ui.md)).

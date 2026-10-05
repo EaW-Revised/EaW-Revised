@@ -4,24 +4,24 @@
 
 - Product: Star Wars Empire at War: Forces of Corruption, tactical space, the ships of the M2
   fleet ([m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) SK-22): `Corellian_Corvette`,
-  `Tartan_Patrol_Cruiser`, `Nebulon_B_Frigate` and `Acclamator_Assault_Ship`. P2-07
-  (EAWR-70).
+  `Tartan_Patrol_Cruiser`, `Nebulon_B_Frigate` and `Acclamator_Assault_Ship`. Ship movement
+  and turning (legacy EAWR-70).
 - Bounded question: how one ship given a move, face or stop order accelerates, turns, travels
-  and stops, frame by frame, and how it banks while it turns (EAWR-351).
+  and stops, frame by frame, and how it banks while it turns (ship banking and sway).
 - Source tags: **data** (a tag in the FoC files: `spaceunitscorvettes.xml`,
   `spaceunitsfrigates.xml`, `gameconstants.xml`; hashes under Sources in the M2 lock),
-  **recording** (the P2-06 original-game traces of S-10 to S-14 and S-17,
+  **recording** (the fixed-force original-game traces of S-10 to S-14 and S-17,
   [tests/fidelity](../../tests/fidelity/README.md); three runs each, spread 0), **research**
   (the FoC debug build read under the [clean-room rule](../clean-room.md); evidence IDs
   E70-nn, E71-nn and E351-nn are opaque and their map stays private), **owner** (the owner's
   play knowledge of the original), **project** (a remake decision) and **inference**. Where
   research and a recording disagree, the recording wins.
-- Avoidance (EAWR-71, P2-08): how the path finder routes one ship around other ships of its
+- Avoidance (group formations and avoidance): how the path finder routes one ship around other ships of its
   layer and around stations and other static objects ([Avoidance](#avoidance-71)).
-- Group moves (EAWR-344, P2-08b): how one move order for several ships gives each ship its slot,
+- Group moves (multi-select formation slots): how one move order for several ships gives each ship its slot,
   its planning speed and its planning frame ([Formations](#formations-344)).
-- Out of scope: occupied destinations (EAWR-266), hyperspace, the abilities' speed multipliers
-  ([space abilities](space-abilities.md) AB-24, EAWR-76) and squadron craft (EAWR-75), whose fighter locomotor maps its turn to a roll its own way.
+- Out of scope: occupied destinations (blocked move-target clipping), hyperspace, the abilities' speed multipliers
+  ([space abilities](space-abilities.md) AB-24, space ability implementation) and squadron craft (fighter spawning and simulation), whose fighter locomotor maps its turn to a roll its own way.
 
 ## How FoC moves a ship
 
@@ -36,19 +36,19 @@ at the target followed by a straight "end" leg onto the target, slow-speed and t
 length divided by 1.5; collisions with static and dynamic obstacles add cost. A finished
 path then gets its end speed and the helper nodes where braking starts.
 
-The remake runs that search (EAWR-71, [Avoidance](#avoidance-71)) whenever the motion table
+The remake runs that search (group formations and avoidance, [Avoidance](#avoidance-71)) whenever the motion table
 carries avoidance rules, as the FoC tables do. The rules MV-12 to MV-17 below describe the
 shape it takes in open space; a table without avoidance rules (the synthetic replay fixtures)
-plans that shape directly, without the search. Threat steps are not implemented; EAWR-266 adds
+plans that shape directly, without the search. Threat steps are not implemented; blocked move-target clipping adds
 destinations inside occupied space.
 
 ## Interface
 
 - Content: the motion table (`sim::tactical::MotionTable`), built for M2 by
-  `units::motion_table` from the EAWR-65 unit tables ([unit-data.md](../unit-data.md#motion-table)).
+  `units::motion_table` from the space-unit data loading unit tables ([unit-data.md](../unit-data.md#motion-table)).
   Per ship type: maximum speed, acceleration and deceleration (units per frame, per frame
   squared), rate of turn (degrees per frame) and turn-in-place slowdown. Rules: the arc angle
-  and the expansion distance; with EAWR-71 the avoidance rules and the footprints (AV-05). Like
+  and the expansion distance; with group formations and avoidance the avoidance rules and the footprints (AV-05). Like
   the sensor and durability tables it is passed to the session, named by the content identity,
   and is neither replay data nor state.
 - State: for each live unit whose type has a profile, its motion: at rest, following a path
@@ -60,7 +60,7 @@ destinations inside occupied space.
   ([replay-format.md](../replay-format.md)).
 - Inputs: the move (opcode 2), face (opcode 5, the Lua `Turn_To_Face`) and stop (opcode 1)
   orders of the unit's owner; attack, attack-move and guard orders plan through
-  [space orders](space-orders.md) (EAWR-452). A move naming two or more tracked ships is a group move (FM-01).
+  [space orders](space-orders.md) (attack approach, attack-move and guard). A move naming two or more tracked ships is a group move (FM-01).
 - Outputs: each unit's position and rotation per completed tick, in the state and the
   snapshot transform.
 - Cadence: every tick, before the tick's commands, each unit that follows a plan moves to
@@ -83,7 +83,7 @@ destinations inside occupied space.
   from frame t + 2: during frame t + 1 the unit still does what it did before (at rest, on its
   old path), and its new plan starts at frame t + 1 from where that frame left it. A move at
   tick 30 first moves the unit at tick 32; a stop at tick 120 still moves it at 121.
-- **MV-03** (project, EAWR-70 blocked-path option B) An order is accepted but moves nothing when
+- **MV-03** (project, ship movement and turning blocked-path option B) An order is accepted but moves nothing when
   the unit's type has no motion profile (stations), when the target's XY is the unit's XY, or
   when the unit or the target lies outside ±262,144 units. Rejections are unchanged.
 - **MV-10** (research E70-03, E70-06) A move plans one path at its start frame from the
@@ -137,7 +137,7 @@ destinations inside occupied space.
   movement to the approach of [space orders](space-orders.md) OR-02 to OR-08: a unit in range
   holds, one out of range plans a move to its approach slot and closes. A unit at rest turns in
   place toward an ordered target in range ([space weapon fire A-04](space-weapon-fire.md#attack-orders));
-  the turn is MV-20's. Attack-move and guard orders (EAWR-452) plan as moves or approaches (OR-10 to
+  the turn is MV-20's. Attack-move and guard orders (attack approach, attack-move and guard) plan as moves or approaches (OR-10 to
   OR-17).
 - **MV-30** (research E70-01) Between two path nodes the position follows the cubic Hermite
   curve whose end tangents are each node's yaw vector times its speed times the frames
@@ -159,7 +159,7 @@ destinations inside occupied space.
 
 ## Banking in turns
 
-research E351-01 to E351-10; data; owner (2026-09-27, EAWR-351: in the original both the Corellian
+research E351-01 to E351-10; data; owner (2026-09-27, ship banking and sway: in the original both the Corellian
 corvette and the Nebulon-B frigate sway into a small bank while they turn). FoC's space
 locomotor rolls the ship about its own forward axis every frame it follows a path or turns in
 place, and levels it again once it is at rest. The roll is part of the ship's facing, which
@@ -216,7 +216,7 @@ The rule worked by hand (0.24 per frame roll rate):
 
 `tests/replay/motion_tests.cpp` pins BK-01 to BK-05 on these values and C-10 in a session
 (1, 2, 4 and 8 workers alike); the `tactical-motion` fixture's golden hashes were re-pinned
-for EAWR-351 because its corvette and Acclamator now bank.
+for ship banking and sway because its corvette and Acclamator now bank.
 
 ## Cases
 
@@ -247,14 +247,14 @@ to C-06 in a session, and tactical-motion-clipped pins C-07 with the FoC avoidan
 ## Against the recordings
 
 Remake traces against the first original run with the committed tolerances
-(`compare_traces.py --report`, P2-06 traces private):
+(`compare_traces.py --report`, fixed-force traces private):
 
 | Case | Result |
 |---|---|
 | S-11 | Every field within tolerance. |
 | S-12 | Position within 0.0015 units (largest 24,371 raw against the 2,048 raw bound), fwd within 260 raw; alive, hull, shield, pos.z and fwd.z exact. |
 | S-13 | Position within 0.001 units (16,366 raw); everything else within tolerance. |
-| S-10 | Before EAWR-71 up to 9.7 units and 15 degrees off from tick 94 (U-01); with the search, within 0.01 units at every tick ([Avoidance](#against-the-recordings-1)). |
+| S-10 | Before the group formations and avoidance work up to 9.7 units and 15 degrees off from tick 94 (U-01); with the search, within 0.01 units at every tick ([Avoidance](#against-the-recordings-1)). |
 | S-17 | Follows S-10 through tick 61; from 62 TURBO doubles the cruise to 7.44 as recorded. Retail stops 55.8 units short; the remake arrives (U-02). |
 
 The S-12 and S-13 position differences are the original's own rounding: it evaluates each
@@ -265,7 +265,7 @@ tolerances stay at the conversion bound.
 
 ## Unknowns
 
-- **U-01** (resolved by EAWR-71) Retail's A* sometimes chooses another shape than MV-13 to
+- **U-01** (resolved by group formations and avoidance) Retail's A* sometimes chooses another shape than MV-13 to
   MV-17. S-10's corvette, with its target dead ahead, turns 15 degrees right at full speed,
   15 degrees back and matches (a match needs at least 0.01 degrees of bearing difference and
   the path must finish with the end leg). The search reproduces it (AV-10 to AV-18).
@@ -278,7 +278,7 @@ tolerances stay at the conversion bound.
 - **U-04** Retail's end-of-move idle drift (the space idle movement switch) is off in every
   recording and not modelled.
 - **U-05** Banking (BK-01 to BK-05) rests on the debug build, the owner's report that the
-  corvette and the Nebulon-B sway in turns, and rig stills (rig recording, 2026-09-27, EAWR-351): 28
+  corvette and the Nebulon-B sway in turns, and rig stills (rig recording, 2026-09-27, ship banking and sway): 28
   fog-off stills of a staged corvette and Nebulon-B, each ordered 90 degrees to its left from
   rest (capture, `-StagingProbe bank`; each still is labelled with
   the seconds since the order and the heading change so far). The corvette banks while it turns.
@@ -288,13 +288,15 @@ tolerances stay at the conversion bound.
   would predict. The stills also give the turn pace: the corvette is at +37 degrees after 3.2 s
   and +96 after 5.1 s; the Nebulon-B at +42 after 3.9 s and +84 after 5.5 s. The depth of the
   bank is **not measured**: the stills come from the perspective tactical camera at varying
-  screen positions, and the P2-06 traces record position and forward only, which a roll does not
+  screen positions, and the fixed-force traces record position and forward only, which a roll does not
   change. BK-01's values stay the debug build's.
 
-## Heights (EAWR-666)
+<a id="heights-666"></a>
+
+## Heights
 
 Status: implemented for the skirmish start (companies, stations, map objects, squadron craft) and
-the hangar launch. Reinforcements (EAWR-556, PU-34) raise the unit they create (LZ-01, PL-08); Lua and ability spawns do not exist in the sim yet and must raise theirs when they land. The rules come from the FoC debug build (evidence IDs E666-01 to E666-08,
+the hangar launch. Reinforcements (simulation economy, build queue and arrivals, PU-34) raise the unit they create (LZ-01, PL-08); Lua and ability spawns do not exist in the sim yet and must raise theirs when they land. The rules come from the FoC debug build (evidence IDs E666-01 to E666-08,
 private map) and the retail recordings. Space ships don't all fly on one plane: each type flies at
 its own height, and that gap is what keeps ships of different layers, which never avoid each other
 (AV-01), from meeting.
@@ -341,7 +343,7 @@ its own height, and that gap is what keeps ships of different layers, which neve
 ### What reads the height
 
 The height now reaches every rule that reads a position. Each was written to FoC's own test,
-planar or 3-D, so none needed a change; until EAWR-666 the 3-D ones only saw heights of 0.
+planar or 3-D, so none needed a change; until per-unit flight heights the 3-D ones only saw heights of 0.
 
 | Reader | FoC's test | Rule |
 |---|---|---|
@@ -365,10 +367,12 @@ planar or 3-D, so none needed a change; until EAWR-666 the 3-D ones only saw hei
 | The tactical camera | its own target and height | tactical-camera-input |
 
 Not wired: `SpaceProp` heights ([rendering](../rendering.md#space-ambient-particle-allocation-238)
-places props at their TED position; the tag's row belongs to EAWR-649). The console flag
+places props at their TED position; the tag's row belongs to movement tag coverage). The console flag
 `FightersPreserveZ` belongs to the fighters (E457-09).
 
-## Avoidance (EAWR-71)
+<a id="avoidance-71"></a>
+
+## Avoidance
 
 Status: implemented for single-ship moves when the motion table carries avoidance rules (the
 FoC tables do; `units::motion_table`). The rules come from the FoC debug build (evidence IDs
@@ -490,7 +494,9 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   target, and the S-10 recording shows the search going on to its detour. The remake drops a
   zero-length forward step.
 
-### The destination (EAWR-266)
+<a id="the-destination-266"></a>
+
+### The destination
 
 - **AV-19** (research E266-01, E266-02, E266-04) Before the 40-unit rule (AV-16) and the speed
   reduction (AV-17), every move's target goes through the nearest open position search, and the
@@ -511,9 +517,9 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   and every point is the destination. When no point is open the target stays as ordered.
   FoC bounds the point count by nothing but the soft radius (the object type's soft
   footprint has no floor; research E266-06), so a tiny radius would put billions of points on a
-  ring. The remake (project, EAWR-372 review) rejects a footprint whose ring 39 would hold more
-  than 2^13 points at unit-table validation, since each point is a collision query (FoC's
-  smallest soft radius, the corvette's 41.822, puts 245 there; at 50 a radius under about 1.25
+  ring. The remake (project, nearest-open-position path clipping review) rejects a footprint whose ring 39 would hold more
+  than 2^13 points at unit-table validation, since each point is a collision query (for example, the
+  corvette's soft radius of 41.822 puts 245 there; at 50 a radius under about 1.25
   is rejected), caps each ring at 2^13 points for a footprint that bypassed validation,
   and ends the search after ring 0 when the direction is zero, which returns what FoC's 40
   rings of the same point return.
@@ -524,7 +530,7 @@ avoids other ships and static objects. Ships in other layers are invisible to it
   within a rounding step of an integer, can therefore come out the other way. The plan's
   recorded target is the moved point.
 
-Against the retail recordings (FoC debug build, P2-06 recorder, fog revealed, Coruscant):
+Against the retail recordings (FoC debug build, fixed-force recorder, fog revealed, Coruscant):
 
 | Case | Result |
 |---|---|
@@ -541,18 +547,18 @@ Against the retail recordings (FoC debug build, P2-06 recorder, fog revealed, Co
 |---|---|
 | S-10 | The retail detour (15° right, 15° left, a 0.34° match, the end leg) within 0.01 units at every tick; largest pos.x 106,953 raw (0.006 units) at the stop, fwd.y 10,386 raw in the last frames where the speed falls to zero. U-01 resolved. |
 | S-11 | Every field within tolerance (no change). |
-| S-12, S-13 | As before EAWR-71 (the search takes the MV-13 to MV-16 shape): position within 0.0016 and 0.001 units. |
+| S-12, S-13 | As before the group formations and avoidance work (the search takes the MV-13 to MV-16 shape): position within 0.0016 and 0.001 units. |
 | S-14 left corvette | Within 0.00 units (display rounding) at every sampled tick: speed-up, match, end. |
 | S-14 right corvette | Within 0.01 units: slow-down to 0.744, one 20-unit wait leg, speed-up, match, end. |
 | S-14 frigate | The mirror image of the retail detour: the same arcs, straight leg at 30°, match and end, on the other side of the held Nebulon-B (AV-U8). |
 
 ### Not covered
 
-- **AV-U1** (resolved by EAWR-344) Group moves are FoC's formation system: see
+- **AV-U1** (resolved by multi-select formation slots) Group moves are FoC's formation system: see
   [Formations](#formations-344). S-14 uses individual orders.
 - **AV-U2** Threat-aware steps and final-facing (aligned) steps are out of scope for M2 moves.
-- **AV-U3** (resolved by EAWR-266, AV-19, and FM-05a) The nearest open position search runs for every
-  space move and for the formation slot mapping (EAWR-344). Verified at runtime for single moves onto
+- **AV-U3** (resolved by blocked move-target clipping, AV-19, and FM-05a) The nearest open position search runs for every
+  space move and for the formation slot mapping (multi-select formation slots). Verified at runtime for single moves onto
   map objects (S-21); the slot mapping's calls have no recording (FM-U10).
 - **AV-U4** The map-edge rule (off-map steps cost 20 times more or are dropped) needs the map
   bounds, which the session does not have; it is not modelled. For the same reason the
@@ -583,12 +589,14 @@ Against the retail recordings (FoC debug build, P2-06 recorder, fog revealed, Co
   cell); why retail's first try fails near a held ship was not found (possibly the footprints,
   AV-U7).
 
-## Formations (EAWR-344)
+<a id="formations-344"></a>
+
+## Formations
 
 Status: implemented for move commands that name two or more ships tracked in a dynamic layer,
 when the motion table carries avoidance rules. The rules come from the FoC debug build
 (evidence IDs E344-nn, private map) and are checked against the owner's capture of a rebel fleet
-group move (EAWR-345); there is no recording of a group move yet (FM-U10).
+group move (mixed-fleet group-move capture); there is no recording of a group move yet (FM-U10).
 
 ### How FoC moves a group
 
@@ -658,7 +666,7 @@ the ships of their layer that planned before them.
   together and the group's slowest ship flies at full speed. A speed of 0 plans nothing.
   (research E344-15) When the group's time is 0 (every ship already at the target) the scaling
   is skipped: each ship keeps its full maximum speed.
-- **FM-09a** (research E344-14; project, EAWR-374) A ship whose maximum speed with its modifiers
+- **FM-09a** (research E344-14; project, group formation, planning and speed matching) A ship whose maximum speed with its modifiers
   (lost engines times `Engines_Disabled_Speed_Modifier` included) is 0 cannot join the group.
   FoC tests that speed before it creates the ship's formation or counts its time; at 0 it
   asserts and leaves the composition before any layer is mapped, so the ships nearer to the
@@ -695,15 +703,17 @@ layer, a wait replaced by a stop, zero-speed and zero-time groups, and worker eq
 
 ### Against the owner capture
 
-The owner's capture of a rebel fleet group move (EAWR-345: corvettes, frigates, a destroyer,
+The owner's capture of a rebel fleet group move (mixed-fleet group-move capture: corvettes, frigates, a destroyer,
 fighters and bombers; a Nebulon-B in the way) shows the fleet keeping its arrangement as seen
 from its centre while it flies, the larger ships on the outside, and the ships going around the
 Nebulon-B in their way on the second order. FM-03 to FM-05 and FM-10 give that picture; the
 capture has no coordinates, so slots and timing are not compared in numbers (FM-U10).
 
-### The owner's order (EAWR-613)
+<a id="the-owners-order-613"></a>
 
-In the EAWR-520 eye-check clip some ships left the formation towards the rear after the order. The
+### The owner's order
+
+In the path-search performance parity eye-check clip some ships left the formation towards the rear after the order. The
 clip replays `path_bench`'s `owner` staging, which is no player order: 20 ships in a block of
 five columns by four rows 400 apart, 12 of them ordered as one group move and the other 8, which
 stand between them, as single moves in the same tick. The ships that fell back were group
@@ -723,11 +733,11 @@ members, the frigate layer's front Nebulon-Bs (fleet indices 13 and 12):
   times the straight distance), and it no longer goes north of its start.
 
 The slots, the layer split and the planning speeds follow FM-03 to FM-09; the debug build was
-read again for EAWR-613: the slot directions are the ships' offsets from their layer's centroid in
+read again for group-move formation fallback: the slot directions are the ships' offsets from their layer's centroid in
 world space, with no turn to the move's heading and no rows.
 
 `path_bench --selection owner-group` stages the same 20 ships and gives them one group move to
-the same point, the clip's order since EAWR-613. No ship turns back: none goes north of its start,
+the same point, the clip's order since the group-move formation fallback work. No ship turns back: none goes north of its start,
 and no path is longer than 1.06 times the straight line (1.05 with FoC's timing). `tests/replay/formation_tests.cpp` pins a block of 16 (eight corvettes, eight
 Nebulon-Bs) against FM-02 to FM-09 and its approach (no ship falls back along the order or moves
 away from its slot, with every search in its frame and with every search sliced), and PC-09 on
@@ -738,14 +748,14 @@ two Nebulon-Bs in a line.
 - **FM-U1** (unverified at runtime) A waiting ship's dummy destination ends at its frame (FM-08);
   whether its path is found in that frame's service or the next was not pinned. The remake plans
   at the frame.
-- **FM-U2** (resolved by EAWR-266, FM-05a) The nearest open position search moves a layer's first slot out
+- **FM-U2** (resolved by blocked move-target clipping, FM-05a) The nearest open position search moves a layer's first slot out
   of occupied space; no recording checks it yet (FM-U10).
 - **FM-U3** The map-bounds test of a slot is not applied (AV-U4).
 - **FM-U4** A moving ship whose current path ends before its planning frame stops there; FoC lets
   it continue its last motion at its walk speed until then (an idle destination, not modelled like
   U-04).
 - **FM-U5** Squadrons (no space layer) join a group move in FoC as a formation of their own that
-  escorts the group's ships; EAWR-75 owns squadrons, so they are left out.
+  escorts the group's ships; fighter spawning and simulation owns squadrons, so they are left out.
 - **FM-U6** When the first ship mapped in a layer is on both the centroid and the target, FoC's
   later ships start their rays at the map origin; the remake starts them at the target.
 - **FM-U7** FoC sorts with its library's `std::sort`, which keeps the order of ties for up to 32
@@ -760,7 +770,7 @@ two Nebulon-Bs in a line.
 - **FM-U11** (unverified at runtime) A group with a zero-speed ship (FM-09a): the release build's
   outcome of FoC's failed composition was not recorded. The remake's rule (the ship stays, the
   others move as a group) is the least visible choice, not FoC's.
-- **FM-U12** (project, EAWR-613; fidelity list) A group member whose search starts while the search
+- **FM-U12** (project, group-move formation fallback (legacy EAWR-613); fidelity list) A group member whose search starts while the search
   of an earlier ship of its layer is still running in slices (PC-08) plans with that ship held
   where it stands; FoC's would read its plan (PC-02). PC-09 closes the case where the earlier
   search has ended; the rest is measured in [The owner's order](#the-owners-order-613).
@@ -769,11 +779,13 @@ two Nebulon-Bs in a line.
   block of 16 of `formation_tests` the rear ships stop up to 900 units short of their FM-05
   slots. No recording shows FoC's group arriving (FM-U10).
 
-## Planning cost (EAWR-503)
+<a id="planning-cost-503"></a>
 
-Status: PC-01 to PC-04 come from the FoC debug build (read for EAWR-503) and the `gameconstants.xml`
-data; PC-05 to PC-08 are the remake's (EAWR-503, EAWR-520): the search's internals may differ from
-FoC's where the routes stay close (owner, EAWR-520), measured against FoC's search below. The battle paused for a moment when the owner sent every unit at
+## Planning cost
+
+Status: PC-01 to PC-04 come from the FoC debug build (read for large-selection order stalls) and the `gameconstants.xml`
+data; PC-05 to PC-08 are the remake's (large-selection order stalls, path-search performance parity): the search's internals may differ from
+FoC's where the routes stay close (owner, path-search performance parity), measured against FoC's search below. The battle paused for a moment when the owner sent every unit at
 the top of Coruscant to the bottom: the remake computed that order's path searches in one
 tick.
 
@@ -795,12 +807,12 @@ tick.
   move while a search is pending: the search is never pending past its frame (PC-02). The
   remake's sliced searches (PC-08) land frames later; the ship waits the same way until then,
   and its layer predicts the search's plan as soon as the search has ended (PC-09).
-- **PC-05** (project, EAWR-503) Searches due in one frame in different layers run side by side in the
+- **PC-05** (project, large-selection order stalls) Searches due in one frame in different layers run side by side in the
   partitioned `plan-searches` phase ([simulation](../simulation.md#path-searches-503)): a
   search reads only its own layer and the static layer (AV-01), so it never sees a search of
   another layer, and the result is the one-at-a-time result of AV-15. Searches in one layer
   keep their order and each submits before the next.
-- **PC-06** (project, EAWR-520) The bounded search. FoC's first try finishes only on an end leg
+- **PC-06** (project, path-search performance parity) The bounded search. FoC's first try finishes only on an end leg
   (AV-14); when a static object stands off the final approach it drops every end leg and the
   try spends all its 3,500 expansions on a flat fan before the second try finds the path. The
   remake changes three things and keeps FoC's tries otherwise:
@@ -811,7 +823,7 @@ tick.
   The tries share the farthest reach that FoC's fourth try reads. A search whose first try
   ends within 500 expansions is FoC's search exactly; FoC's search stays in the code as
   `PathSearchMode::exact`, the reference the path cost test measures against.
-- **PC-07** (project, EAWR-520) Search lanes and a per-tick budget. A tick's searches (due waits,
+- **PC-07** (project, path-search performance parity) Search lanes and a per-tick budget. A tick's searches (due waits,
   then the orders' single moves and each group's front ships) are queued in planning order and
   planned before anything else reads or changes a layer (a group's slot mapping, a face, stop
   or other plan, any command but a move) and after the commands. Each dynamic layer is a lane:
@@ -823,7 +835,7 @@ tick.
   the lane's searches after it do not start. Both run sliced instead (PC-08). The first search
   of a layer always starts, so a search that fits in the budget plans in its own frame as in
   FoC (PC-02); only a long search or a burst runs sliced.
-- **PC-08** (project, EAWR-520; the owner's suggestion to compute in the background and adjust the
+- **PC-08** (project, path-search performance parity; the owner's suggestion to compute in the background and adjust the
   heading when done) Sliced searches with a fixed landing. A search PC-07 gives up or does not
   start runs again from where the ship's current plan puts it `search_delay` frames later (4,
   0.13 s at 30 frames a second), for the plan the ship would make then, and that plan lands
@@ -840,7 +852,7 @@ tick.
   such as an engine hit), it plans at once instead. Differences from FoC, which plans every
   order in its frame (PC-02): a sliced search plans against its layer as it was 4 frames
   before the landing, and the ship moves on its old plan (or stays at rest) for 0.13 s longer.
-- **PC-09** (project, EAWR-613) A sliced search that has ended before its landing publishes its
+- **PC-09** (project, group-move formation fallback) A sliced search that has ended before its landing publishes its
   plan at once: from the frame it ends, its unit's layer predicts the unit along its current
   plan (at rest when it has none) up to the landing frame and along the search's plan from then
   on. The layer keeps its windows' anchor: the unit's submission is still the landing (AV-02,
@@ -849,10 +861,12 @@ tick.
   layer reads before the landing, and with it that search's plan. A search that starts after that reads the plan, as FoC's search
   of a ship that plans later reads the plan of a ship that planned before it (PC-02). Without
   it, a group member whose frame came while a neighbour of its layer waited for its landing
-  planned around that neighbour as if it would stay where it stood (EAWR-613). A search that has
+  planned around that neighbour as if it would stay where it stood (group-move formation fallback). A search that has
   not ended when a later search of its layer starts is still read as holding there (FM-U12).
 
-### Against FoC's search (EAWR-520)
+<a id="against-focs-search-520"></a>
+
+### Against FoC's search
 
 `tactical_path_cost_tests` runs 82 searches both ways: corvettes and frigates from three sides
 of Coruscant to a 3 x 3 grid of targets, onto the stations and a pad (AV-19), across a field
@@ -887,7 +901,7 @@ and divide went through a 192-step bitwise division. With exact fast paths in th
 arithmetic (identical bits, `math_contract_tests`) and PC-05, the tick takes about 32 ms on 4
 workers (about 48 ms on 1), and a normal tick about 1.3 ms.
 
-The owner's benchmark (EAWR-520, `path_bench`, [simulation](../simulation.md#path-search-cost)):
+The owner's benchmark (path-search performance parity, `path_bench`, [simulation](../simulation.md#path-search-cost)):
 20 capital ships of the four M2 types that move, 12 as one group move and 8 as single moves in
 tick 600, across Coruscant through the centre's stations and pads. On the owner's PC with
 other workers keeping it near 90 % busy (the benchmark at high priority; a plain tick takes
@@ -895,7 +909,7 @@ about 5 ms there), 4 workers:
 
 | | Order tick | p99 of the 300 ticks after | Max |
 |---|---:|---:|---:|
-| Before EAWR-520 | 94 to 118 ms | 52 to 65 ms | 94 to 118 ms |
+| Before the path-search performance parity work | 94 to 118 ms | 52 to 65 ms | 94 to 118 ms |
 | Faster search, same bits | 28 to 35 ms | 19 to 21 ms | 28 to 35 ms |
 | PC-06 and PC-07 | 12.5 to 17 ms | 12.5 to 15 ms | 20 to 25 ms |
 
@@ -926,13 +940,15 @@ sees the ship keep its old plan until they stop; FoC re-plans on every click. La
 the search starts and before an approach's re-evaluation (`search_delay` 4 < `reevaluation_frames` 10);
 `validate` checks each constant alone, not that pair.
 
-## Placement (EAWR-597)
+<a id="placement-597"></a>
+
+## Placement
 
 Status: implemented for the skirmish start (`skirmish::find_free_space`, `src/skirmish/placement.cpp`;
 `src/skirmish/start.cpp`). Evidence IDs E597-01 to E597-08 are FoC debug-build readings (private map).
 A new object in FoC is placed by a free-space search around a point when it is created on the
 battlefield or joins as a squadron member (PL-08 lists the arrivals that skip it); the skirmish
-start runs it for each starting company, which before EAWR-597 the remake stacked on the spawn marker.
+start runs it for each starting company, which before the free-space starting placements work the remake stacked on the spawn marker.
 
 - **PL-01** (research E597-02, E597-05 to E597-07) A lobby player's starting companies are created in
   list order, each from its spawn marker's position with the marker's facing. A company that is
@@ -952,7 +968,7 @@ start runs it for each starting company, which before EAWR-597 the remake stacke
   ring the bearing starts at the marker's facing yaw less 45 degrees (measured from world +X, counter-
   clockwise) and goes counter-clockwise in 22.5-degree steps through a full turn, 17 bearings
   with the last repeating the first; radius 0 is tried once. The first free candidate wins.
-  Evidence (debug build, the per-object battlefield placement, E597-05, re-read for EAWR-605): the call
+  Evidence (debug build, the per-object battlefield placement, E597-05, re-read for free-space start placement): the call
   passes the facing's Z component less 45 as the start angle, and that facing is the Euler
   triple in degrees the object is created with, so Z is the yaw (the exit-door variant adds a door
   angle in degrees to it and turns (1,0,0) by the sum). It is not a constant -45: Coruscant's
@@ -979,31 +995,31 @@ start runs it for each starting company, which before EAWR-597 the remake stacke
   FoC's own boxes produce these particular ones depends on PL-U1.
 - **PL-07** (research E597-05) When no candidate within 2500 is free the object is created at the
   world origin: the start's placement does not check for a failed search.
-- **PL-08** (research E597-04, re-read for EAWR-605) A space reinforcement searches only for the members
+- **PL-08** (research E597-04, re-read for free-space start placement) A space reinforcement searches only for the members
   of a squadron or a fleet breakdown: each is searched from the arrival point with a start angle
   of 0 (world +X), and a member whose search fails is put on the point itself; every member's
   height is then set to 0. A single ship (a type with no squadron members and no ground company
   members, such as a bought Nebulon-B) is created directly on the arrival point at height 0
   with **no search at all**, so it may overlap what stands there; a transport is likewise placed
-  without a search. Bought units' arrival (EAWR-556, EAWR-574) reuses `find_free_space` for the squadron
+  without a search. Bought units' arrival (simulation economy, build queue and arrivals, purchase UI and reinforcement placement) reuses `find_free_space` for the squadron
   and fleet members only, with the fixed start angle 0, the point as the fallback and height 0. The
   "height 0" is the arrival point's: the point is on the plane, and object creation then raises each created
-  unit by its `Layer_Z_Adjust` (LZ-01). The sim does this in `execute_economy` (EAWR-530); whether the reinforcement
+  unit by its `Layer_Z_Adjust` (LZ-01). The sim does this in `execute_economy` (station purchasing and reinforcements); whether the reinforcement
   call itself sets the raise flag is PU-G26 in [space purchasing](space-purchasing.md).
 - **PL-09** (research E71-01 to E71-24, AV-01 to AV-19) FoC does not push overlapping ships apart:
   its ships do not steer, avoidance happens only when a move is planned, and a ship at rest holds
   its position. FoC does have a resolver for stopped-against-stopped and moving-against-moving
   overlaps (infantry, vehicles, garrisons), but it lives in the collision system only the land
   game mode provides: the base mode and the space mode give none, and the resolver returns at
-  once without one (debug build, reviewed for EAWR-605). The remake adds no separation. Craft in flight steer around ships and never around
-  each other (space-fighters FD-10, FD-11, EAWR-457); that steer is not a push-apart of units at rest.
+  once without one (debug build, reviewed for free-space start placement). The remake adds no separation. Craft in flight steer around ships and never around
+  each other (space-fighters FD-10, FD-11, squadron dogfight pairing and chase); that steer is not a push-apart of units at rest.
 
 ### Placement unknowns
 
 - **PL-U1** (unverified) Which box the model bounding box is (all meshes, or the collidable ones
   the remake uses) and whether it includes `Scale_Factor` was not read. A larger box spreads the
   start further and removes some PL-06 clips.
-- **PL-U2** Resolved for FoC (debug build, the box overlap test, E597-01, re-read for EAWR-605): the
+- **PL-U2** Resolved for FoC (debug build, the box overlap test, E597-01, re-read for free-space start placement): the
   test is inclusive, the distance between centres on each axis is at most the sum of the half
   extents, so boxes that only touch block. The remake's `find_free_space` keeps open intervals, so
   it lets touching boxes stand; the ring step is 1.2 times the box's larger side, so a touching

@@ -10,6 +10,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 #include <cstdint>
@@ -38,6 +40,18 @@ namespace {
         buffer.resize(buffer.size() * 2);
     }
     return std::nullopt;
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    // dyld reports the required buffer size, including the terminating null.
+    if (_NSGetExecutablePath(nullptr, &size) != -1 || size == 0) {
+        return std::nullopt;
+    }
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        return std::nullopt;
+    }
+    // The returned path can contain symlinks; opening it follows them to the binary.
+    return std::filesystem::path(buffer.data());
 #elif defined(__linux__)
     std::error_code error;
     auto path = std::filesystem::read_symlink("/proc/self/exe", error);

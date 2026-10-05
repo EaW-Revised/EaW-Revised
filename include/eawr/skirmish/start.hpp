@@ -13,7 +13,6 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <array>
-#include <optional>
 #include <utility>
 #include <cstdint>
 #include <map>
@@ -42,7 +41,29 @@ struct LobbySlot final {
     std::uint32_t team{}; // team t starts on the Team_tt markers (SK-03)
     bool human{};
     std::vector<std::string> fleet; // SK-22, after the free starting units
+    std::optional<std::uint32_t> colour_index{}; // WSS-20: absent retains the pinned slot palette.
 };
+
+// WSS-22/24: a copied match record; only mode-supported controls are exposed.
+using MatchOptions = sim::tactical::ReplayMatchOptions;
+
+[[nodiscard]] inline sim::tactical::SkirmishMatchPolicy replay_policy(const MatchOptions& options) noexcept {
+    return {options.allow_heroes, options.allow_superweapons, options.free_starting_units, options.pre_built_base};
+}
+
+// WSS-27..30: reconstruct the applied flags, retaining other authored options.
+[[nodiscard]] inline MatchOptions replay_match_options(const sim::tactical::TacticalSetup& setup,
+    MatchOptions defaults) {
+    if (setup.skirmish) return setup.skirmish->match;
+    const auto policy = setup.match_policy.value_or(sim::tactical::SkirmishMatchPolicy{});
+    defaults.allow_heroes = policy.allow_heroes;
+    defaults.allow_superweapons = policy.allow_superweapons;
+    defaults.free_starting_units = policy.free_starting_units;
+    defaults.pre_built_base = policy.pre_built_base;
+    return defaults;
+}
+
+[[nodiscard]] core::Result<MatchOptions> read_match_defaults(const vfs::Vfs& filesystem);
 
 struct Fixture final {
     std::string map;        // logical TED path (SK-01)
@@ -51,6 +72,8 @@ struct Fixture final {
     bool pre_built_base{true};      // MP_Default_Pre_Built_Base (SK-20)
     bool free_starting_units{true}; // MP_Default_Free_Starting_Units (SK-21)
     std::uint64_t seed{};
+    std::optional<sim::tactical::VictoryCondition> victory_condition{};
+    std::optional<MatchOptions> match{};
 };
 
 // The M2 fixture: Coruscant, slot 1 Rebel human on team 0, slot 2 Empire AI on
@@ -63,6 +86,8 @@ struct FixtureOptions final {
     std::optional<std::string> map;
     std::optional<std::vector<LobbySlot>> slots;
     std::optional<std::uint64_t> seed;
+    std::optional<sim::tactical::VictoryCondition> victory_condition{};
+    std::optional<MatchOptions> match{};
 };
 
 // Reads and validates the selected space map and binds its actual SHA-256.
@@ -89,6 +114,7 @@ struct MapPlacement final {
     // TED mini 5 is absent or not finite.
     std::optional<Vec3> orientation_degrees;
     bool marker{};                            // Is_Marker = yes or Behavior MARKER
+    bool space_hazard{};                      // WHZ-01: a tracked, independently flagged space hazard
     std::vector<MarkerCandidate> marker_for;
     bool victory_relevant{};
     std::optional<Fixed> hull;                // Tactical_Health
@@ -108,6 +134,7 @@ struct StartFaction final {
     bool neutral{};            // Is_Neutral
     // #530 PU-21: Space_Tactical_Unit_Cap, the faction's population cap in a space skirmish.
     std::optional<std::uint32_t> space_unit_cap;
+    std::string basic_ai{}; // WSS-35: authored Basic_AI player type; absent means no controller.
 };
 
 struct FactionForces final {
@@ -119,6 +146,9 @@ struct LobbyColour final {
     std::string constant; // MP_Color_<name>
     std::array<std::uint8_t, 3> rgb{};
 };
+
+inline constexpr std::uint32_t multiplayer_colour_count = 9; // WSS-20.
+[[nodiscard]] core::Result<std::vector<LobbyColour>> read_lobby_colours(const vfs::Vfs& filesystem);
 
 struct StartInputs final {
     std::string map;
@@ -135,7 +165,15 @@ struct StartInputs final {
     // fog grid's cell and regrow time (#495).
     sim::math::Fixed fog_cell_size{sim::math::Fixed::from_raw(std::int64_t{100} * sim::math::Fixed::scale)};
     sim::math::Fixed fog_regrow_seconds{sim::math::Fixed::from_raw(std::int64_t{6} * sim::math::Fixed::scale)};
+    sim::tactical::VictoryCondition space_victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
+    MatchOptions match_defaults{};
+    std::vector<sim::tactical::TypeId> named_heroes, superweapons;
 };
+
+// Rebuild lobby/faction bindings from recorded players; human ownership remains
+// the caller's fixture contract, as for legacy replays.
+[[nodiscard]] core::Result<Fixture> replay_fixture(const Fixture& base, const StartInputs& inputs,
+    const sim::tactical::TacticalSetup& setup);
 
 // A TED map's declared extents (root minis 0x10 and 0x11) as binary32 bit patterns, read from
 // each mini's payload in `ted`, the map's bytes. Nullopt without both or when a mini is not the
@@ -245,7 +283,12 @@ struct SkirmishStart final {
     std::vector<StartMarker> markers; // lobby team markers, record order
     std::vector<Launch> launches;
     sim::tactical::TacticalSetup setup;
+    sim::tactical::VictoryCondition victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
+    MatchOptions match{}; // applied flags bind replays; other copied options remain content.
 };
+
+// Attach recording metadata after building a live start; fixture builders retain their pins.
+[[nodiscard]] sim::tactical::TacticalSetup recording_setup(const Fixture& fixture, const SkirmishStart& start);
 
 // Type and faction IDs are the CRC-32 of the ASCII-upper-cased name, the hash
 // TED placements use for object types (assets::object_type_crc).
@@ -311,7 +354,8 @@ struct SessionContent final {
 // lobby players; the non-playable factions' players have no command flag, OW-E3) and `humans`
 // among them. Like the other content tables it is neither replay data nor state.
 [[nodiscard]] sim::tactical::VictoryRules victory_rules(const sim::tactical::TacticalSetup& setup,
-    const units::UnitTables& tables, std::span<const sim::tactical::PlayerId> humans);
+    const units::UnitTables& tables, std::span<const sim::tactical::PlayerId> humans,
+    sim::tactical::VictoryCondition condition = sim::tactical::VictoryCondition::enemy_starbase_destroyed);
 // The start's own human lobby players.
 [[nodiscard]] sim::tactical::VictoryRules victory_rules(const SkirmishStart& start, const units::UnitTables& tables);
 
@@ -331,7 +375,7 @@ struct SessionContent final {
 // a constant it needs is missing or validate_economy rejects the rules.
 [[nodiscard]] core::Result<sim::tactical::EconomyRules> economy_rules(
     const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables);
-// The fixture's human slots: a replay does not record which players are human.
+// The fixture's human slots (also the fallback for recordings without SKSU).
 [[nodiscard]] std::vector<sim::tactical::PlayerId> human_slots(const Fixture& fixture);
 
 // Fails on a missing marker or station candidate, a type the tables lack, a

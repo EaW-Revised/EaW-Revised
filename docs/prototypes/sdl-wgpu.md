@@ -1,6 +1,6 @@
 # SDL3 and wgpu-native prototype A
 
-ADR-011 selected Godot RenderingServer. The SDL/wgpu source was removed from the current tree; reconstruct this historical prototype from commit `6728da1bcc69f5e18c77cc3bd49759a4dc379263`. Its manifest is `plan/inventories/prototype-a.json`; pinned dependencies and licenses are in that revision's `prototypes/sdl_wgpu/dependencies.json`.
+[Godot presentation decision](../architecture-decisions.md#adr-011-godot-presentation) selected Godot RenderingServer. The SDL/wgpu source was removed from the current tree; reconstruct this historical prototype from commit `6728da1bcc69f5e18c77cc3bd49759a4dc379263`. Its manifest is `plan/inventories/prototype-a.json`; pinned dependencies and licenses are in that revision's `prototypes/sdl_wgpu/dependencies.json`.
 
 ## Format and reproduction
 

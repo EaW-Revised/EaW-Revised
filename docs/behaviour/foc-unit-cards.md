@@ -1,4 +1,6 @@
-# FoC unit cards in the tactical command bar (EAWR-425)
+<a id="foc-unit-cards-in-the-tactical-command-bar-425"></a>
+
+# FoC unit cards in the tactical command bar
 
 ## Applicability
 
@@ -30,11 +32,13 @@ Output: the card in each slot, the column borders, and on a click the new select
   `s_select_23` (24), with a `s_health_NN` and a `s_shield_NN` bar each; the count of health
   bars must equal the count of slots. Slots 2c and 2c + 1 form column c (top, then bottom) and
   `special_border_c` borders it.
-- L-2 (CARD-1). A craft of a squadron whose squadron type is homogeneous (every craft one type)
-  shows no card of its own; the squadron shows one card. A craft of a mixed squadron shows as
-  itself. Transports are left out (no M2 unit is one).
-  Project (EAWR-435): the selection holds a squadron as its team container
-  ([foc-battle-world-ui.md](foc-battle-world-ui.md), EAWR-424), so the cards read a selected container
+- L-2 (CARD-1; EHS-02–EHS-04). A craft of a squadron whose effective `Is_Homogeneous` flag is
+  Yes shows no card of its own; the squadron shows one card. The flag defaults to Yes in the
+  debug build and is independent of member type names. An explicit No shows individual craft
+  cards. Vader therefore has one card for his leader and six escorts; Rogue Squadron explicitly
+  authors Yes for its six distinct craft types. Transports are left out (no M2 unit is one).
+  Project (world UI and squadron orders): the selection holds a squadron as its team container
+  ([foc-battle-world-ui.md](foc-battle-world-ui.md), battle world UI and squadron selection), so the cards read a selected container
   as its live craft and a card stands for the containers of its craft: selecting or deselecting a
   squadron card (or a mixed squadron's craft card) selects or deselects the squadron as one unit.
 - L-3 (CARD-2). The debug build's stacking compares the exact object type and ability
@@ -62,6 +66,8 @@ Output: the card in each slot, the column borders, and on a click the new select
 - L-10 (CARD-4). A bar draws its back quad and the overlay of its level, each at texture size times
   `Scale` around its bone plus `Offset`. A smooth bar narrows the overlay to its percent (level
   over the top level for health, the shield percent for shields) and keeps its left edge.
+  Card bars retain the default pixel alignment (WSU-60): their screen origin and extent are
+  snapped independently, so the same atlas bar keeps the same pixel height in both card rows.
 
 ## Clicks
 
@@ -101,7 +107,7 @@ Output: the card in each slot, the column borders, and on a click the new select
   hardpoint health for types destroyed with their hardpoints (the station in M2).
 - Ability state (ready, active, recharging) is not in the snapshot, so all units of a type share a
   state and stack together; the ability buttons, autofire marks and the recharge dial on a card are
-  P2-20b's ability work.
+  the ability-button work.
 - The encyclopedia popup is reduced to the type's display name on its header line above the help
   droid (where the retail still shows it), after `Encyclopedia_Delay`; the class, description,
   strong/weak icons and the popup frame are not drawn.

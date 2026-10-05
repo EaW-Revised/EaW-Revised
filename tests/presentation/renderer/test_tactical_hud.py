@@ -23,6 +23,9 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
+
 SRC = ROOT / "apps/viewer/src"
 UI = ROOT / "src/presentation/godot/ui"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
@@ -40,12 +43,12 @@ FACEPLATES = {
 
 class TacticalHudStructure(unittest.TestCase):
     def test_the_hud_is_wired_into_the_map_mode_the_gallery_and_the_build(self):
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/map_mode_hud.cpp", "src/presentation/godot/ui/tactical_hud.cpp",
                        "src/presentation/ui/hud_shell.cpp"):
             self.assertIn(source, build)
         self.assertIn("register_tactical_hud_classes()", (SRC / "register_types.cpp").read_text(encoding="utf-8"))
-        map_mode = (SRC / "map_mode.cpp").read_text(encoding="utf-8")
+        map_mode = source_text("apps/viewer/src/map_mode.cpp")
         # Both the land path and the space hand-off build the HUD.
         self.assertEqual(map_mode.count("state.build_hud(host, map.context_name)"), 2)
         self.assertIn("state.hud->world_input(event)", map_mode)
@@ -53,10 +56,10 @@ class TacticalHudStructure(unittest.TestCase):
         hud_arguments = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
         self.assertIn('if (mode.empty() && live_session) mode = "tactical";', hud_arguments)
         self.assertIn("live_session->local_faction()", hud_arguments)
-        self.assertIn("build_hud_page(", (SRC / "ui_gallery_mode.cpp").read_text(encoding="utf-8"))
+        self.assertIn("build_hud_page(", source_text("apps/viewer/src/ui_gallery_mode.cpp"))
 
     def test_the_shell_comes_from_game_data(self):
-        hud = (UI / "tactical_hud.cpp").read_text(encoding="utf-8")
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
         for call in ("load_command_bar(", "load_shell_anchors(", "load_mega_texture_atlas(",
                      "hud_view_model(", "load_language_text_database("):
             self.assertIn(call, hud)
@@ -66,7 +69,7 @@ class TacticalHudStructure(unittest.TestCase):
         self.assertIn("load_font_cache(", (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8"))
         self.assertIn("EawrUiHitMask", hud)
         for path in (UI / "tactical_hud.cpp", UI / "tactical_hud.hpp", SRC / "map_mode_hud.cpp"):
-            text = path.read_text(encoding="utf-8")
+            text = source_text(path.relative_to(ROOT).as_posix())
             self.assertNotIn(".tga\"", text, path)
             self.assertNotIn(".ttf\"", text, path)
 
@@ -74,7 +77,7 @@ class TacticalHudStructure(unittest.TestCase):
         # FoC picks the shell mesh, not the drawn art (docs/ui/ui-layer.md 1.3):
         # the button spans its art quad, but only its component rect (the hit
         # mask's rect) is interactive.
-        hud = (UI / "tactical_hud.cpp").read_text(encoding="utf-8")
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
         self.assertIn("bool _has_point(const Vector2& point) const override { return hit_rect_.has_point(point); }",
                       hud)
         self.assertIn("setup.options_hit = look.rect;", hud)
@@ -88,10 +91,10 @@ class TacticalHudStructure(unittest.TestCase):
     def test_ability_buttons_follow_the_foc_command_bar(self):
         # #454 (docs/behaviour/foc-ability-buttons.md): the buttons come from the shell's
         # special_button_NN components, draw over the cards and hand their clicks to the battle input.
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/presentation/ui/ability_buttons.cpp", "src/presentation/godot/ui/ability_buttons_view.cpp"):
             self.assertIn(source, build)
-        hud = (UI / "tactical_hud.cpp").read_text(encoding="utf-8")
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
         self.assertIn("GDREGISTER_CLASS(EawrAbilityButtons);", hud)
         self.assertIn("abilities.buttons = state.shell.ability_buttons;", hud)
         self.assertIn('constexpr std::string_view ability_stem = "special_button_";',
@@ -102,7 +105,7 @@ class TacticalHudStructure(unittest.TestCase):
         # #530: the cards and the ability bar refresh together in State::sync_cards(), which the
         # tick and the input paths both call.
         self.assertIn("hud->set_ability_bar(battle->ability_bar());", wiring)
-        self.assertEqual((SRC / "map_mode.cpp").read_text(encoding="utf-8").count("state.sync_cards();"), 2)
+        self.assertEqual(source_text("apps/viewer/src/map_mode.cpp").count("state.sync_cards();"), 2)
         note = (ROOT / "docs/behaviour/foc-ability-buttons.md").read_text(encoding="utf-8")
         for rule in ("AB-01", "AB-05", "AB-06", "AB-08", "AB-09", "AB-10", "Interface to the simulation"):
             self.assertIn(rule, note)
@@ -110,10 +113,10 @@ class TacticalHudStructure(unittest.TestCase):
     def test_unit_cards_follow_the_foc_command_bar(self):
         # #425: the selection's cards are drawn in the shell's own card slots and a card click goes
         # back to the battle's selection (docs/behaviour/foc-unit-cards.md).
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/presentation/ui/unit_cards.cpp", "src/presentation/godot/ui/unit_cards_view.cpp"):
             self.assertIn(source, build)
-        hud = (UI / "tactical_hud.cpp").read_text(encoding="utf-8")
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
         self.assertIn("GDREGISTER_CLASS(EawrUnitCards);", hud)
         self.assertIn("cards.slots = state.shell.card_slots;", hud)
         wiring = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
@@ -137,14 +140,14 @@ class TacticalHudStructure(unittest.TestCase):
     def test_the_minimap_is_drawn_in_the_radar_mesh(self):
         # #455 (docs/behaviour/foc-minimap.md): the minimap model, its Godot control and the live
         # battle's per-frame hand-off.
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/presentation/ui/minimap.cpp", "src/presentation/godot/ui/minimap_view.cpp"):
             self.assertIn(source, build)
-        hud = (UI / "tactical_hud.cpp").read_text(encoding="utf-8")
+        hud = source_text("src/presentation/godot/ui/tactical_hud.cpp")
         self.assertIn("GDREGISTER_CLASS(EawrMinimap);", hud)
         self.assertIn("minimap.rect = *state.shell.minimap;", hud)
         self.assertIn("state.minimap_fog.advance(", hud)
-        self.assertIn("state.sync_minimap();", (SRC / "map_mode.cpp").read_text(encoding="utf-8"))
+        self.assertIn("state.sync_minimap();", source_text("apps/viewer/src/map_mode.cpp"))
         wiring = (SRC / "map_mode_hud.cpp").read_text(encoding="utf-8")
         for call in ("hud->set_minimap_handlers(", "battle_space->live_camera_focus(", "input->minimap_move(",
                      "battle->ground_corners(minimap_height.value_or(0.0))",
@@ -349,6 +352,42 @@ class TacticalHudGraphical(unittest.TestCase):
         self.assertEqual(cards["borders"], 12)  # the shell's border slots, including empty ones
         self.assertNotEqual(drawn[0]["icon"], drawn[1]["icon"])
         self.assertTrue(all(card["icon_drawn"] for card in drawn.values()), drawn)
+
+    def test_card_bar_pixel_heights_match_in_both_rows(self):
+        from PIL import Image
+
+        # WSU-60: the atlas bars retain the same pixel height in every row,
+        # including the owner's fractional HUD scale at 2574x1399.
+        spec = "Nebulon_B_Frigate*2:NONE@1~1,Calamari_Cruiser*2:NONE@1~1"
+        for resolution in ("1280x720", "1920x1080", "2574x1399"):
+            with self.subTest(resolution=resolution):
+                capture = self.directory / f"hud-card-bar-heights-{resolution}.png"
+                result, _ = run(self, ["--eawr-ui-gallery", "--eawr-font-cache", str(self.cache),
+                                       "--eawr-ui-hud", "rebel", "--eawr-ui-hud-cards", spec,
+                                       "--eawr-capture", str(capture)],
+                                capture.with_suffix(".json"), resolution=resolution)
+                cards = result["hud"]["unit_cards"]["drawn"]
+                self.assertEqual([card["slot"] for card in cards], [0, 1, 2, 3])
+                with Image.open(capture) as image:
+                    pixels = image.convert("RGB")
+                    heights = {"health_rect": [], "shield_rect": []}
+                    for card in cards:
+                        for key in heights:
+                            rect = card[key]
+                            self.assertTrue(all(value == int(value) for value in rect), rect)
+                            x, y, width, height = map(int, rect)
+                            # Sample the rendered fill through its centre. Counting
+                            # actual coloured rows catches row-dependent rasterisation.
+                            column = [pixels.getpixel((x + width // 2, row))
+                                      for row in range(y - 2, y + height + 2)]
+                            coloured = [g > r * 1.1 and g > b * 1.5 if key == "health_rect"
+                                        else b > r * 1.5 and b > g * 1.2
+                                        for r, g, b in column]
+                            self.assertGreater(sum(coloured), 0, (key, rect, column))
+                            heights[key].append(sum(coloured))
+                    for key, values in heights.items():
+                        self.assertEqual(len(set(values)), 1, (resolution, key, values))
+                    self.assertEqual(heights["health_rect"], heights["shield_rect"])
 
     def test_the_hud_scales_to_1080_lines(self):
         result, _ = run(self, ["--eawr-ui-gallery", "--eawr-font-cache", str(self.cache), "--eawr-ui-hud", "rebel",

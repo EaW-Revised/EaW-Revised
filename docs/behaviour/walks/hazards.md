@@ -4,7 +4,7 @@
 
 FoC tactical space: asteroid fields, solid asteroids, nebulas, ion storms, neutral
 structures, capture points and placed scenery. This walk also checks whether stock
-space mines exist. It writes no simulation code. Map selection belongs to EAWR-908;
+space mines exist. It writes no simulation code. Space-skirmish map selection is tracked separately (legacy EAWR-908);
 this note supplies the semantics that a selected map needs.
 
 Sources are **debug build** (read-only inspection with opaque EHZ evidence IDs),
@@ -74,9 +74,11 @@ have a four-frame interval. Shield service refreshes storm membership after
 recharge. Destruction schedules eligible map-object respawns. Minimap rebuilding
 and visual interpolation are presentation entry points.
 
-The following sections give the order **within each entry point**. Their global
-interleaving, including fog, movement, shields and capture-point objects, remains
-U-01. Do not derive one universal order from the section order here.
+The following sections give the order **within each entry point**.
+[WFO-08 and WFO-12 to WFO-19](frame-order.md) settle U-01's ordinary scheduler:
+fog-grid decay precedes objects; reverse service registration selects object turns, while
+general then space behaviour attachment determines each object's service order. Do not
+derive one universal order from the section order here.
 
 ## Rules, in evaluation order
 
@@ -94,7 +96,8 @@ U-01. Do not derive one universal order from the section order here.
   backwards through its serviced prefix, preserving their attachment order.
   Each must be due and service-enabled. The intervals below are logical frames,
   not render frames. Logical FPS converts seconds to frames; the stock battle
-  uses 30 FPS. Global object order and attachment from separate XML lists are U-01.
+  uses 30 FPS. Global object order and attachment from separate XML lists are now
+  [WFO-12/WFO-15](frame-order.md); runtime re-registration/duplicates remain UFO-04 there.
 - **WHZ-03** (**debug build**, EHZ-06, EHZ-18, EHZ-21, EHZ-29, EHZ-35;
   AV-03 to AV-05) An active `SPACE_OBSTACLE` registers a static prediction
   outside limbo. Its tracking footprint uses the soft radius:
@@ -137,6 +140,21 @@ U-01. Do not derive one universal order from the section order here.
   asteroids, excluding field, storm and nebula categories. Fighters do not gain
   asteroid collision damage merely because their hull intersects a field
   (WHZ-10). This leaves fighter movement internals with the squadrons walk.
+- **WHZ-08a** (**debug build**, EAT-01..07) An ordinary positional move order
+  starts with the all-category destination. Before mapping each ship, derive its
+  filter from zero-extent static-layer point queries at the original destination
+  and current centre, in XY from the current frame through the tracking horizon.
+  Remove every category found at either endpoint. A unit without the attached
+  asteroid-damage behavior also removes fields, so stock corvettes cross fields
+  without using fighter locomotion. A double-click move removes field, storm and
+  nebula categories regardless of endpoint contact. Always restore ordinary
+  moving/static and solid-asteroid categories. The resulting filter governs slot
+  placement, destination clipping and the path search. A normal frigate/capital
+  order avoids a field between two clear endpoints; an inside-field destination
+  admits transit, and a double-click admits transit between clear endpoints.
+  Filtered hazards receive no failed-search penalty unless the original derived
+  filter was all categories (WHZ-06/07). Field damage remains independently gated
+  by WHZ-10..14; no runtime wall or pushback is added (WMV-04).
 - **WHZ-09** (**debug build**, EHZ-38, EHZ-39; IS-07/IS-08, G-V2;
   **data**) Outside the map editor, fog initialization clears one shared dense
   bit grid, then ORs circles for obstacles with any of the four hazard flags
@@ -183,6 +201,15 @@ U-01. Do not derive one universal order from the section order here.
   collision geometry, preferring shield geometry when available, and offsets
   the surface point by **0.1** along its normal (code). Particle choices come
   from `Asteroid_Damage_Hit_Particles` using synchronized random selection.
+
+The WHZ-14 ordinary route was checked again against the debug build (EHZ-65).
+Selection draws a start index over the complete hardpoint list only if at least
+one live destroyable point exists, then scans circularly past dead and
+indestructible points. The chosen mesh name resolves to the first matching
+hardpoint, without case sensitivity; an absent selector uses the hull. Asteroid
+damage receives combat defense, shield armor and hull armor modifiers, but does
+not enter the projectile-only diminishing-firepower or energy-drain branches.
+The read-only evidence and identifier map remain in ignored research storage.
 
 ### Nebula state: every logical frame on affected units
 
@@ -334,7 +361,7 @@ Tags are `Capture_Point_Radius`, `Capture_Point_Transition_Time_Seconds`,
 `Shield_Refresh_Rate`, `Space_FOW_Reveal_Range`, `Influences_Capture_Point`,
 `Collidable_By_Projectile_Living`, `Scale_Factor`, `Ownership_Sticks` and
 `Is_Community_Property`. Pad construction/options and mining income belong to
-EAWR-541 and production. Completed defense-satellite weapons use the weapons/combat
+Space build pads and mining facilities (legacy EAWR-541) and production. Completed defense-satellite weapons use the weapons/combat
 walks; “satellite” does not imply a new environmental damage algorithm.
 
 ### Neutral map objects, projectile interface and destruction
@@ -357,6 +384,14 @@ walks; “satellite” does not imply a new environmental damage algorithm.
   `Collidable_By_Projectile_Dead` do not make a non-hostile player hostile.
   Area explosions and explicitly targeted damage remain separate combat
   interfaces. Script/lobby relationship overrides remain with player setup.
+  A targeted read-only debug-build recheck of ordinary attack command admission
+  and projectile player visitation confirms that the attack checks hostility before
+  setting a target, unless its separate forced-friendly option is set; projectile
+  contact queries only hostile players in sorted player order and returns the first
+  player that supplies a hit. The remake shares the neutral/team relationship gate
+  between ordinary attack admission, targeting, presentation and projectile damage.
+  It applies the living collision permission and DG-30's persistent first-contact
+  owner-tree order; the forced-friendly command option has no remake command interface.
 - **WHZ-52** (**debug build**, EHZ-37; **data**) In the ordinary destruction
   path, a non-clone object with `Tactical_Respawn_Time_In_Secs > 0` schedules
   recreation of the same type, position and facing at the rounded
@@ -402,9 +437,15 @@ walks; “satellite” does not imply a new environmental damage algorithm.
   application are WHZ-72. Capture progress/events use WHZ-47, not hazard blips.
 - **WHZ-71** (**debug build**, EHZ-01; **data**) Nebula visual state has its
   own blend, targeted at 1 on contact and 0 on a failed recheck (WHZ-21/WHZ-24).
-  `Nebula_Effect_Color` is (255,255,255,64) in GameConstants. The exact blend
-  rate and material application are U-07; logical ability state must not be
-  inferred from the currently visible opacity. Asteroid hit effects use WHZ-14;
+  `Nebula_Effect_Color` is (255,255,255,64) in GameConstants. A targeted
+  debug-build follow-up establishes an initial blend of zero and a critically
+  damped characteristic time of **0.15 seconds** (code). The service advances
+  the blend before changing its contact target; a subsequent cached positive
+  service settles it immediately to one. Material submission ignores blends
+  **<= 0.01** (code), interpolates white RGBA toward the authored nebula color,
+  multiplies existing RGB modulation and combines alpha with visibility opacity.
+  Logical ability state must not be inferred from the currently visible opacity.
+  Asteroid hit effects use WHZ-14;
   neither visual interpolation nor absent SFX changes environmental damage.
 - **WHZ-72** (**debug build**, EHZ-66; **data**) Rebuilding the field-map texture
   clears it, rasterizes the registered field icons as ellipses from their stored
@@ -415,8 +456,13 @@ walks; “satellite” does not imply a new environmental damage algorithm.
   `Space_Asteroid_Field_Border_Color` (174,171,200,127). Fill-only and border-only
   pixels use the corresponding color with alpha scaled by mask coverage;
   mixed pixels blend the two colors by fill coverage. A failed texture validation
-  leaves the map dirty for retry. Precise bounds supplied by icon registration,
-  ellipse-coordinate reconstruction and invalidation callers remain U-07.
+  leaves the map dirty for retry. A targeted debug-build follow-up establishes
+  registration of every field, storm and nebula independent of ordinary radar
+  admission; it supplies object position and the render model's bounding box.
+  The integer center is the projected position; each radius is half the projected
+  displacement of the corresponding bounding-box half extent, with a minimum
+  of one pixel. The remake unions analytic ellipse scanlines; exact integer
+  fringe quantization and exceptional model-bound variants remain U-07.
 
 ## Comparison with existing behavior notes
 
@@ -429,7 +475,7 @@ walks; “satellite” does not imply a new environmental damage algorithm.
 | [Space weapon fire](../space-weapon-fire.md) R-02/R-05; [weapons](weapons.md) WWP-66 | **same** nebula/fog opportunity and hostile-player projectile interfaces; **missing there** neutral default relationship establishment, settling weapons U-05 for default neutral factions. |
 | [Abilities](abilities.md) WAB-02, WAB-34, WAB-64; AB-14, AB-64 | **same** cancellation/ready interfaces and ion-shot/storm gates; **missing there** entry, cache, union and restore-slot details. **Differs in applicability:** “no M2 map has either” describes the old scoped map set; selectable Endor and Geonosis require these rules. |
 | [Capital combat](capital-combat.md) WCC-47, WCC-80; BP-19 | **same** absorption and collision gates; **missing there** storm refresh order, pool preservation and capture-point respawn scheduling. |
-| [Production](production.md) WPR-02, WPR-30; SK-32, EAWR-541 | **same** pads are currently inert / construction remains its interface; **missing there** full capture candidate, contested transition, rollback and generic respawn rules. |
+| [Production](production.md) WPR-02, WPR-30; SK-32, space build pads and mining facilities (legacy EAWR-541) | **same** pads are currently inert / construction remains its interface; **missing there** full capture candidate, contested transition, rollback and generic respawn rules. |
 | [Sensors/UI](sensors-ui.md) WSU-16; [minimap](../foc-minimap.md) MM-12/MM-14 | **same** community selection and hazard blip exclusion; **missing there** capture progress/events and field-map geometry. |
 | [Tactical AI](tactical-ai.md), WAB-34 | **same** ability signals hand off to plans; **missing there** environmental event timing. No AI behavior is re-derived here. |
 | Asteroid damage, shared mine trigger, other scenery | **missing there** as a complete environmental walk; WHZ-10 to WHZ-14 and WHZ-60/WHZ-61 supply the sourced scope. |
@@ -444,13 +490,13 @@ claim that our land trigger is implemented.
 | Rule | Our code / current behavior | Verdict | Gap |
 |---|---|---|---|
 | WHZ-01 | `src/units/unit_tables.cpp`, `pinned_obstacles`: only five old-map obstacle profiles; `src/skirmish/inputs.cpp`, `placement_facts` lacks hazard semantics | missing | G-1 |
-| WHZ-02 | `src/sim/tactical/session.cpp` has partitioned subsystem phases but no environmental services/cadence | missing | G-3/G-4/G-5/G-6 |
+| WHZ-02 | `src/sim/tactical/session_step.cpp` has partitioned subsystem phases but no environmental services/cadence | missing | G-3/G-4/G-5/G-6 |
 | WHZ-03 | `src/units/unit_motion.cpp`, `footprint_of`; session `leaf_for`; tracking point-query kernel | same | prerequisite G-1 |
 | WHZ-04 | session `leaf_for` assigns ordinary static/moving to every tracked footprint | differs | G-2 |
 | WHZ-05 | no obstacle-offset read in motion profiles; centers use raw position | differs | G-2 |
-| WHZ-06 | `src/sim/tactical/pathfind.cpp`, configuration/`next_try` match default all-filter moves; custom destination filters are not exposed | same for normal moves | custom filters belong to orders/AI |
+| WHZ-06 | `src/sim/tactical/pathfind_search_internal.hpp` and `src/sim/tactical/pathfind_sliced.cpp`, configuration/`next_try` match default all-filter moves; custom destination filters are not exposed | same for normal moves | custom filters belong to orders/AI |
 | WHZ-07 | pathfinder `linear_expansion_cost`, `next_try` already implement penalties and filtered hazard bits | same | prerequisite G-2 |
-| WHZ-08 | `src/sim/tactical/fighters.cpp`, `avoid` (WSQ-35) | same interface | prerequisite G-1/G-2 for new map solids |
+| WHZ-08 | `src/sim/tactical/fighters_motion.cpp`, `avoid` (WSQ-35) | same interface | prerequisite G-1/G-2 for new map solids |
 | WHZ-09 | `src/sim/tactical/fog_cells.cpp` has no dense obstacle map or multiplier application | missing | G-8 |
 | WHZ-10 | no per-type asteroid service/layer gates | missing | G-3 |
 | WHZ-11 | no asteroid point-query or scalar gates | missing | G-3 |
@@ -463,7 +509,7 @@ claim that our land trigger is implemented.
 | WHZ-23 | ordinary ability deactivation exists; no environmental cancel source | missing | G-4 |
 | WHZ-24 | no environmental primary-slot ready events | missing | G-4 |
 | WHZ-25 | no team/behavior/fallback nebula query or environmental gate | missing | G-4 |
-| WHZ-26 | `src/sim/tactical/combat.cpp`, `nebula_fogged` always false; ion shot lacks nebula cancel | differs | G-4 |
+| WHZ-26 | `src/sim/tactical/combat_algorithms.hpp`, `nebula_fogged` always false; ion shot lacks nebula cancel | differs | G-4 |
 | WHZ-30 | `src/sim/tactical/damage.cpp`, `recharge_shields` exists; no storm-service integration | missing | G-5 |
 | WHZ-31 | no storm point-query/cache | missing | G-5 |
 | WHZ-32 | shield damage/DEFEND gate omit storm state | differs | G-5 |
@@ -477,8 +523,8 @@ claim that our land trigger is implemented.
 | WHZ-46 | no capture completion/change-owner handoff | missing | G-6 |
 | WHZ-47 | no capture animations/radar events/progress | missing | G-6 |
 | WHZ-50 | `unit_tables.cpp` loads footprints, not neutral-object combat/economy profiles | missing | G-6 |
-| WHZ-51 | `src/sim/tactical/projectiles.cpp`, `step_projectile` tests all other teams, omitting living/dead type eligibility | differs | G-10 |
-| WHZ-52 | no tactical map-object respawn scheduling | missing | G-7 |
+| WHZ-51 | `src/sim/tactical/session.cpp`, `players_hostile`; ordinary orders, targeting, snapshot cursor classification and projectile contact reject neutral players; living projectile permission gates the persistent owner trees | agrees for neutral eligibility and DG-30 first-contact owner order | G-10 |
+| WHZ-52 | ordinary typed tactical respawn with neutral capture ownership and rounded deadlines | same | `TacticalSession::step`, `respawn_after_death`; exceptional branches remain U-05 |
 | WHZ-53 | scene population renders placed props; no invented scenery damage/capture | same | no new mechanic |
 | WHZ-60 | no minefield applied on the five stock space maps | same for stock space | no new ticket |
 | WHZ-61 | shared land trigger is outside M2; no stock-space mine trigger needed | same for stock space applicability | U-06 before any space extension |
@@ -491,22 +537,22 @@ differs 6, missing 29**. Unverified branches are listed separately below.
 Missing details of ordinary combat or AI interfaces already owned by another
 walk are not counted again.
 
-| Gap | Implementation boundary and M2 impact | Size | Ticket |
+| Gap | Implementation boundary and M2 impact | Size | Work |
 |---|---|---|---|
-| G-1 | Load semantic profiles for actual selected-map placements, effective flags and behavior opt-ins. All five maps currently draw fields without sim participation. Keep CRC decoding/map choice with EAWR-908. | M | EAWR-922 |
-| G-2 | Correct tracking category precedence and yaw-rotated obstacle offsets, then exercise the existing ship/fighter/path-retry filters. Prevent fields becoming ordinary solids and preserve late retry passage. | M | EAWR-923 |
-| G-3 | Add affected-unit asteroid damage services, gates, cached contact, synchronized per-overlap rolls and combat hardpoint handoff. High: capitals/frigates currently cross every field unharmed. | M | EAWR-924 |
-| G-4 | Add nebula contact windows, unit/team/fallback predicates, ability cancel/ready/gates, opportunity-fire and ion-shot adapters. High on Endor/Geonosis: abilities and concealment differ. | M | EAWR-925 |
-| G-5 | Add storm refresh and shield absorption/mesh/DEFEND gates while preserving the shield pool/recharge order. High on Endor: shielding remains effective here. | M | EAWR-926 |
-| G-6 | Capture candidate/contested/progress/rollback ownership and neutral structure interfaces. High: pads/mining remain inert. **Reuse EAWR-541** for pad capture/build/income; extend to merchant/ordinary map-object profiles separately. | M per extension | EAWR-541; EAWR-927 |
-| G-7 | Schedule destruction-driven neutral capture-point respawns with same placement and data delays; settle due-frame ordering. Medium: destroyed pads/docks currently never return. | M | EAWR-928 |
-| G-8 | Dense-cell initialization and destination-cell reveal multiplier. High: hazards conceal less than retail. **Reuse EAWR-826**, including WHZ-09's geometry. | M | EAWR-826 |
-| G-9 | Hazard-aware minimap suppression/fill, unit nebula blend and asteroid hit particles/SFX. Medium/low feedback; resolve U-07 before reproducing unverified geometry. Capture feedback stays with EAWR-541/G-6. | M | EAWR-929 |
-| G-10 | Respect hostile-player relationship and living/dead projectile eligibility on neutral/captured objects. Medium: otherwise neutral scenery can absorb shots. **Reuse EAWR-749**, whose source rule already requires hostile-player visitation; this walk settles the default-neutral relationship question. | M | EAWR-749 |
+| G-1 | Load semantic profiles for actual selected-map placements, effective flags and behavior opt-ins. All five maps currently draw fields without sim participation. Keep CRC decoding/map choice with space-skirmish map selection (legacy EAWR-908). | M | data-driven map hazard profiles (legacy EAWR-922) |
+| G-2 | Correct tracking category precedence and yaw-rotated obstacle offsets, then exercise the existing ship/fighter/path-retry filters. Prevent fields becoming ordinary solids and preserve late retry passage. | M | hazard classification and obstacle offsets (legacy EAWR-923) |
+| G-3 | Add affected-unit asteroid damage services, gates, cached contact, synchronized per-overlap rolls and combat hardpoint handoff. High: capitals/frigates currently cross every field unharmed. | M | asteroid damage and contact state (legacy EAWR-924) |
+| G-4 | Add nebula contact windows, unit/team/fallback predicates, ability cancel/ready/gates, opportunity-fire and ion-shot adapters. High on Endor/Geonosis: abilities and concealment differ. | M | nebula contact and weapon gates (legacy EAWR-925) |
+| G-5 | Add storm refresh and shield absorption/mesh/DEFEND gates while preserving the shield pool/recharge order. High on Endor: shielding remains effective here. | M | ion-storm shield-pool preservation (legacy EAWR-926) |
+| G-6 | Capture candidate/contested/progress/rollback ownership and neutral structure interfaces. High: pads/mining remain inert. **Reuse space build pads and mining facilities (legacy EAWR-541)** for pad capture/build/income; extend to merchant/ordinary map-object profiles separately. | M per extension | space build pads and mining facilities (legacy EAWR-541); merchant-dock capture and neutral profiles (legacy EAWR-927) |
+| G-7 | Schedule destruction-driven neutral capture-point respawns with same placement and data delays; settle due-frame ordering. Medium: destroyed pads/docks currently never return. | M | capturable-object respawning (legacy EAWR-928) |
+| G-8 | Dense-cell initialization and destination-cell reveal multiplier. High: hazards conceal less than retail. **Reuse multisample fog and dense reveal ranges (legacy EAWR-826)**, including WHZ-09's geometry. | M | multisample fog and dense reveal ranges (legacy EAWR-826) |
+| G-9 | Hazard-aware minimap suppression/fill, unit nebula blend and asteroid hit particles/SFX. Medium/low feedback; resolve U-07 before reproducing unverified geometry. Capture feedback stays with space build pads and mining facilities (legacy EAWR-541)/G-6. | M | hazard minimap and effect presentation (legacy EAWR-929) |
+| G-10 | Neutral/captured eligibility and existing living/dead gates are applied. The nearest-contact project choice still differs from first hostile-player/tree contact; changing collection traversal is separate collision-order work. | M | projectile collision order (legacy EAWR-749) |
 
-Tracking issue: EAWR-921, with eight new implementation sub-issues and existing
+Tracking issue: space-hazard rule walk (legacy EAWR-921), with eight new implementation sub-issues and existing
 work linked above. Implementation must use copied immutable phase inputs,
-disjoint staging and ordered commit (ADR-009), preserving synchronized random
+disjoint staging and ordered commit ([EnTT storage decision](../../architecture-decisions.md#adr-009-entt-storage-and-stable-simulation-ids)), preserving synchronized random
 draw order. These observations do not authorize a new serial per-unit tick loop.
 
 ## XML coverage registry audit
@@ -517,23 +563,23 @@ is `deferred`. A docs-only walk does not change application status.
 
 | Tag | Classes marked todo | Existing registry ticket / rules |
 |---|---|---|
-| `Asteroid_Field_Damage`, `Asteroid_Field_Damage_Rate` | GameConstants | EAWR-650; WHZ-11/12 |
-| `Is_Asteroid_Field`, `Is_Ion_Storm` | SpaceProp | EAWR-650; WHZ-01/04/12/31 |
-| `Is_Impassable_Asteroid` | SpaceProp, SpecialStructure | EAWR-650; WHZ-04/08/09 |
-| `Nebula_Ability_Disable_Time`, `Ion_Storm_Shield_Disable_Time` | GameConstants | EAWR-650; WHZ-21/31 |
-| `Space_Obstacle_Offset` | SecondaryStructure, SpaceBuildable, SpaceProp, SpaceStructure, SpecialStructure, StarBase | EAWR-649; WHZ-05/09 |
-| `Space_Obstacle_Radius` | SpaceStructure | EAWR-649; WHZ-03/09; other class rows already cover some applications |
-| `Dense_FOW_Reveal_Range_Multiplier` | Container, HeroUnit, Projectile, SpaceUnit, StarBase, TransportUnit, UniqueUnit | EAWR-653 / concrete EAWR-826; WHZ-09 |
-| `Capture_Point_Radius` | Marker, Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpecialStructure | EAWR-654; WHZ-41 |
-| `Capture_Point_Transition_Time_Seconds` | Marker, SecondaryStructure, SpaceBuildable, SpecialStructure | EAWR-654; WHZ-44/45 |
-| `Influences_Capture_Point` | HeroUnit, Marker, MiscObject, Mobile_Defense_Unit, Projectile, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, UniqueUnit | EAWR-654; WHZ-41 |
-| `Ownership_Sticks` | SecondaryStructure, SpaceBuildable, SpecialStructure | EAWR-654; WHZ-43 |
-| `Abilities/Battlefield_Modifier_Ability/Capture_Point_Time_Multiplier` | UpgradeObject | EAWR-760; WHZ-45 ability interface |
-| `Tactical_Respawn_Time_In_Secs` | SecondaryStructure, SpaceBuildable | EAWR-650; WHZ-52 |
-| `Asteroid_Damage_Hit_Particles` | SpaceUnit, TransportUnit, UniqueUnit | EAWR-653; WHZ-14 |
-| `SFXEvent_Damaged_By_Asteroid` | SpaceUnit, UniqueUnit | EAWR-653; WHZ-14 |
-| `Nebula_Effect_Color` | GameConstants | EAWR-653; WHZ-71, material application U-07 |
-| `Space_Asteroid_Field_Color`, `Space_Asteroid_Field_Border_Color` | RadarMapSettings | EAWR-653; WHZ-72 field-map fill/border |
+| `Asteroid_Field_Damage`, `Asteroid_Field_Damage_Rate` | GameConstants | combat tag coverage (legacy EAWR-650); WHZ-11/12 |
+| `Is_Asteroid_Field`, `Is_Ion_Storm` | SpaceProp | combat tag coverage (legacy EAWR-650); WHZ-01/04/12/31 |
+| `Is_Impassable_Asteroid` | SpaceProp, SpecialStructure | combat tag coverage (legacy EAWR-650); WHZ-04/08/09 |
+| `Nebula_Ability_Disable_Time`, `Ion_Storm_Shield_Disable_Time` | GameConstants | combat tag coverage (legacy EAWR-650); WHZ-21/31 |
+| `Space_Obstacle_Offset` | SecondaryStructure, SpaceBuildable, SpaceProp, SpaceStructure, SpecialStructure, StarBase | movement tag coverage (legacy EAWR-649); WHZ-05/09 |
+| `Space_Obstacle_Radius` | SpaceStructure | movement tag coverage (legacy EAWR-649); WHZ-03/09; other class rows already cover some applications |
+| `Dense_FOW_Reveal_Range_Multiplier` | Container, HeroUnit, Projectile, SpaceUnit, StarBase, TransportUnit, UniqueUnit | presentation tag coverage (legacy EAWR-653) / concrete multisample fog and dense reveal ranges (legacy EAWR-826); WHZ-09 |
+| `Capture_Point_Radius` | Marker, Mobile_Defense_Unit, SecondaryStructure, SpaceBuildable, SpecialStructure | economy tag coverage (legacy EAWR-654); WHZ-41 |
+| `Capture_Point_Transition_Time_Seconds` | Marker, SecondaryStructure, SpaceBuildable, SpecialStructure | economy tag coverage (legacy EAWR-654); WHZ-44/45 |
+| `Influences_Capture_Point` | HeroUnit, Marker, MiscObject, Mobile_Defense_Unit, Projectile, SecondaryStructure, SpaceBuildable, SpaceUnit, SpecialStructure, UniqueUnit | economy tag coverage (legacy EAWR-654); WHZ-41 |
+| `Ownership_Sticks` | SecondaryStructure, SpaceBuildable, SpecialStructure | economy tag coverage (legacy EAWR-654); WHZ-43 |
+| `Abilities/Battlefield_Modifier_Ability/Capture_Point_Time_Multiplier` | UpgradeObject | space ability rule walk (legacy EAWR-760); WHZ-45 ability interface |
+| `Tactical_Respawn_Time_In_Secs` | SecondaryStructure, SpaceBuildable | combat tag coverage (legacy EAWR-650); WHZ-52 |
+| `Asteroid_Damage_Hit_Particles` | SpaceUnit, TransportUnit, UniqueUnit | presentation tag coverage (legacy EAWR-653); WHZ-14 |
+| `SFXEvent_Damaged_By_Asteroid` | SpaceUnit, UniqueUnit | presentation tag coverage (legacy EAWR-653); WHZ-14 |
+| `Nebula_Effect_Color` | GameConstants | presentation tag coverage (legacy EAWR-653); WHZ-71, material application U-07 |
+| `Space_Asteroid_Field_Color`, `Space_Asteroid_Field_Border_Color` | RadarMapSettings | presentation tag coverage (legacy EAWR-653); WHZ-72 field-map fill/border |
 
 `Is_Nebula` is already marked `applied` for SpaceProp through
 `src/scene/space_population.cpp#nebula`; that records presentation routing,
@@ -557,13 +603,13 @@ by this PR.
 
 | ID | Open question | Next evidence / retail capture |
 |---|---|---|
-| U-01 | Global object order and interleaving of movement, shield, fog and environmental services; behavior attachment from combined XML lists | Read tactical service scheduling and attachment. Then single-step a frigate crossing a field/Endor storm and record position, ability, shield state at boundaries. |
+| U-01 | **Settled ordinary schedule:** early fog decay, most recent service-registration first object turns, general `Behavior` then `SpaceBehavior`, periodic services in attachment order | [WFO-08/12/15..19](frame-order.md), debug build. Exceptional duplicate/runtime reattachment remains UFO-04 there; field/storm crossing and same-frame shield mesh remain U-02. |
 | U-02 | Exact shield-mesh refresh on the same frame that storm membership enters/exits | Read all mesh-update callers. Capture entry/exit while firing at an Endor storm occupant with shields above zero; distinguish pool from collision/absorption. |
 | U-03 | Whether dense grids rebuild when a hazard moves, is destroyed or is spawned | Read dense-grid invalidation callers. A controlled destroyable-asteroid capture with fixed revealers would show whether the dense region persists. |
 | U-04 | Zero transition duration during capture rollback; default capture influence for types without an authored tag | Read scalar defaults and zero-time branch. A controlled point with zero transition and selected eligible/noneligible unit types can confirm safely. Stock five-map durations are positive. |
 | U-05 | Exact due-frame creation order for respawns and exceptional destruction routes | Read scheduled-object creation and special destroy branches. Capture pad/dock destruction through at least 80 seconds with battle-frame timestamps and verify neutral ownership and identical placement. |
 | U-06 | Modded space mine arming, placement and damage; no stock example in the five-map census | Establish a real space-capable type and reachable placement path first. Only then capture hostile/friendly/projectile crossings at known radii; do not infer a ship minefield from the land trigger. |
-| U-07 | Nebula blend rate/material application; asteroid minimap icon-bound supply, exact ellipse coordinates and invalidation | Read visual blend/material consumers and field-icon registration/invalidation. WHZ-72 settles the mask pipeline and colors. Lit retail entry/exit plus minimap recordings on Bespin/Endor settle appearance without substituting render interpolation for sim state. |
+| U-07 | Exact minimap integer fringe quantization, exceptional render-model bounds and dynamic invalidation; nebula blend/material application and ordinary registration coordinates are settled by the targeted debug-build follow-up in WHZ-71/72 | Lit retail entry/exit plus minimap recordings on Bespin/Endor check appearance. Follow exceptional model bounds and dynamic field changes separately; do not substitute render interpolation for sim state. |
 | U-08 | Movement-entry audio for asteroid fields/nebulas | Read the locomotor's SFX consumers. Record one entry/re-entry and a stationary occupant, distinguishing entry sounds from damage-hit sounds. |
 
 No capture is required to establish the verified probability, cache, overlap,

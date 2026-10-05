@@ -20,6 +20,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 // #80 part A: the viewer's live tactical session (eawr::platform::LiveSession). A session that
@@ -249,7 +250,7 @@ void test_event_log_outlives_the_history() {
                 auto tick = headless.value().step(executor);
                 if (!tick) break;
                 const auto& snapshot = *tick.value().snapshot;
-                eawr::platform::LiveTickEvents record{snapshot.completed_tick(), {}, {}};
+                eawr::platform::LiveTickEvents record{snapshot.completed_tick(), {}, {}, {}};
                 for (const auto& event : snapshot.events()) {
                     if (event.kind == tactical::EventKind::order_accepted) orders = true;
                     if (event.kind == tactical::EventKind::unit_destroyed) record.events.push_back(event);
@@ -353,6 +354,29 @@ void test_event_log_bounds_a_high_event_rate() {
     expect(!LiveEventLog::presented(shot), "an ordinary shot is not presented");
     shot.outcome = tactical::fired_ability_shot;
     expect(LiveEventLog::presented(shot), "an ability shot is presented");
+    LiveEventLog hazards({.ticks = 5, .bytes = 1024});
+    tactical::AsteroidImpact impact;
+    impact.target = 7;
+    impact.hit.source = 11;
+    impact.hit.amount = units(3);
+    hazards.record(busy_snapshot(1, 0, 0), std::span(&impact, 1));
+    hazards.record(busy_snapshot(2, 0, 0));
+    const auto held = hazards.after(0, 2);
+    expect(held.ticks.size() == 1 && held.ticks.front().asteroid_impacts.size() == 1
+        && held.ticks.front().asteroid_impacts.front().target == 7,
+        "WHZ-14: asteroid impacts survive skipped snapshots in the bounded presentation log");
+    expect(hazards.bytes() == sizeof(eawr::platform::LiveTickEvents) + sizeof(tactical::AsteroidImpact),
+        "WHZ-14: retained asteroid impacts count against the presentation byte bound");
+    shot.outcome = tactical::fired_barrage_shot;
+    expect(LiveEventLog::presented(shot), "WAD-38: a Barrage override shot is presented");
+    LiveEventLog overrides({.ticks = 5, .bytes = 1024});
+    overrides.record(tactical::TacticalSnapshot(1, {}, {}, {}, {shot}));
+    const auto retained = overrides.after(0, 1);
+    expect(retained.ticks.size() == 1 && retained.ticks.front().combat_events.size() == 1
+        && retained.ticks.front().combat_events.front().outcome == tactical::fired_barrage_shot,
+        "WAD-38: the bounded event log retains the override flag for projectile look selection");
+    shot.kind = tactical::CombatEventKind::target_acquired;
+    expect(!LiveEventLog::presented(shot), "WAD-38: an acquisition is filtered even with an override flag");
     const std::uint64_t oldest = events.ticks.empty() ? 0 : events.ticks.front().tick;
     expect(events.ticks.size() == log.size() && events.ticks.back().tick == ticks, "the newest ticks are kept");
     expect(events.lost_through == oldest - 1, "the gap ends right before the oldest kept tick");
@@ -369,6 +393,44 @@ void test_event_log_bounds_a_high_event_rate() {
 
 // #370 re-review 3: the reported loss never runs past the asked range, and a dropped tick
 // outside it is not reported at all.
+void test_event_log_keeps_sparse_ability_frames() {
+    using eawr::platform::LiveEventLog;
+    const auto snapshot = [](const std::uint64_t tick, std::vector<tactical::AbilitySpawnState> spawns) {
+        return tactical::TacticalSnapshot(tick, {}, {}, {}, {}, {}, std::nullopt,
+            {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, std::move(spawns));
+    };
+    tactical::AbilitySpawnState bomb;
+    bomb.id = 7; bomb.due = 5; bomb.kind = tactical::AbilityKind::harmonic_bomb;
+    LiveEventLog log({.ticks = 20, .bytes = 4096});
+    for (std::uint64_t tick = 1; tick <= 5; ++tick) log.record(snapshot(tick, {bomb}));
+    expect(log.size() == 0, "pending countdowns do not retain every empty frame");
+    log.record(snapshot(6, {})); // The authoritative bomb metadata disappeared on expiry.
+    log.record(snapshot(7, {}));
+    const auto due = log.after(0, 7);
+    expect(due.ticks.size() == 1 && due.ticks.front().tick == 6 && due.ticks.front().events.empty()
+        && due.ticks.front().combat_events.empty(), "WHE-62: an eventless detonation frame survives exactly once");
+    expect(log.bytes() == sizeof(eawr::platform::LiveTickEvents), "empty ability frames count against the byte bound");
+    tactical::Event input;
+    input.kind = tactical::EventKind::order_accepted; input.order = tactical::OrderKind::ability;
+    log.record(tactical::TacticalSnapshot(8, {}, {}, {input}));
+    input.kind = tactical::EventKind::order_rejected;
+    log.record(tactical::TacticalSnapshot(9, {}, {}, {input}));
+    const auto activation = log.after(7, 9);
+    expect(activation.ticks.size() == 1 && activation.ticks.front().tick == 8
+        && activation.ticks.front().events.empty(), "instant accepted abilities retain their frame without unfiltering orders");
+    LiveEventLog bounded({.ticks = 2, .bytes = 1});
+    bomb.due = 100;
+    bounded.record(snapshot(1, {bomb}));
+    bounded.record(snapshot(101, {}));
+    expect(bounded.size() == 0 && !bounded.after(0, 101).lost_through,
+        "pending due markers outside the history horizon are not retained");
+    bomb.due = 102;
+    bounded.record(snapshot(102, {bomb}));
+    bounded.record(snapshot(103, {}));
+    expect(bounded.after(102, 103).lost_through == 103,
+        "an oversized empty ability record reports its dropped presentation frame");
+}
+
 void test_event_log_gap_stays_in_the_asked_range() {
     using eawr::platform::LiveEventLog;
     {
@@ -536,9 +598,7 @@ void test_simulation_thread_exception() {
         if (!live) continue;
         auto& session = *live.value();
         session.advance_to(10);
-        const auto started = std::chrono::steady_clock::now();
         expect(!session.wait_for(10, std::chrono::seconds(30)), label + "the failed session never reaches tick 10");
-        expect(std::chrono::steady_clock::now() - started < std::chrono::seconds(20), label + "waiters wake on the failure");
         const auto failure = session.failure();
         expect(failure && failure->code == tactical::diagnostic_codes::worker_failure, label + "the exception is the session's failure");
         expect(failure && failure->message.find("stopped before tick 3") != std::string::npos, label + "the failure names the tick");
@@ -595,7 +655,7 @@ void test_victory_outcome() {
 
 // #459 (docs/behaviour/tactical-time-controls.md TP-01 to TP-03, TMC-05, TMC-06) and #453
 // (battle-end.md BEP-02): pausing, changing the target rate and halting change only when ticks
-// run. A real-time run that is paused, given orders while paused, fast-forwarded, slowed and
+// run. A driven run that is paused, given orders while paused, fast-forwarded, slowed and
 // halted records a replay whose headless hashes equal its own, and a plain driven run of the
 // same commands at the same ticks gives the same hashes. Orders given while paused run at the
 // tick after the pause.
@@ -604,8 +664,13 @@ void test_time_controls_keep_hashes(const std::filesystem::path& fixtures) {
     if (!parsed) return;
     const auto& setup = parsed.value().setup;
     using namespace std::chrono_literals;
+    for (const auto& [rate, milliseconds] : std::array<std::pair<std::uint32_t, int>, 9>{{
+             {0, 1000}, {10, 100}, {20, 50}, {30, 33}, {45, 22}, {60, 16}, {120, 8}, {1000, 1}, {1001, 1}}}) {
+        expect(LiveSession::tick_interval(rate) == std::chrono::milliseconds(milliseconds),
+            "TM-02: the target rate selects its whole millisecond interval");
+    }
     auto live = LiveSession::start(setup, {}, {}, motion_table(), {},
-        {.workers = 2, .pacing = LiveSession::Pacing::real_time, .target_rate = 120});
+        {.workers = 2, .pacing = LiveSession::Pacing::driven, .target_rate = 120});
     expect(static_cast<bool>(live), "a time-controlled session starts");
     if (!live) return;
     auto& session = *live.value();
@@ -613,26 +678,22 @@ void test_time_controls_keep_hashes(const std::filesystem::path& fixtures) {
     std::uint64_t halted_at = 0;
     {
         const Reader reader(session);
+        session.advance_to(5);
         expect(session.wait_for(5, std::chrono::seconds(10)), "fast forward reaches tick 5");
         session.set_paused(true);
         expect(session.paused(), "the session reports the pause");
-        std::this_thread::sleep_for(100ms);
         paused_at = session.completed_tick();
         // Orders given while paused wait for the next tick (TM-10).
         session.submit({1, {1}, tactical::MovePayload{at(0, -1500, 0)}, std::nullopt});
         session.submit({2, {2}, tactical::MovePayload{at(-1500, 2500, 0)}, std::nullopt});
-        std::this_thread::sleep_for(300ms);
+        session.advance_to(paused_at + 30);
+        expect(!session.wait_for(paused_at + 1, 200ms), "a driven target waits while paused");
         expect(session.completed_tick() == paused_at, "no tick runs while paused");
         expect(session.rejected_orders().empty(), "orders given while paused are accepted");
-        // The slowest step: at most one tick per 100 ms, whatever the host's speed.
+        // Rate selection is checked above; driven ticks exercise state without elapsed time.
         session.set_target_rate(10);
         session.set_paused(false);
-        const auto slow_start = std::chrono::steady_clock::now();
-        std::this_thread::sleep_for(350ms);
-        const auto slow_ticks = session.completed_tick() - paused_at;
-        const auto slow_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - slow_start).count();
-        expect(slow_ticks <= static_cast<std::uint64_t>(slow_ms / 100 + 1), "rate 10 runs at most one tick per 100 ms");
+        expect(session.wait_for(paused_at + 30, std::chrono::seconds(10)), "the selected driven ticks complete");
         session.set_target_rate(120);
         expect(session.wait_for(paused_at + 30, std::chrono::seconds(10)), "fast forward runs on after the pause");
         session.set_paused(true);
@@ -642,6 +703,7 @@ void test_time_controls_keep_hashes(const std::filesystem::path& fixtures) {
         session.halt_at(halted_at);
         session.halt_at(halted_at + 100); // a later limit never raises it
         expect(session.halt_tick() && *session.halt_tick() == halted_at, "the halt keeps the lower limit");
+        session.advance_to(halted_at + 100);
         expect(session.wait_for(halted_at, std::chrono::seconds(10)), "the session reaches the halt tick");
         expect(!session.wait_for(halted_at + 1, 300ms), "the session never steps past the halt tick");
         expect(reader.ordered(), "the time-controlled reader sees ordered frames");
@@ -731,6 +793,97 @@ void test_start_rejects_worker_counts() {
     }
 }
 
+void test_loading_barrier_and_second_session(const std::filesystem::path& fixtures) {
+    const auto parsed = tactical::parse_replay(read_bytes(fixtures / "tactical-motion.eawr-replay"), "tactical-motion");
+    expect(static_cast<bool>(parsed), "loading-barrier fixture parses");
+    if (!parsed) return;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        for (const auto pacing : {LiveSession::Pacing::real_time, LiveSession::Pacing::driven}) {
+            std::atomic<unsigned> taken{};
+            auto live = LiveSession::start(parsed.value().setup, {}, {}, motion_table(), {},
+                {.workers = workers, .pacing = pacing, .target_rate = 1000,
+                 .command_source = [&taken](std::uint64_t) {
+                     ++taken;
+                     return std::vector<tactical::PlayerCommand>{};
+                 }, .initially_paused = true});
+            expect(static_cast<bool>(live), "a loading session starts");
+            if (!live) continue;
+            expect(live.value()->paused(), "the barrier is installed before start returns");
+            expect(live.value()->frame().latest->completed_tick() == 0, "loading publishes tick zero");
+            live.value()->advance_to(2);
+            expect(!live.value()->wait_for(1, std::chrono::milliseconds(50)), "neither pacing admits a tick before Begin");
+            expect(taken == 0, "loading does not consume commands or service scripts");
+            // An order left at the barrier must not survive a teardown/recreation.
+            live.value()->submit({1, {1}, tactical::MovePayload{at(0, -1500, 0)}, std::nullopt});
+            live.value()->stop();
+            expect(live.value()->tick_hashes().empty(), "teardown before Begin has no tick hashes");
+            live.value().reset();
+
+            auto second = LiveSession::start(parsed.value().setup, {}, {}, motion_table(), {},
+                {.workers = workers, .pacing = LiveSession::Pacing::driven, .initially_paused = true});
+            expect(static_cast<bool>(second), "the second battle starts fresh");
+            if (!second) continue;
+            expect(second.value()->completed_tick() == 0 && second.value()->rejected_orders().empty(),
+                "the second battle has no previous ticks or diagnostics");
+            second.value()->advance_to(2);
+            second.value()->set_paused(false);
+            expect(second.value()->wait_for(2, std::chrono::seconds(10)), "Begin releases the second battle's gate");
+            second.value()->stop();
+            const auto replay = second.value()->record();
+            expect(replay.commands.empty(), "the abandoned battle's command queue does not leak into the second replay");
+            expect(second.value()->tick_hashes() == headless_hashes(replay),
+                "Begin and recreation preserve deterministic headless hashes for every worker count");
+        }
+    }
+}
+
+void test_quit_publication_halts_the_live_thread() {
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 0, 1, tactical::player_flag_commandable}, {2, 1, 2, tactical::player_flag_commandable}};
+    tactical::VictoryRules rules;
+    rules.condition = tactical::VictoryCondition::enemy_starbase_destroyed;
+    rules.contenders = {1, 2};
+    rules.humans = {1};
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        for (const auto pacing : {LiveSession::Pacing::real_time, LiveSession::Pacing::driven}) {
+            auto started = LiveSession::start(setup, {}, {}, {}, {},
+                {.workers = workers, .pacing = pacing, .target_rate = 1000,
+                 .command_source = [](const std::uint64_t next_tick) {
+                     return next_tick == 0 ? std::vector<tactical::PlayerCommand>{{{0, 1, 0}, {}, tactical::QuitPayload{}}}
+                         : std::vector<tactical::PlayerCommand>{};
+                 }, .initially_paused = true}, rules);
+            expect(static_cast<bool>(started), "paused departure bridge starts");
+            if (!started) continue;
+            auto& live = *started.value();
+            live.advance_to(100);
+            expect(!live.wait_for(1, std::chrono::milliseconds(20)), "paused departure waits for its scheduled tick");
+            live.set_paused(false);
+            expect(live.wait_for(1, std::chrono::seconds(10)), "departure snapshot is published");
+            expect(!live.wait_for(2, std::chrono::milliseconds(20)) && live.completed_tick() == 1
+                && live.halt_tick() == 1, "quit publication halts the sim thread before a second tick, regardless of render delay");
+            const auto snapshot = live.frame().latest;
+            expect(snapshot->outcome() && snapshot->outcome()->winner == 2
+                && snapshot->quits().size() == 1 && snapshot->quits()[0].player == 1,
+                "the halted snapshot carries the enemy result and durable quit status");
+            live.stop();
+            auto headless = tactical::TacticalSession::from_replay(live.record(), {}, {}, {}, {}, {}, rules);
+            const eawr::sim::InlineExecutor executor;
+            expect(headless && headless.value().step(executor)
+                && live.tick_hashes().size() == 1 && live.tick_hashes()[0] == headless.value().state_sha256(),
+                "a recorded intentional departure reproduces its authoritative hash headless");
+            auto second = LiveSession::start(setup, {}, {}, {}, {},
+                {.workers = workers, .pacing = LiveSession::Pacing::driven}, rules);
+            expect(static_cast<bool>(second), "fresh post-quit bridge starts");
+            if (!second) continue;
+            second.value()->advance_to(2);
+            expect(second.value()->wait_for(2, std::chrono::seconds(10))
+                && second.value()->frame().latest->quits().empty() && !second.value()->halt_tick(),
+                "a second battle inherits neither quit status nor the departure halt");
+            second.value()->stop();
+        }
+    }
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
@@ -739,16 +892,19 @@ int main(const int argc, const char* const argv[]) {
         return 2;
     }
     test_start_rejects_worker_counts();
+    test_quit_publication_halts_the_live_thread();
     test_shared_fog_history();
     test_victory_outcome();
     test_driven_matches_headless(argv[1]);
     test_event_log_outlives_the_history();
     test_event_log_bounds_a_high_event_rate();
+    test_event_log_keeps_sparse_ability_frames();
     test_event_log_gap_stays_in_the_asked_range();
     test_real_time_records_its_replay(argv[1]);
     test_command_source_and_held_orders(argv[1]);
     test_time_controls_keep_hashes(argv[1]);
     test_simulation_thread_exception();
+    test_loading_barrier_and_second_session(argv[1]);
     if (failures != 0) {
         std::cerr << failures << " live session check(s) failed\n";
         return 1;

@@ -1,5 +1,7 @@
 #include "particle_adapter.hpp"
 #include "particle_texture.hpp"
+#include "particle_upload.hpp"
+#include "particle_culling.hpp"
 
 #include "eawr/presentation/lighting/lighting.hpp"
 
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -32,6 +35,22 @@ using namespace godot;
 
 namespace eawr::presentation::godot_backend {
 namespace {
+using UploadClock = std::chrono::steady_clock;
+thread_local bool measure_uploads{};
+thread_local GodotParticleBackend::FrameWork upload_work;
+
+class UploadTimer final {
+public:
+    explicit UploadTimer(double& target) : target_(measure_uploads ? &target : nullptr) {
+        if (target_ != nullptr) start_ = UploadClock::now();
+    }
+    ~UploadTimer() {
+        if (target_ != nullptr) *target_ += std::chrono::duration<double, std::milli>(UploadClock::now() - start_).count();
+    }
+private:
+    double* target_;
+    UploadClock::time_point start_{};
+};
 
 // Clean-room Godot spatial programs, one per blend policy. Each reproduces the
 // render state of the public engine effect the legacy selector names (see
@@ -235,6 +254,7 @@ float eawr_particle_fog() {
 } // namespace
 
 class GodotParticleBackend::Impl final {
+    friend class GodotParticleBackend;
 public:
     struct Shared final {
         RID rid;
@@ -252,6 +272,16 @@ public:
         std::size_t quads{};
         bool bump{};
         std::vector<std::pair<float, float>> source_points;
+        detail::ParticleSurfaceShape shape;
+        PackedByteArray vertex_bytes;
+        PackedByteArray attribute_bytes;
+        PackedByteArray index_bytes;
+        std::vector<std::uint32_t> topology;
+        std::uint32_t vertex_stride{};
+        std::uint32_t attribute_stride{};
+        std::uint32_t colour_offset{};
+        std::uint32_t uv_offset{};
+        std::uint32_t index_stride{};
     };
 
     Impl(Node3D& host, TextureResolver resolver, GodotParticleBackend::FogCallbacks fog)
@@ -393,47 +423,121 @@ public:
         const auto found = emitters_.find(id);
         if (rendering == nullptr || found == emitters_.end()) return;
         Emitter& emitter = found->second;
+        if (measure_uploads) ++upload_work.streams;
         // #638: an emitter that drew nothing and draws nothing again keeps its empty mesh; most of a
         // battle's emitters are idle on a given frame, and clearing them cost a server call each.
-        if (emitter.quads == 0 && (stream.quads == 0 || stream.vertices.empty())) return;
-        rendering->mesh_clear(emitter.mesh);
-        emitter.quads = stream.quads;
+        if (emitter.quads == 0 && stream.vertices.empty()) return;
+        const bool was_empty = emitter.quads == 0;
+        emitter.quads = stream.quads + stream.triangles;
         emitter.source_points.clear();
-        if (stream.quads == 0 || stream.vertices.empty()) return;
+        if (stream.vertices.empty()) {
+            emitter.quads = 0;
+            UploadTimer timer(upload_work.submission_ms);
+            rendering->instance_set_visible(emitter.instance, false);
+            return;
+        }
+        if (measure_uploads) ++upload_work.uploads;
         if (fog_.attenuation_at_source_xy) emitter.source_points.reserve(stream.vertices.size());
+        if (emitter.shape.matches(stream)) {
+            const auto vertex_stride = emitter.vertex_stride;
+            const auto attribute_stride = emitter.attribute_stride;
+            const bool changed_indices = emitter.topology != stream.indices;
+            AABB bounds(axis_convert(stream.vertices.front().position), Vector3());
+            {
+                UploadTimer timer(upload_work.conversion_ms);
+                emitter.vertex_bytes.resize(static_cast<int64_t>(stream.vertices.size() * vertex_stride));
+                emitter.attribute_bytes.resize(static_cast<int64_t>(stream.vertices.size() * attribute_stride));
+                auto* const vertex_out = emitter.vertex_bytes.ptrw();
+                auto* const attribute_out = emitter.attribute_bytes.ptrw();
+                for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
+                    const auto& vertex = stream.vertices[index];
+                    detail::pack_particle_vertex(vertex, vertex_out + index * vertex_stride,
+                        attribute_out + index * attribute_stride + emitter.colour_offset,
+                        attribute_out + index * attribute_stride + emitter.uv_offset);
+                    bounds.expand_to(axis_convert(vertex.position));
+                    if (fog_.attenuation_at_source_xy) emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
+                }
+                bounds.size = bounds.size.max(Vector3(0.00001F, 0.00001F, 0.00001F));
+                if (changed_indices) {
+                    const auto stride = emitter.index_stride;
+                    emitter.index_bytes.resize(static_cast<int64_t>(stream.indices.size() * stride));
+                    auto* const output = emitter.index_bytes.ptrw();
+                    for (std::size_t index = 0; index < stream.indices.size(); ++index) {
+                        if (stride == sizeof(std::uint16_t)) {
+                            const auto value = static_cast<std::uint16_t>(stream.indices[index]);
+                            std::memcpy(output + index * stride, &value, sizeof(value));
+                        } else {
+                            std::memcpy(output + index * stride, &stream.indices[index], sizeof(std::uint32_t));
+                        }
+                    }
+                    emitter.topology = stream.indices;
+                }
+            }
+            UploadTimer timer(upload_work.submission_ms);
+            rendering->mesh_surface_update_vertex_region(emitter.mesh, 0, 0, emitter.vertex_bytes);
+            rendering->mesh_surface_update_attribute_region(emitter.mesh, 0, 0, emitter.attribute_bytes);
+            if (changed_indices && !stream.indices.empty())
+                rendering->mesh_surface_update_index_region(emitter.mesh, 0, 0, emitter.index_bytes);
+            // Region updates retain the surface's creation bounds: refresh instance culling
+            // from this frame's vertices, including beams whose stream has no bounds metadata.
+            rendering->mesh_set_custom_aabb(emitter.mesh, bounds);
+            if (was_empty) rendering->instance_set_visible(emitter.instance, true);
+            return;
+        }
         PackedVector3Array vertices;
         PackedColorArray colors;
         PackedVector2Array uv;
         PackedInt32Array indices;
-        vertices.resize(static_cast<int64_t>(stream.vertices.size()));
-        colors.resize(static_cast<int64_t>(stream.vertices.size()));
-        uv.resize(static_cast<int64_t>(stream.vertices.size()));
-        // #638: written through the arrays' own storage, not one checked set() per element.
-        Vector3* const vertex_out = vertices.ptrw();
-        Color* const color_out = colors.ptrw();
-        Vector2* const uv_out = uv.ptrw();
-        for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
-            const particles::ParticleVertex& vertex = stream.vertices[index];
-            vertex_out[index] = axis_convert(vertex.position);
-            color_out[index] = Color(vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
-            uv_out[index] = Vector2(vertex.u, vertex.v);
-            if (fog_.attenuation_at_source_xy) {
-                emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
-            }
-        }
-        indices.resize(static_cast<int64_t>(stream.indices.size()));
-        std::int32_t* const index_out = indices.ptrw();
-        for (std::size_t index = 0; index < stream.indices.size(); ++index) {
-            index_out[index] = static_cast<std::int32_t>(stream.indices[index]);
-        }
         Array arrays;
-        arrays.resize(RenderingServer::ARRAY_MAX);
-        arrays[RenderingServer::ARRAY_VERTEX] = vertices;
-        arrays[RenderingServer::ARRAY_COLOR] = colors;
-        arrays[RenderingServer::ARRAY_TEX_UV] = uv;
-        arrays[RenderingServer::ARRAY_INDEX] = indices;
-        rendering->mesh_add_surface_from_arrays(emitter.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays);
+        {
+            UploadTimer timer(upload_work.conversion_ms);
+            vertices.resize(static_cast<int64_t>(stream.vertices.size()));
+            colors.resize(static_cast<int64_t>(stream.vertices.size()));
+            uv.resize(static_cast<int64_t>(stream.vertices.size()));
+            // #638: written through the arrays' own storage, not one checked set() per element.
+            Vector3* const vertex_out = vertices.ptrw();
+            Color* const color_out = colors.ptrw();
+            Vector2* const uv_out = uv.ptrw();
+            for (std::size_t index = 0; index < stream.vertices.size(); ++index) {
+                const particles::ParticleVertex& vertex = stream.vertices[index];
+                vertex_out[index] = axis_convert(vertex.position);
+                color_out[index] = Color(vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
+                uv_out[index] = Vector2(vertex.u, vertex.v);
+                if (fog_.attenuation_at_source_xy) {
+                    emitter.source_points.emplace_back(vertex.position.x, vertex.position.y);
+                }
+            }
+            indices.resize(static_cast<int64_t>(stream.indices.size()));
+            std::int32_t* const index_out = indices.ptrw();
+            for (std::size_t index = 0; index < stream.indices.size(); ++index) {
+                index_out[index] = static_cast<std::int32_t>(stream.indices[index]);
+            }
+            arrays.resize(RenderingServer::ARRAY_MAX);
+            arrays[RenderingServer::ARRAY_VERTEX] = vertices;
+            arrays[RenderingServer::ARRAY_COLOR] = colors;
+            arrays[RenderingServer::ARRAY_TEX_UV] = uv;
+            arrays[RenderingServer::ARRAY_INDEX] = indices;
+        }
+        UploadTimer timer(upload_work.submission_ms);
+        rendering->mesh_clear(emitter.mesh);
+        rendering->mesh_set_custom_aabb(emitter.mesh, AABB());
+        rendering->mesh_add_surface_from_arrays(emitter.mesh, RenderingServer::PRIMITIVE_TRIANGLES, arrays,
+            Array(), Dictionary(), RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
         rendering->mesh_surface_set_material(emitter.mesh, 0, emitter.material);
+        if (was_empty) rendering->instance_set_visible(emitter.instance, true);
+        emitter.shape.assign(stream);
+        emitter.topology = stream.indices;
+        const auto format = BitField<RenderingServer::ArrayFormat>(
+            RenderingServer::ARRAY_FORMAT_VERTEX | RenderingServer::ARRAY_FORMAT_COLOR
+            | RenderingServer::ARRAY_FORMAT_TEX_UV | RenderingServer::ARRAY_FORMAT_INDEX
+            | RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE | RenderingServer::ARRAY_FLAG_FORMAT_CURRENT_VERSION);
+        const auto count = static_cast<int32_t>(stream.vertices.size());
+        emitter.vertex_stride = rendering->mesh_surface_get_format_vertex_stride(format, count);
+        emitter.attribute_stride = rendering->mesh_surface_get_format_attribute_stride(format, count);
+        emitter.colour_offset = rendering->mesh_surface_get_format_offset(format, count, RenderingServer::ARRAY_COLOR);
+        emitter.uv_offset = rendering->mesh_surface_get_format_offset(format, count, RenderingServer::ARRAY_TEX_UV);
+        emitter.index_stride = rendering->mesh_surface_get_format_index_stride(format, count);
+        if (measure_uploads) ++upload_work.replacements;
     }
 
     void destroy(const std::uint64_t id) {
@@ -595,6 +699,13 @@ GodotParticleBackend::GodotParticleBackend(Node3D& host, TextureResolver resolve
 
 GodotParticleBackend::~GodotParticleBackend() = default;
 
+void GodotParticleBackend::begin_frame_measurement(const bool enabled) {
+    measure_uploads = enabled;
+    upload_work = {};
+}
+
+GodotParticleBackend::FrameWork GodotParticleBackend::frame_work() { return upload_work; }
+
 std::uint64_t GodotParticleBackend::create_emitter(const particles::EmitterRenderPlan& plan) {
     return impl_->create(plan);
 }
@@ -603,6 +714,22 @@ void GodotParticleBackend::update_emitter(const std::uint64_t resource, const pa
 }
 void GodotParticleBackend::destroy_emitter(const std::uint64_t resource) { impl_->destroy(resource); }
 std::string GodotParticleBackend::failure_cause() const { return impl_->failure(); }
+particles::CullingFrame GodotParticleBackend::culling_frame() const {
+    return particle_culling::frame(impl_->scenario_);
+}
+void GodotParticleBackend::set_emitter_visible(const std::uint64_t resource, const bool visible) {
+    const auto found = impl_->emitters_.find(resource);
+    if (found != impl_->emitters_.end()) {
+        RenderingServer::get_singleton()->instance_set_visible(found->second.instance, visible && found->second.quads != 0);
+    }
+}
+void GodotParticleBackend::record_group_work(const bool visible, const bool prepared, const bool stepped) {
+    if (!measure_uploads) return;
+    ++upload_work.groups;
+    upload_work.visible_groups += visible ? 1U : 0U;
+    upload_work.prepared_groups += prepared ? 1U : 0U;
+    upload_work.stepped_groups += stepped ? 1U : 0U;
+}
 GodotParticleBackend::BumpLighting GodotParticleBackend::default_bump_lighting() noexcept {
     // The renderer's hemisphere fallback split for a per-pixel sun, as the
     // legacy bump adapters receive it without a scene environment.

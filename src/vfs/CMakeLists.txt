@@ -1,10 +1,12 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
 add_subdirectory(
     "${PROJECT_SOURCE_DIR}/third_party/pugixml"
     "${PROJECT_BINARY_DIR}/third_party/pugixml"
     EXCLUDE_FROM_ALL
 )
 
-add_library(eawr_vfs STATIC vfs.cpp vfs_archive.cpp)
+add_library(eawr_vfs STATIC ${EAWR_VFS_SOURCES})
 add_library(eawr::vfs ALIAS eawr_vfs)
 
 target_include_directories(

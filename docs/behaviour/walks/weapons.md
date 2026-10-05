@@ -8,15 +8,15 @@
   in evaluation order, with the gaps against the remake.
 - Sources: **debug build** (the FoC debug executable with symbols, read under the clean-room rule;
   evidence IDs EWW-nn are opaque and their map stays private), **recording** (the fidelity traces
-  of [tests/fidelity](../../../tests/fidelity/README.md) and the EAWR-607 retail shot log), **data** (a
+  of [tests/fidelity](../../../tests/fidelity/README.md) and the retail dogfight outcome comparison retail shot log), **data** (a
   tag or value in the FoC XML), **unverified** (not settled by either). Earlier evidence families
   (TE, WA, AT, CF, PD, CT) keep their meaning from [space-weapon-fire](../space-weapon-fire.md),
   [space-damage](../space-damage.md) and [space-targeting](../space-targeting.md).
 - Out of scope, recorded only as an interface: the ship-level target choice and the opportunity
   scan's inside (walk 2, capital combat, and [space-targeting](../space-targeting.md)); where a
-  hit's damage goes once it reaches a unit (walk 2: shields, hull, hardpoints, DG-39 of EAWR-676); how
+  hit's damage goes once it reaches a unit (walk 2: shields, hull, hardpoints, DG-39 of hardpoint hit routing); how
   a squadron moves into range (walk 1); abilities that scale fire (walk 7); heights and layers
-  (walk 4, EAWR-666). Presentation (projectile models, trails, sounds, EAWR-660) is not covered.
+  (walk 4, per-unit flight heights). Presentation projectile models, trails and sounds (legacy EAWR-660) are not covered.
 
 ## Scope
 
@@ -35,6 +35,13 @@
   (**unverified**, U-01, U-02); the remake's order is space-weapon-fire P-01 and space-damage DP-01.
 
 ## Rules, in evaluation order
+
+The [ion inventory](../space-damage.md#inventory-of-the-starting-fleet-and-production-roster)
+covers both the starting fleet and the expanded M2 production roster, including level-3/4/5
+stations. Ordinary station ion cannons share the MC80's EN-07 drain path and do not stun;
+`ION_CANNON_SHOT` overrides stun without draining. An ion projectile is not identified by
+hardpoint class alone: B-wing laser hardpoints and TIE Defender torpedo hardpoints also fire
+ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 
 ### Weapon hardpoint service (every frame)
 
@@ -100,7 +107,7 @@
 - **WWP-17** (debug build, EWW-03) A turret hardpoint (`Is_Turret`) fails unless its barrel already
   points within `Fire_Cone_Width` of the target (space-weapon-fire W-07; no M2 turret).
 - **WWP-18** (debug build, EWW-03) The projectile is the hardpoint's `Fire_Projectile_Type`, replaced
-  by a unit ability's override for this target and aimed hardpoint (the Y-wing's ion shot, EAWR-561).
+  by a unit ability's override for this target and aimed hardpoint: the Y-wing's ion shot (legacy EAWR-561).
   A craft whose squadron runs the ion-shot or lucky-shot ability and that has no override for this
   shot does not fire at all.
 - **WWP-19** (debug build, EWW-03, EWW-06) The aim point:
@@ -143,7 +150,7 @@
   target and aimed hardpoint and keeps its scatter (scattered minus led point) in the target's
   frame. Any other projectile records its start, facing, speed and fire-at point.
 - **WWP-30** (debug build, EWW-03) The parent's "weapon fired" hook runs (abilities: the ion shot's
-  one shot per craft, EAWR-561).
+  one shot per craft, ion weapons, energy drain and stun (legacy EAWR-561)).
 - **WWP-31** (debug build, EWW-03; space-weapon-fire W-06, space-abilities AB-21) The burst: one
   pulse is spent. After the last pulse the recharge is a synchronized draw of whole hundredths
   between `trunc(100 × Fire_Min_Recharge_Seconds)` and `trunc(100 × Fire_Max_Recharge_Seconds)`,
@@ -167,7 +174,7 @@
 - **WWP-41** (debug build, EWW-07) The recharge counts down by the frames since the last service
   (not while a forced fire holds it); while above zero the service stops. Unlike a hardpoint's, it
   counts down while the unit is stunned (WWP-43 comes after).
-- **WWP-42** (debug build, EWW-07; EAWR-607 PR EAWR-634 W-06a) Once a burst has begun, each later pulse is
+- **WWP-42** (debug build, EWW-07; retail dogfight outcome comparison dogfight scatter and burst timing W-06a) Once a burst has begun, each later pulse is
   spent when the recharge runs out, before any gate (the burst clock); the burst's first shot waits
   for a successful fire.
 - **WWP-43** (debug build, EWW-08) The weapon is enabled only when its behaviour is serviced, unit
@@ -210,7 +217,10 @@
 - **WWP-53** (debug build, EWW-09; space-weapon-fire W-09) `Fires_Forward` yes: the shot leaves along
   the unit's facing, with no cone test. Otherwise the fired-at point must lie within
   `Turret_Rotate_Extent_Degrees` in yaw and `Turret_Elevate_Extent_Degrees` in pitch (whole, not
-  halved) of the unit's facing at the muzzle; a point of zero length fails.
+  halved) of the unit's facing at the muzzle; a point of zero length fails. The flag defaults
+  to no and the extents independently default to 360 degrees yaw and 180 degrees pitch
+  (debug build, OW-01 to OW-03 in space-weapon-fire). Authored extents apply even when
+  `Fires_Forward` is absent, resolving G-W4; StarViper therefore uses its authored 45/45 cone.
 - **WWP-54** (debug build, EWW-09) The projectile is created at the muzzle; its muzzle delay ends at
   the current frame plus the bone's appearance delay (zero in M2), so it moves from the next frame.
 - **WWP-55** (debug build, EWW-07) After the shot: the pulse is spent (a burst's first shot, WWP-42),
@@ -242,7 +252,7 @@
 - **WWP-67** (debug build, EWW-15) On a hit the damage goes to the unit hit, with the contact, the
   mesh met and the projectile's aimed hardpoint (walk 2 routes it: DG-01 to DG-39). Then the
   detonation sound, the projectile's blast area damage (`Projectile_Blast_Area_Damage` and `_Range`;
-  no M2 projectile), and its detonation effects: stun, ion stun (EAWR-561), and the land-only ones.
+  no M2 projectile), and its detonation effects: stun, ion stun (legacy EAWR-561), and the land-only ones.
 - **WWP-68** (debug build, EWW-12; space-damage DG-33) The projectile moves to the new position and
   adds its speed to its travel. It expires when its travel reaches the limit (WWP-27, WWP-48); one
   with no limit expires after `Projectile_Max_Lifetime` seconds. A `DEFAULT`-category projectile
@@ -257,9 +267,11 @@
 - **WWP-72** (debug build, EWW-16) A unit's height-adjusted position is its position raised by its
   type's `Ranged_Target_Z_Adjust` (M2: the Nebulon-B 35, every other M2 type 0 or unset).
 
-## Planar or 3-D (EAWR-666)
+<a id="planar-or-3-d-666"></a>
 
-With the EAWR-666 heights the M2 ships sit up to 290 units apart in height. From WWP-20 to WWP-70:
+## Planar or 3-D
+
+With the per-unit flight heights the M2 ships sit up to 290 units apart in height. From WWP-20 to WWP-70:
 
 | Test | Metric | Rule |
 |---|---|---|
@@ -278,7 +290,7 @@ With the EAWR-666 heights the M2 ships sit up to 290 units apart in height. From
 So FoC keeps a hardpoint's range planar and adds the height to the travel limit, which lets a ship
 hit a target on another layer at full range; the cone's pitch test and the 3-D opportunity aim
 distance do see the height. The remake computes each of these with the same metric (see the gap
-list); only the missing heights themselves (EAWR-666) and the soft radius (G-01) change what it fires
+list); only the missing heights themselves (per-unit flight heights) and the soft radius (G-01) change what it fires
 at.
 
 ## Existing notes against this walk
@@ -291,14 +303,14 @@ at.
 | W-05 | differs for the unit weapon (its aim point is WWP-50, not the nearest hardpoint); for a hardpoint the range adds the soft radius (WWP-20) and a squadron target is a random craft (WWP-19) |
 | W-06, W-08 | same (WWP-22, WWP-31) |
 | W-07, W-10, W-11, W-12 | same (WWP-23, WWP-24) |
-| W-09 | same for the cone; `Fires_Forward` yes fires along the facing (WWP-53), which the code does not do |
+| W-09 | same for the cone and the omitted-tag defaults (G-W4 resolved); `Fires_Forward` yes fires along the facing (WWP-53), which the code does not do |
 | P-04 | differs: the soft radius is not zero (WWP-21); `Fire_Min_Range_Distance` is read (no M2 hardpoint authors it) |
 | P-06 | same (project choice kept) |
 | space-damage DG-21 | same for the unit weapon (WWP-54); for a hardpoint's projectile **unverified** (U-02) |
 | DG-22, DG-24 | same (WWP-63, WWP-25, WWP-52) |
 | DG-23 | differs: the travel adds the target's soft radius and a squadron container's (WWP-27) |
 | DG-25 | **wrong**: the MC80's weapon hardpoints author `Projectile_Damage` (20 on the lasers against the projectile's 15, 40 on the ion cannons against 20), and FoC uses it (WWP-26) |
-| DG-30 | same; the "first unit the tree hands out" of DG-30 is WWP-66 (the remake keeps the nearest, project) |
+| DG-30 | same; the first eligible object in sorted hostile-player and persistent projectile ray-collection order is WWP-66; DG-30a to DG-30g specify the tree walk, lifecycle and continuing flight after target detach |
 | DG-32 | same, sharpened: only players the owner counts as enemies (WWP-66) |
 | DG-33, DG-34, DG-36 to DG-38 | same (WWP-66, WWP-68, WWP-70) |
 | MS-01 to MS-06 | same (WWP-62, WWP-64) |
@@ -311,14 +323,14 @@ at.
 
 ## Gap list against the remake
 
-Ours: `src/sim/tactical/combat.cpp` (`UnitCombat::service_weapon`, `attempt`, `choose_aim`,
+Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (`UnitCombat::service_weapon`, `attempt`, `choose_aim`,
 `scatter`, `lead`), `projectiles.cpp` (`launch_projectile`, `step_projectile`),
 `src/units/unit_combat.cpp` and `unit_tables.cpp` (the tables).
 
 | Rule | Ours | Verdict |
 |---|---|---|
 | WWP-01, WWP-03 | `service_weapon` | same |
-| WWP-02 | only the destroyed gate (`weapon_up`); stun and disable come with EAWR-561 (PR EAWR-579) | differs (G-07) |
+| WWP-02 | only the destroyed gate (`weapon_up`); stun and disable come with ion energy drain and hardpoint damage (legacy EAWR-561) | differs (G-07) |
 | WWP-04 | not loaded | missing (not in M2; G-08) |
 | WWP-05 | restriction and a dead target drop; mode flags not loaded | same for M2 |
 | WWP-06 | FT-07's `squadron_idle` | same |
@@ -331,7 +343,7 @@ Ours: `src/sim/tactical/combat.cpp` (`UnitCombat::service_weapon`, `attempt`, `c
 | WWP-14 | not modelled | missing (not in M2) |
 | WWP-16 | nearest targetable hardpoint from the shooter's position | same (the shooter's height adjustment differs by at most 35, G-06) |
 | WWP-17 | turrets treated as fixed (P-04) | missing (not in M2; G-08) |
-| WWP-18 | projectile override comes with EAWR-561 (PR EAWR-580) | same after EAWR-580 |
+| WWP-18 | projectile override comes with targeted ion-shot input and HUD (legacy EAWR-561) | same after the targeted ion-shot input and HUD work |
 | WWP-19 | a squadron resolves to its nearest craft (`resolve_target`) | **differs (G-04)** |
 | WWP-20 | planar range, soft radius zero, no minimum range | **differs (G-01)**; minimum range missing (not in M2; G-08) |
 | WWP-21 | the motion table has it (AV-05); combat does not use it | **differs (G-01)** |
@@ -341,11 +353,11 @@ Ours: `src/sim/tactical/combat.cpp` (`UnitCombat::service_weapon`, `attempt`, `c
 | WWP-27 | range plus height | **differs (G-01)** |
 | WWP-28 | not loaded | missing (not in M2; G-08) |
 | WWP-29 | `launch_projectile` | same |
-| WWP-30 | ion shot with EAWR-580 | same after EAWR-580 |
-| WWP-31 to WWP-33 | `attempt`, `scaled_weapon_delay`; fire rate with EAWR-579 | same (after EAWR-579) |
+| WWP-30 | ion shot with targeted ion-shot input and HUD | same after the targeted ion-shot input and HUD work |
+| WWP-31 to WWP-33 | `attempt`, `scaled_weapon_delay`; fire rate with ion energy drain and hardpoint damage | same (after the ion energy drain and hardpoint damage work) |
 | WWP-34, WWP-35 | no memory needed; no line of fire | same |
 | WWP-41 | countdown | same |
-| WWP-42 | PR EAWR-634 | same after EAWR-634 |
+| WWP-42 | dogfight scatter and burst timing | same after the dogfight scatter and burst timing work |
 | WWP-43 | planar range to the aim point against `Targeting_Max_Attack_Distance` in `attempt` | **differs (G-05)**, the gate's inside is walk 1/2's |
 | WWP-44 | drops only a dead or fogged target | same for M2 (no ownership changes) |
 | WWP-45, WWP-46 | `service_weapon` | same |
@@ -359,7 +371,7 @@ Ours: `src/sim/tactical/combat.cpp` (`UnitCombat::service_weapon`, `attempt`, `c
 | WWP-60, WWP-61 | no delay, no acceleration | missing (not in M2; G-08) |
 | WWP-62 to WWP-64 | `step_projectile`; no jamming or missile shield | same for M2 |
 | WWP-65 | no ground in space | same |
-| WWP-66 | nearest along the step over every unit of another team; `Collidable_By_Projectile_Living` not loaded (every M2 unit sets yes) | differs (project, DG-30; no ticket) |
+| WWP-66 | hostile-player gate shared with ordinary targeting; living collision permission loaded and applied; a separate persistent owner tree supplies ray contacts in DG-30 order | agrees in query order; DG-30f records deterministic tick commit and equal-centre tie choices |
 | WWP-67 | hand-off to `damage.cpp`; no blast area | same for M2 |
 | WWP-68 to WWP-70 | `step_projectile` | same; lifetime expiry missing (not in M2; G-08) |
 | WWP-72 | not loaded | **differs (G-06)** |
@@ -372,14 +384,14 @@ Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 43**, **di
 
 | Gap | Rules | What | Size |
 |---|---|---|---|
-| G-01 (EAWR-708) | WWP-20, WWP-21, WWP-27 (and R-11, A-07) | Add the target's soft radius to a hardpoint's fire range and travel, to the opportunity aim distance and to the attack distance. FoC's weapons reach the stations 250 to 300 units further and every ship by its half length. | M |
-| G-02 (EAWR-709) | WWP-26 | A hardpoint's `Projectile_Damage` replaces the projectile's: the MC80's lasers do 20 (not 15) and its ion cannons 40 (not 20). | S |
-| G-03 (EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at the ordered hardpoint, else a random target bone, else the height-adjusted centre (never the nearest hardpoint, which with DG-39 also sends the damage to that hardpoint); fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | M |
-| G-04 (EAWR-711) | WWP-19 | A hardpoint ordered at a squadron fires at a random craft each attempt (a synchronized draw), not the nearest; FO-04 is corrected. | S |
-| G-05 (EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the EAWR-607 shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
-| G-06 (EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | Load `Ranged_Target_Z_Adjust` and use the height-adjusted position for the aim fallback, the nearest-hardpoint reference and missile steering (the Nebulon-B +35). | S |
-| G-07 (EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (EAWR-561, PR EAWR-579). | XS (in EAWR-561) |
-| G-08 (EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 22 (random box), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
+| G-01 target soft-radius range adjustment (legacy EAWR-708) | WWP-20, WWP-21, WWP-27 (and R-11, A-07) | Add the target's soft radius to a hardpoint's fire range and travel, to the opportunity aim distance and to the attack distance. FoC's weapons reach the stations 250 to 300 units further and every ship by its half length. | M |
+| G-02 MC80 hardpoint damage overrides (legacy EAWR-709) | WWP-26 | A hardpoint's `Projectile_Damage` replaces the projectile's: the MC80's lasers do 20 (not 15) and its ion cannons 40 (not 20). | S |
+| G-03 fighter aim and muzzle bones (legacy EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at the ordered hardpoint, else a random target bone, else the height-adjusted centre (never the nearest hardpoint, which with DG-39 also sends the damage to that hardpoint); fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | M |
+| G-04 random craft selection by ordered hardpoints (legacy EAWR-711) | WWP-19 | A hardpoint ordered at a squadron fires at a random craft each attempt (a synchronized draw), not the nearest; FO-04 is corrected. | S |
+| G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
+| G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | Load `Ranged_Target_Z_Adjust` and use the height-adjusted position for the aim fallback, the nearest-hardpoint reference and missile steering (the Nebulon-B +35). | S |
+| G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
+| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 22 (random box), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
 
 ### XML tags this subsystem reads
 
@@ -401,7 +413,7 @@ Projectile: `Projectile_Category`, `Max_Speed`, `Max_Rate_Of_Turn`, `Projectile_
 `Projectile_Does_Energy_Damage`, `Projectile_Does_Hitpoint_Damage`, `Projectile_Energy_Per_Shot`,
 `Projectile_Blast_Area_Damage`, `Projectile_Blast_Area_Range`, `Projectile_Ion_Stun_*`.
 
-In [statuses.json](../../tag-coverage/statuses.json) (EAWR-628), these rows are `todo` and belong to
+In [statuses.json](../../tag-coverage/statuses.json) (M2 XML tag coverage audit), these rows are `todo` and belong to
 this walk: `HardPoint/Projectile_Damage` (G-02), `SpaceUnit/Ranged_Target_Z_Adjust` and
 `SpaceStructure/Ranged_Target_Z_Adjust` (G-06), `Projectile/Projectile_Max_Scan_Range` (read: 0 on
 every M2 missile, so a lost missile never retargets; MS-05), `SpaceUnit/Collidable_By_Projectile_Living`,
@@ -420,23 +432,23 @@ and `_Length` are drawing data (presentation). `HardPoint/Allows_Special_Weapon_
 - **Abilities (walk 7).** In: the fire range modifiers (WWP-20, WWP-48), the weapon delay and fire
   rate factors (WWP-32, WWP-33), the weapons-enabled mode flag (WWP-43), projectile overrides
   (WWP-18, WWP-45), the blast ability (WWP-14).
-- **Movement (walk 4).** In: positions and heights (EAWR-666), the soft radius it already computes
+- **Movement (walk 4).** In: positions and heights (per-unit flight heights), the soft radius it already computes
   (AV-05).
 
 ## Symptoms
 
-- **EAWR-607 (TIEs fire 64 shots where retail's fire 163).** The fire itself matches (WWP-41 to WWP-55
-  with PR EAWR-634), except that ours holds a fighter's fire outside its attack distance where FoC
+- **retail dogfight outcome comparison (TIEs fire 64 shots where retail's fire 163).** The fire itself matches (WWP-41 to WWP-55
+  with dogfight scatter and burst timing), except that ours holds a fighter's fire outside its attack distance where FoC
   asks the targeting state (G-05), and aims at the nearest hardpoint where FoC aims at the centre
   (G-03). Fire-to-target distance in the retail shot log never exceeds 424 units. The count gap is
   the chase geometry (walk 1) plus G-05.
-- **EAWR-660 (missile comparison).** The flight rules match (WWP-62, WWP-64, WWP-66 to WWP-70); the
-  steering point misses the Nebulon-B's height adjustment (G-06). The rest of EAWR-660 is presentation.
-- **EAWR-633 (bombers hitting the adjacent station, not the corvette).** FoC's projectiles hit any enemy
+- **concussion-missile flight comparison (legacy EAWR-660) (missile comparison).** The flight rules match (WWP-62, WWP-64, WWP-66 to WWP-70); the
+  steering point misses the Nebulon-B's height adjustment (G-06). The rest of concussion-missile flight comparison (legacy EAWR-660) is presentation.
+- **AI bombing-run departure (legacy EAWR-633) (bombers hitting the adjacent station, not the corvette).** FoC's projectiles hit any enemy
   unit in their path (WWP-66); nothing makes a torpedo skip the station. Whether the station lies in
-  the path depends on the approach (walk 1) and the heights (EAWR-666); G-01 lets FoC's bombers fire
+  the path depends on the approach (walk 1) and the heights (per-unit flight heights); G-01 lets FoC's bombers fire
   from further out. No weapon rule differs here.
-- **EAWR-666 (are range and arcs planar?).** See "Planar or 3-D": hardpoint range planar, travel
+- **per-unit flight heights (are range and arcs planar?).** See "Planar or 3-D": hardpoint range planar, travel
   compensated for height, cones and the opportunity aim distance 3-D.
 
 ## Unverified

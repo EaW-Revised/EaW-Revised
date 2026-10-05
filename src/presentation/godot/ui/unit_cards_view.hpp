@@ -18,6 +18,7 @@
 #include "eawr/presentation/ui/fonts.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 
 #include <godot_cpp/classes/control.hpp>
@@ -47,6 +48,9 @@ public:
         // An object type's Icon_Name and display name (Text_ID through the text DB).
         std::function<std::string(const std::string& type)> icon;
         std::function<godot::String(const std::string& type)> name;
+        std::function<godot::String(const std::string& type)> description;
+        data::ui::Vec2 tooltip_size{};
+        std::int32_t tooltip_point_size{};
         // The slots' face (UI-F3) and its GDI text cell at a glyph height; the size follows the layout.
         godot::Ref<godot::Font> font;
         std::function<presentation::ui::TextCell(std::int32_t glyph_height)> cell;
@@ -69,6 +73,10 @@ public:
         std::optional<std::int64_t> price;
         bool room{true};
         bool disabled{};
+        std::optional<std::uint32_t> build_frames{};
+        std::string disabled_reason{};
+        bool pad{};
+        double cooldown_progress{1.0};
     };
 
     EawrUnitCards();
@@ -76,6 +84,8 @@ public:
     void setup(Setup setup);
     // The cards to draw; redraws only when they change.
     void show(std::vector<Card> cards, std::vector<presentation::ui::CardBorder> borders);
+    // A retained menu can change price/tint/dial without reconstructing card names.
+    bool update_build_states(std::span<const presentation::ui::BuildButton> buttons);
     void set_click(std::function<void(std::size_t slot, bool shift)> click) { click_ = std::move(click); }
     // The clock the hover delay runs on, in seconds (default: the engine's ticks). A driven live
     // battle times it on its presented tick, so a capture run repeats.
@@ -105,6 +115,8 @@ private:
 
     Setup setup_;
     std::vector<Card> cards_;
+    std::uint64_t build_card_batches_{};
+    std::uint64_t build_state_updates_{};
     std::vector<presentation::ui::CardBorder> borders_;
     std::vector<std::unique_ptr<KitText>> counts_;
     KitText tooltip_;

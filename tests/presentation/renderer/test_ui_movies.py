@@ -27,10 +27,13 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
 SRC = ROOT / "apps/viewer/src"
 FIXTURE = ROOT / "tests/ui/fixtures/hud_movie_alpha.ogv.base64"
 RUNTIME = bool(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"))
@@ -43,13 +46,13 @@ FRAME_COLOURS = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
 
 class UiMovieStructure(unittest.TestCase):
     def test_the_gallery_plays_movies_through_the_theora_player(self):
-        mode = (SRC / "ui_gallery_mode.cpp").read_text(encoding="utf-8")
+        mode = source_text("apps/viewer/src/ui_gallery_mode.cpp")
         for token in ('"--eawr-ui-movie"', '"--eawr-movie-cache"', "resolve_hud_movie(", "attach_hud_movie(",
                       "validate_hud_movie("):
             self.assertIn(token, mode)
         player = (ROOT / "src/presentation/godot/ui/movie_player.cpp").read_text(encoding="utf-8")
         self.assertIn("VideoStreamTheora", player)
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/data/ui/movie.cpp", "src/presentation/godot/ui/movie_player.cpp"):
             self.assertIn(source, build)
 
@@ -57,7 +60,7 @@ class UiMovieStructure(unittest.TestCase):
         # The only decoder is Godot's Theora; Bink goes through the player's own FFmpeg.
         for path in [ROOT / "apps/viewer/CMakeLists.txt", *SRC.glob("*.cpp"),
                      *(ROOT / "src/presentation/godot/ui").glob("*.cpp")]:
-            text = path.read_text(encoding="utf-8").lower()
+            text = source_text(path.relative_to(ROOT).as_posix()).lower()
             for token in ("avcodec", "avformat", "binkw32", "bink2w", "radgametools"):
                 self.assertNotIn(token, text, path)
         shipped = [path.name for path in (ROOT / "apps/viewer/project").rglob("*")

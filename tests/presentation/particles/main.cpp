@@ -31,8 +31,9 @@ Bytes integer(const std::uint32_t value){Bytes out;u32(out,value);return out;}
 Bytes scalar(const float value){Bytes out;f32(out,value);return out;}
 Bytes vector3(const float x,const float y,const float z){Bytes out;f32(out,x);f32(out,y);f32(out,z);return out;}
 
-Bytes old_group(const std::uint32_t type,const float x,const float y,const float z){
-    Bytes data;u32(data,type);for(int i=0;i<12;++i)f32(data,0); // through cylinder height
+Bytes old_group(const std::uint32_t type,const float x,const float y,const float z,
+                const float minimum=0,const float maximum=0){
+    Bytes data;u32(data,type);for(int i=0;i<12;++i)f32(data,i==0?minimum:i==3?maximum:0); // through cylinder height
     f32(data,x);f32(data,y);f32(data,z);
     return chunk(0x1100,chunk(0x1101,std::move(data)),true);
 }
@@ -46,11 +47,11 @@ Bytes scalar_track_header(Bytes first,Bytes last){
     append(data,mini(4,integer(0)));return chunk(0,std::move(data));
 }
 
-Bytes legacy_fixture(Bytes lifetime=scalar(2.0F),Bytes size_first=scalar(4.0F),Bytes acceleration=vector3(1,0,0),Bytes mesh_props={}){
+Bytes legacy_fixture(Bytes lifetime=scalar(2.0F),Bytes size_first=scalar(4.0F),Bytes acceleration=vector3(1,0,0),Bytes mesh_props={},Bytes age_group={}){
     Bytes properties;append(properties,mini(0x0f,std::move(lifetime)));append(properties,mini(0x13,scalar(0.25F)));append(properties,mini(0x12,scalar(0.2F)));append(properties,mini(0x2a,integer(2)));append(properties,mini(0x10,integer(16)));
     append(properties,mini(0x0a,std::move(acceleration)));append(properties,mini(0x31,Bytes{std::byte{1}}));
     append(properties,mesh_props);
-    Bytes groups;append(groups,old_group(0,0,0,0));append(groups,old_group(0,0,0,0));append(groups,old_group(0,2,0,0));
+    Bytes groups;append(groups,old_group(0,0,0,0));append(groups,age_group.empty()?old_group(0,2,0,0):age_group);append(groups,old_group(0,2,0,0));
     Bytes tracks;for(int i=0;i<4;++i){append(tracks,track_header(1,1,true));append(tracks,chunk(1,{}));}
     append(tracks,scalar_track_header(std::move(size_first),scalar(8)));append(tracks,chunk(1,{}));append(tracks,track_header(0,3));append(tracks,chunk(1,{}));append(tracks,track_header(1,1));append(tracks,chunk(1,{}));
     Bytes emitter;append(emitter,chunk(2,std::move(properties)));Bytes name;text(name,"fixture");append(emitter,chunk(0x16,std::move(name)));append(emitter,chunk(0x29,std::move(groups),true));append(emitter,chunk(1,std::move(tracks),true));
@@ -227,8 +228,8 @@ void test_mesh_frames_and_capacity(){
     binding.geometry.submeshes[0].vertices[0].position={999,999,999};
     expect(cpu.advance(0).spawned==1,"mesh emission owns caller geometry after mutation");
     const auto particle=cpu.particles().front();
-    expect(close(particle.position.x,12)&&close(particle.position.y,23)&&close(particle.position.z,35),
-        "mesh affine point and ordinary linear normal preserve nonuniform scale and offset");
+    expect(close(particle.position.x,11)&&close(particle.position.y,20)&&close(particle.position.z,29),
+        "every-vertex emission uses the affine vertex without a surface offset");
     const float tilt=std::atan2(12.0F,std::sqrt(40.0F));
     const float pitch=3.14159265358979323846F/2-tilt;
     const float azimuth=std::atan2(6.0F,2.0F);
@@ -291,6 +292,126 @@ void test_mesh_frames_and_capacity(){
     expect(resumed.spawned==1&&close(cpu.particles().front().position.x,
         binding.geometry.submeshes[next_submesh].vertices[next_vertex].position.x),
         "dropped event consumes no mesh RNG before later emission");
+}
+
+void test_mesh_surface_size_offset() {
+    particles::MeshBinding binding;
+    binding.geometry.submeshes={{{{{0,0,0},{0,0,3}},{{2,0,0},{0,0,3}},{{0,3,0},{0,0,3}}},{0,1,2}}};
+    binding.frame.origin={7,11,13};
+    binding.frame.basis={{2,0,0},{0,3,0},{0,0,4}};
+    for(const auto mode:{particles::MeshSpawnMode::random_vertex,particles::MeshSpawnMode::random_surface}){
+        auto emitter=mesh_emitter(mode);
+        emitter.bursting=true;emitter.particles_per_interval=8;
+        emitter.mesh_surface_offset=1.5F;emitter.size_variation=0.4F;
+        emitter.size={particles::Interpolation::linear,{{0,4},{1,1}}};
+        particles::SystemDefinition definition;definition.emitters.push_back(emitter);
+        particles::CpuSystem shifted(definition,123,16,binding);
+        definition.emitters[0].mesh_surface_offset=0;
+        particles::CpuSystem control(definition,123,16,binding);
+        expect(shifted.advance(0).spawned==8&&control.advance(0).spawned==8,
+            "random mesh controls emit the same authored burst");
+        const std::vector<particles::Particle> before(shifted.particles().begin(),shifted.particles().end());
+        for(std::size_t i=0;i<before.size();++i){
+            const auto& a=before[i];const auto& b=control.particles()[i];
+            expect(close(a.position.x,b.position.x)&&close(a.position.y,b.position.y)&&
+                close(a.position.z-b.position.z,0.75F*a.size),
+                "random mesh offset uses normalized transformed normal and sampled half-extent");
+            expect(a.id==b.id&&a.size==b.size&&a.death_time==b.death_time,
+                "surface offset adds no RNG draws to size variation or lifetime");
+        }
+        static_cast<void>(shifted.advance(1));
+        for(std::size_t i=0;i<before.size();++i)
+            expect(shifted.particles()[i].position.z==before[i].position.z&&
+                shifted.particles()[i].size<before[i].size,
+                "birth surface offset stays fixed as the size gradient shrinks");
+
+        definition.emitters[0].mesh_surface_offset=-2;
+        particles::CpuSystem inward(definition,123,16,binding);
+        static_cast<void>(inward.advance(0));
+        for(const auto& a:inward.particles())
+            expect(close(a.position.z,13-a.size),"signed mesh offset remains authored");
+        definition.emitters[0].size=constant(0);
+        particles::CpuSystem zero_size(definition,123,16,binding);
+        static_cast<void>(zero_size.advance(0));
+        for(const auto& a:zero_size.particles())
+            expect(a.position.z==13,"zero half-extent has zero surface displacement");
+    }
+    auto emitter=mesh_emitter(particles::MeshSpawnMode::random_vertex);
+    emitter.mesh_surface_offset=1.5F;emitter.size=constant(4);
+    binding.geometry.submeshes[0].vertices={{{0,0,0},{1,2,3}}};
+    binding.geometry.submeshes[0].triangle_indices.clear();
+    particles::SystemDefinition definition;definition.emitters.push_back(emitter);
+    particles::CpuSystem skewed(definition,123,4,binding);
+    static_cast<void>(skewed.advance(0));
+    const auto point=skewed.particles().front().position;
+    const float magnitude=std::sqrt(184.0F);
+    expect(close(point.x,7+6/magnitude)&&close(point.y,11+18/magnitude)&&close(point.z,13+36/magnitude),
+        "world-normal normalization follows the nonuniform mesh frame");
+    binding.geometry.submeshes[0].vertices[0].normal={};
+    particles::CpuSystem degenerate(definition,123,4,binding);
+    static_cast<void>(degenerate.advance(0));
+    const auto zero=degenerate.particles().front().position;
+    expect(zero.x==7&&zero.y==11&&zero.z==13,"zero normal yields a finite zero surface offset");
+}
+
+void test_lifetime_variation() {
+    // PL-01: raw saved bounds remain inspectable; legacy post-load rebuilds the runtime range.
+    const auto loaded = particles::load_alo(legacy_fixture(scalar(8),scalar(4),vector3(0,0,0),{},
+        old_group(1,8,8,8,1.44F,14.56F)), "age-range.alo");
+    expect(bool(loaded), "serialized lifetime range parses");
+    if (!loaded) return;
+    auto emitter = loaded.value().emitters.front();
+    expect(emitter.lifetime_range && close(emitter.lifetime_range->minimum,1.44F)
+        && close(emitter.lifetime_range->maximum,14.56F) && !emitter.lifetime_range->constant_mode,
+        "loader retains both saved scalar age bounds and range mode");
+    emitter.bursting = true; emitter.particles_per_interval = 512;
+    emitter.spawn_interval = 100; emitter.lifetime = 8; emitter.lifetime_variation = 0.82F;
+    auto cpu = system_with(emitter, 123, 512);
+    expect(cpu.advance(0).spawned == 512, "lifetime probe fills one seeded birth batch");
+    float sum = 0, minimum = 8, maximum = 0;
+    for (const auto& particle : cpu.particles()) {
+        const float age = particle.death_time - particle.spawn_time;
+        expect(age >= 1.44F - 0.00001F && age <= 8, "births sample the post-load age range");
+        sum += age; minimum = std::min(minimum, age); maximum = std::max(maximum, age);
+    }
+    expect(minimum < 2 && maximum > 7.8F && std::abs(sum / 512 - 4.72F) < 0.25F,
+        "post-load smoke covers the shorter range and expected mean");
+    expect(close(loaded.value().emitters.front().lifetime_range->maximum,14.56F),
+        "runtime construction leaves the raw decoded definition unchanged");
+    expect(cpu.advance(8).killed == 512 && cpu.particles().empty(),
+        "all varied smoke particles retire by the post-load maximum");
+
+    emitter.lifetime_range = particles::EmitterDefinition::LifetimeRange{3,3};
+    emitter.lifetime_variation = 0;
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
+        [](const auto& particle) { return particle.death_time - particle.spawn_time == 8; }),
+        "equal range-mode bounds are rebuilt, and zero variation yields the authored maximum");
+    emitter.lifetime_variation = 1.5F;
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
+        [](const auto& particle) { return particle.death_time>=0 && particle.death_time<=8; }),
+        "wide variation clamps the post-load lower age bound to zero");
+    emitter.lifetime_variation = -0.5F;
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
+        [](const auto& particle) { return particle.death_time>=8 && particle.death_time<=12; }),
+        "negative variation sorts the rebuilt age bounds");
+    emitter.lifetime_variation = -std::numeric_limits<float>::max();
+    cpu = system_with(emitter, 123, 512);
+    expect(cpu.advance(0).spawned==0, "overflowing rebuilt age bounds fail closed");
+    const auto point = particles::load_alo(legacy_fixture(scalar(8)), "age-point.alo");
+    expect(point && point.value().emitters.front().lifetime_range
+        && point.value().emitters.front().lifetime_range->minimum==2
+        && point.value().emitters.front().lifetime_range->maximum==2
+        && point.value().emitters.front().lifetime_range->constant_mode,
+        "constant-mode age loading uses its saved default");
+    if(point){
+        particles::CpuSystem constant(point.value(),123,512);static_cast<void>(constant.advance(0));
+        expect(!constant.particles().empty() && std::all_of(constant.particles().begin(),constant.particles().end(),
+            [](const auto& particle){return particle.death_time-particle.spawn_time==2;}),
+            "post-load preserves a true constant sampler's mode and saved default");
+    }
 }
 
 void test_creator_killers_and_translation(){
@@ -444,8 +565,11 @@ void test_parent_lifecycle(){
     particles::CpuSystem bounded(parent_system(),21,2);
     static_cast<void>(bounded.advance(0));
     const auto limited=bounded.advance(0.5F);
-    expect(bounded.particles().size()<=2&&limited.dropped_at_capacity==1&&
-        limited.death_bursts==1,"death bursts respect the shared hard particle bound");
+    expect(bounded.emitter_capacities()[0].reserved==1&&
+        bounded.emitter_capacities()[1].reserved==1&&bounded.emitter_capacities()[2].reserved==0&&
+        bounded.particles().size()==1&&bounded.particles()[0].emitter_index==1&&
+        limited.requested==2&&limited.dropped_at_capacity==2&&limited.death_bursts==1,
+        "PS-19 death bursts cannot borrow retired root slots under the explicit host budget");
     auto cycle=parent_system();cycle.emitters[0].creator_id=39;cycle.emitters[0].parent_emitter=1;
     particles::CpuSystem rejected(std::move(cycle),21,32);
     expect(rejected.advance(0).spawned==0&&rejected.live_child_instances()==0,
@@ -722,8 +846,7 @@ void test_skip_and_freeze_times(){
             [](const particles::Particle& a,const particles::Particle& b){
                 return a.id==b.id&&a.position.z==b.position.z&&a.size==b.size&&a.color.w==b.color.w;}),
         "frozen particles keep their last state");
-    // One long advance must stop the emitter at the same state as a step to
-    // the freeze boundary followed by a step entirely inside the frozen span.
+    // PS-08: equality advances, while a crossing rejects the complete update permanently.
     auto crossing=emitter;crossing.freeze_time=1;crossing.lifetime=10;
     auto long_step=system_with(crossing,5,256);
     auto split_step=system_with(crossing,5,256);
@@ -731,22 +854,71 @@ void test_skip_and_freeze_times(){
     const auto crossed=long_step.advance(2);
     const auto to_boundary=split_step.advance(1);
     const auto after_boundary=split_step.advance(1);
-    expect(crossed.spawned==to_boundary.spawned&&after_boundary.spawned==0&&
+    expect(crossed.spawned==0&&to_boundary.spawned>0&&after_boundary.spawned==0&&
         crossed.killed==0&&after_boundary.killed==0,
-        "crossing a freeze boundary cannot spawn or kill after it");
-    expect(close(long_step.presentation_time(),2)&&
-        long_step.particles().size()==split_step.particles().size()&&
-        std::equal(long_step.particles().begin(),long_step.particles().end(),split_step.particles().begin(),
-            [](const particles::Particle& a,const particles::Particle& b){
-                return a.id==b.id&&a.spawn_time==b.spawn_time&&a.position.z==b.position.z&&
-                    a.size==b.size&&a.color.w==b.color.w;}),
-        "a 0-to-2 s advance with freeze at 1 s has no motion after 1 s");
+        "freeze equality admits births but a crossing skips the full update");
+    expect(close(long_step.presentation_time(),2)&&long_step.particles().size()==1&&
+        close(long_step.particles().front().position.z,0)&&close(split_step.particles().front().position.z,3),
+        "a crossed update keeps the prior state rather than splitting at the boundary");
+    expect(long_step.advance(0.25F).spawned==0&&close(long_step.particles().front().position.z,0),
+        "a smaller later delta cannot unfreeze the emitter");
+    auto linked=crossing;linked.translater_id=26;
+    auto held=system_with(linked,5,256);held.set_origin({});static_cast<void>(held.advance(0));
+    static_cast<void>(held.advance(2));held.set_origin({10,0,0});held.follow_emitter();
+    expect(close(held.particles().front().position.x,0), "frozen linked particles stop following their owner");
     // An emitter without a skip time in a pre-rolled system starts at zero, exactly as before.
     particles::SystemDefinition mixed;mixed.emitters={skipped,emitter};
     particles::CpuSystem both(mixed,5,512);static_cast<void>(both.advance(0));
     const auto late=std::count_if(both.particles().begin(),both.particles().end(),
         [](const particles::Particle& particle){return particle.emitter_index==1;});
     expect(late==1,"an emitter without a skip time is not pre-simulated with its neighbour");
+}
+
+void test_prewarm_boundaries(){
+    auto emitter=base_emitter();emitter.velocity.point={1,0,0};
+    const auto probe=[&](const float target,const float caller_delta){
+        auto warm=emitter;warm.skip_time=target;
+        auto cpu=system_with(warm,7,256);static_cast<void>(cpu.advance(caller_delta));return cpu;
+    };
+    const auto zero=probe(0,0),equal=probe(0.1F,0),between=probe(0.15F,0),next=probe(0.2F,0);
+    expect(zero.particles().front().spawn_time==0&&zero.particles().front().position.x==0,
+        "zero prewarm target runs no presimulation step");
+    expect(equal.particles().front().spawn_time==-0.2F&&close(equal.particles().front().position.x,0.1F),
+        "inclusive 0.1-second target runs two 0.1-second steps");
+    expect(between.particles().front().spawn_time==-0.2F&&close(between.particles().front().position.x,0.1F),
+        "a target between steps overshoots to the next complete step");
+    expect(next.particles().front().spawn_time==-0.3F&&close(next.particles().front().position.x,0.2F),
+        "exact equality at the second prewarm step admits one more step");
+    const auto ordinary=probe(0.1F,0.05F);
+    expect(close(ordinary.presentation_time(),0.05F)&&close(ordinary.particles().front().position.x,0.15F),
+        "the admitted caller update runs after prewarm");
+    auto warm=emitter;warm.skip_time=0.2F;warm.freeze_time=0.15F;
+    auto admitted=system_with(warm,7,256);static_cast<void>(admitted.advance(0.05F));
+    expect(close(admitted.particles().front().position.x,0.25F),
+        "first-update freeze admission precedes prewarm and is not repeated inside it");
+    static_cast<void>(admitted.advance(0.01F));
+    expect(close(admitted.particles().front().position.x,0.25F), "the next crossing freezes the prewarmed state");
+    auto rejected=system_with(warm,7,256);
+    expect(rejected.advance(0.2F).spawned==0&&rejected.particles().empty(),
+        "a rejected first update freezes before prewarming or births");
+    expect(rejected.advance(0.01F).spawned==0, "a rejected first update remains frozen");
+    auto boundary=emitter;boundary.skip_time=0.1F;boundary.freeze_time=0.2F;boundary.translater_id=26;
+    auto neighbor=emitter;neighbor.skip_time=10;neighbor.lifetime=100;
+    particles::SystemDefinition mixed;mixed.emitters={boundary,neighbor};
+    particles::CpuSystem both(mixed,7,256);both.set_origin({});static_cast<void>(both.advance(0));
+    static_cast<void>(both.advance(0));both.set_origin({1,0,0});both.follow_emitter();
+    const auto first=std::find_if(both.particles().begin(),both.particles().end(),
+        [](const auto& particle){return particle.emitter_index==0;});
+    expect(first!=both.particles().end()&&first->position.x>1,
+        "freeze equality uses the emitter's own elapsed time across unequal prewarm targets");
+    const auto fixed=first->position.x;
+    static_cast<void>(both.advance(0.05F));
+    const auto after=std::find_if(both.particles().begin(),both.particles().end(),
+        [](const auto& particle){return particle.emitter_index==0;});
+    const auto moving=std::find_if(both.particles().begin(),both.particles().end(),
+        [](const auto& particle){return particle.emitter_index==1;});
+    expect(after->position.x==fixed&&moving->position.x>9.9F,
+        "one frozen emitter leaves its neighbor advancing");
 }
 
 void test_prewarmed_capacity() {
@@ -778,14 +950,267 @@ void test_prewarmed_capacity() {
     expect(particles::prewarmed_capacity(field, 256) == 256, "cold effects retain caller policy");
     field.emitters[0] = inner; field.emitters[0].freeze_time = 0;
     field.emitters[0].lifetime_variation = 1;
-    expect(particles::prewarmed_capacity(field, 256) > 660, "lifetime variation contributes to the live bound");
+    field.emitters[0].lifetime_range = particles::EmitterDefinition::LifetimeRange{1,14};
+    const auto varied_capacity = particles::prewarmed_capacity(field, 256);
+    field.emitters[0].lifetime_variation = 0;
+    expect(varied_capacity == 335 && varied_capacity == particles::prewarmed_capacity(field, 256),
+        "post-load maximum age bounds prewarming independently of raw bounds or positive variation");
     field.emitters[0].particles_per_interval = std::numeric_limits<float>::max();
     expect(particles::prewarmed_capacity(field, 256) == 65536, "huge finite rates saturate before integer conversion");
+    auto short_freeze=inner;short_freeze.particles_per_interval=500;short_freeze.skip_time=5;short_freeze.freeze_time=0.1F;
+    field.emitters={short_freeze};
+    const auto budget=particles::continuous_capacity(field,256);
+    particles::CpuSystem warm(field,7,budget);
+    expect(budget>2500&&warm.advance(0).dropped_at_capacity==0&&warm.particles().size()>2400,
+        "capacity includes admitted prewarm even when its target exceeds freeze");
+}
+
+void test_continuous_mesh_capacity() {
+    // pi_damage_elec_SD00: independent random-surface births, 3500/s,
+    // saved age 0.5 s, no pre-roll. The old allocation loses most of the arcs.
+    auto emitter = mesh_emitter(particles::MeshSpawnMode::random_surface);
+    emitter.bursting = false; emitter.particles_per_interval = 3500; emitter.spawn_interval = 1;
+    emitter.stop_time = 0; emitter.lifetime = 0.5F;
+    emitter.lifetime_range = particles::EmitterDefinition::LifetimeRange{0.5F, 0.5F};
+    particles::SystemDefinition system; system.emitters = {emitter};
+    const auto capacity = particles::continuous_mesh_capacity(system, 256);
+    expect(capacity >= 1750 && capacity < 2000, "cold mesh population is sized from authored rate and age");
+    auto mesh = asymmetric_mesh(); mesh.geometry.submeshes.erase(mesh.geometry.submeshes.begin());
+    particles::CpuSystem old(system, 1187, 256, mesh), full(system, 1187, capacity, mesh);
+    std::size_t old_drops = 0;
+    for (int tick = 0; tick < 60; ++tick) {
+        old_drops += old.advance(1.0F / 30.0F).dropped_at_capacity;
+        expect(full.advance(1.0F / 30.0F).dropped_at_capacity == 0,
+            "derived allocation keeps the electrical stream without dropped births");
+    }
+    expect(old_drops > 5000 && old.particles().size() <= 256,
+        "the old allocation reproduces severe electrical density loss");
+    expect(full.particles().size() >= 1700 && full.particles().size() <= capacity,
+        "authored steady electrical population fits the bounded pool");
+    full.detach();
+    for (int tick = 0; tick < 17; ++tick)
+        expect(full.advance(1.0F / 30.0F).spawned == 0, "stun end stops births with the larger pool");
+    expect(full.finished(), "the full electrical population drains within its authored age");
+    expect(particles::continuous_mesh_capacity(system, 256, 100) == 100, "caller limit remains authoritative");
+    system.emitters[0].particles_per_interval = std::numeric_limits<float>::max();
+    expect(particles::continuous_mesh_capacity(system, 256) == 5003,
+        "untrusted authored rates saturate at FoC's independent-emitter ceiling");
+    system.emitters[0] = emitter; system.emitters[0].mesh_mode = particles::MeshSpawnMode::every_vertex;
+    expect(particles::continuous_mesh_capacity(system, 256) == 256, "vertex multiplicity retains explicit policy");
+    system.emitters[0] = emitter; system.emitters[0].parent_emitter = 0;
+    expect(particles::continuous_mesh_capacity(system, 256) == 256, "parent multiplicity retains explicit policy");
+    system.emitters[0] = emitter; system.emitters[0].bursting = true;
+    expect(particles::continuous_mesh_capacity(system, 256) == 256, "bursts retain explicit policy");
+    system.emitters[0] = emitter; system.emitters[0].lifetime_range->maximum = std::numeric_limits<float>::quiet_NaN();
+    expect(particles::continuous_mesh_capacity(system, 256) == 256, "invalid saved age retains bounded fallback");
+}
+
+void test_continuous_capacity() {
+    auto shape = base_emitter();
+    shape.bursting = false; shape.stop_time = 0; shape.skip_time = 0;
+    shape.spawn_interval = 1; shape.particles_per_interval = 600; shape.lifetime = 1;
+    auto mesh = mesh_emitter(particles::MeshSpawnMode::random_surface);
+    mesh.bursting = false; mesh.stop_time = 0; mesh.particles_per_interval = 100;
+    mesh.spawn_interval = 1; mesh.lifetime = 5;
+    particles::SystemDefinition system; system.emitters = {shape, mesh};
+    const auto capacity = particles::continuous_capacity(system, 256);
+    expect(capacity >= 1100 && capacity < 1150, "cold shape and mesh bounds are summed independently");
+    auto binding = asymmetric_mesh(); binding.geometry.submeshes.erase(binding.geometry.submeshes.begin());
+    particles::CpuSystem old(system, 119, 256, binding), full(system, 119, capacity, binding);
+    std::size_t drops = 0;
+    for (int tick = 0; tick < 180; ++tick) {
+        drops += old.advance(1.0F / 30.0F).dropped_at_capacity;
+        expect(full.advance(1.0F / 30.0F).dropped_at_capacity == 0,
+            "mixed independent streams retain their authored populations without prewarming");
+    }
+    expect(drops > 2000 && full.particles().size() > 1050,
+        "generic fallback reproduces population loss beyond the ion-only case");
+    full.detach();
+    for (int tick = 0; tick < 155; ++tick) static_cast<void>(full.advance(1.0F / 30.0F));
+    expect(full.finished(), "larger mixed population drains without extending authored age");
+    expect(particles::continuous_capacity(system, 256, 100) == 100, "explicit caller ceiling wins");
+    shape.particles_per_interval = std::numeric_limits<float>::max();
+    mesh.particles_per_interval = std::numeric_limits<float>::max();
+    system.emitters = {shape, mesh};
+    expect(particles::continuous_capacity(system, 256) == 10006,
+        "5003 ceiling is applied per emitter before the system sum");
+    expect(particles::continuous_capacity(system, 256, 6000) == 6000,
+        "system sum saturates at the caller ceiling");
+    auto excluded = shape; excluded.bursting = true; excluded.creator_id = 39;
+    system.emitters = {mesh, excluded};
+    expect(particles::continuous_capacity(system, 256) == 5259,
+        "dependent burst retains fallback reserve beside an independent mesh bound");
+    excluded.bursting = false; excluded.creator_id = 39; system.emitters[1] = excluded;
+    expect(particles::continuous_capacity(system, 256) == 5259, "parent family retains fallback reserve");
+    system.emitters[1] = mesh; system.emitters[1].mesh_mode = particles::MeshSpawnMode::every_vertex;
+    expect(particles::continuous_capacity(system, 256) == 5259, "every-vertex multiplicity is not inferred");
+    system.emitters[1] = shape; system.emitters[1].parent_emitter = 0;
+    expect(particles::continuous_capacity(system, 256) == 5259, "parent reference excludes shape multiplicity");
+    system.emitters = {shape}; system.emitters[0].lifetime_range =
+        particles::EmitterDefinition::LifetimeRange{1, std::numeric_limits<float>::quiet_NaN()};
+    expect(particles::continuous_capacity(system, 256) == 256, "invalid saved bounds retain fallback");
+    system.emitters[0] = shape; system.emitters[0].cpu_ready = false;
+    expect(particles::continuous_capacity(system, 256) == 256, "unsupported definitions retain fallback");
+    system.emitters[0] = shape; system.emitters[0].particles_per_interval = 33;
+    system.emitters[0].lifetime = 10;
+    system.emitters[0].lifetime_range = particles::EmitterDefinition::LifetimeRange{1,14};
+    expect(particles::continuous_capacity(system, 256) == 333, "post-load maximum age governs cold allocation");
+    system.emitters[0].lifetime_range = particles::EmitterDefinition::LifetimeRange{14,14,true};
+    expect(particles::continuous_capacity(system, 256) == 465, "true constant default governs effective allocation");
+    system.emitters[0].lifetime_range = particles::EmitterDefinition::LifetimeRange{1,14};
+    system.emitters[0].freeze_time = 2;
+    expect(particles::continuous_capacity(system, 256) == 256, "freeze bounds the accumulated population");
+    system.version = particles::AloParticleVersion::plugin_v2;
+    expect(particles::continuous_capacity(system, 256) == 256, "unsupported version retains caller policy");
+}
+
+void test_burst_capacity() {
+    // PS-18: the seven independent burst shapes of a large explosion.
+    // Synthetic definitions exercise scheduling and ages without game assets.
+    particles::SystemDefinition explosion;
+    const float counts[] = {1, 50, 2, 150, 1, 10, 20};
+    const float intervals[] = {2, 2, 0.2F, 2, 2, 0.33F, 1};
+    const float stops[] = {2, 2, 0.6F, 2, 2, 1.98F, 1};
+    const float ages[] = {2, 2, 2, 2, 2, 3, 4};
+    const float variations[] = {0, 1, 0.5F, 0.5F, 0, 0.38F, 0.82F};
+    for (std::size_t index = 0; index < 7; ++index) {
+        auto emitter = base_emitter();
+        emitter.bursting = true; emitter.particles_per_interval = counts[index];
+        emitter.spawn_interval = intervals[index]; emitter.stop_time = stops[index];
+        emitter.lifetime = ages[index]; emitter.lifetime_variation = variations[index];
+        explosion.emitters.push_back(emitter);
+    }
+    const auto capacity = particles::continuous_capacity(explosion, 256);
+    expect(capacity == 626, "overlapping whole-burst bounds sum independently of the fallback");
+    for (const auto seed : {1234U, 4567U, 10001U}) {
+        particles::CpuSystem old(explosion, seed, 256), full(explosion, seed, capacity);
+        const auto* storage = full.particles().data();
+        std::size_t peak = 0;
+        for (int tick = 0; tick < 240; ++tick) {
+            static_cast<void>(old.advance(1.0F / 30.0F));
+            expect(full.advance(1.0F / 30.0F).dropped_at_capacity == 0,
+                "all explosion births fit the bounded pool across fixed seeds");
+            expect(full.particles().data() == storage, "births never grow the preallocated particle storage");
+            peak = std::max(peak, full.particles().size());
+        }
+        expect(old.total_dropped() > 0 && peak > 256 && peak <= capacity,
+            "the old fallback loses overlapping explosion births");
+        full.detach();
+        expect(full.finished(), "the larger pool does not prolong explosion lifetime");
+    }
+    expect(particles::continuous_capacity(explosion, 256, 100) == 100,
+        "explicit system ceiling still bounds burst pools");
+
+    auto burst = base_emitter();
+    burst.bursting = true; burst.stop_time = 0;
+    burst.particles_per_interval = 30.75F; burst.spawn_interval = 1; burst.lifetime = 0.1F;
+    particles::SystemDefinition system; system.emitters = {burst};
+    expect(particles::continuous_capacity(system, 1) == 30,
+        "isolated bursts reserve the truncated authored event count");
+    burst.particles_per_interval = 100; burst.spawn_interval = 0.6F; burst.lifetime = 1;
+    system.emitters = {burst};
+    const auto overlapping = particles::continuous_capacity(system, 1);
+    expect(overlapping == 200, "fractional overlap retains whole bursts rather than averaging their rate");
+    particles::CpuSystem repeated(system, 17, overlapping);
+    for (int tick = 0; tick < 600; ++tick)
+        expect(repeated.advance(1.0F / 30.0F).dropped_at_capacity == 0,
+            "repeated bursts remain bounded by live overlap");
+    burst.particles_per_interval = std::numeric_limits<float>::max();
+    burst.spawn_interval = std::numeric_limits<float>::min();
+    system.emitters = {burst, burst};
+    expect(particles::continuous_capacity(system, 256) == 10006,
+        "huge finite burst populations clamp before integer conversion, per emitter");
+    expect(particles::continuous_capacity(system, 256, 6000) == 6000,
+        "summed burst ceilings respect the caller ceiling");
+    system.emitters[1].creator_id = 39;
+    expect(particles::continuous_capacity(system, 256) == 5259,
+        "unsupported parent bursts keep one fallback beside independent reserves");
+    burst = mesh_emitter(particles::MeshSpawnMode::random_surface);
+    burst.bursting = true; burst.particles_per_interval = 400; burst.spawn_interval = 2; burst.lifetime = 0.5F;
+    system.emitters = {burst};
+    expect(particles::continuous_capacity(system, 256) == 400,
+        "independent random mesh bursts use the same authored count bound");
+    system.emitters[0].mesh_mode = particles::MeshSpawnMode::every_vertex;
+    expect(particles::continuous_capacity(system, 256) == 256,
+        "every-vertex bursts retain explicit multiplicity policy");
+    system.emitters[0] = burst; system.emitters[0].spawn_interval = 0;
+    expect(particles::continuous_capacity(system, 256) == 256, "invalid burst intervals retain fallback");
+    system.emitters[0] = burst; system.emitters[0].cpu_ready = false;
+    expect(particles::continuous_capacity(system, 256) == 256, "unsupported burst definitions retain fallback");
+
+    // A pool above the old initial reserve must also be allocated before births.
+    system.emitters = {burst}; system.emitters[0].particles_per_interval = 4500;
+    const auto large = particles::continuous_capacity(system, 256);
+    auto binding = asymmetric_mesh();
+    binding.geometry.submeshes.erase(binding.geometry.submeshes.begin());
+    particles::CpuSystem preallocated(system, 71, large, binding);
+    const auto* storage = preallocated.particles().data();
+    expect(preallocated.advance(0).spawned == 4500 && preallocated.particles().data() == storage,
+        "a burst above 4096 births does not reallocate its particle pool");
+}
+
+void test_independent_emitter_capacity() {
+    auto dense = base_emitter(); dense.bursting = true; dense.stop_time = 0;
+    dense.particles_per_interval = 100; dense.spawn_interval = 0.1F; dense.lifetime = 10;
+    auto sparse = dense; sparse.particles_per_interval = 3; sparse.spawn_interval = 20;
+    particles::SystemDefinition system; system.emitters = {dense, sparse};
+    particles::CpuSystem cpu(system, 42, 16);
+    const auto capacities = cpu.emitter_capacities();
+    expect(capacities[0].native_requested == 5003 && capacities[1].native_requested == 3,
+        "PS-18 base clamp and long-interval event count are independent");
+    expect(capacities[0].reserved == 13 && capacities[1].reserved == 3,
+        "explicit host budget partitions before births without starvation");
+    const auto memory = cpu.reserved_memory_bytes();
+    expect(memory >= 16 * sizeof(particles::Particle)
+        && memory <= 16 * (sizeof(particles::Particle) + sizeof(std::size_t)),
+        "independent roots reserve bounded particle/slot payload without unused dependent scratch");
+    const auto first = cpu.advance(0);
+    expect(first.requested == 103 && first.spawned == 16 && first.dropped_at_capacity == 87,
+        "requested and dropped counts include every emitter at exhaustion");
+    const auto ids = std::vector<particles::Particle>(cpu.particles().begin(), cpu.particles().end());
+    const auto second = cpu.advance(0.1F);
+    expect(second.spawned == 0 && second.dropped_at_capacity == 100,
+        "exhausted emitter drops new births without oldest replacement");
+    expect(std::equal(ids.begin(), ids.end(), cpu.particles().begin(),
+        [](const auto& a, const auto& b) { return a.id == b.id && a.draw_slot == b.draw_slot; }),
+        "capacity pressure preserves live IDs and stable emitter slots");
+    expect(cpu.reserved_memory_bytes() == memory, "exhaustion cannot grow reserved memory");
+    auto parent = sparse; parent.particles_per_interval = 2;
+    auto child = dense; child.creator_id = 39; child.parent_emitter = 1;
+    auto mesh = dense; mesh.creator_id = 35; mesh.mesh_mode = particles::MeshSpawnMode::every_vertex;
+    mesh.parent_emitter = 0;
+    system.emitters = {child, parent, mesh};
+    const auto plan = particles::emitter_capacity_plan(system, 4, 65536);
+    expect(plan[0].native_requested == 10006 && plan[2].native_requested == 200240072,
+        "5003 base clamp precedes forward-parent and every-vertex multiplication");
+    expect(plan[0].reserved + plan[1].reserved + plan[2].reserved == 65536,
+        "dependent and vertex multiplicities stay inside the explicit host memory budget");
+    const auto overflow = particles::emitter_capacity_plan(system, std::numeric_limits<std::size_t>::max(), 128);
+    expect(overflow[2].native_requested == std::numeric_limits<std::size_t>::max()
+        && overflow[0].reserved + overflow[1].reserved + overflow[2].reserved == 128,
+        "multiplication saturates before host budgeting without wraparound");
+    system.emitters[1].parent_emitter = 0;
+    const auto cyclic = particles::emitter_capacity_plan(system, 4, 65536);
+    expect(cyclic[0].reserved == 0 && cyclic[1].reserved == 0 && cyclic[2].reserved == 0,
+        "cyclic capacity links fail closed");
+    mesh.parent_emitter = particles::EmitterDefinition::no_parent;
+    mesh.particles_per_interval = 6000; mesh.spawn_interval = 20; mesh.lifetime = 1;
+    auto binding = asymmetric_mesh();
+    std::size_t vertices{};
+    for (const auto& submesh : binding.geometry.submeshes) vertices += submesh.vertices.size();
+    system.emitters = {mesh};
+    particles::CpuSystem all_vertices(system, 1, 65536, binding);
+    const auto vertex_births = all_vertices.advance(0);
+    expect(all_vertices.emitter_capacities()[0].native_requested == 5003 * vertices
+        && vertex_births.requested == 6000 * vertices && vertex_births.spawned == 5003 * vertices
+        && vertex_births.dropped_at_capacity == 997 * vertices,
+        "every-vertex burst exposes clamp-before-multiply admission and dropped count");
 }
 
 } // namespace
 
 int main(const int argc,char** argv){
+    test_independent_emitter_capacity();
     if(argc==3&&std::string(argv[1])=="--inspect-alo"){
         std::ifstream input(argv[2],std::ios::binary);std::vector<char> raw((std::istreambuf_iterator<char>(input)),{});Bytes bytes(raw.size());
         for(std::size_t index=0;index<raw.size();++index)bytes[index]=static_cast<std::byte>(raw[index]);
@@ -793,6 +1218,6 @@ int main(const int argc,char** argv){
         std::size_t ready{};for(const auto& emitter:loaded.value().emitters)if(emitter.cpu_ready)++ready;
         std::cout<<"emitters="<<loaded.value().emitters.size()<<" cpu_ready="<<ready<<'\n';return 0;
     }
-    test_catalog_and_parser();test_malformed_numeric_inputs();test_mesh_parser();test_mesh_cpu_sampling();test_mesh_frames_and_capacity();test_creator_killers_and_translation();test_emitter_translater_follows_rotation();test_emitter_translater_local_acceleration();test_modifier_families();test_uv_cell_is_integer_part();test_resource_bound();test_parent_lifecycle();test_parent_id_survives_live_compaction();test_parent_inward_speed_uses_system_origin();test_runtime_numeric_inputs();
-    test_detach_before_first_spawn_and_schedule_boundary();test_detach_after_births_drains();test_repeated_detach_is_stable();test_detach_keeps_parent_chains();test_detach_fixed_seed_schedule();test_skip_and_freeze_times();test_prewarmed_capacity();std::cout<<"particle CPU contracts passed\n";
+    test_catalog_and_parser();test_malformed_numeric_inputs();test_mesh_parser();test_mesh_cpu_sampling();test_mesh_frames_and_capacity();test_mesh_surface_size_offset();test_lifetime_variation();test_creator_killers_and_translation();test_emitter_translater_follows_rotation();test_emitter_translater_local_acceleration();test_modifier_families();test_uv_cell_is_integer_part();test_resource_bound();test_parent_lifecycle();test_parent_id_survives_live_compaction();test_parent_inward_speed_uses_system_origin();test_runtime_numeric_inputs();
+    test_detach_before_first_spawn_and_schedule_boundary();test_detach_after_births_drains();test_repeated_detach_is_stable();test_detach_keeps_parent_chains();test_detach_fixed_seed_schedule();test_skip_and_freeze_times();test_prewarm_boundaries();test_prewarmed_capacity();test_continuous_mesh_capacity();test_continuous_capacity();test_burst_capacity();std::cout<<"particle CPU contracts passed\n";
 }

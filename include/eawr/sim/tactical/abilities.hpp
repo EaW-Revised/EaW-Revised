@@ -3,10 +3,12 @@
 #include "eawr/core/result.hpp"
 #include "eawr/sim/math/fixed.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -15,6 +17,88 @@
 // and recharge, the multipliers they apply while active, and the DEFEND stand-in for the object
 // script of the Nebulon-B and the MC80. Pure functions of Q24 values and ticks: no clock, thread or host input.
 namespace eawr::sim::tactical {
+
+// WHE-09/10/12/14: shared nested-handler data, independent of ordinary Unit_Ability kinds.
+enum class SpecialAbilityKind : std::uint8_t {
+    none, combat_bonus, production_price, concentrate_fire, tractor_beam, energy_weapon,
+    sensor_jamming, corrupt_systems, blast, stealth, find_weakness, maximum_firepower,
+};
+enum class SpecialActivationStyle : std::uint8_t {
+    unspecified, space_automatic, ground_automatic, ground_activated, galactic_automatic, user_input,
+};
+enum class SpecialAbilityMode : std::uint8_t { space, ground, galactic };
+
+struct SpecialAbilityFilter {
+    std::vector<TypeId> applicable_types{}; // sorted exact identities, never variant expansion
+    std::uint64_t applicable_categories{};
+    std::vector<TypeId> excluded_types{};
+    std::uint64_t excluded_categories{};
+    friend bool operator==(const SpecialAbilityFilter&, const SpecialAbilityFilter&) = default;
+};
+struct SpecialAbilityProfile {
+    std::string name;
+    SpecialAbilityKind kind{};
+    SpecialActivationStyle style{}; // unspecified stays unclassified until its policy is traced
+    std::optional<bool> initially_enabled{};
+    bool causes_despawn{};
+    std::uint32_t service_interval{}; // WHE-09: code interval, not an XML timer
+    SpecialAbilityFilter filter;
+    // WHE-25: target contributions, keyed by source and authored stacking category.
+    math::Fixed target_damage_increase{}, target_speed_decrease{};
+    std::uint32_t concentrate_stacking_category{};
+    // WHE-57..60: nested ranges override ordinary targeting only when positive.
+    math::Fixed beam_min_range{}, beam_max_range{}, damage_per_frame{};
+    std::uint64_t doubled_speed_categories{}; // nonhero Corvette exception, resolved from content
+    std::string beam_owner_particle{}, beam_owner_bone{};
+    friend bool operator==(const SpecialAbilityProfile&, const SpecialAbilityProfile&) = default;
+};
+struct SpecialActivationContext {
+    EntityId owner{}, target{};
+    SpecialAbilityMode mode{SpecialAbilityMode::space};
+    bool owner_exists{true}, type_exists{true}, death_clone{}, map_editor{};
+    friend bool operator==(const SpecialActivationContext&, const SpecialActivationContext&) = default;
+};
+struct SpecialAbilitySlot {
+    bool enabled{}, cancelled{}, despawn_success{};
+    std::uint64_t next_service_frame{};
+    std::optional<SpecialActivationContext> context{};
+    std::vector<EntityId> targets{}; // sorted, unique tracked recipients
+    friend bool operator==(const SpecialAbilitySlot&, const SpecialAbilitySlot&) = default;
+};
+struct SpecialAbilityState {
+    bool service_cancelled{};
+    std::vector<SpecialAbilitySlot> slots{};
+    friend bool operator==(const SpecialAbilityState&, const SpecialAbilityState&) = default;
+};
+
+// A concrete handler supplies its own gates/effects. Calls may mutate only this owner's
+// staged slot and effect output; world inputs are immutable during a partitioned phase.
+struct SpecialAbilityHandler {
+    virtual ~SpecialAbilityHandler() = default;
+    virtual bool ready(std::size_t slot, const SpecialActivationContext&) const = 0;
+    virtual bool appropriate_mode(std::size_t slot, SpecialAbilityMode) const = 0;
+    virtual bool appropriate_target(std::size_t slot, const SpecialActivationContext&) const = 0;
+    virtual bool available(std::size_t slot, const SpecialActivationContext&) const = 0;
+    virtual bool apply(std::size_t slot, SpecialAbilitySlot&, const SpecialActivationContext&) = 0;
+    virtual void service(std::size_t slot, SpecialAbilitySlot&, std::uint64_t frame) = 0;
+    virtual bool target_live(EntityId target) const = 0;
+    virtual void remove_effect(std::size_t slot, EntityId target) = 0;
+    virtual void terminate(std::size_t slot) = 0;
+};
+
+[[nodiscard]] SpecialAbilityKind special_ability_kind(std::string_view name) noexcept;
+[[nodiscard]] SpecialActivationStyle special_activation_style(std::string_view name) noexcept;
+[[nodiscard]] std::uint32_t special_service_interval(SpecialAbilityKind kind) noexcept;
+[[nodiscard]] bool special_type_matches(const SpecialAbilityFilter&, TypeId type, std::uint64_t categories) noexcept;
+[[nodiscard]] SpecialAbilityState initial_special_abilities(std::span<const SpecialAbilityProfile>, bool default_enabled = false);
+// Return the number of successful applications; despawn_success is set only by a successful Apply.
+[[nodiscard]] std::size_t activate_special_abilities(std::span<const SpecialAbilityProfile>, SpecialAbilityState&,
+    SpecialActivationStyle, const SpecialActivationContext&, bool first_only, SpecialAbilityHandler&);
+[[nodiscard]] std::size_t service_special_abilities(std::span<const SpecialAbilityProfile>, SpecialAbilityState&,
+    const SpecialActivationContext&, std::uint64_t frame, SpecialAbilityHandler&);
+void delete_special_owner(std::span<const SpecialAbilityProfile>, SpecialAbilityState&, SpecialAbilityMode, SpecialAbilityHandler&);
+void delete_special_target(SpecialAbilityState&, EntityId target);
+void append_special_abilities(std::vector<std::uint8_t>&, const SpecialAbilityState&);
 
 // The XML and Lua spelling (`DEFEND`, `TURBO`, `POWER_TO_WEAPONS`, `SPOILER_LOCK`,
 // `ION_CANNON_SHOT`), any case; none for every other name.
@@ -29,7 +113,48 @@ struct AbilityModifiers {
     math::Fixed energy_regen{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed energy_regen_interval{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed speed{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed scatter_radius{math::Fixed::from_raw(math::Fixed::scale)}; // WAD-10
+    math::Fixed cause_damage{math::Fixed::from_raw(math::Fixed::scale)}; // WHE-22
+    math::Fixed take_damage{math::Fixed::from_raw(math::Fixed::scale)}; // WHE-22
+    math::Fixed fire_rate{math::Fixed::from_raw(math::Fixed::scale)}; // WAD-38
     friend constexpr bool operator==(const AbilityModifiers&, const AbilityModifiers&) noexcept = default;
+};
+
+struct WeakenProfile {
+    bool on_detonation{};
+    math::Fixed radius{}, take_damage_increase{}, cause_damage_reduction{};
+    std::uint32_t duration_frames{};
+    std::uint64_t categories{};
+    std::string status_effect{};
+    friend bool operator==(const WeakenProfile&, const WeakenProfile&) = default;
+};
+struct SpawnedAbilityProfile {
+    TypeId type{};
+    math::Fixed damage{}, reach{}, z_offset{};
+    std::uint32_t damage_type{0xffffffffU}, countdown_frames{};
+    bool shield_damage{true}, hitpoint_damage{true};
+    BlastProfile blast;
+    WeakenProfile weaken;
+    friend bool operator==(const SpawnedAbilityProfile&, const SpawnedAbilityProfile&) = default;
+};
+struct WeakenRecipient {
+    EntityId target{};
+    std::uint64_t expires{};
+    friend constexpr bool operator==(const WeakenRecipient&, const WeakenRecipient&) = default;
+};
+// WHE-28/29/61: independent spawned object identity and its surviving timed recipients.
+struct AbilitySpawnState {
+    std::uint64_t id{};
+    TypeId type{};
+    AbilityKind kind{};
+    PlayerId owner{};
+    EntityId source{};
+    math::Vec3 position{};
+    math::Quat rotation{};
+    std::uint64_t due{};
+    bool detonated{};
+    std::vector<WeakenRecipient> recipients{};
+    friend bool operator==(const AbilitySpawnState&, const AbilitySpawnState&) = default;
 };
 
 // One Unit_Ability of a type (content, neither replay data nor state).
@@ -42,7 +167,15 @@ struct AbilityProfile {
     // AB-60 (#561): a team ability: the squadron's team container holds it, from the team type's
     // data; its craft's own slot of the kind only marks which of them still has to fire.
     bool team{};
-    friend constexpr bool operator==(const AbilityProfile&, const AbilityProfile&) noexcept = default;
+    math::Fixed effective_radius{};
+    std::string gui_activated_ability_name{};
+    std::optional<SpawnedAbilityProfile> spawned{};
+    TypeId barrage_target_type{};
+    std::optional<math::Fixed> fixed_inaccuracy{};
+    math::Fixed target_z_offset{};
+    TypeId replenish_team{}; // WHE-63: authored Create_Team_Type
+    std::string replenish_particle{}; // Particle_Effect, presentation only
+    friend bool operator==(const AbilityProfile&, const AbilityProfile&) = default;
 };
 
 // A type's abilities in Unit_Abilities_Data order (the primary, then the secondary one), and
@@ -51,6 +184,7 @@ struct UnitAbilityProfile {
     TypeId type_id{};
     std::vector<AbilityProfile> abilities;
     bool defend_script{};
+    std::vector<SpecialAbilityProfile> special{};
     friend bool operator==(const UnitAbilityProfile&, const UnitAbilityProfile&) = default;
 };
 
@@ -60,8 +194,13 @@ struct UnitAbilityProfile {
 struct AbilityTable {
     std::vector<UnitAbilityProfile> profiles; // strictly increasing type_id
     std::vector<PlayerId> humans;             // strictly increasing
+    // AB-45: owners whose new supported abilities start on autofire. Session content
+    // supplies each local player's profile preference; existing units keep their toggles.
+    std::vector<PlayerId> autofire_defaults{}; // strictly increasing, a subset of humans
+    std::uint32_t beam_damage_type{0xffffffffU}; // shared Damage_Default armor index, bound from content
     [[nodiscard]] const UnitAbilityProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] bool human(PlayerId player) const noexcept;
+    [[nodiscard]] bool autofire_default(PlayerId player) const noexcept;
     friend bool operator==(const AbilityTable&, const AbilityTable&) = default;
 };
 
@@ -70,7 +209,8 @@ inline constexpr std::uint32_t max_ability_frames = 30U * 3600U;
 // Every multiplier is in [-64, 64]; delay, interval and speed multipliers are positive.
 inline constexpr std::int64_t max_ability_multiplier = 64;
 
-// Fails with EAWR-SIM-0305 unless type IDs and humans strictly increase, a type has one or two
+// Fails with EAWR-SIM-0305 unless type IDs, humans and creation owners strictly increase,
+// creation owners are human, a type has one or two
 // abilities of distinct modelled kinds, frames are at most max_ability_frames and every
 // multiplier is in bounds.
 [[nodiscard]] core::Result<void> validate_abilities(const AbilityTable& table);
@@ -99,10 +239,13 @@ struct AbilityState {
     math::Fixed window_damage{};
     math::Fixed damage_rate{};
     bool replan_due{};
+    SpecialAbilityState special{};
+    // WHE-24: activation-only recruitment; release drops these source-owned references.
+    std::vector<EntityId> concentrate_recruits{};
     friend bool operator==(const AbilityState&, const AbilityState&) = default;
 };
 
-[[nodiscard]] AbilityState initial_abilities(const UnitAbilityProfile& profile);
+[[nodiscard]] AbilityState initial_abilities(const UnitAbilityProfile& profile, bool autofire_default = false);
 
 // The slot of `kind` in the profile, if the type has it.
 [[nodiscard]] std::optional<std::size_t> ability_slot(const UnitAbilityProfile& profile, AbilityKind kind) noexcept;
@@ -115,6 +258,8 @@ struct AbilityGate {
     bool shield_depleted{};
     bool engines_online{true};
     bool ion_stunned{}; // AB-14: DEFEND is refused under ion stun (#561)
+    bool in_nebula{}; // WHZ-25: environmental gate precedes the ordinary gates
+    bool in_ion_storm{}; // WHZ-32: DEFEND needs an effective shield
 };
 
 // AB-13: the ability may be switched on (or is on): it is not recharging and, for DEFEND, the
@@ -146,6 +291,10 @@ enum class AbilityModifier : std::uint8_t {
     energy_regen,
     energy_regen_interval,
     speed,
+    scatter_radius,
+    cause_damage,
+    take_damage,
+    fire_rate,
 };
 [[nodiscard]] math::Fixed ability_multiplier(
     const UnitAbilityProfile& profile, const AbilityState& state, AbilityModifier modifier) noexcept;

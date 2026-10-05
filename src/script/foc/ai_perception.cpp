@@ -4,6 +4,7 @@
 #include "ai_engine.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -32,13 +33,44 @@ bool fogged_for(const Host& host, const WorldView& view, const ViewUnit& unit, t
     return entry == nullptr || (unit.visible_to & (std::uint64_t{1} << entry->snapshot_index)) == 0;
 }
 
+template <typename Row>
+void prepare_rows(const sim::PartitionExecutor& executor, const std::string_view name, const std::size_t size, Row row) {
+    if (size == 0) return;
+    const auto prepared = executor.execute_phase(name, sim::tick_partition_count, [&](const std::size_t partition) {
+        const auto range = sim::partition_range(partition, size);
+        for (std::size_t index = range.begin; index < range.end; ++index) row(index);
+    });
+    if (!prepared) throw std::runtime_error("AI threat preparation failed: " + prepared.error().message);
+}
+
 } // namespace
 
 // ---- Threat grid ----------------------------------------------------------------------------
 
+void ThreatGrid::clear_queries() noexcept {
+    total_queries_.clear();
+    force_queries_.clear();
+}
+
+ThreatGrid::Preparation::Preparation(ThreatGrid& grid, const sim::PartitionExecutor* executor,
+    const Host& host, const WorldView& view) : grid_(grid) {
+    grid_.clear_queries();
+    grid_.executor_ = executor;
+    grid_.preparation_host_ = &host;
+    grid_.preparation_view_ = &view;
+}
+
+ThreatGrid::Preparation::~Preparation() {
+    grid_.executor_ = nullptr;
+    grid_.preparation_host_ = nullptr;
+    grid_.preparation_view_ = nullptr;
+    grid_.clear_queries();
+}
+
 // PG-01: the grid spans the map with a cell per AI_FogCellsPerThreatCell fog cells (rounded up);
 // the smallest zone radius is half the cell diagonal.
 void ThreatGrid::partition(const AiBounds& bounds, std::int32_t x_cells, std::int32_t y_cells, const Constants& constants) {
+    clear_queries();
     left_ = bounds.left;
     top_ = bounds.top;
     right_ = bounds.right;
@@ -132,6 +164,7 @@ void ThreatGrid::remove(sim::EntityId object, Tracked& tracked) {
 // PG-03: an object joins the grid at its first service; from then on, whenever its service frame
 // comes (every 300 frames from the first), its zones are rebuilt if it moved. Dead objects leave.
 void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t frame) {
+    clear_queries();
     if (!ready()) return;
     for (auto iterator = tracked_.begin(); iterator != tracked_.end();) {
         if (view.find(iterator->first) == nullptr) {
@@ -171,10 +204,47 @@ std::vector<sim::EntityId> ThreatGrid::objects() const {
 Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect, std::uint64_t category,
     tactical::PlayerId player, bool friendly, Real attenuator, sim::EntityId excluded) const {
     if (!ready()) return Real{};
+    const ForceKey key{category, player, friendly, attenuator.repr,
+        rect.x.repr, rect.y.repr, rect.width.repr, rect.height.repr, excluded};
+    const bool preparation = preparing(host, view);
+    if (preparation) {
+        if (const auto found = force_queries_.find(key); found != force_queries_.end()) return found->second;
+    }
     const std::int64_t x0 = std::max<std::int64_t>(truncate(single((rect.x - left_) / cell_width_)), 0);
     const std::int64_t x1 = std::min<std::int64_t>(truncate(single((rect.x - left_ + rect.width) / cell_width_)), x_cells_ - 1);
     const std::int64_t y0 = std::max<std::int64_t>(truncate(single((top_ - (rect.y + rect.height)) / cell_height_)), 0);
     const std::int64_t y1 = std::min<std::int64_t>(truncate(single((top_ - rect.y) / cell_height_)), y_cells_ - 1);
+    if (preparation) {
+        const auto columns = x1 < x0 ? std::size_t{} : static_cast<std::size_t>(x1 - x0 + 1);
+        const auto rows = y1 < y0 ? std::size_t{} : static_cast<std::size_t>(y1 - y0 + 1);
+        std::vector<Real> cells(rows * columns);
+        prepare_rows(*executor_, "ai-threat-cells", cells.size(), [&](const std::size_t offset) {
+            const auto row = y0 + static_cast<std::int64_t>(offset / columns);
+            const auto column = x0 + static_cast<std::int64_t>(offset % columns);
+            Real cell{};
+            // PG-05: keep covering entries in insertion order, including each rounding step.
+            for (const auto& [object, index] : cells_[static_cast<std::size_t>(row * x_cells_ + column)]) {
+                const ViewUnit* unit = view.find(object);
+                if (unit == nullptr || object == excluded) continue;
+                if (fogged_for(host, view, *unit, player)) continue;
+                const AiType* company = company_type(host, *unit);
+                if (company == nullptr || (company->category_bits & category) == 0) continue;
+                if (unit->owner == 0 || host.neutral(unit->owner)) continue;
+                if (host.allied(unit->owner, player) != friendly) continue;
+                const auto found = tracked_.find(object);
+                if (found == tracked_.end() || index >= found->second.entries.size()) continue;
+                const Real threat = found->second.entries[index].power;
+                cell = single(cell + single(threat * single(real(1) - attenuator * single(real(1) - unit->health))));
+            }
+            cells[offset] = cell;
+        });
+        Real total{};
+        // Fold the prepared cell scalars in the original row/column order, not partition order.
+        for (const Real cell : cells) total = single(total + cell);
+        const Real result = single(total * constants_.area_threat_scale);
+        force_queries_.emplace(key, result);
+        return result;
+    }
     Real total{};
     for (std::int64_t row = y0; row <= y1; ++row) {
         for (std::int64_t column = x0; column <= x1; ++column) {
@@ -201,6 +271,31 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
 // PG-06.
 Real ThreatGrid::total_force(const Host& host, const WorldView& view, std::uint64_t category,
     tactical::PlayerId player, bool friendly, Real attenuator) const {
+    if (preparing(host, view)) {
+        const TotalKey key{category, player, friendly, attenuator.repr};
+        if (const auto found = total_queries_.find(key); found != total_queries_.end()) return found->second;
+        std::vector<std::optional<Real>> contributions(view.units.size());
+        prepare_rows(*executor_, "ai-threat-total", view.units.size(), [&](const std::size_t index) {
+            const ViewUnit& unit = view.units[index];
+            if (!tracked_.contains(unit.id)) return;
+            const AiType* company = company_type(host, unit);
+            if (company == nullptr || (company->category_bits & category) == 0) return;
+            contributions[index] = single(power_metric(company) * single(real(1) - attenuator * single(real(1) - unit.health)));
+        });
+        Real total{};
+        // PG-06: the copied view and tracked map both have ascending IDs. Keep the player-first
+        // fold and its rounding; an entity-only fold or a sum per partition changes the result.
+        for (const detail::ViewPlayer& owner : view.players) {
+            if (player != 0 && (host.neutral(player) || host.allied(player, owner.id) != friendly)) continue;
+            for (std::size_t index = 0; index < view.units.size(); ++index) {
+                if (view.units[index].owner == owner.id && contributions[index]) {
+                    total = single(total + *contributions[index]);
+                }
+            }
+        }
+        total_queries_.emplace(key, total);
+        return total;
+    }
     Real total{};
     for (const detail::ViewPlayer& owner : view.players) {
         if (player != 0 && (host.neutral(player) || host.allied(player, owner.id) != friendly)) continue;
@@ -404,12 +499,56 @@ struct Engine::Evaluator final : LookupResolver {
         const AiPerception& fixture = host().setup.perception;
         if (token == "ISDEFENDER") return real(fixture.defender ? 1 : 0);
         if (token == "CANRETREAT") return real(0);            // SK-43: retreat is not allowed
-        if (token == "BASELEVEL") return real(fixture.base_level);
-        if (token == "CREDITSUNNORMALIZED") return Real{};    // SK-30: no credits
-        if (token == "OPENBUILDPADCOUNT") return Real{};      // FH-20: map objects are not AI content
-        if (token == "TACTICALBUILTSTRUCTURECOUNT") return Real{};
-        if (token == "REINFORCEMENTSUNNORMALIZED") return Real{}; // no reinforcement pool in the fixture
-        if (token == "UNITSPACEAVAILABLE") return Real{};     // SK-31: no population cap
+        const auto* account = host().economy(id);
+        if (token == "BASELEVEL") {
+            if (account == nullptr || host().world == nullptr) return real(fixture.base_level);
+            std::uint32_t level = 0;
+            for (const auto& type : host().setup.content.types) {
+                if (!type.star_base) continue;
+                // SAE-02: the shared team station supplies every teammate's base level.
+                for (const auto& owner : host().world->players()) {
+                    if (host().allied(id, owner.player_id)
+                        && host().world->production_counts(owner.player_id, type.type_id).owned_player != 0) {
+                        level = std::max(level, type.base_level);
+                        break;
+                    }
+                }
+            }
+            return real(level);
+        }
+        if (token == "CREDITSUNNORMALIZED") return account != nullptr ? fixed(account->credits) : Real{};
+        if (token == "UNITSPACEAVAILABLE") {
+            return account != nullptr ? real(account->population_cap - std::min(account->population, account->population_cap)) : Real{};
+        }
+        if (token == "REINFORCEMENTSUNNORMALIZED") {
+            Real total{};
+            if (account != nullptr) for (const auto type : account->pool) {
+                const auto* info = host().type(type);
+                if (info != nullptr && (info->category_bits & parameters.category) != 0) total = to_single(total + info->combat_power);
+            }
+            return total;
+        }
+        if (token == "TACTICALBUILTSTRUCTURECOUNT") {
+            std::int64_t total = 0;
+            if (host().world != nullptr) for (const auto& name : parameters.types) {
+                const auto type = host().types_by_name.find(name);
+                if (type != host().types_by_name.end()) total += static_cast<std::int64_t>(host().world->production_counts(id, type->second->type_id).owned_player);
+            }
+            return real(total);
+        }
+        if (token == "OPENBUILDPADCOUNT") {
+            std::int64_t total = 0;
+            if (host().world != nullptr) for (const auto& [object, state] : host().world->pads()) {
+                const auto* pad = view().find(object);
+                const auto* type = pad != nullptr ? host().type(pad->type) : nullptr;
+                if (pad == nullptr || type == nullptr || pad->owner != id || state.under_construction != 0 || state.constructed != 0) continue;
+                const auto* profile = host().world->economy().pads.point(pad->type);
+                if (profile == nullptr || !profile->build_pad) continue;
+                if (parameters.types.empty() || std::any_of(parameters.types.begin(), parameters.types.end(),
+                    [&](const std::string& name) { return name == type->name; })) ++total;
+            }
+            return real(total);
+        }
         if (token == "ISFACTION") {
             const auto found = host().players.find(id);
             if (found == host().players.end()) return std::nullopt;
@@ -445,9 +584,16 @@ struct Engine::Evaluator final : LookupResolver {
         }
         if (token == "DISTANCETONEARESTFRIENDLY") return distance_to_nearest(self, true, parameters);
         if (token == "DISTANCETONEARESTENEMY") return distance_to_nearest(self, false, parameters);
-        if (token == "ISCONTESTABLE") return Real{};  // no capturable objects in the AI content
-        if (token == "ISBUILDPAD") return Real{};
-        if (token == "HASBUILTOBJECT") return Real{};
+        if (token == "ISCONTESTABLE") return real(company != nullptr && company->capture_point ? 1 : 0);
+        if (token == "ISBUILDPAD") {
+            const auto* pad = host().world != nullptr ? host().world->economy().pads.point(self.type) : nullptr;
+            return real(pad != nullptr && pad->build_pad ? 1 : 0);
+        }
+        if (token == "HASBUILTOBJECT") {
+            if (host().world == nullptr) return Real{};
+            const auto pad = host().world->pads().find(self.id);
+            return real(pad != host().world->pads().end() && (pad->second.constructed != 0 || pad->second.under_construction != 0) ? 1 : 0);
+        }
         if (token == "CONTAINSHERO") return Real{};   // no heroes in the fixture (AI-G03)
         if (token == "AREENGINESONLINE") return real(self.engines_online ? 1 : 0);
         if (token == "HARDPOINTHEALTH") return hard_point_health(self, parameters);

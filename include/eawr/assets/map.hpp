@@ -22,7 +22,7 @@ enum class MapKind : std::uint8_t { land = 1, space = 2 };
 // component is NaN or infinite.  Neither is ever presented as an identity or
 // yaw-only rotation.
 enum class OrientationStatus : std::uint8_t {
-    yaw_only, unsupported_three_axis_order, absent, nonfinite,
+    yaw_only, three_axis, absent, nonfinite,
 };
 enum class TypeResolution : std::uint8_t { missing, unique, collision };
 
@@ -200,14 +200,31 @@ struct MapNotice final {
     std::string message;
 };
 
+// WSS-05: authored lobby facts, independent of placed station/spawn objects.
+// Missing, malformed or duplicate optional fields retain no semantic value.
+struct MapLobbyMetadata final {
+    std::optional<std::uint32_t> capacity;
+    std::optional<std::uint32_t> levels;
+    std::optional<std::uint32_t> owner;
+    std::optional<std::uint32_t> terrain;
+    std::optional<std::string> game_types;
+    std::optional<bool> custom;
+    std::optional<bool> new_markers;
+    // Top-level chunk 3: count followed by finite source-space XY pairs.
+    std::optional<std::vector<Vec2f>> start_positions;
+};
+
 struct Map final {
     Source source;
     std::uint32_t format_version{};
     std::optional<MapKind> kind;
+    MapLobbyMetadata lobby;
     std::vector<RawField> root_fields;
     // Root 0x09, decoded from validated UTF-16LE to UTF-8.  Empty is valid;
     // absence (old headers) is valid too.  Not an asset path.
     std::optional<std::string> context_name;
+    // R-SETUP-02: root 0x08, a localised lobby map-name key.
+    std::optional<std::string> display_name_key;
     std::optional<DeclaredExtents> declared_extents;
     std::vector<RawChunk> chunks;
     std::vector<Notice> notices;

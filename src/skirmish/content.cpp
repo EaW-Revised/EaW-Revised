@@ -1,4 +1,5 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 
 #include "skirmish_internal.hpp"
 
@@ -22,7 +23,8 @@ core::Result<SessionContent> session_content(
     auto combat = units::combat_table(tables);
     if (!combat) return ContentResult::failure(combat.error());
     content.combat = std::move(combat).value();
-    auto abilities = units::ability_table(tables, humans);
+    auto abilities = units::ability_table(tables, humans,
+        [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); });
     if (!abilities) return ContentResult::failure(abilities.error());
     content.abilities = std::move(abilities).value();
     return ContentResult::success(std::move(content));
@@ -77,24 +79,31 @@ core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs
 }
 
 sim::tactical::VictoryRules victory_rules(const sim::tactical::TacticalSetup& setup, const units::UnitTables& tables,
-    const std::span<const sim::tactical::PlayerId> humans) {
+    const std::span<const sim::tactical::PlayerId> humans, const sim::tactical::VictoryCondition condition) {
     sim::tactical::VictoryRules rules;
-    rules.condition = sim::tactical::VictoryCondition::enemy_starbase_destroyed;
+    rules.condition = condition;
     for (const auto& type : tables.units) {
         if (type.kind == units::UnitKind::station && type.victory_relevant) rules.starbase_types.push_back(type_id(type.id));
+        if (type.victory_relevant) rules.relevant_types.push_back(type_id(type.id));
     }
     std::sort(rules.starbase_types.begin(), rules.starbase_types.end());
     rules.starbase_types.erase(std::unique(rules.starbase_types.begin(), rules.starbase_types.end()),
         rules.starbase_types.end());
+    std::sort(rules.relevant_types.begin(), rules.relevant_types.end());
+    rules.relevant_types.erase(std::unique(rules.relevant_types.begin(), rules.relevant_types.end()), rules.relevant_types.end());
     for (const auto& player : setup.players) {
+        rules.installed_players.push_back(player.player_id); // WBF-08 includes non-playable players.
         if (!player.commandable()) continue;
         rules.contenders.push_back(player.player_id);
+        rules.controlled_players.push_back(player.player_id);
         if (std::find(humans.begin(), humans.end(), player.player_id) != humans.end()) {
             rules.humans.push_back(player.player_id);
         }
     }
     std::sort(rules.contenders.begin(), rules.contenders.end());
     std::sort(rules.humans.begin(), rules.humans.end());
+    std::sort(rules.controlled_players.begin(), rules.controlled_players.end());
+    std::sort(rules.installed_players.begin(), rules.installed_players.end());
     return rules;
 }
 
@@ -103,7 +112,15 @@ sim::tactical::VictoryRules victory_rules(const SkirmishStart& start, const unit
     for (const auto& player : start.players) {
         if (player.lobby && player.human) humans.push_back(player.player.player_id);
     }
-    return victory_rules(start.setup, tables, humans);
+    auto rules = victory_rules(start.setup, tables, humans, start.victory_condition);
+    // WBF-35: only lobby players have human/AI controllers in this local start.
+    rules.controlled_players.clear();
+    for (const auto& player : start.players) if (player.lobby) rules.controlled_players.push_back(player.player.player_id);
+    for (const auto& unit : start.units) if (unit.victory_relevant) rules.relevant_types.push_back(unit.state.type_id);
+    std::sort(rules.controlled_players.begin(), rules.controlled_players.end());
+    std::sort(rules.relevant_types.begin(), rules.relevant_types.end());
+    rules.relevant_types.erase(std::unique(rules.relevant_types.begin(), rules.relevant_types.end()), rules.relevant_types.end());
+    return rules;
 }
 
 std::vector<sim::tactical::PlayerId> human_slots(const Fixture& fixture) {

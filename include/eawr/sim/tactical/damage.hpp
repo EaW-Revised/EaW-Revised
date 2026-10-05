@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -42,6 +44,9 @@ inline constexpr std::int64_t max_damage_multiplier = 256;
 [[nodiscard]] core::Result<math::Fixed> diminishing_factor(const DamageRules& rules, std::uint64_t frames);
 
 // What arrives at a unit: a projectile's hit (DG-01) or scripted damage (DG-20).
+enum class HitKind : std::uint8_t { ordinary, asteroid };
+// WHZ-12: coordinator-reserved keyed service stream, sequential within a unit/frame.
+inline constexpr std::uint32_t asteroid_service_slot = 0xfffe0004U;
 struct Hit {
     math::Fixed amount{};
     std::uint32_t damage_type{no_type_index};
@@ -58,6 +63,13 @@ struct Hit {
     bool internal_damage_misc{true};
     math::Fixed defense{};    // DG-26: the target's defense modifier; a projectile does 1 - this times its damage
     bool energy_damage{};     // EN-07: Projectile_Does_Energy_Damage; ignored for scripted damage
+    bool area{}; // WAD-23: secondary route, no original aimed-hardpoint override
+    HitKind kind{HitKind::ordinary};
+    EntityId source{invalid_entity_id}; // WHZ-14: source field retained on environmental hits
+    // WHE-51: current active modes, target then source, before diminishing/defense/armor.
+    math::Fixed take_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    math::Fixed cause_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    bool bypass_take_damage_mode{}; // explicit internal delivery bypass, not a damage category
 };
 
 struct HitOutcome {
@@ -70,15 +82,32 @@ struct HitOutcome {
     // (one when nothing reached the armor stage; FoC's armor-reduced effect is <= 0.75).
     bool shield_absorbed{};
     math::Fixed armor_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
+    bool cancelled{}; // WAD-03: take-damage ability handoff, independent of shield absorption
+    std::uint32_t routed_hardpoint{hull_target}; // final ordinary damage route for the blast seam
+    bool storm_shield_branch{}; // WHZ-32: branch feedback/cancellation, independent of absorption
+};
+
+// Ordered environmental feedback, outside canonical state and replay hashes.
+struct AsteroidImpact {
+    EntityId target{};
+    Hit hit;
+    HitOutcome outcome;
 };
 
 // Applies one hit at `frame` (DG-01 to DG-11, DG-20). Needs the table's damage rules; a
 // projectile hit's amount is in [0, max_durability_health] like a validated projectile's damage.
 [[nodiscard]] core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const DamageRules& rules,
     DurabilityState& state, const Hit& hit, std::uint64_t frame);
+class CombatRandom;
+// WHZ-14: ordinary random-start circular selection over the complete hardpoint list.
+[[nodiscard]] std::uint32_t random_destroyable_hardpoint(
+    const DurabilityProfile& profile, const DurabilityState& state, CombatRandom& random) noexcept;
+// The first authored hardpoint with this collision-mesh selector; hull when absent/empty.
+[[nodiscard]] std::uint32_t damage_mesh_route(std::span<const std::string> selectors, std::uint32_t selected) noexcept;
 
 // The shield depletion effect (DG-08) at `frame`.
 [[nodiscard]] bool shield_depleted(const DamageRules& rules, const DurabilityState& state, std::uint64_t frame) noexcept;
+[[nodiscard]] bool in_ion_storm(const DamageRules& rules, const DurabilityState& state, std::uint64_t frame) noexcept;
 
 // One shield recharge (DG-13 to DG-16, EN-04); the session calls it on the unit's recharge
 // frames. A unit with an energy pool pays for what the shield gains, or gains nothing.
@@ -116,6 +145,46 @@ struct CollisionBox {
     friend constexpr bool operator==(const CollisionBox&, const CollisionBox&) noexcept = default;
 };
 
+// WAD-01: immutable type-level budget; direct shot multipliers never change it.
+struct BlastProfile {
+    math::Fixed damage{};
+    math::Fixed radius{};
+    bool dropoff{};
+    std::int32_t tiers{5};
+    std::int32_t max_victims{5000};
+    std::optional<FactionId> immune_faction{};
+    math::Fixed max_delay{math::Fixed::from_raw(math::Fixed::scale * 4 / 5)};
+    [[nodiscard]] bool enabled() const noexcept { return damage.raw() > 0 && radius.raw() > 0; }
+    friend bool operator==(const BlastProfile&, const BlastProfile&) = default;
+};
+
+// WAD-04 / RFL-01..08: authored flight endpoints, independent of weapon range.
+enum class FlightKind : std::uint8_t { ordinary, rocket, default_projectile };
+struct FlightProfile {
+    FlightKind kind{FlightKind::ordinary};
+    bool target_radius{};
+    std::optional<math::Fixed> lifetime{}; // seconds, only used without positive travel allowance
+    math::Fixed authored_distance{};
+    math::Fixed curve_distance{};
+    math::Fixed curve_offset{};
+    math::Fixed straight_distance{};
+    friend bool operator==(const FlightProfile&, const FlightProfile&) = default;
+};
+struct RocketSegment {
+    math::Vec3 a{}, b{}, c{}, d{}; // cubic a + t*(b + t*(c + t*d))
+    math::Fixed length{};
+    friend bool operator==(const RocketSegment&, const RocketSegment&) = default;
+};
+struct FlightState {
+    FlightProfile profile{};
+    math::Vec3 origin{}, aim{};
+    std::uint64_t age_frames{};
+    math::Fixed path_distance{};
+    bool path_initialized{};
+    std::vector<RocketSegment> path{};
+    friend bool operator==(const FlightState&, const FlightState&) = default;
+};
+
 // A projectile in flight (hashed state when the table binds damage rules).
 struct Projectile {
     std::uint64_t id{};                   // creation order, from 1
@@ -149,6 +218,12 @@ struct Projectile {
     // Ion weapons (#561): the shot drains energy (EN-07) and stuns what it hits (IS-01).
     bool energy_damage{};
     std::optional<IonStunShot> ion_stun{};
+    BlastProfile blast{};
+    bool explosion_requested{}; // WAD-05: explicit service request, never implicit deletion
+    math::Fixed source_damage_factor{math::Fixed::from_raw(math::Fixed::scale)}; // WCC-44 cause term, separate from instance overrides
+    std::optional<std::uint32_t> disable_engines_frames{}; // EN-08, captured at launch
+    std::optional<FlightState> flight{};
+    std::uint64_t muzzle_delay_until{}; // positive only: PROJ bit11, appended expiry frame
     friend bool operator==(const Projectile&, const Projectile&) = default;
 };
 

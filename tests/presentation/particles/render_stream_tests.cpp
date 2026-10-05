@@ -28,6 +28,214 @@ void operator delete(void* const memory, std::size_t) noexcept { std::free(memor
 #endif
 
 namespace particle_render_contracts {
+void test_legacy_sort_triangles_and_atlas() {
+    LegacyEmitter authored; authored.depth_sort = true; authored.primitive = 0;
+    const auto decoded = particles::load_alo(legacy_system({authored}), "sort-triangle.alo");
+    expect(bool(decoded), "serialized sort/primitive fixture parses");
+    if (!decoded) return;
+    expect(decoded.value().emitters[0].depth_sort && decoded.value().emitters[0].primitive_mode == 0,
+        "PS-31/32 preserve authored sort and triangle selection");
+    auto emitter = drawable_emitter(); emitter.depth_sort = true; emitter.blend_mode = 2;
+    emitter.primitive_mode = 0;
+    std::vector<particles::Particle> live(3);
+    for (std::size_t index = 0; index < live.size(); ++index) {
+        live[index].id = index + 1; live[index].size = 1;
+        live[index].position = {static_cast<float>(index + 1), 0, 0};
+    }
+    const particles::CameraFrame camera{{0,0,0},{1,0,0},{0,1,0}};
+    particles::VertexStream stream;
+    stream.vertices.reserve(12); stream.indices.reserve(18); stream.sorted_particles.reserve(3);
+    auto plan = particles::plan_emitter(emitter, 0);
+    const auto before = global_allocations.load(std::memory_order_relaxed);
+    particles::build_stream(plan, live, camera, stream);
+    expect(global_allocations.load(std::memory_order_relaxed) == before,
+        "preallocated triangle sorting performs no allocation");
+    expect(stream.sort_candidates == 3 && stream.triangles == 3 && stream.quads == 0
+        && stream.vertices.size() == 9 && stream.indices.size() == 9,
+        "triangle topology has three vertices/indices per eligible particle");
+    expect(close(stream.vertices[0].position.x, 3) && close(stream.vertices[3].position.x, 2)
+        && close(stream.vertices[6].position.x, 1), "PS-32 alpha sorts farthest first by squared camera distance");
+    expect(close(stream.vertices[0].position.y, -1) && close(stream.vertices[1].position.x, 2)
+        && close(stream.vertices[2].position.x, 4) && close(stream.vertices[0].u, 0.5F)
+        && close(stream.vertices[1].u, 1) && close(stream.vertices[2].u, 0),
+        "PS-31 sourced triangle corner and UV layout");
+    for (const auto blend : {0U, 2U, 11U}) {
+        emitter.blend_mode = blend; emitter.disable_depth_test = false;
+        expect(particles::plan_emitter(emitter, 0).sort_particles, "eligible authored blend requests sorting");
+    }
+    for (const bool ignore_depth : {false, true}) {
+        emitter.blend_mode = ignore_depth ? 2U : 1U; emitter.disable_depth_test = ignore_depth;
+        plan = particles::plan_emitter(emitter, 0); stream.clear();
+        particles::build_stream(plan, live, camera, stream);
+        expect(!plan.sort_particles && stream.sort_candidates == 0 && stream.sorted_particles.empty()
+            && close(stream.vertices[0].position.x, 1), "additive and ignore-depth omit sorting and retain storage order");
+    }
+    emitter.primitive_mode = 1; emitter.depth_sort = false; stream.clear();
+    particles::build_stream(particles::plan_emitter(emitter, 0), live, camera, stream);
+    expect(stream.quads == 3 && stream.triangles == 0 && stream.vertices.size() == 12 && stream.indices.size() == 18,
+        "quad fixtures retain four vertices and six indices");
+    emitter.primitive_mode = 99;
+    expect(!particles::plan_emitter(emitter, 0).drawable, "unknown primitive selector fails closed");
+    emitter.primitive_mode = 0; emitter.renderer_id = 52;
+    expect(!particles::plan_emitter(emitter, 0).drawable,
+        "triangle kite fails closed until its geometry is sourced");
+    emitter.renderer_id = 22;
+    emitter.primitive_mode = 1; emitter.texture_size = 10; emitter.uv_index = constant(8);
+    particles::SystemDefinition system; system.emitters = {emitter};
+    particles::CpuSystem cpu(system, 4, 32); static_cast<void>(cpu.advance(0));
+    expect(cpu.particles().size() == 1 && close(cpu.particles()[0].texcoords.x, 2.0F / 3)
+        && close(cpu.particles()[0].texcoords.y, 2.0F / 3)
+        && close(cpu.particles()[0].texcoords.z, 1.0F / 3), "PS-30 nonsquare atlas uses floor square root");
+}
+
+void test_cpu_steady_state_allocates_nothing() {
+    auto root = drawable_emitter(); root.spawn_interval = 1; root.particles_per_interval = 10;
+    root.stop_time = 0; root.lifetime = 0.2F;
+    auto trail = root; trail.creator_id = 39; trail.parent_emitter = 0; trail.lifetime = 0.5F;
+    auto death = root; death.creator_id = 40; death.parent_emitter = 0;
+    death.bursting = true; death.particles_per_interval = 3; death.spawn_interval = 2;
+    particles::SystemDefinition system; system.emitters = {root, trail, death};
+    particles::CpuSystem cpu(system, 9, 128);
+    static_cast<void>(cpu.advance(0));
+    const auto* storage = cpu.particles().data();
+    const auto before = global_allocations.load(std::memory_order_relaxed);
+    for (int tick = 0; tick < 300; ++tick) static_cast<void>(cpu.advance(1.0F / 30));
+    const auto after = global_allocations.load(std::memory_order_relaxed);
+    expect(before == after && storage == cpu.particles().data(),
+        "root/trail/death steady state allocates nothing after spawn reserves");
+}
+
+void test_particle_detail_gates() {
+    using particles::CpuSystem;
+    using particles::SystemDefinition;
+    SystemDefinition system;
+    auto emitter = drawable_emitter();
+    emitter.bursting = true;
+    emitter.particles_per_interval = 17;
+    system.emitters = {emitter};
+    CpuSystem full(system, 43, 17);
+    expect(full.advance(0).spawned == 17, "detail fixture fills fixed slots");
+    for (const float detail : {0.0F, 0.4F, 0.6F, 0.8F, 1.0F}) {
+        expect(bool(full.set_detail({detail, 1})), "global detail accepted independently");
+        const std::size_t k = static_cast<std::size_t>(std::ceil(17.0F * detail));
+        std::size_t expected{};
+        for (const auto& particle : full.particles()) {
+            const bool eligible = (particle.draw_slot * 60659U + 60913U) % 17 < k;
+            expect(particle.draw_eligible == eligible, "PS-35 slot mask equals sourced affine mask");
+            expected += eligible ? 1U : 0U;
+        }
+        particles::VertexStream stream;
+        particles::build_stream(particles::plan_emitter(emitter, 0), full.particles(), test_camera(), stream);
+        expect(full.particles().size() == 17 && stream.quads == expected,
+            "detail masks geometry without scaling births or allocation");
+    }
+    expect(!full.set_detail({std::numeric_limits<float>::quiet_NaN(), 1}), "NaN global detail rejected");
+    expect(!full.set_detail({1, std::numeric_limits<float>::infinity()}), "infinite local LOD rejected");
+    expect(bool(full.set_detail({2, -1})), "finite detail inputs clamp");
+    expect(full.detail().global == 1 && full.detail().local == 0, "global and local clamp independently");
+
+    system.emitters.assign(9, drawable_emitter());
+    for (const float lod : {0.0F, 0.4999F, 0.5F, 0.5001F, 0.6999F, 0.7F, 0.7001F, 1.0F}) {
+        CpuSystem cpu(system, 51, 64);
+        expect(bool(cpu.set_detail({1, lod})), "boundary local LOD accepted");
+        const std::size_t count = lod <= 0.5F ? 5U : lod <= 0.7F ? 7U : 9U;
+        expect(cpu.advance(0).spawned == count, "PS-36 exact first ceil(N * band) emitters");
+        for (std::size_t index = 0; index < 9; ++index)
+            expect(cpu.emitter_enabled(index) == (index < count), "local emitter admission independent of global detail");
+    }
+    CpuSystem live(system, 52, 64);
+    expect(live.advance(0).spawned == 9, "all emitters start at full LOD");
+    expect(bool(live.set_detail({1, 0.5F})), "lower local LOD on existing particles");
+    expect(live.advance(0.5F).killed == 0 && live.particles().size() == 9,
+        "PS-37 disabled emitters keep their live particles");
+    live.detach();
+    expect(live.advance(10).killed == 9 && live.finished(), "below-LOD live particles still age and retire");
+
+    // Disabled parent at the end propagates to an otherwise admitted child.
+    auto child = drawable_emitter(); child.creator_id = 39; child.parent_emitter = 2;
+    auto root = drawable_emitter(); root.lifetime = 0.1F;
+    system.emitters = {child, drawable_emitter(), root};
+    CpuSystem linked(system, 53, 64);
+    expect(bool(linked.set_detail({1, 0.5F})) && !linked.emitter_enabled(0),
+        "PS-36 disabled parent propagates across forward child links");
+    expect(linked.advance(0).spawned == 1, "disabled parent and propagated child reject births");
+
+    child.parent_emitter = 0; child.spawn_interval = 1; child.particles_per_interval = 30; child.stop_time = 0;
+    auto death = drawable_emitter(); death.creator_id = 40; death.parent_emitter = 0; death.bursting = true;
+    system.emitters = {root, child, death};
+    for (const float lod : {0.5F, 0.7F, 0.7001F, 1.0F}) {
+        // This parent slot is draw-eligible in every local band under test, so
+        // this contract isolates child permissions from the independent mask.
+        CpuSystem cpu(system, 54, 17);
+        expect(bool(cpu.set_detail({1, lod})), "child permissions configured");
+        const auto born = cpu.advance(0);
+        expect(born.spawned == (lod > 0.7F ? 2U : 1U), "trail births allowed only above 0.7");
+        const auto retired = cpu.advance(0.11F);
+        expect(retired.death_bursts == (lod > 0.5F ? 1U : 0U), "PS-22 death burst permission above 0.5");
+    }
+    CpuSystem invisible_parent(system, 55, 64);
+    expect(bool(invisible_parent.set_detail({0, 1})), "hide parent by global draw mask");
+    const auto hidden = invisible_parent.advance(0);
+    expect(hidden.spawned == 1,
+        "PS-37 draw-ineligible parent rejects continuous trail births while root still spawns");
+    expect(invisible_parent.advance(0.11F).death_bursts == 1,
+        "draw mask does not replace independent death-spawn permission");
+    CpuSystem running_trail(system, 56, 64);
+    expect(running_trail.advance(0).child_instances_started == 1, "trail starts before lowering detail");
+    expect(bool(running_trail.set_detail({0, 1})), "mask existing parent");
+    expect(running_trail.advance(0.05F).spawned == 0, "existing continuous child observes current parent mask");
+    expect(bool(running_trail.set_detail({1, 1})), "restore existing parent draw eligibility");
+    expect(running_trail.advance(0.02F).spawned > 0,
+        "dormant child link resumes while the original parent still lives");
+
+    root.killer_id = 21; root.position.point.z = -1; root.lifetime = 10;
+    system.emitters = {root};
+    for (const float lod : {0.5F, 0.7F, 0.7001F}) {
+        CpuSystem cpu(system, 57, 4);
+        expect(bool(cpu.set_detail({1, lod})), "terrain permission configured");
+        static_cast<void>(cpu.advance(0));
+        expect(cpu.advance(0.01F).killed == (lod > 0.7F ? 1U : 0U), "terrain collision disabled through 0.7");
+    }
+    auto mesh = mesh_system(particles::MeshSpawnMode::every_vertex);
+    for (const bool weather : {false, true}) {
+        mesh.emitters[0].weather = weather;
+        CpuSystem cpu(mesh, 58, 17, test_mesh_binding());
+        expect(bool(cpu.set_detail({0, 0})), "zero detail on every-vertex emitter");
+        expect(cpu.advance(0).spawned == 2, "every-vertex birth count unchanged at zero detail");
+        for (const auto& particle : cpu.particles())
+            expect(particle.draw_eligible == !weather, "PS-35 every-vertex exemption is nonweather only");
+    }
+    // Retiring packed slot zero must not renumber surviving slot one.
+    system.emitters = {drawable_emitter()}; system.emitters[0].spawn_interval = 1;
+    system.emitters[0].stop_time = 0; system.emitters[0].lifetime = 1.5F;
+    CpuSystem slots(system, 59, 3);
+    static_cast<void>(slots.advance(0)); static_cast<void>(slots.advance(1));
+    static_cast<void>(slots.advance(0.6F));
+    expect(slots.particles().size() == 1 && slots.particles()[0].draw_slot == 1,
+        "draw slot remains stable through packed storage compaction");
+    static_cast<void>(slots.advance(0.4F));
+    expect(slots.particles().size() == 2 && slots.particles()[1].draw_slot == 0,
+        "retired slot is reused without replacing live particles");
+
+    RecordingBackend backend;
+    particles::EffectRegistry registry(backend);
+    emitter.renderer_id = 38; emitter.blend_mode = 10;
+    system.emitters = {emitter};
+    expect(bool(registry.set_detail({1, 1, false})), "heat setting is independent of ordinary detail");
+    const auto handle = registry.spawn(system, 60, 17);
+    expect(bool(handle), "heat fixture spawns with heat disabled");
+    if (handle) {
+        const auto hidden_heat = registry.advance(handle.value(), 0, test_camera());
+        expect(bool(hidden_heat) && hidden_heat.value().particles == 17 && hidden_heat.value().emitters[0].quads == 0,
+            "disabled heat phase preserves particle aging and births");
+        expect(bool(registry.set_detail({1, 1, true})), "heat can be enabled without changing LOD");
+        const auto visible_heat = registry.advance(handle.value(), 0, test_camera());
+        expect(bool(visible_heat) && visible_heat.value().emitters[0].quads == 17,
+            "retained live heat particles appear when heat is reenabled");
+        expect(!registry.set_detail({0, std::numeric_limits<float>::quiet_NaN()}), "registry rejects invalid detail atomically");
+    }
+}
+
 void test_parser_retains_renderer_fields() {
     const auto spec = [](std::string name, const std::uint32_t blend) {
         LegacyEmitter value; value.name = std::move(name); value.blend = blend; return value;
@@ -74,6 +282,63 @@ void test_death_burst_ignores_parent_velocity(){
     expect(death.death_bursts>0&&found!=cpu.particles().end(),"V1 parent death emits child particles");
     if(found!=cpu.particles().end())
         expect(close(found->velocity.x,0.0F),"V1 death child ignores nonzero parent velocity with 0x28 and 0x43 set");
+}
+
+void test_legacy_moving_kite() {
+    LegacyEmitter authored;
+    authored.tail = true;
+    authored.tail_size = 15;
+    authored.parent_link_strength = 1;
+    const auto loaded = particles::load_alo(legacy_system({authored}), "moving-kite.alo");
+    expect(bool(loaded), "MD-07: authored moving kite parses");
+    if (!loaded) return;
+    const auto& emitter = loaded.value().emitters.front();
+    expect(emitter.inherit_emitter_motion && emitter.legacy_kite_motion,
+           "MD-07: legacy inheritance and kite path are applied");
+    particles::CpuSystem cpu(loaded.value(), 17, 128);
+    cpu.set_origin({100, 0, 0});
+    static_cast<void>(cpu.advance(0));
+    cpu.set_origin({110, 0, 0});
+    static_cast<void>(cpu.advance(0.1F));
+    expect(!cpu.particles().empty() && close(cpu.particles().front().motion_velocity.x, 100),
+           "MD-07: a root particle follows inherited emitter movement");
+    if (cpu.particles().empty()) return;
+    expect(close(cpu.particles().front().position.x, 110),
+           "MD-07: inherited velocity moves a free particle without changing its intrinsic velocity");
+    particles::VertexStream stream;
+    auto camera = test_camera();
+    camera.right = {1, 0, 0}; camera.up = {0, 1, 0};
+    const auto plan = particles::plan_emitter(emitter, 0);
+    particles::build_stream(plan, cpu.particles().first(1), camera, stream);
+    expect(stream.quads == 1 && close(stream.bounds_min.x, 94) && close(stream.bounds_max.x, 111),
+           "MD-07: full-speed kite has an authored-length backward streak");
+    if (stream.vertices.size() != 4) return;
+    const auto& across_first = stream.vertices[1];
+    const auto& across_second = stream.vertices[2];
+    const auto glow_uv = cpu.particles().front().texcoords;
+    expect(close((across_first.position.x + across_second.position.x) * 0.5F, 110)
+        && close((across_first.position.y + across_second.position.y) * 0.5F, 0)
+        && close((across_first.u + across_second.u) * 0.5F, glow_uv.x + glow_uv.z * 0.5F)
+        && close((across_first.v + across_second.v) * 0.5F, glow_uv.y + glow_uv.w * 0.5F),
+        "MD-07: the glow UV center stays at the head anchor on the across diagonal");
+    auto particle = cpu.particles().front();
+    particle.motion_velocity = {50, 0, 0};
+    stream.clear();
+    particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
+    expect(close(stream.bounds_min.x, 101.5F), "MD-07: a slower kite shortens its tail against the reference speed");
+    particle.motion_velocity = {};
+    stream.clear();
+    particles::build_stream(plan, std::span{&particle, 1}, camera, stream);
+    expect(close(stream.bounds_min.x, 109) && close(stream.bounds_max.x, 111),
+           "MD-07: zero movement draws an unstretched quad");
+    particles::CpuSystem repeated(loaded.value(), 17, 128);
+    repeated.set_origin({100, 0, 0}); static_cast<void>(repeated.advance(0));
+    repeated.set_origin({110, 0, 0}); static_cast<void>(repeated.advance(0.1F));
+    particles::VertexStream repeat_stream;
+    particles::build_stream(plan, repeated.particles().first(1), camera, repeat_stream);
+    stream.clear(); particles::build_stream(plan, cpu.particles().first(1), camera, stream);
+    expect(particles::stream_hash(stream) == particles::stream_hash(repeat_stream),
+           "MD-07: repeated inherited motion produces identical streams");
 }
 
 void test_parent_link_rejection(){

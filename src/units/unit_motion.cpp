@@ -56,6 +56,11 @@ namespace tactical = sim::tactical;
     footprint.type_id = assets::object_type_crc(id);
     footprint.layer = layer;
     footprint.obstacle = data.space_obstacle;
+    footprint.asteroid_field = data.hazard.asteroid_field;
+    footprint.ion_storm = data.hazard.ion_storm;
+    footprint.nebula = data.hazard.nebula;
+    footprint.impassable_asteroid = data.hazard.impassable_asteroid;
+    footprint.obstacle_offset = {data.hazard.obstacle_offset.x, data.hazard.obstacle_offset.y};
     const Fixed box_x = data.collision_x.value_or(Fixed{});
     const Fixed box_y = data.collision_y.value_or(Fixed{});
     if (positive(data.custom_hard_x) && positive(data.custom_hard_y)) {
@@ -129,11 +134,12 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
                                    unit.id + " Max_Rate_Of_Roll");
         profile.bank_angle = movement.bank_turn_angle.value_or(Fixed::from_raw(70 * Fixed::scale));
         profile.turn_in_place_slowdown = Fixed::from_raw(Fixed::scale);
-        if (movement.space_layer == "Corvette") {
+        const auto layer = space_layer(movement.space_layer);
+        if (layer == tactical::SpaceLayer::corvette) {
             profile.turn_in_place_slowdown = *corvette;
-        } else if (movement.space_layer == "Frigate") {
+        } else if (layer == tactical::SpaceLayer::frigate) {
             profile.turn_in_place_slowdown = *frigate;
-        } else if (movement.space_layer == "Capital" || movement.space_layer == "SuperCapital") {
+        } else if (layer == tactical::SpaceLayer::capital || layer == tactical::SpaceLayer::super_capital) {
             profile.turn_in_place_slowdown = *capital;
         }
         table.profiles.push_back(profile);
@@ -167,6 +173,8 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
         for (const auto& unit : tables.units) {
             if (unit.kind == UnitKind::squadron || unit.kind == UnitKind::craft) continue;
             if (auto footprint = footprint_of(unit.id, unit.movement.space_layer, unit.scale_factor, unit.footprint, error)) {
+                footprint->asteroid_damage = unit.footprint.hazard.asteroid_damage;
+                footprint->locomotor = unit.locomotion;
                 table.footprints.push_back(*footprint);
             }
         }
@@ -186,6 +194,11 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
         }
     }
     // #75: craft flight, squadron types and hangars (docs/behaviour/space-fighters.md FL, FM).
+    table.nebula_disable_seconds = scalar("Nebula_Ability_Disable_Time").value_or(Fixed{});
+    for (const auto& unit : tables.units) {
+        if (unit.footprint.hazard.nebula_service) table.nebula_service_types.push_back(assets::object_type_crc(unit.id));
+    }
+    std::sort(table.nebula_service_types.begin(), table.nebula_service_types.end());
     auto& squadrons = table.squadrons;
     // FO-11 (#599): a squadron's lane steer on a group move; without the constants it is off.
     squadrons.side_error_min = scalar("FormationMinimumSideError").value_or(Fixed{});
@@ -230,9 +243,15 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
             [id](const tactical::CraftProfile& craft) { return craft.type_id == id; });
     };
     for (const auto& unit : tables.units) {
-        if (unit.kind != UnitKind::squadron || unit.members.empty()) continue;
+        const bool solo = unit.kind == UnitKind::craft && is_craft(assets::object_type_crc(unit.id));
+        if (!solo && (unit.kind != UnitKind::squadron || unit.members.empty())) continue;
         tactical::SquadronProfile squadron;
         squadron.type_id = assets::object_type_crc(unit.id);
+        // WHE-SQ-02: a parentless fighter uses its own flight/order state; no extra entity is created.
+        if (solo) {
+            squadron.members.push_back(squadron.type_id);
+            squadron.offsets.push_back(Vec3{});
+        }
         bool flyable = true;
         for (const auto& member : unit.members) {
             const auto id = assets::object_type_crc(member.craft);

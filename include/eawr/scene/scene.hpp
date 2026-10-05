@@ -53,7 +53,7 @@ enum class Cause : std::uint8_t {
     effect_unresolved,       // an attached proxy effect probes to no file
     scale_invalid,           // Scale_Factor is malformed or not positive
     position_absent,         // record carries no position mini
-    orientation_three_axis,  // nonzero roll/pitch; Euler order is quarantined
+    orientation_three_axis,  // historical evidence cause; sourced finite triples no longer emit it
     transform_nonfinite,     // a TED float is NaN or infinite
     transform_overflow,      // a converted value leaves the Q24 range
     orientation_absent,      // record carries no valid orientation mini
@@ -197,6 +197,14 @@ struct AssetAccess final {
     std::function<bool(std::string_view logical_path)> particle_system;
 };
 
+// Resolve each model proxy in ordinal order, including the documented ALT-number fallback.
+// Shared by scene construction and runtime hardpoint attachments (BP-67).
+[[nodiscard]] std::vector<AttachedEffect> model_proxy_effects(const AssetAccess& access, const assets::Model& model);
+
+// WBP-17: runtime construction keeps authored alternate meshes available.
+[[nodiscard]] std::vector<Surface> construction_surfaces(const AssetAccess& access, const std::string& path);
+[[nodiscard]] std::optional<std::uint32_t> mesh_alternate(std::string_view name) noexcept;
+
 // Fixed transform in the TED source basis (right-handed, X-right, Y-forward,
 // Z-up), already in the simulation's Q24 representation.
 struct Transform final {
@@ -225,6 +233,8 @@ struct Placement final {
     std::int64_t scale_raw{sim::math::Fixed::scale};
     bool scale_declared{};
     Provenance scale_provenance;
+    // LZ-01: presentation-only height of authored space props.
+    std::int64_t layer_z_adjust_raw{};
 
     // Team colour (see team_colour_statuses). The owner is the TED record's
     // player index; the colour is its faction's <Color>, with provenance.

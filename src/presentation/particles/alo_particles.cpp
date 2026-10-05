@@ -309,7 +309,9 @@ bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.parti
     std::isfinite(emitter.skip_time)&&std::isfinite(emitter.freeze_time)&&
     std::isfinite(emitter.inherited_velocity_scale)&&std::isfinite(emitter.max_inherited_velocity)&&
     finite(emitter.position)&&finite(emitter.velocity)&&std::isfinite(emitter.lifetime)&&
-    std::isfinite(emitter.lifetime_variation)&&std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
+    std::isfinite(emitter.lifetime_variation)&&(!emitter.lifetime_range||
+        (std::isfinite(emitter.lifetime_range->minimum)&&std::isfinite(emitter.lifetime_range->maximum)))&&
+    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
     std::isfinite(emitter.inward_acceleration)&&std::isfinite(emitter.wind_response)&&
     std::isfinite(emitter.terrain_elasticity)&&finite(emitter.red)&&finite(emitter.green)&&finite(emitter.blue)&&
     finite(emitter.alpha)&&finite(emitter.size)&&std::isfinite(emitter.size_variation)&&finite(emitter.uv_index)&&
@@ -328,12 +330,16 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
         if(system.emitters.size()>=65536)return core::Result<SystemDefinition>::failure(error(path,diagnostic_codes::limit,"emitter count exceeds safety limit",node.offset));
         auto emitter=default_emitter();Pending pending;
         std::vector<Mini> props;std::vector<PropertyGroup> groups;std::vector<bool> group_hollow;std::vector<ScalarTrack> tracks;
+        std::vector<EmitterDefinition::LifetimeRange> scalar_ranges;
         for(const auto& child:node.children){
             if(child.type==2){auto parsed=parse_minis(child,path);if(!parsed)return core::Result<SystemDefinition>::failure(parsed.error());props=std::move(parsed.value());}
             else if(child.type==0x16)emitter.name=read_string(child);
             else if(child.type==0x03)emitter.color_texture=read_string(child);
             else if(child.type==0x45)emitter.normal_texture=read_string(child);
-            else if(child.type==0x29&&child.group){for(const auto& group:child.children){auto parsed=parse_old_group(group,path);if(!parsed)return core::Result<SystemDefinition>::failure(parsed.error());groups.push_back(std::move(parsed.value()));group_hollow.push_back(old_group_hollow(group));}}
+            else if(child.type==0x29&&child.group){for(const auto& group:child.children){auto parsed=parse_old_group(group,path);if(!parsed)return core::Result<SystemDefinition>::failure(parsed.error());
+                const auto data=group.children[0].payload;
+                scalar_ranges.push_back({f32(data,u32(data)==0?52:4),f32(data,u32(data)==0?52:16),u32(data)==0});
+                groups.push_back(std::move(parsed.value()));group_hollow.push_back(old_group_hollow(group));}}
             else if(child.type==1){auto parsed=parse_old_tracks(child,path);if(!parsed)return core::Result<SystemDefinition>::failure(parsed.error());tracks=std::move(parsed.value());}
             else if(child.type==0x36){auto parsed=parse_minis(child,path);if(!parsed)return core::Result<SystemDefinition>::failure(parsed.error());pending.death=read_u32(parsed.value(),0x37,pending.death);pending.life=read_u32(parsed.value(),0x39,pending.life);}
         }
@@ -342,6 +348,8 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
         emitter.velocity=groups[0];emitter.position=groups[2];emitter.hollow_velocity=group_hollow[0];emitter.hollow_position=group_hollow[2];
         emitter.inherited_velocity_scale=read_bool(props,0x43)?read_float(props,0x28):0.0F;
         emitter.inherit_parent_velocity=emitter.inherited_velocity_scale!=0.0F;
+        emitter.inherit_emitter_motion=read_bool(props,0x43);
+        emitter.legacy_kite_motion=true;
         emitter.bursting=read_bool(props,0x07);emitter.particles_per_interval=static_cast<float>(emitter.bursting?read_u32(props,0x26,1):read_u32(props,0x2a,1));
         emitter.spawn_interval=emitter.bursting?read_float(props,0x25,1.0F):1.0F;
         emitter.start_delay=read_float(props,0x24);auto bursts=read_u32(props,0x27);if(bursts==std::numeric_limits<std::uint32_t>::max())bursts=0;emitter.stop_time=emitter.bursting?static_cast<float>(bursts)*emitter.spawn_interval:0.0F;
@@ -358,8 +366,12 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
         emitter.inward_speed=read_float(props,0x09);emitter.acceleration=read_vec3(props,0x0a);emitter.acceleration.z-=read_float(props,0x0c);emitter.acceleration_local=read_bool(props,0x35);
         emitter.inward_acceleration=-read_float(props,0x0b);emitter.wind_response=read_bool(props,0x31)?0.01F:0.0F;
         emitter.lifetime=read_float(props,0x0f,1.0F);emitter.lifetime_variation=read_float(props,0x13);
+        // PL-01: the loaded scalar sampler uses its default for a point, saved X bounds otherwise.
+        emitter.lifetime_range=scalar_ranges[1];
         const auto ground=read_u32(props,0x2f);emitter.killer_id=ground==1?21U:19U;emitter.terrain_elasticity=ground==2?read_float(props,0x30,0.2F):ground==3?0.0F:0.0F;
         emitter.blend_mode=read_u32(props,0x04,1);emitter.disable_depth_test=read_bool(props,0x46);emitter.world_oriented=read_bool(props,0x2e);emitter.tail_size=read_float(props,0x42,50.0F);
+        // PS-31/PS-32: primitive mode and requested depth sorting are independent.
+        emitter.primitive_mode=read_u32(props,0x05,1);emitter.depth_sort=read_bool(props,0x2b);
         if(read_bool(props,0x3b))emitter.renderer_id=38;else if(read_bool(props,0x2e))emitter.renderer_id=28;else if(read_bool(props,0x41))emitter.renderer_id=52;else emitter.renderer_id=22;
         emitter.red=tracks[0];emitter.green=tracks[1];emitter.blue=tracks[2];emitter.alpha=tracks[3];emitter.size=tracks[4];emitter.uv_index=tracks[5];emitter.rotation_rate=tracks[6];
         // Retail V1 size keys are the full quad width and the size variation is

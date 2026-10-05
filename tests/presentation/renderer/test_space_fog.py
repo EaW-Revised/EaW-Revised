@@ -119,10 +119,14 @@ class SpaceFogStructure(unittest.TestCase):
         self.assertIn('<SpaceUnit Name="EAWR_SPACE_FOG_UNIT">', fixture.objects_xml())
         self.assertIn('<SpaceProp Name="EAWR_SPACE_FOG_PROP">', fixture.objects_xml())
 
-    def test_space_composition_keeps_the_legacy_route_out_of_the_sky_module(self):
+    def test_space_composition_confines_legacy_routes_to_companion_meshes_and_units(self):
         environment = mode_source("space_environment")
-        self.assertNotIn("MaterialRoute::legacy_effect", environment)
-        units = (ROOT / "apps/viewer/src/space_fog_units.cpp").read_text(encoding="utf-8")
+        physical = (ROOT / "apps/viewer/src/space_environment_surfaces.cpp").read_text(encoding="utf-8")
+        companion = physical.index("case space::SceneRoute::legacy_mesh:")
+        end = physical.index("case space::SceneRoute::unsupported:", companion)
+        self.assertNotIn("MaterialRoute::legacy_effect", environment.replace(physical[companion:end], "", 1))
+        self.assertIn("scene::find_legacy_selector(surface.shader)", physical[companion:end])
+        units = (ROOT / "apps/viewer/src/space_fog_units_compose.cpp").read_text(encoding="utf-8")
         self.assertIn("MaterialRoute::legacy_effect", units)
         self.assertIn("declare_fog_consumer(renderer_asset)", units)
         self.assertNotIn("placeholder", units.lower())

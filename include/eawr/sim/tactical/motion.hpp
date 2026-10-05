@@ -65,6 +65,13 @@ struct Footprint {
     math::Fixed y_extent{};
     math::Fixed radius{};
     bool obstacle{};
+    bool asteroid_field{};
+    bool ion_storm{};
+    bool nebula{};
+    bool impassable_asteroid{};
+    math::Vec2 obstacle_offset{}; // WHZ-05: raw XY, rotated by yaw without scale
+    bool asteroid_damage{}; // WHZ-10: behavior opt-in, independent of the layer
+    bool locomotor{};
     friend constexpr bool operator==(const Footprint&, const Footprint&) noexcept = default;
 };
 
@@ -106,6 +113,9 @@ struct MotionTable {
     // Craft flight and squadron launch (#75): a craft of a squadron flies by its CraftProfile,
     // never by a MotionProfile.
     SquadronTable squadrons;
+    // WHZ-20: craft participate without joining the ship tracking layers.
+    std::vector<TypeId> nebula_service_types{}; // ascending, behavior opt-ins
+    math::Fixed nebula_disable_seconds{}; // Nebula_Ability_Disable_Time
     [[nodiscard]] const MotionProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] const Footprint* footprint(TypeId type_id) const noexcept;
     friend bool operator==(const MotionTable&, const MotionTable&) = default;

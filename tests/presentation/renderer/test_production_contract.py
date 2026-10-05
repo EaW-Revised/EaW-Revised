@@ -8,14 +8,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
-from viewer_mode_sources import mode_source  # noqa: E402
+from viewer_mode_sources import combined_source, mode_source, source_text  # noqa: E402
 SCENE_HASH = "de673739583babf0a4541feafc6bd1f0c40da36788a962e7d49b284be7611a18"
 RENDERER_SOURCES = ("renderer.cpp", "renderer_fog.cpp", "renderer_instances.cpp", "renderer_internal.hpp",
                     "renderer_upload.cpp")
 
 
 def renderer_source() -> str:
-    return "".join((ROOT / "src/presentation/godot" / name).read_text(encoding="utf-8") for name in RENDERER_SOURCES)
+    return combined_source(*(f"src/presentation/godot/{name}" for name in RENDERER_SOURCES))
 
 
 class ProductionRendererContract(unittest.TestCase):
@@ -49,8 +49,17 @@ class ProductionRendererContract(unittest.TestCase):
 
         for name in ("meshgloss_shader_opaque", "meshgloss_shader_alpha"):
             pattern = rf"{name} = R\"GODOT\((.*?)\)GODOT\";"
+            expected = stored_values(code(re.search(pattern, prototype, re.S).group(1)))
+            if name == "meshgloss_shader_alpha":
+                # FW-19 adds the live unit's opacity to this explicit-alpha
+                # shader. Keep the frozen prototype and compare every other
+                # byte, including the authored material alpha calculation.
+                expected = expected.replace("shader_type spatial;", "shader_type spatial;\n"
+                    "instance uniform float eawr_unit_opacity = 1.0;")
+                expected = expected.replace("ALPHA = eawr_vertex_diffuse.a;",
+                    "ALPHA = eawr_vertex_diffuse.a;\n    ALPHA *= eawr_unit_opacity;")
             self.assertEqual(
-                stored_values(code(re.search(pattern, prototype, re.S).group(1))),
+                expected,
                 code(re.search(pattern, production, re.S).group(1)),
             )
 
@@ -96,7 +105,7 @@ class ProductionRendererContract(unittest.TestCase):
         coverage = json.loads((ROOT / "plan/inventories/godot-material-coverage.json").read_text(
             encoding="utf-8"
         ))
-        renderer = (ROOT / "src/presentation/godot/renderer_upload.cpp").read_text(encoding="utf-8")
+        renderer = source_text("src/presentation/godot/renderer_upload.cpp")
         contract = (ROOT / "src/presentation/godot/renderer_contract.cpp").read_text(
             encoding="utf-8"
         )
@@ -127,7 +136,21 @@ class ProductionRendererContract(unittest.TestCase):
             '"pass_order": ["opaque", "alpha-tested", "transparent", "post"]',
             source,
         )
-        self.assertIn("order_pass_submissions(routed)", renderer)
+        # The cached plan preserves pass priority and stable entity ordering;
+        # capture evidence comes from those same uploaded pieces, even when
+        # an unchanged frame needs no transform updates.
+        self.assertIn("order_.plan(instances, upload_generation_", renderer)
+        self.assertIn("pieces = order_.pieces()", renderer)
+        self.assertRegex(renderer, r"if \(reordered\)\s*\{\s*submission_evidence_\.clear\(\)")
+        self.assertIn("if (!pieces[index].uploaded) continue;", renderer)
+        self.assertIn("instances[pieces[index].source]", renderer)
+        self.assertIn("submission_evidence_.push_back({source.entity_id, source.asset_id, pieces[index].pass})", renderer)
+        plan = (ROOT / "src/presentation/godot/submission_plan.hpp").read_text(encoding="utf-8")
+        self.assertIn("upload_generation == generation_ && same_sequence(instances)", plan)
+        self.assertIn("order_planned_pieces(instances, pieces_, scratch_)", plan)
+        self.assertIn("render_pass_priority(pass)", plan)
+        self.assertIn("instances[left.source].entity_id < instances[right.source].entity_id", plan)
+        self.assertIn("std::stable_sort(first, last, by_entity)", plan)
         self.assertIn("ResourceLeaseLedger", renderer)
         self.assertIn("diagnostics_.push(valid.error())", renderer)
         self.assertIn("get_shader_parameter_list", renderer)

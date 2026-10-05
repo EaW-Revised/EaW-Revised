@@ -518,11 +518,15 @@ void test_dispatch_by_cost() {
     namespace platform = eawr::platform;
     using Adapter = platform::ThreadWorkerAdapter;
     const auto caller = std::this_thread::get_id();
+    std::atomic<std::int64_t> clock_ns{0};
+    const auto clock = [&] {
+        return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::nanoseconds(clock_ns.load(std::memory_order_relaxed))));
+    };
 
-    // Small phases: after the first, they stay on the calling thread in partition order. The
-    // budget is a time, so a descheduled caller may hand a few to the pool; most stay inline.
+    // The clock stays still: scheduling noise cannot spend the inline budget.
     {
-        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        const Adapter adapter(4, Adapter::Dispatch::by_cost, clock);
         int off_caller = 0;
         bool ordered = true;
         for (int phase = 0; phase < 100; ++phase) {
@@ -544,28 +548,21 @@ void test_dispatch_by_cost() {
         const auto counts = adapter.phase_counts();
         expect(counts.inline_phases + counts.escalated_phases + counts.pool_phases == 100,
             "every named phase is counted once");
-        expect(counts.inline_phases >= 50, "small phases stay on the calling thread (" + std::to_string(counts.inline_phases)
-                + " of 100 inline)");
+        expect(counts.inline_phases == 100, "all phases below the budget stay inline");
         expect(ordered, "an inline phase runs its partitions in partition order");
-        expect(counts.pool_phases > 0 || counts.escalated_phases > 0 || off_caller == 0,
-            "only a pool phase runs partitions on other threads");
+        expect(counts.pool_phases == 0 && counts.escalated_phases == 0 && off_caller == 0,
+            "inline phases stay on the caller");
     }
 
     // A small phase that turns big hands its remaining partitions to the pool once the budget is
     // spent; the next run of that phase goes to the pool at once.
     {
-        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        const Adapter adapter(4, Adapter::Dispatch::by_cost, clock);
         expect(static_cast<bool>(adapter.execute_phase("burst", 64, [](const std::size_t) {})), "the burst phase starts small");
         std::vector<std::atomic<int>> runs(64);
-        std::mutex mutex;
-        std::set<std::thread::id> threads;
         const auto slow = [&](const std::size_t partition) {
             runs[partition].fetch_add(1);
-            {
-                const std::lock_guard lock(mutex);
-                threads.insert(std::this_thread::get_id());
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            clock_ns.fetch_add(4 * Adapter::inline_budget(4).count(), std::memory_order_relaxed);
         };
         const auto before = adapter.phase_counts();
         expect(static_cast<bool>(adapter.execute_phase("burst", 64, slow)), "the grown phase runs");
@@ -573,7 +570,6 @@ void test_dispatch_by_cost() {
         expect(grown.escalated_phases == before.escalated_phases + 1, "a grown phase moves to the pool part way");
         expect(std::all_of(runs.begin(), runs.end(), [](const auto& count) { return count.load() == 1; }),
             "a phase handed to the pool part way runs each partition once");
-        expect(threads.size() > 1, "the pool helps a grown phase");
         for (auto& count : runs) count.store(0);
         expect(static_cast<bool>(adapter.execute_phase("burst", 64, slow)), "the big phase runs again");
         const auto big = adapter.phase_counts();
@@ -582,19 +578,55 @@ void test_dispatch_by_cost() {
             "a pool phase runs each partition once");
     }
 
+    // Escalation uses > budget; the following run uses < budget to choose inline.
+    // The pool's frozen clock records zero work, so a shrunken phase returns inline.
+    {
+        const Adapter adapter(4, Adapter::Dispatch::by_cost, clock);
+        expect(static_cast<bool>(adapter.execute_phase("boundary", 64, [&](const std::size_t partition) {
+            if (partition == 0) clock_ns.fetch_add(Adapter::inline_budget(4).count(), std::memory_order_relaxed);
+        })), "a phase at the budget completes");
+        expect(adapter.phase_counts().inline_phases == 1, "exactly the budget does not escalate");
+        expect(static_cast<bool>(adapter.execute_phase("boundary", 64, [](const std::size_t) {})),
+            "a phase at the previous-work boundary runs again");
+        expect(adapter.phase_counts().pool_phases == 1, "previous work at the budget starts on the pool");
+        expect(static_cast<bool>(adapter.execute_phase("boundary", 64, [](const std::size_t) {})), "the shrunken phase runs");
+        expect(adapter.phase_counts().inline_phases == 2, "work below the budget returns inline");
+    }
+
+    // Moderate pool work retries inline every 16 pool decisions. Each clock read advances
+    // 3 us: with two workers the measured pool work is 6..12 us, regardless of interleaving,
+    // at or above the 6 us budget and below four budgets. The inline trial exceeds it after 3 jobs.
+    {
+        std::atomic<std::int64_t> retry_ns{0};
+        const Adapter adapter(2, Adapter::Dispatch::by_cost, [&] {
+            return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(retry_ns.fetch_add(3000, std::memory_order_relaxed))));
+        });
+        for (int phase = 0; phase < 16; ++phase) {
+            expect(static_cast<bool>(adapter.execute_phase("retry", 64, [](const std::size_t) {})), "the retry phase runs");
+        }
+        const auto before = adapter.phase_counts();
+        expect(before.escalated_phases == 1 && before.pool_phases == 15, "the first 15 pool decisions do not retry inline");
+        expect(static_cast<bool>(adapter.execute_phase("retry", 64, [](const std::size_t) {})), "the retry trial runs");
+        expect(adapter.phase_counts().escalated_phases == 2, "the 16th pool decision retries inline and escalates");
+    }
+
     // Failures and nesting behave as on the pool: the lowest throwing partition, inline or not.
     {
-        const Adapter adapter(4, Adapter::Dispatch::by_cost);
+        const Adapter adapter(4, Adapter::Dispatch::by_cost, clock);
         for (int phase = 0; phase < 3; ++phase) {
             std::atomic<int> completed{0};
             const auto thrown = adapter.execute_phase("throws", 64, [&](const std::size_t partition) {
+                if (phase != 0) clock_ns.fetch_add(4 * Adapter::inline_budget(4).count(), std::memory_order_relaxed);
                 if (partition == 17 || partition == 40) throw std::runtime_error("boom " + std::to_string(partition));
-                if (phase == 2) std::this_thread::sleep_for(std::chrono::microseconds(200));
                 completed.fetch_add(1);
             });
             expect(!thrown && thrown.error().message == "partition 17 threw: boom 17" && completed.load() == 62,
                 "a by-cost phase reports the lowest partition that threw and runs the others");
         }
+        const auto failure_counts = adapter.phase_counts();
+        expect(failure_counts.inline_phases == 1 && failure_counts.escalated_phases == 1 && failure_counts.pool_phases == 1,
+            "failure handling is exercised inline, during escalation, and on the pool");
         std::atomic<int> inner{0};
         const auto nested = adapter.execute_phase("outer", 8, [&](const std::size_t) {
             static_cast<void>(adapter.execute_phase("inner", 8, [&](const std::size_t) { inner.fetch_add(1); }));

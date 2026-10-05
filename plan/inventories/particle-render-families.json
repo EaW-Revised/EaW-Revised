@@ -425,7 +425,7 @@
       "evidence": ""
     }
   ],
-  "sort_policy": "converted V1 renderers construct with sorting disabled: quads draw in CPU particle order inside one mesh; emitters are ordered by index through the material render priority inside their pass range; Godot orders instances within one priority by depth",
+  "sort_policy": "PS-32: authored depth sorting for opaque/alpha/bump-alpha with depth enabled, farthest first by squared camera distance; ignore-depth and additive omit sorting. Unsupported depth-sprite alpha remains fail-closed. Equal-distance ties use stable particle IDs as project policy.",
   "coverage_manifest": "plan/inventories/godot-material-coverage.json still lists particles under not_supported; it is owned by P1-01 and should gain these modern_spatial particle adapters when that owner accepts them",
   "corpus_runs": [
     {

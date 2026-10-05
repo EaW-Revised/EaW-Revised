@@ -1,7 +1,8 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
 # Engine-free UI data loaders (docs/ui/ui-layer.md, section 3.1): text
 # database, dialog catalogue, command bar, shell anchors and sfnt faces.
-add_library(eawr_ui_data STATIC text_database.cpp dialog_catalog.cpp dialog_script.cpp command_bar.cpp shell_anchors.cpp
-    sfnt.cpp movie.cpp)
+add_library(eawr_ui_data STATIC ${EAWR_UI_DATA_SOURCES})
 add_library(eawr::ui_data ALIAS eawr_ui_data)
 
 target_include_directories(

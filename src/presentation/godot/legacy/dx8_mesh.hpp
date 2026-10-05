@@ -67,6 +67,7 @@ uniform mat4 eawr_sph_b;
 uniform vec4 eawr_light_scale = vec4(1.0);
 // WR-14/37: per-object preview tint and arrival fade share the light-scale input.
 instance uniform vec3 eawr_unit_light_scale = vec3(1.0);
+instance uniform float eawr_unit_opacity = 1.0;
 uniform vec3 eawr_light_direction = vec3(0.0, 1.0, 0.0);
 uniform vec3 eawr_light_specular = vec3(2.0, 1.88, 1.72);
 varying vec4 eawr_vertex_diffuse;
@@ -108,6 +109,7 @@ inline constexpr std::string_view batch_mesh_gloss_pixel = R"GODOT(    vec3 stor
 inline constexpr std::string_view batch_mesh_alpha_pixel = R"GODOT(    vec3 stored_rgb = clamp(2.0 * eawr_vertex_diffuse.rgb * base.rgb + eawr_vertex_specular, 0.0, 1.0);
     ALBEDO = eawr_stored_albedo(stored_rgb);
     ALPHA = base.a * eawr_vertex_diffuse.a;
+    ALPHA *= eawr_unit_opacity;
 }
 )GODOT";
 
@@ -115,6 +117,7 @@ inline constexpr std::string_view mesh_alpha_gloss_pixel = R"GODOT(    float glo
     vec3 stored_rgb = clamp(2.0 * eawr_vertex_diffuse.rgb * base.rgb + eawr_vertex_specular * gloss, 0.0, 1.0);
     ALBEDO = eawr_stored_albedo(stored_rgb);
     ALPHA = base.a * eawr_vertex_diffuse.a;
+    ALPHA *= eawr_unit_opacity;
 }
 )GODOT";
 

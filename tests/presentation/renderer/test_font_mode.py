@@ -23,6 +23,8 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
 SRC = ROOT / "apps/viewer/src"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
 sys.path.insert(0, str(ROOT / "tests/ui"))
@@ -43,10 +45,10 @@ PIXELS_720 = {24: 38, 7: 11, 10: 15}
 
 class FontModeStructure(unittest.TestCase):
     def test_the_mode_is_wired_into_the_host_and_the_build(self):
-        host = (SRC / "viewer_host.cpp").read_text(encoding="utf-8")
+        host = source_text("apps/viewer/src/viewer_host.cpp")
         self.assertIn("FontMode::requested()", host)
         self.assertIn("font_mode_->process()", host)
-        build = (ROOT / "apps/viewer/CMakeLists.txt").read_text(encoding="utf-8")
+        build = source_text("apps/viewer/CMakeLists.txt")
         for source in ("src/font_mode.cpp", "src/presentation/godot/ui/font_provider.cpp",
                        "src/presentation/ui/fonts.cpp", "src/data/ui/sfnt.cpp"):
             self.assertIn(source, build)

@@ -229,9 +229,14 @@ public:
         return result;
     }
     mutable std::map<std::string, double> tick;
+    void serial(const std::string_view name, const bool begin) {
+        if (begin) serial_start_ = Clock::now();
+        else tick["commit." + std::string(name)] += std::chrono::duration<double, std::milli>(Clock::now() - serial_start_).count();
+    }
     bool profiling = false;
 
 private:
+    Clock::time_point serial_start_{};
     const eawr::sim::PartitionExecutor& inner_;
 };
 
@@ -272,6 +277,7 @@ struct Run {
         ? eawr::platform::ThreadWorkerAdapter::Dispatch::by_cost
         : eawr::platform::ThreadWorkerAdapter::Dispatch::always_pool);
     TimingExecutor executor(pool);
+    session.set_commit_observer([&executor](const std::string_view name, const bool begin) { executor.serial(name, begin); });
     executor.profiling = sampler != nullptr;
     if (sampler != nullptr) sampler->start();
     Run out;
@@ -354,7 +360,7 @@ struct Stats {
 [[nodiscard]] double serial_ms(const TickRecord& record) {
     double parallel = 0;
     for (const auto& [name, ms] : record.phases) {
-        static_cast<void>(name);
+        if (name.starts_with("commit.")) continue; // serial detail rows may contain a named executor phase
         parallel += ms;
     }
     return std::max(0.0, record.ms - parallel);

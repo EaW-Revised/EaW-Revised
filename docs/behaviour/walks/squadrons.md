@@ -149,7 +149,8 @@
   - the aim point: the leader on a path looks along its path's current segment, a turn radius
     ahead (360 / `Max_Rate_Of_Turn` x speed / 2 pi, with the speed the greater of the wanted
     speed and the craft's own), plus the formation's Y-offset coefficient times the segment's left
-    normal (G-F8); otherwise the aim is the leader's position plus a turn radius along the
+    normal (FO-10); this applies on a single-squadron move as well. Followers use the leader's
+    velocity, rather than their own path segment. Otherwise the aim is the leader's position plus a turn radius along the
     leader's velocity (its facing when it stands still);
   - the aim's height eases toward `h`: when the craft is closer to the aim in the plane than the
     distance it needs to level out (|pitch| / `Max_Lift` x speed), the height is interpolated by
@@ -158,7 +159,10 @@
 - **WSQ-18a** (debug build, EWSQ-05; FM-12) *Formation speed* for a follower, from a wanted speed
   `w` and bounds `slow` and `fast`: only when the squadron's formation error (WSQ-52) exceeds
   `Squadron_Formation_Error_Tolerance` in size, and only by the craft's own error `e` along the
-  leader's velocity (its offset from its slot):
+  leader's velocity (its offset from its slot).
+  The squadron error is the largest absolute slot error projected onto the
+  leader's facing, including pitch; the individual correction below instead
+  projects onto its velocity. The gate stays closed at the tolerance itself:
   - `e` above the tolerance (ahead): the speed blends from the leader's speed toward `slow` by
     `e` over the distance to slow from `w` (clamped to 0..1);
   - `e` below minus the tolerance (behind): it blends toward `fast` by -`e` over the braking
@@ -196,8 +200,11 @@
   out immediately chases the first craft of the target squadron (roster order) whose own timer has
   run out, without the follow test (FD-05); both timers restart at ten seconds and the chased
   craft drops its own chase (FD-06's bookkeeping). So a squadron that turns on another squadron
-  can pair its craft with the enemy's before it reaches the cell. The call site's gating is only
-  partly read (**unverified** in detail: when exactly the formation's attack target differs).
+  can pair its craft with the enemy's before it reaches the cell. The space targeting service
+  compares the held target and hardpoint to the formation's attack target and hardpoint. The
+  team setter passes its player-direct flag as both the direct and pursuit flags. An autonomous
+  mismatch notifies the team locomotor; a player pursuit outside attack reach instead asks the
+  movement coordinator for an attack destination (WSQ-46).
 - **WSQ-21** (debug build, EWSQ-13) *End of combat*: the squadron clears the player's direct
   attack flag and its attack target, and gives up its combat cell. A craft outside a squadron
   clears its own target.
@@ -267,7 +274,11 @@
 ### The craft's targeting service (every frame) — interface only
 
 - **WSQ-41** (debug build, EWSQ-26) A squadron craft adopts its formation's attack target (and
-  hardpoint) as its own and its weapons', when that target is suitable and in reach.
+  hardpoint) as its own and its weapons', when that target is suitable and in reach. This query
+  starts at the base destination (stack index 0), not the current top override. An autonomous
+  attack override above an idle/escort base does not qualify; the separate collision-target
+  fallback can still supply an enemy. Held-target suitability and notification use the top
+  destination instead (WSQ-45/46).
 - **WSQ-42** (debug build, EWSQ-27; FT-02, FT-06, G-F5) Without a target the craft scans for one
   itself, around itself, at most once per scan period: each scan sets the next one 30 frames plus
   a synchronized random 0 to 15 frames later. The scan range is the craft's
@@ -277,17 +288,37 @@
   random start; a priority-1 find ends the scan (space-targeting).
 - **WSQ-43** (debug build, EWSQ-26) What a squadron craft's scan finds goes to the squadron, not
   the craft: the squadron takes it as its attack target (WSQ-47) and every member takes it.
+  The remake partitions this work by squadron, visits its members in ascending-ID service order,
+  and stops after the first share. Sparse results commit in global ascending-ID order, including
+  target loss; unused later scans neither run nor advance their clocks.
 - **WSQ-44** (debug build, EWSQ-26) A held target is dropped (the craft clears it) when it is in
   limbo, dead, being deleted, stealthed and the craft cannot target stealth, or fogged for the
   craft's owner.
 - **WSQ-45** (debug build, EWSQ-26; G-F5) A held target that is unsuitable, or whose priority is
   not the best (1), is re-scanned for a better one on the scan period; a better find replaces it.
+  Candidate admission accepts the exact held formation target, the craft's own attack reach, or
+  formation diversion from its destination. The two distance tests include the target's hard
+  X extent when the absolute cosine of its planar facing to the sight line exceeds 0.7071,
+  otherwise its hard Y extent (debug build, AT-10). These extents use the canonical footprint,
+  including authored custom overrides (AV-05), or the loaded collision half extents when there
+  is no layered footprint. Member admission applies this expansion;
+  ordinary ship targeting and formation adoption retain their separate extent gap.
 - **WSQ-46** (debug build, EWSQ-26) When a craft's target is not yet its formation's attack
-  target, the craft's targeting either asks the movement coordinator for an attack move of its
-  formation toward the target's squadron (the FA-07 approach path) or notifies the team locomotor
-  (WSQ-20), depending on a pursue flag not read here. Movement walk.
+  target, a non-player target notifies the team locomotor (WSQ-20). A player-directed pursuit
+  outside attack reach asks the movement coordinator for an attack move of its formation toward
+  the target's squadron (the FA-07 approach path); the team setter supplies its player-direct
+  flag as both direct and pursuit. Movement walk owns the resulting destination.
 
 ### The team service (the container, every frame)
+
+- **WSQ-60** (debug build, EWSQ-60..62; data; Y-wing recording) The spawned team container
+  starts with its own type's `Tactical_Health`, whose default is 100, multiplied by
+  `Object_Max_Health_Multiplier_Space` (stock 1.5). The hull getter returns this object-local
+  value, not the sum of craft health. All five M2 squadron container types omit the health
+  tag, so their initial hull is 150. They author no `Shield_Points` (default zero); their craft's shields
+  are separate. The trace loads the resolved `Create_Team_Type` (default `Team`), including
+  inherited overrides, and reports its hull independently of the live roster. This reporting
+  metadata does not change the craft's damage pools or the last-craft death rule (WSQ-57).
 
 - **WSQ-47** (debug build, EWSQ-22) Setting the squadron's attack target: a craft of a squadron
   stands for its squadron; the squadron signals a move start; every member's targeting and every
@@ -337,7 +368,7 @@
 | FM-02, FM-03, FM-04, FM-05, FM-07 | same (WSQ-23, WSQ-25, WSQ-27 to WSQ-29) |
 | FM-06 | same (WSQ-24, WSQ-26) |
 | FM-08 | same (WSQ-40) |
-| FM-10 | **differs**: slots follow the current roster index, so craft move up a slot when one ahead dies (WSQ-51); FM-10 keeps each craft's launch slot for life |
+| FM-10 | same: slots follow the current roster index, so craft move up a slot when one ahead dies (WSQ-51) |
 | FM-11, FM-13 | same (WSQ-17); FM-11 omits the budget scaling, which FM-13 states |
 | FM-12 | same formula; **differs** in the gate: FoC gates on the squadron's largest formation error along the leader's facing (WSQ-52), FM-12's text says "the squadron's error" but the remake gates on the craft's own |
 | FM-14 | same (WSQ-51) |
@@ -354,7 +385,7 @@
 | FT-05, FT-07 | same (WSQ-43, WSQ-47) |
 | FT-06 | explained: the first scan comes 30 + 0..15 frames after the launch (WSQ-42), which covers the recordings' 30 to 35 (G-F5) |
 | FC-01 | same (WSQ-57) |
-| FC-02 | not settled (tick-zero placement, EAWR-597) |
+| FC-02 | not settled tick-zero placement, free-space starting placements (legacy EAWR-597) |
 | FO-01, FO-02 | same (WSQ-10, WSQ-59) |
 | FO-03 | same (WSQ-39) |
 | FO-04 to FO-09 | not re-read (orders and group moves: movement walk) |
@@ -363,9 +394,9 @@
 
 ## Gaps against the remake
 
-Our code: `src/sim/tactical/fighters.cpp` (the locomotor class and the squadron target scan) and
-`src/sim/tactical/session.cpp` (the squadron frame, the dogfight and chase phases, the container
-update).
+Our code: `src/sim/tactical/fighters_motion.cpp` and `src/sim/tactical/fighters_targeting.cpp` (the locomotor class and the squadron target scan) and
+`src/sim/tactical/session_types.hpp` (the squadron frame) and
+`src/sim/tactical/session_step.cpp` (the dogfight and chase phases, the container update).
 
 | Rules | Ours | Verdict |
 | --- | --- | --- |
@@ -373,14 +404,14 @@ update).
 | WSQ-04 | `CraftStep` out-of-combat defense | same |
 | WSQ-05 | none | missing, not needed (no teamless craft in M2) |
 | WSQ-06, WSQ-07 | `Locomotor::idle` | same |
-| **WSQ-08, WSQ-09, WSQ-50** | none: an idle squadron holds `SquadronState::anchor`, the exact point it was given | **missing** (EAWR-674: escorts of one carrier and squadrons ending one move stack) |
+| **WSQ-08, WSQ-09, WSQ-50** | none: an idle squadron holds `SquadronState::anchor`, the exact point it was given | **missing** (overlapping squadron craft (legacy EAWR-674): escorts of one carrier and squadrons ending one move stack) |
 | WSQ-10, WSQ-11 | `Locomotor::move`, `squadron_move_arrived` | same, except the idle cell claim (WSQ-09) |
 | WSQ-12 | none: the escort flies at `Max_Speed` | differs (escort override speed; movement walk) |
 | WSQ-13 to WSQ-17 | `Locomotor::directed_combat`, `form_up` | same |
 | WSQ-18a | `Locomotor::target_speed` | **differs**: gated on the craft's own error, not the squadron's largest (WSQ-52) |
 | WSQ-18 | `directed_combat` with `target_craft` | differs for a lone craft target (FA-06); none in M2 |
 | WSQ-19, WSQ-22 | `dogfight`, the session's dogfight and chase phases | same |
-| **WSQ-20** | none | **missing**: no pairing when a squadron target is acquired |
+| WSQ-20 | partitioned pairing candidates in `Tick::targets`, sparse roster-order commit | acquisition pairing before cell reach/follow tests |
 | WSQ-21 | FD-09 in the session | same |
 | WSQ-23 to WSQ-30 | `head_for`, `adjust_turn`, `adjust_pitch`, `adjust_speed`, `handle_flip` | same |
 | WSQ-31 to WSQ-36 | `followable`, `follow`, `avoid` | same |
@@ -388,21 +419,22 @@ update).
 | WSQ-38 | none | missing, not needed in M2 |
 | WSQ-39 | FO-03 | same |
 | WSQ-40 | FM-08 | same |
-| WSQ-41, WSQ-43, WSQ-47 | `detail::squadron_target`, FT-05 hand-off | same in effect |
-| **WSQ-42** | one squadron scan a second from the hold point (or leader), chase range plus attack distance | **differs**: per-craft scans around each craft on a 30 + 0..15 frame period |
-| **WSQ-44, WSQ-45** | FT-01 keeps a live, seen target | **differs**: no better-target re-scan; no stealth or limbo drop (no M2 stealth) |
-| WSQ-46 | FA-07 approach in the session | same in effect (movement walk owns the path) |
+| WSQ-41 | partitioned player command hand-off before member scans | base attacks retain direct assignment; autonomous overrides over an idle/escort base remain autonomous; destination-stack collision fallback, target extents and hardpoint persistence remain gaps |
+| WSQ-43, WSQ-47 | `Tick::targets` member results and `hand_target` | normalized team sharing with the actual player-direct flag |
+| WSQ-42 | `target_combat` in partitioned member preparation | per-member collection box, own 30 + 0..15 clock and formation diversion admission; guard candidates admit from the guarded destination; launch admission delay retained |
+| WSQ-44, WSQ-45 | `UnitCombat::ship_target`, shared target-loss commit | live/hostile/visible checks, member admission with facing-dependent hard extent, and better-target rescan; stealth and detailed limbo service remain outside this port |
+| WSQ-46 | new-target approach and sparse acquisition notification | team player-direct/pursuit dispatch; movement walk owns the destination |
 | WSQ-48, WSQ-53 | container at the centre of its craft's positions | same (points, not model bounds: negligible) |
-| **WSQ-51** | `roster_offset`: the launch roster, a dead craft's slot stays empty | **differs** (FM-10) |
+| **WSQ-51** | `roster_offset`: the surviving roster | current roster order closes the slots after a death (FM-10) |
 | WSQ-52 | none | missing (part of the WSQ-18a gap) |
 | WSQ-54, WSQ-56 to WSQ-59 | squadron frame, FC-01 | same |
 
-**The runaway note (EAWR-664, EAWR-634, soak EAWR-673).** FoC's speed rules (WSQ-37) let a follower fly
+**The runaway note (dogfight craft dispersion, scatter and burst timing, and long-battle soak).** FoC's speed rules (WSQ-37) let a follower fly
 several times `Max_Speed` while it catches up, never 40 times: the asked speed falls as the craft
 speeds up (WSQ-18a) and the idle ratio falls as it closes (WSQ-06). Ours uses the same formulas, so
 a craft at 40x to 1974x of its maximum speed, 160 000 units off the grid, comes from something
-FoC does not do: a bogus hold or slot point far away, a position set, or a Q24 edge. The EAWR-607
-worker owns that bug (EAWR-664, PR EAWR-634); this walk files no duplicate.
+FoC does not do: a bogus hold or slot point far away, a position set, or a Q24 edge. The retail dogfight outcome comparison
+worker owns that bug (dogfight craft dispersion, dogfight scatter and burst timing); this walk files no duplicate.
 
 ### XML tags this subsystem reads
 
@@ -416,26 +448,26 @@ worker owns that bug (EAWR-664, PR EAWR-634); this walk files no duplicate.
 `Space_Idle_Movement_Speed` (not in the FoC data). The spawner's tags are FL-01's.
 
 Marked `todo` in `docs/tag-coverage/statuses.json`: `Container/Squadron_Formation_Error_Tolerance`
-and `Container/Squadron_Offsets` (EAWR-651; both are read through the unit tables, so the rows are
-stale), `Container/Idle_Chase_Range` and `SpaceUnit/Idle_Chase_Range` (EAWR-653),
+and `Container/Squadron_Offsets` (fighter tag coverage (legacy EAWR-651); both are read through the unit tables, so the rows are
+stale), `Container/Idle_Chase_Range` and `SpaceUnit/Idle_Chase_Range` presentation tag coverage (legacy EAWR-653),
 `Container/Guard_Chase_Range`, `Container/Attack_Move_Response_Range`,
 `Container/Autonomous_Move_Extension_Vs_Attacker`, `Container/Max_Speed`, `Container/Min_Speed`
-(EAWR-649), `Container/Targeting_Max_Attack_Distance` (EAWR-650), `SpaceUnit/Number_per_Squadron`,
+Movement tag coverage (legacy EAWR-649), `Container/Targeting_Max_Attack_Distance` combat tag coverage (legacy EAWR-650), `SpaceUnit/Number_per_Squadron`,
 `SpaceUnit/Squadron_Capacity`, `Squadron/Max_Squad_Size`, `Squadron/Is_Bomber`, `Squadron/Is_Escort`
-(EAWR-651). None is `deferred`.
+Fighter tag coverage (legacy EAWR-651). None is `deferred`.
 
 ## Unverified, and what would settle it
 
 - **U-01** The object manager's service order between a squadron's craft and its container
   (Scope). Ghidra: the object manager's service loop.
-- **U-02** Whether a squadron that was never ordered (idle, no formation) has a formation whose
-  divert allowance adds the chase range to its scan (WSQ-42). The EAWR-607 worker's retail S-99 shows an
-  idle X-wing squadron chasing a passing TIE squadron 4150 units without turning back: FoC has no
-  leash for an idle squadron. Ghidra: the formation's divert-for-attack test (movement walk).
+- **U-02** Creation/presence settled by WMV-18: a starting team registers a position formation,
+  and completion preserves it. Retail S-99's 4150-unit chase does not establish absence of a
+  formation; the remaining destination-stack and diversion timing differences need measurement.
 - **U-03** The gating of the pairing at target acquisition (WSQ-20): the pursue flag and when the
   formation's attack target lags the craft's. Ghidra: the targeting interface's pursue getter.
 - **U-04** The escort's override maximum speed (WSQ-12). Movement walk.
-- **U-05** `Space_Idle_Movement_Speed`'s code default (WSQ-05). Not needed in M2.
+- **U-05** Settled by the debug build's constant initializer: `Space_Idle_Movement_Speed`
+  defaults to 1 (WSQ-05). WMV-14's idle drift defaults to disabled.
 - **U-06** A retail capture of two squadrons launched by one carrier idling side by side would
   confirm WSQ-09 on screen (two holds 120 or more units apart): the capture-mod Lua staging of
-  EAWR-391 can spawn two squadrons at one point and let them idle.
+  hardpoint breakoff debris can spawn two squadrons at one point and let them idle.

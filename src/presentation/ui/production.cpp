@@ -58,15 +58,31 @@ namespace tactical = sim::tactical;
 
 std::vector<BuildButton> layout_build_buttons(const tactical::StationMenu& menu, const sim::math::Fixed credits,
     const std::array<std::size_t, tactical::build_queue_count>& queue_sizes, const std::size_t max_queue,
-    const std::size_t slots) {
+    const std::size_t slots, const BuildOptionStateOf& state_of) {
     std::vector<BuildButton> buttons;
-    for (std::size_t index = 0; index < menu.options.size() && buttons.size() < slots; ++index) {
+    update_build_buttons(buttons, menu, credits, queue_sizes, max_queue, slots, state_of);
+    return buttons;
+}
+
+void update_build_buttons(std::vector<BuildButton>& buttons, const tactical::StationMenu& menu, const sim::math::Fixed credits,
+    const std::array<std::size_t, tactical::build_queue_count>& queue_sizes, const std::size_t max_queue,
+    const std::size_t slots, const BuildOptionStateOf& state_of) {
+    std::size_t shown = 0;
+    for (std::size_t index = 0; index < menu.options.size() && shown < slots; ++index) {
         const auto& option = menu.options[index];
-        BuildButton button;
-        button.slot = buttons.size();
+        const auto state = state_of ? state_of(option) : BuildOptionState{true, option.available};
+        if (!state.visible) continue;
+        if (shown == buttons.size()) buttons.emplace_back();
+        BuildButton& button = buttons[shown];
+        button.slot = shown++;
         button.option = index;
+        button.state = BuildButtonState::normal;
+        button.pad = false;
+        button.cooldown_progress = 1.0;
         button.type = option.type;
+        if (button.disabled_reason != option.disabled_reason) button.disabled_reason = option.disabled_reason;
         button.price = nearest(option.price);
+        button.build_frames = option.build_frames;
         const auto queue = static_cast<std::size_t>(option.queue);
         const bool room = queue < queue_sizes.size() && queue_sizes[queue] < max_queue;
         const bool affordable = credits.raw() >= option.price.raw();
@@ -76,16 +92,58 @@ std::vector<BuildButton> layout_build_buttons(const tactical::StationMenu& menu,
         } else if (!room) {
             button.state = BuildButtonState::queue_full;
         }
-        button.enabled = option.available && affordable && room;
+        button.enabled = option.available && state.enabled && affordable && room;
         button.room = room;
-        buttons.push_back(button);
     }
-    return buttons;
+    buttons.resize(shown);
 }
 
 std::optional<std::size_t> queue_component(const tactical::BuildQueue queue, const std::size_t index) noexcept {
     if (index >= queue_slot_count) return std::nullopt;
     return queue == tactical::BuildQueue::upgrades ? index : queue_slot_count + index;
+}
+
+std::vector<BuildButton> layout_pad_buttons(const tactical::StationMenu& menu, const sim::math::Fixed credits,
+    const std::uint64_t frame, const std::uint64_t cooldown_until, const std::size_t slots,
+    const std::span<const std::uint32_t> rows, const std::uint64_t cooldown_start) {
+    std::vector<BuildButton> buttons;
+    update_pad_buttons(buttons, menu, credits, frame, cooldown_until, slots, rows, cooldown_start);
+    return buttons;
+}
+
+void update_pad_buttons(std::vector<BuildButton>& buttons, const tactical::StationMenu& menu,
+    const sim::math::Fixed credits, const std::uint64_t frame, const std::uint64_t cooldown_until,
+    const std::size_t slots, const std::span<const std::uint32_t> rows, const std::uint64_t cooldown_start) {
+    const auto count = std::min({menu.options.size(), slots, pad_slot_count});
+    const auto slot_of = [&](const std::size_t index) {
+        return rows.empty() ? index : index * 2 + std::min<std::uint32_t>(index < rows.size() ? rows[index] : 0, 1);
+    };
+    std::size_t shown{};
+    for (std::size_t index = 0; index < count; ++index) shown += slot_of(index) < slots ? 1U : 0U;
+    buttons.resize(shown);
+    shown = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& option = menu.options[index];
+        const auto slot = slot_of(index);
+        if (slot >= slots) continue;
+        auto& button = buttons[shown++];
+        // WBP-36: GUI_Row chooses the authored top/bottom row of the existing card columns.
+        button.slot = slot;
+        button.option = index;
+        button.type = option.type;
+        button.price = floor_whole(option.price);
+        button.build_frames = option.build_frames;
+        if (button.disabled_reason != option.disabled_reason) button.disabled_reason = option.disabled_reason;
+        button.pad = true;
+        button.room = true;
+        const bool affordable = credits.raw() >= option.price.raw();
+        button.enabled = option.available && affordable && frame >= cooldown_until;
+        button.state = affordable ? BuildButtonState::normal : BuildButtonState::unaffordable;
+        button.cooldown_progress = frame >= cooldown_until ? 1.0
+            : cooldown_until <= cooldown_start ? 0.0
+            : std::clamp((static_cast<double>(frame) - static_cast<double>(cooldown_start))
+                / static_cast<double>(cooldown_until - cooldown_start), 0.0, 1.0);
+    }
 }
 
 std::vector<QueueSlot> layout_build_queue(

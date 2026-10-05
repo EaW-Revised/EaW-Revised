@@ -3,6 +3,8 @@
 This presentation-only implementation follows the MIT-licensed alo-viewer revision
 `9bb0053919cc5df8377610d4f91b11d956d6c2f4`. The pinned source remains in
 `reference/alo-viewer/`; its notice is retained in `THIRD_PARTY_NOTICES.md`.
+The random-sample surface offset below follows the debug build; it corrects
+the fixed-distance offset inherited from that reference implementation.
 V2 creator parameters remain metadata only.
 
 Legacy mini `0x34` selects disabled (`0`), random vertex (`1`), random surface
@@ -37,8 +39,16 @@ Its count is total vertex count times the Shape count: truncated
 drops consume neither a vertex cursor step nor a mesh RNG draw.
 
 The sampled point uses the mesh-bone affine frame. The normal uses that
-frame's ordinary linear basis, with no inverse transpose or normalization.
-The surface offset multiplies this transformed normal. Velocity alignment
+frame's ordinary linear basis, with no inverse transpose. For random vertex
+and random surface modes, normalize the transformed normal and displace the
+sampled point by the signed surface offset times the sampled particle size
+times `0.5`. Particle size already means billboard half-extent (the loader
+halves authored full widths); this is an additional half factor. Size includes
+its gradient at the birth age and its sampled variation. The displacement
+is fixed at birth and does not shrink with the later gradient. A zero normal
+or zero extent adds no displacement. Every-vertex mode uses the vertex point
+without this offset. These offset and size rules are observed in the debug
+build's random mesh sampling and particle initialization paths. Velocity alignment
 composes a Z quarter-turn, a Y turn of `pi/2 - tilt(normal)`, then a Z
 azimuth turn. The complete composition preserves roll for nonaxial velocity.
 The mesh creator registers as a root even when parent metadata names it as a

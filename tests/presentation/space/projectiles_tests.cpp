@@ -57,6 +57,61 @@ void test_facing() {
            "a homing projectile keeps its own facing, whatever its step");
 }
 
+void test_perspective_axis() {
+    using Point = std::array<double, 3>;
+    const Point eye{100, -200, 300};
+    const Point forward{0, 1, 0};
+    const auto project = [&](const Point& p) {
+        const double depth = p[1] - eye[1];
+        return Point{(p[0] - eye[0]) / depth, 1, (p[2] - eye[2]) / depth};
+    };
+    const auto compare = [&](const Point& a, const Point& b) {
+        const double la = std::hypot(a[0], a[1], a[2]);
+        const double lb = std::hypot(b[0], b[1], b[2]);
+        return (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    };
+    const auto difference = [](const Point& a, const Point& b) {
+        return Point{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    };
+    std::size_t samples = 0;
+    std::size_t old_misaligned = 0;
+    for (const double x : {-600., -300., 0., 300., 600.}) {
+        for (const double z : {-350., 0., 350.}) {
+            for (const double depth : {600., 1000., 2000.}) {
+                for (const Point step : {Point{1, .8, 0}, Point{.3, 1, .3}, Point{.7, -.4, .2}, Point{1, 0, 0}}) {
+                    Point centre{x + eye[0], depth + eye[1], z + eye[2]};
+                    for (int frame = 0; frame < 12; ++frame) {
+                        const auto axis = space::projectile_screen_axis(eye, forward, centre, step);
+                        expect(axis.has_value(), "off-centre moving bolt has a projected axis");
+                        if (!axis) continue;
+                        Point moved = centre;
+                        Point end = centre;
+                        for (std::size_t i = 0; i < 3; ++i) { moved[i] += step[i]; end[i] += (*axis)[i]; }
+                        const auto travel = difference(project(moved), project(centre));
+                        const auto drawn = difference(project(end), project(centre));
+                        expect(compare(travel, drawn) > 1.0 - 1.0e-10,
+                            "drawn axis follows the exact projected flight displacement over frames");
+                        expect(std::abs((*axis)[1]) < 1.0e-10, "billboard axis stays in the camera plane");
+                        const Point global_axis{step[0], 0, step[2]};
+                        if (compare(travel, global_axis) < .999) ++old_misaligned;
+                        centre = moved;
+                        ++samples;
+                    }
+                }
+            }
+        }
+    }
+    expect(samples == 2160 && old_misaligned > 500,
+        "contract covers off-centre perspective cases that reject the global-plane projection");
+    expect(!space::projectile_screen_axis(eye, forward, Point{110, -100, 280}, Point{.1, 1, -.2}),
+        "radial motion has no projected flight tangent");
+    expect(!space::projectile_screen_axis(eye, forward, eye, Point{1, 0, 0}), "eye-plane axis is undefined");
+    expect(!space::projectile_screen_axis(eye, forward, Point{100, -300, 300}, Point{1, 0, 0}),
+        "behind-eye motion is not admitted");
+    expect(!space::projectile_screen_axis(eye, forward, Point{100, 1000, 300}, Point{}),
+        "zero motion has no flight tangent");
+}
+
 void test_interpolation() {
     tactical::Projectile before;
     before.homing = true;
@@ -193,6 +248,7 @@ void test_slots_catch_up_history() {
 
 int main() {
     test_facing();
+    test_perspective_axis();
     test_interpolation();
     test_hit_projectile();
     test_pick();

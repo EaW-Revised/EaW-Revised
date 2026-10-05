@@ -174,9 +174,11 @@ class SpaceCameraStructure(unittest.TestCase):
 
     def test_constants_are_read_for_space_mode_through_the_shared_loader(self):
         source = mode_source("map_mode")
+        physical = (ROOT / "apps/viewer/src/map_mode.cpp").read_text(encoding="utf-8")
         self.assertIn("state.load_map_camera(camera::Mode::space, camera_failure)", source)
         self.assertIn("state.load_map_camera(camera::Mode::land, camera_failure)", source)
-        loader = source[source.index("MapMode::State::load_map_camera("):]
+        loader = read("apps/viewer/src/map_mode_camera_probe.cpp")
+        loader = loader[loader.index("MapMode::State::load_map_camera("):]
         loader = loader[:loader.index("\n}\n")]
         self.assertIn("camera::load_constants(", loader)
         self.assertIn("parse_map_camera_config(*config_text, options.map_path, map_hash, mode)", loader)
@@ -199,14 +201,16 @@ class SpaceCameraStructure(unittest.TestCase):
 
     def test_interactive_run_never_evaluates_fixed_sky_fidelity(self):
         source = mode_source("space_environment")
-        body = source[source.index("std::optional<int> SpaceEnvironment::State::interactive_process("):]
+        physical = (ROOT / "apps/viewer/src/space_environment_probe.cpp").read_text(encoding="utf-8")
+        body = physical[physical.index("std::optional<int> SpaceEnvironment::State::interactive_process("):]
         body = body[:body.index("std::optional<int> SpaceEnvironment::State::finish()")]
         for token in ("evaluate_pixels", "rasterize(", "phases.", "occluder_mask", ".pgm"):
             self.assertNotIn(token, body)
         self.assertIn('pixel_status = "not_evaluated_interactive";', body)
         # The fixed capture camera is written only from the parsed fixed camera
         # or, when unlocked, from the bridge.
-        ready = source[source.index("bool SpaceEnvironment::ready("):]
+        prepare = (ROOT / "apps/viewer/src/space_environment_prepare.cpp").read_text(encoding="utf-8")
+        ready = prepare[prepare.index("bool SpaceEnvironment::ready("):]
         self.assertIn("if (state.options.map_camera && !state.activate_camera(host)) return false;", ready)
 
     def test_bridge_contract_is_registered_with_ctest(self):

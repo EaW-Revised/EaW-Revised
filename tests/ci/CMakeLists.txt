@@ -1,5 +1,10 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Public documentation describes work; tracker numbers are explicit legacy references.
+add_test(NAME ci_doc_refs COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/publish_scan/doc_refs.py"
+         --root "${PROJECT_SOURCE_DIR}")
+add_test(NAME ci_doc_refs_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_doc_refs.py")
+
 # The XML tag registry gate (docs/tag-coverage.md): every (class, tag) of the FoC XML has a row with what its status
 # needs, every applied code location exists, the JSON and its rendering are canonical. Without game data; the
 # game-data half (tag_registry_game_data) sits with the inventory tests.
@@ -31,13 +36,6 @@ add_test(
 add_test(
     NAME ci_package_release
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_package_release.py"
-)
-
-# Every test file above is registered and runs tests (the tools/offload, tools/common and
-# tools/rig tests live here, not next to the tools).
-add_test(
-    NAME ci_registration
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_ci_registration.py"
 )
 
 # Tier labels (cmake/EawrTestTiers.cmake).

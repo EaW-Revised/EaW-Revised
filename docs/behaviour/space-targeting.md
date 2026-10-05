@@ -42,7 +42,7 @@ trace or diagnostic schema.
 
 An implementer may represent the synthetic fixture's `candidate_streams` directly. A full
 world implementation produces the candidate order of R-07 with the collection trees of CO-01 to
-CO-12 below (EAWR-469).
+CO-12 below (target collection order and fighter approach).
 
 ## Ordered behavior rules
 
@@ -60,7 +60,7 @@ CO-12 below (EAWR-469).
 | R-10 | Aim points are tried in this order: target bones in their declared order; then nondestroyed target hardpoints in circular order from one synchronized random starting index; then the target's fallback adjusted position. Return the first point that is both within effective range and pointable by the weapon. The hardpoint pass skips only destroyed hardpoints, not untargetable ones. A target with no hardpoints consumes no hardpoint draw. |
 | R-11 | Aim distance is the three-dimensional Euclidean distance from the firing hardpoint's weapon midpoint to the candidate point. The range boundary is inclusive. Bone and target-hardpoint points add the target soft radius only when the firing parent has a non-null current projectile type; the fallback point always adds the target soft radius. |
 | R-12 | A newly selected object is retained and immediately tried. If that attempt fails, clear it and emit no acquisition event. If it succeeds, retain it and emit one opportunity-target-acquired event for that newly acquired object. A retained target succeeding on a later invocation emits no new acquisition event. The fixture asserts event frame/type/target only. In the original the event names the target and the firing hardpoint; it goes to the squadron when the firing parent leads its squadron, to nobody when the parent is another squadron member, and to the parent otherwise. |
-| R-13 | Opportunity acquisition retains a target object, not a target hardpoint. A target hardpoint may supply an aim point, but this path passes no specific target-hardpoint reference to the firing attempt. Given no reference, the original firing attempt aims at the target's nearest hardpoint that is neither destroyed nor untargetable (three-dimensional distance from the shooter's adjusted position, first on a tie) and repeats the R-10 search only when there is none; the [weapon-fire note](space-weapon-fire.md) implements it (EAWR-73). |
+| R-13 | Opportunity acquisition retains a target object, not a target hardpoint. A target hardpoint may supply an aim point, but this path passes no specific target-hardpoint reference to the firing attempt. Given no reference, the original firing attempt aims at the target's nearest hardpoint that is neither destroyed nor untargetable (three-dimensional distance from the shooter's adjusted position, first on a tie) and repeats the R-10 search only when there is none; the [weapon-fire note](space-weapon-fire.md) implements it (target selection and weapon fire). |
 | R-14 | No candidate leaves the retained target empty. If the scan was cadence-triggered, the scan timestamp still advances, so another ordinary scan waits for a new strictly-greater interval. |
 | R-15 | Do not add a terrain/ship line-of-sight or occlusion filter to this target choice. The complete acquisition, suitability, aim-point, pointing, and immediate firing-attempt evidence applies fog, category, range, and pointing/cone decisions but no obstruction decision. Projectile travel or collision after firing is outside this contract. |
 
@@ -68,7 +68,9 @@ Rules R-04, R-06, R-07, R-09, and R-10 state observable order because changing i
 change the winner or the synchronized-random stream. They do not prescribe source data
 structures or helper decomposition.
 
-## Candidate collection order (EAWR-469)
+<a id="candidate-collection-order-469"></a>
+
+## Candidate collection order
 
 Research CT-01 to CT-14 (the FoC debug build; the evidence map stays private) and recording
 S-28. FoC does not randomise or rank equal-priority candidates by distance: a scan keeps the
@@ -136,7 +138,7 @@ Expected: the retained Fighter is tried successfully and remains selected; no sc
 Given a retained Fighter's firing attempt now fails, a replacement Transport is eligible, and only five frames have elapsed at `30` logical FPS.
 Expected: the Fighter is cleared, a replacement scan runs in the same invocation, the Transport is retained after a successful attempt, and one acquisition event is emitted.
 
-In play, the replacement waits for the next admitted invocation, not for the scan cadence. The retail FoC recordings of [S-03](../../tests/fidelity/S-03-replacement.json) (TIE Defender ion hardpoint, EAWR-43 part B) show the removed target cleared in the next frame and the replacement acquired at the first hardpoint service the fire countdown admits: after at most one pulse delay or one recharge (0.5 to 3.5 s for that hardpoint). The recorded removal fell one frame after the first shot of a two-shot pulse, so the target stayed empty for 13 frames and the replacement came with the second shot, 14 frames after the removal.
+In play, the replacement waits for the next admitted invocation, not for the scan cadence. The retail FoC recordings of [S-03](../../tests/fidelity/S-03-replacement.json) (TIE Defender ion hardpoint, original-game behaviour recordings part B) show the removed target cleared in the next frame and the replacement acquired at the first hardpoint service the fire countdown admits: after at most one pulse delay or one recharge (0.5 to 3.5 s for that hardpoint). The recorded removal fell one frame after the first shot of a two-shot pulse, so the target stayed empty for 13 frames and the replacement came with the second shot, 14 frames after the removal.
 
 ### Case C-05: cadence equality is not enough
 
@@ -162,8 +164,8 @@ Expected: no candidate is selected or announced, the last-scan frame becomes `16
 
 | Gate | Unknown |
 | --- | --- |
-| G-01 | Mapped by CO-01 to CO-12 (EAWR-469). Still open: the order in which FoC services units within a frame (the remake uses ascending ID, CO-11), the exact model boxes (the remake uses its collision box) and float rounding (CO-12), so an individual frame's order can differ from retail's. |
-| G-02 | The remake's signed-int64 Q24 scalar contract and rounding rules are frozen by ADR-010, but equivalence between those operations and the original binary32 distance and priority comparisons is not established. |
+| G-01 | Mapped by CO-01 to CO-12 (target collection order and fighter approach). Still open: the order in which FoC services units within a frame (the remake uses ascending ID, CO-11), the exact model boxes (the remake uses its collision box) and float rounding (CO-12), so an individual frame's order can differ from retail's. |
+| G-02 | The remake's signed-int64 Q24 scalar contract and rounding rules are frozen by [checked Q24 math decision](../architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations), but equivalence between those operations and the original binary32 distance and priority comparisons is not established. |
 | G-03 | Resolved for the signal recipient by the FoC debug build (R-12, [audit](debug-build-audit.md)); service timing is recorded in S-03 (C-04). |
 
 The [debug-build audit](debug-build-audit.md) checked R-01 to R-15 against the FoC debug build

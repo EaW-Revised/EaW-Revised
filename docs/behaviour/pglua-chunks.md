@@ -138,7 +138,7 @@ A 64-bit upstream Lua build rejects a raw 32-bit chunk because the `size_t` widt
 4. omit the persistence identifier but preserve all other values and vector order;
 5. load through upstream `lua_load` with bytecode validation enabled.
 
-Re-encoding all 584 members with 8-byte `size_t` produced 584/584 successful parses in a 64-bit upstream Lua 5.0.2 validator. Fresh code must still test actual execution through P0-07's host surface.
+Re-encoding all 584 members with 8-byte `size_t` produced 584/584 successful parses in a 64-bit upstream Lua 5.0.2 validator. Fresh code must still test actual execution through the Lua host's surface.
 
 ## Pinned upstream build contract
 
@@ -211,7 +211,9 @@ Expected analysis, in instruction order:
 
 Apply each mutation independently to S-01 unless stated otherwise: change signature byte 3 to `61`; change version byte 4 to `52`; change endian byte 5 to `00`; change `size_t` width byte 7 to `08`; change number-width byte 13 to `04`; delete the final byte; append one zero byte; replace bytes 38–41 with zero; or replace the source terminator at byte 33 with a nonzero byte. Each mutation must be rejected for its specific field, truncation, trailing-data, identifier, or string reason. For S-02, replacing constant tag byte 62 with `01` must be rejected as an unknown constant tag.
 
-## Static compiled-script call analysis for P0-08
+<a id="static-compiled-script-call-analysis-for-p0-08"></a>
+
+## Static compiled-script call analysis for the Lua call inventory
 
 Constants alone cannot satisfy vanilla coverage. A clean analyzer can use the validated decoder and the official Lua 5.0.2 instruction contract without executing scripts:
 
@@ -227,7 +229,7 @@ This route accounts for every compiled vanilla member. It complements, rather th
 
 ## Required smoke subset and optional persistence
 
-The pinned smoke script and eight module dependencies in [lua-script-model.md](lua-script-model.md) use constant tags 0, 3, and 4 and opcode IDs `0, 1, 2, 3, 5, 6, 7, 9, 10, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 29, 30, 31, 34`. Every one has paired opcode evidence. A fresh P0-07 implementation may therefore make ordinary compiled-chunk loading required while explicitly leaving these features optional and unsupported:
+The pinned smoke script and eight module dependencies in [lua-script-model.md](lua-script-model.md) use constant tags 0, 3, and 4 and opcode IDs `0, 1, 2, 3, 5, 6, 7, 9, 10, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 29, 30, 31, 34`. Every one has paired opcode evidence. A fresh Lua host implementation may therefore make ordinary compiled-chunk loading required while explicitly leaving these features optional and unsupported:
 
 - whole-state dump/undump;
 - save-game restoration of coroutine stacks, userdata, and event state;

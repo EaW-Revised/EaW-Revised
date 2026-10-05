@@ -23,6 +23,7 @@ SETTINGS = {
     "linuxBuildHost": "EAWR_LINUX_BUILD_HOST",
     "linuxBuildUser": "EAWR_LINUX_BUILD_USER",
     "linuxBuildIdentity": "EAWR_LINUX_BUILD_IDENTITY",
+    "linuxBuildSlots": "EAWR_LINUX_BUILD_SLOTS",
     "windowsBuildHost": "EAWR_WINDOWS_BUILD_HOST",
     "windowsBuildUser": "EAWR_WINDOWS_BUILD_USER",
     "windowsBuildIdentity": "EAWR_WINDOWS_BUILD_IDENTITY",

@@ -3,6 +3,7 @@
 #include "scene_internal.hpp"
 
 #include "eawr/sim/replay.hpp"
+#include "eawr/core/load_profile.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -187,13 +188,11 @@ void resolve_transform(Placement& placement, const assets::Placement& source) {
         add_issue(placement, Cause::transform_nonfinite);
         return;
     }
-    if (source.orientation_status == assets::OrientationStatus::unsupported_three_axis_order) {
-        add_issue(placement, Cause::orientation_three_axis);
-        return;
-    }
-    const float yaw = source.orientation_degrees->z;
-    const std::array<float, 4> inputs{source.position->x, source.position->y, source.position->z, yaw};
-    std::array<Fixed, 4> converted{};
+    // R-ROT-01..03: T + Rz(yaw) Ry(pitch) Rx(roll) Rz(+90) v, once at scene build.
+    const auto& degrees = *source.orientation_degrees;
+    const std::array<float, 6> inputs{source.position->x, source.position->y, source.position->z,
+        degrees.z, degrees.y, degrees.x};
+    std::array<Fixed, 6> converted{};
     for (std::size_t index = 0; index < inputs.size(); ++index) {
         auto value = fixed_from_binary32(inputs[index]);
         if (!value) {
@@ -202,7 +201,13 @@ void resolve_transform(Placement& placement, const assets::Placement& source) {
         }
         converted[index] = value.value();
     }
-    auto matrix = placement_transform(converted[0], converted[1], converted[2], converted[3],
+    auto height = sim::math::add(converted[2], Fixed::from_raw(placement.layer_z_adjust_raw));
+    if (!height) {
+        add_issue(placement, Cause::transform_overflow);
+        return;
+    }
+    converted[2] = height.value();
+    auto matrix = placement_transform(converted[0], converted[1], converted[2], converted[3], converted[4], converted[5],
                                 Fixed::from_raw(placement.scale_raw));
     if (!matrix) {
         add_issue(placement, Cause::transform_overflow);
@@ -237,7 +242,7 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     placement.object_provenance.source_object_id = type.logical_name;
     placement.object_provenance.logical_path = type.source.logical_path;
     placement.object_provenance.line = type.source.line;
-    auto effective = catalog.resolve(type.logical_name);
+    auto effective = catalog.resolve(type.logical_name, data::Category::game_object);
     if (!effective) {
         add_issue(placement, Cause::object_unresolvable, type.logical_name);
         return;
@@ -256,6 +261,15 @@ void resolve_object(Placement& placement, const assets::Placement& source,
             add_issue(placement, Cause::scale_invalid, scale->text);
         } else {
             placement.scale_raw = value.value().raw();
+        }
+    }
+
+    // LZ-01 includes map SpaceProps; only the presentation transform is raised.
+    if (kind == assets::MapKind::space && ieq(object.type_name, "SpaceProp")) {
+        if (const auto height = declared(object, "Layer_Z_Adjust")) {
+            auto value = data::fixed_value(*height->node);
+            if (value) placement.layer_z_adjust_raw = value.value().raw();
+            else add_issue(placement, Cause::transform_nonfinite, "Layer_Z_Adjust");
         }
     }
 
@@ -375,8 +389,15 @@ PreparedScene prepare(const BuildInput& input) {
 }
 
 void finalize_placement(Placement& placement, const assets::Placement& source) {
+    // MD-06: a mesh-free model's resolved proxies still need its authored pose.
+    const bool effect_model = !placement.effects.empty()
+        && std::all_of(placement.effects.begin(), placement.effects.end(),
+                       [](const AttachedEffect& effect) { return !effect.resolved.empty(); });
     const bool blocked = std::any_of(placement.issues.begin(), placement.issues.end(),
-                                     [](const Issue& issue) { return blocks_drawing(issue.cause); });
+        [&](const Issue& issue) {
+            return blocks_drawing(issue.cause)
+                && !(effect_model && issue.cause == Cause::model_has_no_surface);
+        });
     // A placement whose object did not resolve still has a position, but a
     // transform is only meaningful with the object's scale, so it is
     // converted only once the object chain is usable.
@@ -426,6 +447,7 @@ core::Diagnostic invalid_worker_diagnostic() {
 } // namespace
 
 Scene build(const BuildInput& input) {
+    core::load_profile::Scope scope(core::load_profile::Phase::scene_build);
     if (input.map == nullptr || input.catalog == nullptr) return {};
     auto prepared = prepare(input);
     for (std::size_t index = 0; index < prepared.ordered.size(); ++index) {

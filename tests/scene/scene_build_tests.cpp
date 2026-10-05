@@ -150,7 +150,7 @@ void scene_contracts() {
         {"EAWR_SCENE_LOST_MODEL", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {}},                // 6 not in vfs
         {"EAWR_SCENE_ODD_SHADER", std::array<float, 3>{5.0F, 5.0F, 0.0F}, {}, false, 3},      // 7 partial
         {"EAWR_SCENE_PLAIN", std::nullopt, {}},                                                // 8 no position
-        {"EAWR_SCENE_PLAIN", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {10.0F, 0.0F, 0.0F}},    // 9 three-axis
+        {"EAWR_SCENE_PLAIN", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {10.0F, 20.0F, 30.0F}},  // 9 three-axis
         {"EAWR_SCENE_PLAIN", std::array<float, 3>{nan, 0.0F, 0.0F}, {}},                      // 10 nonfinite
         {"EAWR_SCENE_PLAIN", std::array<float, 3>{std::ldexp(1.0F, 40), 0.0F, 0.0F}, {}},     // 11 overflow
         {"EAWR_SCENE_BAD_SCALE", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {}},                 // 12 bad scale
@@ -248,6 +248,34 @@ void scene_contracts() {
                == std::vector<std::size_t>({1, 0, 0, 0}), "fewer placements than workers are counted");
 
     scene_issue_contracts(tree, catalog, records, map, input, scene, serial_bytes);
+
+    const auto height_bytes = ted({
+        {"EAWR_SCENE_BACKGROUND", std::array<float, 3>{3.0F, 4.0F, -4500.0F}, {336.0F, 336.0F, 0.0F}},
+        {"EAWR_SCENE_BAD_HEIGHT", std::array<float, 3>{0.0F, 0.0F, 0.0F}, {}},
+    });
+    auto height_source = source;
+    height_source.stored_size = height_bytes.size();
+    auto height_map = eawr::assets::load_map(height_bytes, height_source, types);
+    expect(static_cast<bool>(height_map), "SpaceProp height fixture loads");
+    if (height_map) {
+        height_map.value().kind = eawr::assets::MapKind::space;
+        auto height_input = input;
+        height_input.map = &height_map.value();
+        const auto elevated = eawr::scene::build(height_input);
+        const auto& background = elevated.placements[0];
+        expect(background.layer_z_adjust_raw == -2500 * Fixed::scale && background.transform
+                   && background.transform->matrix.rows[2][3].raw() == -7000 * Fixed::scale
+                   && height_map.value().placements[0].position->z == -4500.0F,
+               "LZ-01 adds SpaceProp height exactly once to the shared transform and preserves TED position");
+        expect(!elevated.placements[1].transform
+                   && has(elevated.placements[1], Cause::transform_nonfinite, "Layer_Z_Adjust"),
+               "invalid authored height fails closed");
+        height_map.value().kind = eawr::assets::MapKind::land;
+        const auto land = eawr::scene::build(height_input);
+        expect(land.placements[0].layer_z_adjust_raw == 0 && land.placements[0].transform
+                   && land.placements[0].transform->matrix.rows[2][3].raw() == -4500 * Fixed::scale,
+               "the space height rule does not raise a land placement");
+    }
 }
 
 } // namespace eawr::tests::scene_tests

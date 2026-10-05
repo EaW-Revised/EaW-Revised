@@ -20,6 +20,9 @@ enum class VictoryCondition : std::uint8_t {
     none = 0,
     // SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED, FoC's MP_Default_Space_Tactical_Win_Condition.
     enemy_starbase_destroyed = 1,
+    // WBF-08/35: SKIRMISH_ALL_ENEMY_UNITS_DESTROYED, only when selected.
+    all_enemy_units_destroyed = 2,
+    intentional_quit = 3, // WBF-43: immediate local departure outcome, never a lobby selection
 };
 
 // The retail pending-victory countdown (VT-11): the battle ends 210 frames (7 s) after the
@@ -39,6 +42,12 @@ struct VictoryRules {
     // The human contenders (VT-05).
     std::vector<PlayerId> humans;
     std::uint32_t countdown_frames{victory_countdown_frames};
+    // WBF-35: every victory-relevant type, including ships and team containers.
+    std::vector<TypeId> relevant_types{};
+    // Standalone owners with a human or AI controller. Neutral scenery is excluded.
+    std::vector<PlayerId> controlled_players{};
+    // WBF-08/37: players with an installed condition. Empty retains the legacy contender list.
+    std::vector<PlayerId> installed_players{};
     friend bool operator==(const VictoryRules&, const VictoryRules&) = default;
 };
 
@@ -71,6 +80,20 @@ struct BattleOutcome {
 [[nodiscard]] std::optional<PlayerId> starbase_destroyed_winner(
     const VictoryRules& rules, std::span<const Player> players, PlayerId owner,
     std::span<const StarbaseEntry> remaining);
+
+struct OwnerUnitCount {
+    PlayerId owner{};
+    std::uint64_t units{};
+};
+
+// WBF-31/32/35: remaining counts exclude every object already removed by an earlier
+// destruction/conversion hook. The first eligible enemy in player-ID order wins.
+[[nodiscard]] std::optional<PlayerId> all_units_destroyed_winner(
+    const VictoryRules& rules, std::span<const Player> players, PlayerId owner,
+    std::span<const OwnerUnitCount> remaining);
+
+// The two evidenced space conditions; other shared lobby branches remain unsupported (WBF-36).
+[[nodiscard]] core::Result<VictoryCondition> parse_victory_condition(std::string_view value);
 
 [[nodiscard]] std::string_view to_string(VictoryCondition condition) noexcept;
 

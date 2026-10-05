@@ -353,19 +353,27 @@ core::Result<Pose> Player::sample_tick(const std::uint64_t tick, const std::uint
 }
 
 core::Result<Pose> Player::sample_position(const std::uint64_t position, const std::uint32_t subdivisions) const {
+    Pose output;
+    auto sampled = sample_position(position, subdivisions, output);
+    if (!sampled) return core::Result<Pose>::failure(std::move(sampled.error()));
+    return core::Result<Pose>::success(std::move(output));
+}
+
+core::Result<void> Player::sample_position(const std::uint64_t position, const std::uint32_t subdivisions,
+    Pose& output) const {
     if (subdivisions == 0)
-        return core::Result<Pose>::failure(failure(diagnostic_codes::invalid_request, "position sampling requires a positive subdivision count"));
-    if (playable_frames_ == 0) return interpolate(0U, 0U, 0.0F, 0.0F, 0.0F);
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_request, "position sampling requires a positive subdivision count"));
+    if (playable_frames_ == 0) return interpolate(0U, 0U, 0.0F, 0.0F, 0.0F, output);
     const std::uint64_t whole = position / subdivisions;
     if (whole > playable_frames_ || (whole == playable_frames_ && position % subdivisions != 0))
-        return core::Result<Pose>::failure(failure(diagnostic_codes::invalid_request, "clip position is past the last frame"));
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_request, "clip position is past the last frame"));
     const auto first = static_cast<std::size_t>(whole);
     const std::size_t second = std::min(first + 1U, static_cast<std::size_t>(playable_frames_));
     const float fraction = static_cast<float>(position % subdivisions) / static_cast<float>(subdivisions);
     const auto sampled = frames_per_second_ > 0.0F
         ? static_cast<float>(static_cast<double>(position) / (static_cast<double>(subdivisions) * static_cast<double>(frames_per_second_)))
         : 0.0F;
-    return interpolate(first, second, fraction, sampled, 0.0F);
+    return interpolate(first, second, fraction, sampled, 0.0F, output);
 }
 
 std::uint32_t Player::playable_frames() const noexcept { return playable_frames_; }
@@ -373,7 +381,15 @@ float Player::frames_per_second() const noexcept { return frames_per_second_; }
 
 core::Result<Pose> Player::interpolate(const std::size_t first, const std::size_t second, const float fraction, const float sampled,
     const float blend_to_bind) const {
-    Pose result; result.origin_ = origin_; result.sampled_time_seconds = sampled; result.bones.resize(bones_.size());
+    Pose result;
+    auto status = interpolate(first, second, fraction, sampled, blend_to_bind, result);
+    if (!status) return core::Result<Pose>::failure(std::move(status.error()));
+    return core::Result<Pose>::success(std::move(result));
+}
+
+core::Result<void> Player::interpolate(const std::size_t first, const std::size_t second, const float fraction, const float sampled,
+    const float blend_to_bind, Pose& result) const {
+    result.origin_ = origin_; result.sampled_time_seconds = sampled; result.bones.resize(bones_.size());
     for (std::size_t index = 0; index < bones_.size(); ++index) { result.bones[index].local_asset = bones_[index].bind_local; result.bones[index].visible = bones_[index].visible; }
     for (const Track& binding : tracks_) {
         const auto& a = binding.track.samples[first]; const auto& b = binding.track.samples[second];
@@ -393,7 +409,7 @@ core::Result<Pose> Player::interpolate(const std::size_t first, const std::size_
         const Matrix local = compose(value);
         if (blend_to_bind > 0.0F && unsupported.empty() && !finite(local)) unsupported = "blended local transform is non-finite";
         if (!unsupported.empty())
-            return core::Result<Pose>::failure(failure(diagnostic_codes::unsupported_bind_blend,
+            return core::Result<void>::failure(failure(diagnostic_codes::unsupported_bind_blend,
                 "intermediate bind blend is unsupported for tracked bone '" + bones_[binding.bone].name + "': "
                 + std::string(unsupported)));
         result.bones[binding.bone].local_asset = local;
@@ -404,7 +420,7 @@ core::Result<Pose> Player::interpolate(const std::size_t first, const std::size_
         result.bones[index].model_asset = multiply(parent, result.bones[index].local_asset);
         result.bones[index].skin_asset = multiply(result.bones[index].model_asset, bones_[index].inverse_bind);
     }
-    return core::Result<Pose>::success(std::move(result));
+    return core::Result<void>::success();
 }
 
 bool Player::sampled(const Pose& pose) const noexcept {

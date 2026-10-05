@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,6 +32,7 @@ struct TacticalOrder {
     sim::tactical::PlayerId issuer{};
     std::vector<sim::EntityId> units;
     sim::tactical::CommandPayload payload;
+    std::optional<sim::tactical::TacticalSession::ReinforcementSearch> reinforcement_search{};
 };
 
 // Turns one script command into a tactical order. Registered per verb by the
@@ -48,7 +50,17 @@ struct RoutedCommand {
     core::Diagnostic dropped;  // otherwise
 };
 
+// #957: where a scripted tick's wall-clock time went, in the nanoseconds of the clock given to
+// set_step_clock (all zero without one). Measurement only: it never enters a hash, a snapshot or
+// the replay.
+struct StepTiming {
+    std::uint64_t world_ns{};   // the world step
+    std::uint64_t engine_ns{};  // the script engine's barrier step before the service (the AI)
+    std::uint64_t service_ns{}; // the script service (the Lua instances)
+};
+
 struct ScriptedTick {
+    StepTiming timing;
     sim::tactical::TacticalTick world;
     // Player input the world refused, in submission order; it is not recorded.
     std::vector<core::Diagnostic> refused_input;
@@ -77,6 +89,13 @@ public:
     virtual ~ScriptEngine() = default;
     [[nodiscard]] virtual core::Result<ServiceOptions> before_service(
         const sim::tactical::TacticalSession& world, const sim::tactical::TacticalTick& tick, ScriptScheduler& scripts) = 0;
+    // Independent preparation may use the tick executor before the ordered engine commit.
+    // Existing engines retain their serial preparation through the forwarding default.
+    [[nodiscard]] virtual core::Result<ServiceOptions> before_service(const sim::PartitionExecutor& executor,
+        const sim::tactical::TacticalSession& world, const sim::tactical::TacticalTick& tick, ScriptScheduler& scripts) {
+        static_cast<void>(executor);
+        return before_service(world, tick, scripts);
+    }
     // Serially after the script service: the engine takes out of `report.commands` the
     // commands addressed to itself (requests to engine objects, such as a TaskForce's
     // production, #449); the rest become the next tick's world input. Like before_service it
@@ -112,6 +131,9 @@ public:
     // a tick barrier. The live session turns it off: it reads only the world's hash. The world,
     // the scripts and every hash that is computed are the same either way.
     void set_authoritative_hash(bool every_tick) noexcept;
+    // #957: a monotonic clock in nanoseconds; with one, step() fills ScriptedTick::timing. The sim
+    // never reads a clock itself: presentation and tools supply it.
+    void set_step_clock(std::function<std::uint64_t()> clock);
 
     // One tick. Submits `player_input` with the keys it carries (UI-07
     // CommandScheduler::take; a refused command is reported and dropped),

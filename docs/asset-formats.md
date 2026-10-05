@@ -1,6 +1,6 @@
 # Portable CPU asset formats
 
-P0-06 defines CPU-only readers for ALO models, ALA animations, DDS textures and TGA
+The asset loader contract defines CPU-only readers for ALO models, ALA animations, DDS textures and TGA
 textures. Runtime acquisition is exclusively through `eawr::vfs::Vfs`; the byte-span
 overloads exist for tests, tools and callers that already obtained bytes from that VFS.
 Every returned object carries the effective/raw record's logical path, layer, origin,
@@ -97,7 +97,7 @@ bind visibility. TED's editor player index is not the runtime capture owner.
 ### Hardpoint state art
 
 An object's `HardPoints` entries name `HardPoint` objects whose XML carries the
-art for each hardpoint state (EAWR-136). `Model_To_Attach` is a separate ALO whose
+art for each hardpoint state. `Model_To_Attach` is a separate ALO whose
 root is placed at the bind frame of the owner's `Attachment_Bone`. All 618 FoC
 attachments (121 objects with `HardPoints`, including every capital ship and
 station) are authored about their own root. This also holds when the attached
@@ -123,7 +123,7 @@ The retail FoC Coruscant capture shows a starting station without smoke, which
 agrees with the intact row. The FoC debug-build study of the hardpoint
 health-changed handler confirms that art stays unchanged while health is above
 zero. At destruction it removes the attached model, shows the decal, and
-unhides the emitters below `Damage_Particles`. EAWR-72 decides when a state changes;
+unhides the emitters below `Damage_Particles`. Hardpoint state handling decides when a state changes;
 `Death_Breakoff_Prop` and `Death_Explosion_Particles` are one-shot events and
 are not state art. Several `HardPoints` entries may name
 the same art, and the first entry owns it. `scene::hardpoint_art`,
@@ -135,7 +135,7 @@ The same destruction handler hides sub-objects below `Engine_Particles` when
 false; the FoC XML inventory contains no use of the flag, but mods may set it.
 The viewer gates engine meshes and proxies with the destroyed state.
 
-The FoC debug build confirms the intact row for the emitters (EAWR-284). When a
+The FoC debug build confirms the intact row for the emitters. When a
 game object builds its hardpoints, it looks up each hardpoint's
 `Damage_Particles` bone. Every model sub-object below that bone is then hidden
 by code, whatever its authored visibility, so a freshly placed object shows
@@ -420,13 +420,13 @@ converts once, visibly, at its own boundary rather than inheriting a silent rota
   `OrientationStatus::nonfinite`, each with a notice. Neither is ever read as an identity
   or yaw-only rotation: the static-scene builder reports `orientation_absent` and
   `transform_nonfinite` respectively and does not draw the placement.
-- **Three-axis quarantine.** Any record with a nonzero roll or pitch is marked
-  `OrientationStatus::unsupported_three_axis_order` and carries a notice. The composition
-  order of the three angles is not established, and a guessed order silently mis-orients
-  the placement rather than failing, so no quaternion is derived for these records. The
-  angles are still retained verbatim in `orientation_degrees`; the quarantine is about
-  interpretation, not retention. Lifting it requires a clean, approved composition-order
-  fact, at which point the status becomes a decode and not a guess.
+- **Three-axis placements.** A finite record with nonzero roll or pitch is marked
+  `OrientationStatus::three_axis`, retaining its exact `orientation_degrees` without an
+  unsupported-orientation notice. R-ROT-01..03 establish the source composition:
+  `T + Rz(yaw) * Ry(pitch) * Rx(roll) * Rz(+90 degrees) * v`, with right-handed
+  rotations and column vectors. The static scene computes this matrix once; attached
+  models, hardpoints, particles, shadows and evidence bounds compose on that same
+  placement. R-ROT-04 still supplies the unchanged yaw to simulation heading.
 
 ### TED reference resolution
 
@@ -515,7 +515,7 @@ source identity and placement order. Missing catalog inputs do not become presen
 because a scene renders. Exact per-map rows remain in
 plan/inventories/unresolved-placements.json and unresolved-placements-foc.json.
 
-The 356 failures P1 EAWR-24 froze (`tests/presentation/animation/corpus_association_frozen.tsv`,
+The 356 failures the P1 animation work froze (`tests/presentation/animation/corpus_association_frozen.tsv`,
 taken on the Remake view) are re-read on the FoC view under FoC's own clip naming rule
 ([unit animation](behaviour/unit-animation.md) UA-01) by `animation_corpus_association_foc`.
 `corpus_association_foc.tsv` gives each row its disposition and cause: 256 are Remake mod files

@@ -98,9 +98,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "4ecb36833c2fab74128bfbd23411bebaade7d6e9d2f36122e65f92be5305a237",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "b51a46d5a06dfd51ebbf6995aeff9b707ee89605ec93ffbabfd812129e4394c4",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "c549a4514309b255e25fa35429782607ac9740b16697beb1a115adcb066d7180",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "171ef63a594f5b4052281e9d264b17be11a00b6f9fcca0e77b93216ec8ed856d",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "fdfe8383c21fd67dea81d13d470933f9031526932695c0e6626d242e6570e129",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "6fbb2d1d6236ffa2262807b3c13b1e2dbe07adeff602bde1d8f38b615a3a708c",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -170,7 +170,7 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "ab6ae40f42348a6f3dc85f637096a0087865c952104f40658003ede74ef2acc6",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "c402b0220188836495d0ebcc9d5eb9cb9c3592d88e773c7f3d575d4bbf21067a",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2"
     },
     "image_allowlist_origins": {

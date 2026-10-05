@@ -15,6 +15,20 @@
       "defaultJobs": 4,
       "maxJobs": 8,
       "note": "Placeholder host."
+    },
+    {
+      "name": "GPU-HOST-1",
+      "aliases": ["capture"],
+      "address": "capture-host.example",
+      "user": "builduser",
+      "identity": "~/.ssh/id_example",
+      "base": "D:\\build-work",
+      "slots": 1,
+      "defaultJobs": 4,
+      "maxJobs": 4,
+      "gpuHost": "GPU-HOST-1",
+      "maxRunSeconds": 1800,
+      "note": "Optional spare CPU slot on the example GPU host; enable only after measuring memory and queue benefit. Original-game and capture jobs exclude builds through the existing shared lease."
     }
   ]
 }

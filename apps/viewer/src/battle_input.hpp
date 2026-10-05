@@ -1,6 +1,8 @@
 #pragma once
 
 #include "live_session_view.hpp"
+#include "battle_cursor.hpp"
+#include "eawr/presentation/ui/cursors.hpp"
 #include "space_environment.hpp"
 #include "space_populate.hpp"
 #include "world_ui_view.hpp"
@@ -8,6 +10,7 @@
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/production.hpp"
+#include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/overview_ui.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
@@ -57,6 +60,10 @@ public:
     // selection, replays due --eawr-live-input gestures through the engine's input queue and
     // redraws the overlay.
     void frame(LiveSessionView& live, const SpacePopulation& population, SpaceEnvironment& space);
+    // CU-10: after the live preview evaluated its placement predicate.
+    void cursor_frame(const LiveSessionView& live, const SpaceEnvironment& space, double delta, bool capture);
+    // Records pointer position ahead of GUI ownership without issuing a world action.
+    void observe_pointer(const godot::Ref<godot::InputEvent>& event);
     // Focus loss or the pointer leaving: a drag in progress ends without selecting.
     void cancel() noexcept;
     // The report's "battle_input" member, followed by ",\n".
@@ -65,15 +72,20 @@ public:
     // attack acknowledgements, docs/behaviour/battle-audio.md BA-20 to BA-23), oldest first. The
     // battle audio takes them after each frame.
     struct Acknowledgement final {
-        enum class Kind : std::uint8_t { select, move, attack };
+        enum class Kind : std::uint8_t { select, move, attack, stop, guard };
         Kind kind{Kind::select};
         std::vector<sim::EntityId> units;  // the selection it speaks for
+        sim::EntityId target{sim::invalid_entity_id};
+        std::uint32_t hardpoint{sim::tactical::attack_hull};
     };
     [[nodiscard]] std::vector<Acknowledgement> take_acknowledgements();
 
     // #425: the selection as the command bar's unit cards (unit_cards.hpp), rebuilt every frame and
     // after input changes the selection. `slots` is the HUD shell's card slot count (24 in FoC).
     void set_card_slots(std::size_t slots) noexcept { card_slots_ = slots; }
+    void set_world_group_fonts(godot::Ref<godot::Font> icon, godot::Ref<godot::Font> bracket) {
+        world_ui_->set_group_fonts(std::move(icon), std::move(bracket));
+    }
     [[nodiscard]] std::span<const ui::CardUnit> card_units() const noexcept { return card_units_; }
     [[nodiscard]] const ui::CardLayout& card_layout() const noexcept { return card_layout_; }
     // A left release on the card in `slot` (FoC's Component_Logic_Tactical_Select): Shift deselects.
@@ -83,7 +95,9 @@ public:
     // player whose type has a build menu for its faction switches the card slots to that station's
     // build buttons (no cards, no ability buttons). A left release on an enabled button buys its type
     // at the station; a disabled one does nothing.
-    [[nodiscard]] std::optional<sim::EntityId> production_station() const noexcept { return production_station_; }
+    [[nodiscard]] std::optional<sim::EntityId> production_station() const noexcept {
+        return pad_palette_.entity() ? pad_palette_.entity() : production_station_;
+    }
     [[nodiscard]] std::span<const ui::BuildButton> build_buttons() const noexcept { return build_buttons_; }
     bool build_click(std::size_t slot, LiveSessionView& live);
     // WR-11/15: a pool press begins placement; release drops on Z=0 and always ends placement.
@@ -157,7 +171,8 @@ private:
     void note(std::string text);
     // #424: the unit or craft under the pointer, unless the pointer is over a squadron icon.
     void update_hover();
-    void acknowledge(Acknowledgement::Kind kind);
+    void acknowledge(Acknowledgement::Kind kind, sim::EntityId target = sim::invalid_entity_id,
+                     std::uint32_t hardpoint = sim::tactical::attack_hull);
     void refresh_cards(const LiveSessionView& live);
     void follow(const LiveSessionView& live, SpaceEnvironment& space);
 
@@ -167,6 +182,7 @@ private:
     std::array<float, 2> viewport_{};
     std::vector<ui::BattleUnit> units_;
     ui::Selection selection_;
+    std::uint64_t replacement_tick_{};
     std::size_t card_slots_{};
     std::vector<ui::CardUnit> card_units_;
     const units::UnitTables* card_tables_{};
@@ -177,6 +193,7 @@ private:
     ui::CardLayout card_layout_;
     std::uint64_t card_clicks_{};
     std::optional<sim::EntityId> production_station_;
+    ui::PadPalette pad_palette_;
     std::vector<ui::BuildButton> build_buttons_;
     std::uint64_t build_clicks_{};
     std::uint64_t buys_{};
@@ -211,16 +228,31 @@ private:
     std::function<std::optional<std::array<float, 2>>(std::size_t)> ability_point_;
     std::optional<Drag> left_;
     std::optional<std::array<float, 2>> right_start_;
+    bool right_double_click_{};
     // #424: the pointer, what it is over and the world UI drawn from it.
     std::optional<std::array<float, 2>> pointer_;
+    std::optional<ui::Vec3f> hover_point_;
     std::optional<std::size_t> hovered_;
     std::optional<sim::EntityId> hovered_icon_;
+    bool hovered_hostile_{};
+    bool hovered_selectable_{};
+    bool own_selection_{};
+    bool movable_selection_{};
+    BattleCursor cursor_;
+    ui::CursorHistory cursor_history_;
+    std::string cursor_hover_;
     const LiveSessionView* live_{};
     // #665 (WSU-10 to WSU-12): each type's pick volume from the unit tables, loaded once: its
     // collision mesh and its Mouse_Collide_Override_Sphere_Radius.
     struct PickShape {
         ui::PickMesh mesh;
         float sphere_radius{};
+        bool movable{};
+        bool selectable{};
+        bool mouse_sensitive{};
+        bool locomotion{};
+        bool decoration{};
+        bool community_property{};
     };
     std::map<sim::tactical::TypeId, PickShape> pick_shapes_;
     bool pick_shapes_loaded_{};

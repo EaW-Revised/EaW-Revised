@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "asset_internal.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -27,14 +28,14 @@ ObjectTypeCatalog object_type_catalog(const data::Catalog& catalog) {
     const data::tag_trace::Unrecorded unrecorded;
     ObjectTypeCatalog result;
     for (const auto& definition : catalog.definitions()) {
-        if (!definition.winner || definition.id.empty() || definition.category != data::Category::game_object) continue;
+        if (!definition.namespace_winner || definition.id.empty() || definition.category != data::Category::game_object) continue;
         ObjectTypeRef entry;
         entry.logical_name = definition.id;
         entry.source = definition.root.source;
         // The model chain is read from the resolved effective object so an
         // inherited model is found.  A failed resolution leaves every tag
         // absent rather than substituting the definition's own partial view.
-        if (auto effective = catalog.resolve(definition.id)) {
+        if (auto effective = catalog.resolve(definition.id, data::Category::game_object)) {
             const auto declared = [&](const std::string_view tag) -> std::optional<std::string> {
                 const auto* value = effective.value().value(tag);
                 if (value == nullptr || value->value.raw_text.empty()) return std::nullopt;
@@ -85,6 +86,7 @@ std::string_view to_string(const MapIssue issue) noexcept {
 }
 
 core::Result<Map> load_map(const vfs::Vfs& filesystem, const std::string_view path, const ObjectTypeCatalog& catalog) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::map);
     auto record = filesystem.stat(path); if (!record) return core::Result<Map>::failure(record.error());
     // Reject an oversize record from its stat size, before open() allocates.
     if (record.value().size > detail::max_file_size) {

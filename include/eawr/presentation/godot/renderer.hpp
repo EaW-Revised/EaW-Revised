@@ -6,6 +6,7 @@
 #include "eawr/presentation/lighting/scene_bloom.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -22,6 +23,23 @@ class RID;
 
 namespace eawr::presentation::godot_backend {
 
+// Mode/setup-owned immutable shader acceptance. Exact backend source is the key;
+// materials, bindings, textures and all mutable renderer state remain local.
+// A full cache falls back to ordinary resource ownership, without eviction.
+class GodotShaderCache final {
+public:
+    static constexpr std::size_t entry_limit = 64;
+    static constexpr std::size_t source_byte_limit = 1024 * 1024;
+    struct Stats final { std::size_t entries{}, source_bytes{}; };
+    GodotShaderCache();
+    ~GodotShaderCache();
+    [[nodiscard]] Stats stats() const noexcept;
+private:
+    friend class GodotRenderer;
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 namespace fog_diagnostic_codes {
 // A declared fog consumer is not a supported fog-stub-v1 material.
 inline constexpr std::string_view unsupported_consumer = "EAWR-FOG-0006";
@@ -32,7 +50,7 @@ inline constexpr std::string_view unsupported_consumer = "EAWR-FOG-0006";
 // the host node's viewport/scenario; one node bootstraps any number of entities.
 class GodotRenderer final : public Renderer {
 public:
-    explicit GodotRenderer(godot::Node3D& host);
+    explicit GodotRenderer(godot::Node3D& host, std::shared_ptr<GodotShaderCache> shaders = {});
     ~GodotRenderer() override;
 
     GodotRenderer(GodotRenderer&&) noexcept;
@@ -118,6 +136,10 @@ public:
     // must clear their poses, or the pose store grows with every posed ID.
     // Clearing an entity without a pose does nothing.
     void clear_skin_pose(sim::EntityId entity_id);
+    // FW-26: freeze an independent instance's palette and RGB light state.
+    // Geometry and authored team colour remain on the retained mesh asset.
+    void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
+    void forget_instance_pose(sim::EntityId entity_id);
     // Presentation scale for an individual billboard surface. Environment
     // glows may enlarge their authored quad to clear the opaque planet rim.
     // World-space direction toward light 0 for a mode-6 sunlight glow bone.
@@ -130,6 +152,8 @@ public:
     // changes nothing.
     [[nodiscard]] core::Result<void> set_material_scalar(sim::AssetId asset_id, std::string_view binding,
                                                          float value);
+    // Presentation ordering for backdrop transparents, including any later fog variant.
+    [[nodiscard]] core::Result<void> set_material_priority(sim::AssetId asset_id, std::int32_t priority);
     // Presentation-only: the entity's own light scale RGB (FoC's per-object
     // model light scale (the debug build), e.g. the shield colour flash), multiplied into the
     // lit diffuse of the legacy adapters through their per-instance
@@ -137,12 +161,14 @@ public:
     // when its instance is (re)created; (1, 1, 1) ends it. Surfaces whose
     // shader has no such uniform are unchanged.
     void set_light_scale(sim::EntityId entity_id, const std::array<float, 3>& rgb);
+    // WBP-50: stored RGB ownership colour, consumed only inside each shader's
+    // colourise mask. Shared materials and noncolourising surfaces stay intact.
+    // Holds across absence/recreation; unchanged values send no renderer update.
+    void set_unit_colorization(sim::EntityId entity_id, const std::array<float, 3>& rgb);
     // Presentation-only: the entity's own opacity (#535, docs/behaviour/space-fog-presentation.md
     // FW-16 to FW-18: the local player's fog fading a unit in or out). It holds while the entity
     // is absent and applies when its instance is (re)created; 1 (fully opaque) ends it. Applied as
-    // the instance shader parameter `eawr_unit_opacity`, which the ship hull adapters dither with
-    // (surfaces whose shader has no such uniform are unchanged, as with the light scale), a
-    // documented substitution for FoC's shader-level alpha blend.
+    // smooth geometry transparency, shared by hull and attachment materials (FW-19).
     void set_unit_opacity(sim::EntityId entity_id, float alpha);
 
     struct SkinBindingEvidence final {

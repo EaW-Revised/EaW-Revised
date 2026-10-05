@@ -1,9 +1,11 @@
-# Fixed-force FoC recordings (P2-06)
+<a id="fixed-force-foc-recordings-p2-06"></a>
+
+# Fixed-force FoC recordings
 
 S-10..S-19 use the SK-22 M2 fleet on the pinned Coruscant map. Each JSON is the complete
 staging input: units, exact positions and facing, tick orders, field tolerances and content
 hashes. The research recorder is `tools/behaviour_recorder` in
-`Thom-Ernst/EmpireAtWar-MultiThreaded`, branch `Thom-Ernst/p2-06-recorder`, based on EAWR-74.
+`Thom-Ernst/EmpireAtWar-MultiThreaded`, branch `Thom-Ernst/p2-06-recorder`, based on the projectile, damage and shield work.
 Original traces, raw samples, game logs, screenshots and provenance stay in its ignored
 `out/p2-06-final/` and `out/p2-06-replacement/`; they are neither redistributed nor launched by CI.
 
@@ -49,36 +51,38 @@ comparisons. Compare against the exact frozen scenario bytes, not a subsequently
 | S-17 TURBO | Same initial corvette and destination as S-10; activate TURBO at 60 | Compare travel against S-10; ability effect is observed through movement, not an internal activation flag. |
 | S-18 attempted engine loss | Nebulon-B; move east at 30, damage `HP_Nebulon_Engines` by 400 at 180 | HD-02 says hull stays 5400; HD-11 says engine loss multiplies maximum speed by 0.4. Observe actual displacement before and after; the format does not sample hardpoint health. |
 | S-19 weapon-loss replacement | Same duel as S-15, but 4000 damage at 500; read-only DEFEND probes | Overcome the shields and stop the selected laser; preserve hull and let the remaining weapons finish the duel. |
-| S-20 clipped destination | Two Corellians; one sent onto a Lua-spawned mining pad, one onto a held Corellian, at 30 (EAWR-266) | Destination search (space-movement AV-19); three runs bit for bit. The spawned pad is no obstacle (AV-U9); the held-ship move clips but finishes on a retry (AV-U10). |
-| S-21 clipped map objects | Two Corellians sent onto the centres of the TED-placed gravity well station and a mining pad at 30 (EAWR-266) | Stops at the AV-19 ring points within 0.015 units; one run. |
+| S-20 clipped destination | Two Corellians; one sent onto a Lua-spawned mining pad, one onto a held Corellian, at 30 | Destination search (space-movement AV-19); three runs bit for bit. The spawned pad is no obstacle (AV-U9); the held-ship move clips but finishes on a retry (AV-U10). |
+| S-21 clipped map objects | Two Corellians sent onto the centres of the TED-placed gravity well station and a mining pad at 30 | Stops at the AV-19 ring points within 0.015 units; one run. |
 | S-22 Tartan dead astern, idle | Enemy Nebulon-B 800 units at 180 degrees; no order | Stationary facing, uncovered rear arc; no shots. |
 | S-23 Tartan aft port quarter, idle | Enemy Nebulon-B 800 units at about 166 degrees; no order | Stationary facing; two port-side hardpoints fire. |
 | S-24 Nebulon-B dead astern, idle | Enemy Tartan 800 units at 180 degrees; no order | Stationary facing, uncovered rear arc; no shots. |
 | S-25 Nebulon-B aft port quarter, idle | Enemy Tartan 800 units at about 162 degrees; no order | Stationary facing; two port-side hardpoints fire. |
 | S-26 Tartan dead astern, ordered | S-22 with `Attack_Target` at tick 30 | Turn in place through the rear arc; all five hardpoints fire. |
 | S-27 Tartan aft port quarter, ordered | S-23 with `Attack_Target` at tick 30 | Turn in place toward the quarter; all five hardpoints fire. |
-| S-28 squadrons vs capital (EAWR-75) | Acclamator 1200 units from a Corellian corvette; observe 7 TIE fighter, 4 bomber and 10 reserve fighter slots | Launch timing, launch point, attack runs, craft losses and the reserve launch; recorded 2026-09-27 (batch `out/p2-75/` of the recorder checkout). |
-| S-29 attack out of range (EAWR-452) | Two Tartans ordered at 30 to attack a Corellian corvette 3000 units away | Planned recording: where they stop (space-orders OR-05, 720 units short) and the kill. |
-| S-30 guard (EAWR-452) | A Tartan guards an Acclamator from 30; the Acclamator moves 3100 units at 60 | Planned recording: the follow distance and when it starts (OR-14, 675 short, within a 10-frame check). |
-| S-31 attack-move (EAWR-452) | A Tartan attack-moves at 30 past a Corellian corvette 150 units off its route | Planned recording: fire while moving, no stop (OR-11). |
-| S-32 Acclamator port beam, idle (EAWR-516) | Enemy Nebulon-B 800 units at 90 degrees; no order | Stationary facing; only the port lasers `FL` and `BL` fire, the bow missile and torpedo launchers hold. |
-| S-33 Acclamator port bow, idle (EAWR-516) | Enemy Nebulon-B 800 units at 45 degrees; no order | Stationary facing; the port lasers and both launchers (`FC`, `BC`) fire. |
-| S-43 to S-50 time to kill (EAWR-536) | A shooter faces +X from `(0,-1500,0)`; the target, broadside (facing +Y) 700 to 1100 units ahead, holds fire and position; `Attack_Target` at tick 30 | When the target's shield empties, each of its hardpoints and its hull die, and how many shots hit; see [Time to kill](#time-to-kill-536). |
-| S-51 ion drain (EAWR-561) | An MC80 (EAWR-537); its four turbolaser hardpoints take 4000 scripted damage each at ticks 5 to 8; it attacks a Tartan holding fire 1600 units away at 30 | Recorded 2026-09-29 (two runs, bit for bit alike): the Tartan's shields fall under the forward ion cannons alone and then stay down while the overflow drains its energy; its hull never drops (space-damage EN-07, DG-25, DP-06). `test_ion_drain_trace.py` checks the outcome. |
-| S-52 ion shot (EAWR-561) | A Y-wing squadron attacks at 30 a Tartan holding fire 3200 units away, which moves at 30 to a point past the squadron; at 150 the squadron fires its ION_CANNON_SHOT at the Tartan | Recorded 2026-09-29 (one run): the first hit takes exactly 50 off the Tartan's shield, and the stunned Tartan keeps its cruise speed (space-abilities AB-61, space-damage IS-01, IS-05, G-D9). `test_ion_shot_trace.py` checks the outcome. |
+| S-28 squadrons vs capital | Acclamator 1200 units from a Corellian corvette; observe 7 TIE fighter, 4 bomber and 10 reserve fighter slots | Launch timing, launch point, attack runs, craft losses and the reserve launch; recorded 2026-09-27 (batch `out/p2-75/` of the recorder checkout). |
+| S-29 attack out of range | Two Tartans ordered at 30 to attack a Corellian corvette 3000 units away | Planned recording: where they stop (space-orders OR-05, 720 units short) and the kill. |
+| S-30 guard | A Tartan guards an Acclamator from 30; the Acclamator moves 3100 units at 60 | Planned recording: the follow distance and when it starts (OR-14, 675 short, within a 10-frame check). |
+| S-31 attack-move | A Tartan attack-moves at 30 past a Corellian corvette 150 units off its route | Planned recording: fire while moving, no stop (OR-11). |
+| S-32 Acclamator port beam, idle | Enemy Nebulon-B 800 units at 90 degrees; no order | Stationary facing; only the port lasers `FL` and `BL` fire, the bow missile and torpedo launchers hold. |
+| S-33 Acclamator port bow, idle | Enemy Nebulon-B 800 units at 45 degrees; no order | Stationary facing; the port lasers and both launchers (`FC`, `BC`) fire. |
+| S-43 to S-50 time to kill (legacy EAWR-536) | A shooter faces +X from `(0,-1500,0)`; the target, broadside (facing +Y) 700 to 1100 units ahead, holds fire and position; `Attack_Target` at tick 30 | When the target's shield empties, each of its hardpoints and its hull die, and how many shots hit; see [Time to kill](#time-to-kill-536). |
+| S-51 ion drain (legacy EAWR-561) | An MC80 (legacy EAWR-537); its four turbolaser hardpoints take 4000 scripted damage each at ticks 5 to 8; it attacks a Tartan holding fire 1600 units away at 30 | Recorded 2026-09-29 (two runs, bit for bit alike): the Tartan's shields fall under the forward ion cannons alone and then stay down while the overflow drains its energy; its hull never drops (space-damage EN-07, DG-25, DP-06). `test_ion_drain_trace.py` checks the outcome. |
+| S-52 ion shot (legacy EAWR-561) | A Y-wing squadron attacks at 30 a Tartan holding fire 3200 units away, which moves at 30 to a point past the squadron; at 150 the squadron fires its ION_CANNON_SHOT at the Tartan | Recorded 2026-09-29 (one run): the first hit takes exactly 50 off the Tartan's shield, and the stunned Tartan keeps its cruise speed (space-abilities AB-61, space-damage IS-01, IS-05, G-D9). `test_ion_shot_trace.py` checks the outcome. |
 
 No staging command toggles Nebulon-B `DEFEND`. A separate 550-tick logging audit of S-19's
 opening sequence found **autofire true** at ticks 1, 499, 501 and 530, active false at those
 samples, and ready true at 1/499 then false at 501/530. Its observable CSV rows exactly match
 S-19 over ticks 0..549. This is one auxiliary audit, not three repeated ability-flag traces;
-the three full reference traces retain the visible-state fields only. The recorder's game
+The three full reference traces retain the visible-state fields only. The recorder's game
 debug-output function is required: ordinary `print` and script messages produced no values
 under `AILOGSTYLE=none`. Do not infer the human M2 autofire state from these nonhuman players.
 
 These focused cases do not exercise the skirmish victory controller: ship death is covered by
 S-15/S-19, while the quick-loaded map has no skirmish win condition.
 
-## Rear arc and attack order cases (EAWR-361)
+<a id="rear-arc-and-attack-order-cases-361"></a>
+
+## Rear arc and attack order cases
 
 S-22 to S-27 are 1,800-frame, one-run `record_only` captures at 30 frames/s. Each JSON
 contains the exact archive pins, unit placement, order, hardpoint labels, and comparison
@@ -114,7 +118,7 @@ full-length final batch used the fixture bytes as first committed, which matched
 scenario snapshots by SHA-256. All final runs have 1,800 samples, zero frame gaps and zero recorder
 errors.
 
-The fixtures have since gained `fire_windows` (EAWR-392), the per-hardpoint shot-count oracle of
+The fixtures have since gained `fire_windows` (legacy EAWR-392), the per-hardpoint shot-count oracle of
 [traces.md](../../docs/traces.md#fire-windows): silent windows where retail never fires,
 an onset window and sustained 300-tick windows where it does. Without that key each file
 equals its recorded snapshot, so staging is unchanged. To compare the saved runs with the
@@ -139,7 +143,9 @@ without translating, and fires all five hardpoints. The runner does not apply `h
 are checked except those a death can break (a window with a minimum that ends after the
 first death); the test prints the ones that then fail.
 
-## Acclamator launcher arcs (EAWR-516)
+<a id="acclamator-launcher-arcs-516"></a>
+
+## Acclamator launcher arcs
 
 S-32 and S-33 are 1,200-frame, one-run `record_only` captures staged like S-22 and S-23: an
 Acclamator at `(0,-1500,0)` facing +X, an invulnerable Nebulon-B with `hold_fire` 800 units
@@ -155,7 +161,7 @@ pwsh <recorder>/tools/behaviour_recorder/Invoke-BehaviourRecording.ps1 `
   -RigQueueScript "$remake/tools/rig/Invoke-RigQueue.ps1"
 ```
 
-They were recorded under the provisional IDs S-29 and S-30 before EAWR-452 took those numbers; the batch is `out/rec-516/behaviour-recorder-20260928-133256-fb038c/` (private evidence): both
+They were recorded under the provisional IDs S-29 and S-30 before the approach, attack-move and guard orders took those numbers; the batch is `out/rec-516/behaviour-recorder-20260928-133256-fb038c/` (private evidence): both
 runs have 1,200 samples and no recorder errors. The fire windows were added after recording;
 re-converting the raw samples against the committed bytes gives the saved CSVs byte for byte,
 and both pass `compare_traces.py --scenario`, fire windows included. The measured behaviour
@@ -163,7 +169,9 @@ and the remake comparison are in the
 [weapon fire note](../../docs/behaviour/space-weapon-fire.md#acclamator-launcher-arcs-s-32-and-s-33-516);
 `fidelity_attack_turn_scenario_traces` runs both cases.
 
-## Level-1 station arcs (EAWR-516 follow-up)
+<a id="level-1-station-arcs-516-follow-up"></a>
+
+## Level-1 station arcs
 
 S-34 to S-42 are 1,200-frame, one-run `record_only` captures staged like S-32 and S-33: a
 level-1 station at `(6500,-2075,0)` facing +X (more than 2900 units from every one of the
@@ -189,11 +197,11 @@ The batch is `out/rec-516-stations/behaviour-recorder-20260928-204744-2dd7ba/` (
 all nine runs have 1,200 samples and no recorder errors. The fire windows were added after
 recording from the real per-hardpoint shot counts; eight of nine cases match the remake exactly.
 S-40 (bearing -30) matches only while the target is intact: retail's target is invulnerable, but
-the scenario runner does not apply that flag (EAWR-575). The station shoots away the target's nearest
+the scenario runner does not apply that flag (legacy EAWR-575). The station shoots away the target's nearest
 hardpoint, and `hp_empire_station_one_02` then aims at the next one, just inside its cone, and
 fires from tick 812. `EXPECTED_FAIL` in `test_attack_turn_traces.py` takes that hardpoint's fire
 windows out of the check, and requires it to stay silent until the target first loses hull. It
-fails once the hardpoint stops firing, so the entry is removed with EAWR-575. The
+fails once the hardpoint stops firing, so the entry is removed with the invulnerable and hold-fire staging flags. The
 measured behaviour, the full per-hardpoint table and the owner's answer are in the
 [weapon fire note](../../docs/behaviour/space-weapon-fire.md#level-1-station-arcs-s-34-to-s-42-516-follow-up);
 `fidelity_attack_turn_scenario_traces` runs all nine cases.
@@ -225,7 +233,7 @@ matter.
 | S-51 | 39,600 | Yes for the ion drain. The scripted hits take the MC80's 2000 shields and part of its hull (12,750 to 8,184 by tick 9), and no turbolaser hits the Tartan afterwards: its hull stays 750 throughout. The two forward ion cannons fire 70 bolts each in bursts of five, and only about a dozen of the 140 land. Every bolt that lands alone takes exactly 80 off the shield: the hardpoint's 40 (DG-25) at the corvette multiplier of 2. The first lands at tick 59. The shield (800) is empty at 713; afterwards the 10-point refresh every 90 ticks is taken by the next hits, so it never climbs past 20.25, and it ends at 0.25. Neither ship moves. |
 | S-52 | 54,000 | Yes for the ion shot's first hit and the stun's effect on a move under way. The Tartan reaches its 4.2 units per tick cruise by tick 100 and keeps it, tick for tick, to the end, through the blue stun effect of about three seconds. The first hit lands at 401 and takes exactly 50 off its 800 shield; the Y-wings' fire then takes it to 684 by 412 and the hull from 750 to 599.98, and the 10-point refresh every 90 ticks brings the shield back to 754 by the end. The recorder fired the shot by Lua on the squadron and on each Y-wing, after it turned the shot's autofire on at 15; the remake scenario has only the targeted shot. The Y-wing container records 150 hull, which the squadron's XML does not author (docs/traces.md). |
 
-S-28 (2026-09-27, three runs, recorded as S-20 before EAWR-266 took that number and numbered S-22 until EAWR-392 took that; the private
+S-28 (2026-09-27, three runs, recorded as S-20 before the blocked-destination clipping work took that number and numbered S-22 until the rear-arc and attack-order recordings took that; the private
 trace headers are restamped to the S-28 bytes): the fighters launch at tick 27, the bombers at
 177 and the first reserve fighter squadron at 597 (the fighters were all lost by 417); every craft
 starts at one point with one facing. The corvette's shield empties at 818 and it dies at 883 in
@@ -266,7 +274,9 @@ multi-selection/group order once the recorder can drive that input; do not infer
 slots from independent `Move_To` calls. S-18 records the response to a shield-absorbed targeted hit, not verified engine loss or
 a direct per-hardpoint-health oracle.
 
-## Time to kill (EAWR-536)
+<a id="time-to-kill-536"></a>
+
+## Time to kill
 
 S-43 to S-50 answer the owner's report that hardpoints, and maybe every unit, died about twice
 as fast as in FoC. Each is one-sided: the target holds fire (`Prevent_All_Fire`) and position
@@ -276,16 +286,23 @@ X-wing, S-48 Y-wing and S-49 TIE bomber squadrons against a Tartan or Nebulon-B,
 against the level-1 Rebel station. The Acclamator launches its squadrons in S-45 and S-50, in
 both games.
 
+The [current per-weapon table](../../docs/behaviour/combat-time-to-kill.md) separates firing
+entities, including launched fighters and bombers, and reports contacts with the target's
+shield up or down. It includes native hardpoint shots from both matched archived batches
+and native projectile contacts from seed 4242. Individual native hardpoint hits and
+squadron shot counts remain unknown. Frames with damage and individual projectile
+contacts are different quantities.
+
 They were recorded on 2026-09-28 with the recorder of the Reproduce section, extended in a
 private copy: it also samples every hardpoint's health and shots on each labelled unit, stages
 `attack` as `Attack_Target`, and logs each damage call on a labelled unit with the damage
 source's type and the collided mesh's name. Two batches, seeds 12345 and 4242, one run each
-(`out/rec-536/seed-*/` of the EAWR-536 worktree, private). A squadron shooter cannot be labelled by
+(`out/rec-536/seed-*/` of time-to-kill worktree, private). A squadron shooter cannot be labelled by
 the recorder (its spawn returns the craft, not the squadron type), so S-47 to S-49 record the
 target only. `sim_headless --scenario ... --combat-out` writes the remake's side;
 `fidelity_ttk_scenario_traces` prints it next to the recorded ticks and holds S-46's and S-45's
 shield and hull within 15 % of them. For S-45, S-49 and S-50 it also prints the target's hull and
-hardpoints every 150 ticks and holds the hull's direct loss at zero, as recorded (EAWR-669).
+hardpoints every 150 ticks and holds the hull's direct loss at zero, as recorded.
 
 Recorded ticks (seed 12345 / seed 4242; `-`: not within the recording):
 
@@ -309,7 +326,7 @@ meshes, and the shot's scatter is twice the XML distance in space; the remake te
 around the whole model, which caught shots that pass the real hull (space-damage DG-24,
 DG-36 to DG-38).
 
-The remake before and after EAWR-536 (one worker; the same with 8), against the recorded range:
+The remake before and after the time-to-kill measurement and collision work (one worker; the same with 8), against the recorded range:
 
 | Case | Shield empty: before / after / FoC | Hull destroyed: before / after / FoC | Hits: before / after / FoC frames with damage |
 |---|---|---|---|
@@ -334,10 +351,12 @@ hardpoints. The Acclamator's own guns aim at the nearest live hardpoint in both 
 ranks as unlisted, they all tie, and the one nearest the attacker wins (space-weapon-fire G-W3). From the shooter's side the near hardpoints shadow the far ones, so
 in FoC the far-side BR and FR fall to proton torpedoes from the Acclamator's TIE bombers (all
 recorded hits on their collision meshes are torpedoes). The remake's bombers reach them later
-(BR 1537, FR 2313). EAWR-536 put the remaining S-45 gap down to the bombers' attack runs. EAWR-669 found
-the actual cause, below.
+(BR 1537, FR 2313). The time-to-kill investigation put the remaining S-45 gap down to the bombers’ attack runs.
+The hardpoint-before-hull damage investigation found the actual cause, below.
 
-### Hull and hardpoints over time (EAWR-669)
+<a id="hull-and-hardpoints-over-time-669"></a>
+
+### Hull and hardpoints over time
 
 The owner saw an Acclamator die through its hull with half its hardpoints standing. The recordings
 above sample the hull and every hardpoint on every tick. In S-45 (both seeds), S-49 and S-50,
@@ -349,7 +368,7 @@ shot aimed at a hardpoint by that hardpoint's `Collision_Mesh`, whichever mesh i
 (space-damage DG-39). The remake had routed it by the mesh met, so scattered shots that met the
 hull between the hardpoints drained the hull while the hardpoints they aimed at stood.
 
-The remake before and after EAWR-669, S-45 (one worker):
+The remake before and after the hardpoint-before-hull damage correction, S-45 (one worker):
 
 | | Hull destroyed | Hardpoints destroyed | Direct hull loss |
 |---|---|---|---|
@@ -362,9 +381,11 @@ none after (its hull falls at 2524 either way, FoC 2326); S-50's station hull st
 FoC. In the seed-6 burn battle (`foc_burn_battle`, which prints every death of a unit with
 destroyable hardpoints) the Nebulon-B died through its hull with 4 of its 5 hardpoints standing
 before, the owner's report; now it dies with its last hardpoint, 1099 of its hull left. S-45's hull is now held to the recorded range. Which hardpoint falls first still differs
-(the bombers' runs above); that is EAWR-536's balance work.
+(the bombers' runs above); that is the remaining time-to-kill balance work.
 
-## Viewer duel fixture (EAWR-80)
+<a id="viewer-duel-fixture-80"></a>
+
+## Viewer duel fixture
 
 `fixtures/S-15-duel-damage.eawr-replay` is the S-15 duel as the remake stages it, for the
 viewer's live battle (`--eawr-live-session replay --eawr-live-replay <file> --eawr-live-reveal on`,

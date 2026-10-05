@@ -1,6 +1,6 @@
 # Offline inventory contracts
 
-P0-08 and P0-09 share `tools/inventory/corpus.py`. It is a bounded, read-only,
+The Lua call inventory and XML tag inventory share `tools/inventory/corpus.py`. It is a bounded, read-only,
 offline corpus reader, not a runtime asset API. Runtime game/mod I/O remains exclusively
 behind the C++ VFS. The reader accepts the profiles `eaw`, `foc`, and `remake`, extensions
 including the leading dot, and modes `raw` or `effective`.

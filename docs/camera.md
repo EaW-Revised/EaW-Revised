@@ -19,7 +19,9 @@ Location_Follows_Terrain and a land heightfield, the map camera target snaps ont
 at activation and reset, eases with the two smooth times, and the eye stays
 Min_Height_Above_Terrain above the ground (project policy, not measured).
 
-## Motion policy (EAWR-30)
+<a id="motion-policy-30"></a>
+
+## Motion policy
 
 The bounded tactical controller keeps a target zoom fraction and a live distance.
 Wheel and PageUp/PageDown detents change the target fraction by
@@ -56,7 +58,7 @@ table sets 0.5 after the owner's feel check (2026-09-25: land panning was twice 
 fast); the space table leaves it out, which is 1. The Alt drag is a displacement and
 keeps its screen-matched scale. The XML values themselves are not edited.
 
-The map cameras follow the FoC middle-button law (PI-9, runtime check RO-7 in EAWR-295).
+The map cameras follow the FoC middle-button law (PI-9, runtime check RO-7 for rotate-drag fidelity).
 Pointer motion reaches the camera in mouse units: the share of the screen moved (x of
 the width, y of the height, screen-up positive) times 100, so a drag turns the same at
 every resolution.
@@ -65,8 +67,8 @@ every resolution.
   turns 150 degrees per full-width drag. The committed tables keep the owner's reversed
   direction. Vertical motion tilts by `Pitch_Per_Mouse_Unit` per unit: FoC's -1.5 in
   space (a full-height drag is 150 degrees, clamped to the XML `Pitch_Min`..`Pitch_Max`,
-  -10..85; the Coruscant configs override the minimum to -60, EAWR-390) and 0 on land, so FoC
-  land never tilts. Project deviation (owner, EAWR-337/#348):
+  -10..85; the Coruscant configs override the minimum to -60 under the owner camera overrides) and 0 on land, so FoC
+  land never tilts. Project deviation (owner camera tilt and zoom decision):
   the land map camera tilts at space's -1.5 per unit when the land rate is 0, clamped to
   5..85 (the space range with its minimum raised so the eye stays above the terrain).
 - A middle drag without Ctrl translates at four times the screen share: each unit moves
@@ -95,17 +97,17 @@ markers and tactical defaults; the original executable's opening target/yaw
 rule has not been recovered. A fixed `--eawr-space-camera` still takes priority.
 
 The interactive space map camera configs open further out than that. Project
-deviation (owner, EAWR-337/#348): `coruscant-space-map-camera.xml` and
+deviation (owner camera tilt and zoom decision): `coruscant-space-map-camera.xml` and
 `coruscant-live-session-camera.xml` both start at distance 1200 (zoom 0.588235 of
 200..1900) instead of FoC's `Distance_Default` 1000 (zoom 0.470588), and their
 middle-click reset returns there. See
 [tactical camera input](behaviour/tactical-camera-input.md#project-deviation-owner-337348).
 
-Project deviation (owner, EAWR-390): both configs also zoom in to distance 100 instead of FoC's
+Project deviation (owner camera zoom decision): both configs also zoom in to distance 100 instead of FoC's
 `Space_Mode` `Distance_Min` 200, through a `constant_overrides` block that sets
 `Distance_Min` 100 and `Tactical_Min_Scroll_Speed` 823.529412. The second value keeps FoC's pan
 speed line (1000 at 200, 4000 at 1900) and extends it to 823.5 at 100; without it every distance
-would pan faster. The same block sets `Pitch_Min` -60 instead of FoC's -10 (owner, EAWR-390: "Allow
+would pan faster. The same block sets `Pitch_Min` -60 instead of FoC's -10 (owner camera zoom decision: "Allow
 about -60°"), so a Ctrl + middle drag can look up at the battle from well under the plane;
 `Pitch_Max` stays 85. Their opening zoom is 0.611111 (1200 of 100..1900). The maximum distance,
 the default pitch (Space_Mode has no zoom-linked pitch), `Pitch_Max`, the field of view and

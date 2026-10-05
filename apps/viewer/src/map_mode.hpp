@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/skirmish/start.hpp"
+
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/input_event.hpp>
 
@@ -10,6 +12,9 @@
 #include <string>
 
 namespace eawr::presentation::godot_backend {
+
+struct BattleContent;
+class GodotShaderCache;
 
 // A self-contained viewer mode that renders one TED map's terrain and skydome,
 // and with `--eawr-populate` also the map's static placements (P1-11). It owns
@@ -81,6 +86,11 @@ public:
         // --eawr-camera-zoom with --eawr-map-camera-config: replaces the
         // config's initial (and reset) zoom. NaN marks a malformed argument.
         std::optional<float> camera_zoom;
+        // R-SETUP-04: the UI enters the same live skirmish preparation as CLI options.
+        std::optional<skirmish::FixtureOptions> setup;
+        // Reuse the setup screen's installed-content snapshot through return.
+        std::shared_ptr<const BattleContent> content;
+        std::shared_ptr<GodotShaderCache> shaders;
     };
 
     explicit MapMode(Options options);
@@ -100,6 +110,7 @@ public:
     // The window's close request: a live space view writes its report before the engine quits.
     void close_requested();
     void input(const godot::Ref<godot::InputEvent>& event);
+    void observe_pointer(const godot::Ref<godot::InputEvent>& event);
     void focus(bool focused);
     void pointer_left();
     void viewport_changed(float width, float height);

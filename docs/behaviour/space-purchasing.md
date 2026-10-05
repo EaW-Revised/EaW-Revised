@@ -4,9 +4,9 @@
 
 - Product: Star Wars Empire at War: Forces of Corruption, multiplayer-style space skirmish with
   the lobby defaults, the M2 fixture ([m2-skirmish.md](../../plan/phase-2/m2-skirmish.md)).
-  Ticket EAWR-530; owner decisions D2
-  (EAWR-461) and
-  EAWR-522 = A.
+  Scope: station purchasing and reinforcements (legacy EAWR-530); owner decisions D2
+  hyperspace-arrival scope decision (legacy EAWR-461) and
+  station-purchasing scope decision (legacy EAWR-522) = A.
 - Bounded question: how a skirmish player earns credits, what a level-1 space station builds and
   how its queue behaves, how a finished unit enters the battle through hyperspace, and how the FoC
   AI buys.
@@ -15,10 +15,9 @@
   `Data/Config.meg` and `Data/Patch2.meg` winners), **capture** (a rig screenshot of a retail
   skirmish), **owner** (a decision on an issue), **project** (a remake decision) and
   **unverified** (not established; the remake picks the least visible behaviour).
-- Out of scope in M2 (coordinator answer on EAWR-530, 2026-09-28; owner question pending): the
-  station's level-up (`Next_Level_Base`), the station upgrade objects, build pads and mining
-  facilities, and heroes. They are on the fidelity list (PU-G1 to PU-G4). AI buying waits for
-  owner question EAWR-571 (PU-G12).
+- Station levels and upgrades follow the production walk; pads and mining follow the
+  build-pad walk. The [skirmish AI economy](skirmish-ai-economy.md) mounts the purchasing goals
+  and supplies their completed-state inputs. Heroes remain outside this fixture.
 
 ## Interface
 
@@ -28,7 +27,7 @@
   population value, each station type's income stream, the reinforcement facing per player, the
   playable bounds and the prevention radii. Like the other content tables they are passed to the
   session and are neither replay data nor state. A session without them has no economy and hashes
-  exactly as before EAWR-530.
+  exactly as before the station purchasing and reinforcements work were implemented.
 - Commands (replay opcodes 9 to 11, [replay format](../replay-format.md)): buy a type at a
   station, cancel a queue entry, and bring a pooled unit in at a point.
 - State: per player its credits, its two build queues and its reinforcement pool; per arriving
@@ -67,9 +66,9 @@
 | PU-17 | Cancel: the player may cancel any entry of either queue. It is removed and its whole price refunded (not pay-as-you-go). Cancelling the front makes the next entry the front in that frame. | debug build |
 | PU-18 | Every frame, before the fronts build, each entry is checked against PU-11 again (the build limits then allow the entry itself). An entry that fails, for example because its station was destroyed, is removed: a human player gets no refund, an AI player gets the price back. | debug build |
 | PU-19 | A completed unit joins its owner's reinforcement pool (PU-30). A completed upgrade object is created on its station; M2 builds none (PU-20). | debug build |
-| PU-20 | M2 shows the level-1 upgrades and the level-2 station upgrade in the menu but never buys them (project, EAWR-530 scope; PU-G1, PU-G2). | project |
+| PU-20 | M2 shows the level-1 upgrades and the level-2 station upgrade in the menu but never buys them (project, station purchasing and reinforcements scope; PU-G1, PU-G2). | project |
 | PU-21 | Population: a player's space cap is its faction's `Space_Tactical_Unit_Cap` (Rebel 25, Empire 20). A unit brought in from the pool counts its type's `Population_Value`; a squadron's craft share it equally, so a squadron with craft left still counts a fraction. The count rounds any fraction up (`Allow_Reinforcement_Percentage_Normalized` = 0). Buying ignores the cap; bringing a unit in needs room: its value at most the cap minus the count. | debug build; data (`factions.xml`, `gameconstants.xml`) |
-| PU-22 | The starting forces and station-launched squadrons do not count toward the population. | capture (the retail HUD shows 0/25 with the free X-wing squadrons alive); unverified (the debug build registers some starting forces; the EAWR-530 recording checks it) |
+| PU-22 | The starting forces and station-launched squadrons do not count toward the population. | capture (the retail HUD shows 0/25 with the free X-wing squadrons alive); unverified (the debug build registers some starting forces; the station purchasing and reinforcements (legacy EAWR-530) recording checks it) |
 
 ### Hyperspace arrival
 
@@ -88,8 +87,9 @@
 
 ### The AI
 
-Not in EAWR-530: the M2 AI keeps the GC context, where it never buys (PU-G12, owner question EAWR-571).
-These rules record how FoC's AI buys in the skirmish context, for when that question is answered.
+M2 supplies the skirmish context and economy inputs described by SAE-01..08.
+The AI's purchases and reinforcements use these same command paths, and the viewer
+preloads bounded purchase-model slots for both human and AI players.
 
 | Rule | Behaviour | Source |
 |---|---|---|
@@ -107,13 +107,22 @@ command through the order scheduler (UI-07), so it enters the replay like any or
 | PU-60 | While the selection holds a live unit of the local player whose type has a build menu for the player's faction, the first such unit is the production object. Its build buttons replace the unit cards in the card slots (`s_select_00` on), one per menu entry in list order, up to the slots. The ability buttons are hidden. Otherwise the cards show. | debug build |
 | PU-61 | A button is disabled, and tinted grey (128, 128, 128), when its type cannot be built now (PU-11; in M2 also the entries of PU-20), when the player cannot afford its price, or when its queue is full. Its state is 2 when unaffordable, else 0 when the queue is full, else 3. A left release on an enabled button buys its type at the production object. | debug build |
 | PU-62 | A button shows its type's icon (`Icon_Name`, `i_button_temporary.tga` without one) and its price in whole credits as its text. The text is white at alpha 200 while the queue has room, else grey at alpha 200. The remake draws the price where a card's count sits (unverified). An entry the session never builds (PU-20) shows its `Tactical_Build_Cost_Multiplayer` from the data, as the retail capture does (850, 800 and 2000 for the Rebel upgrades and level-2 station). | debug build; project (the text position); capture (the upgrade prices) |
-| PU-63 | The build queues show in the `tqueue` slots: the units queue in `tqueue05` to `tqueue09`, the upgrades queue in `tqueue00` to `tqueue04`, front first. Each slot shows the entry's icon tinted with `Right_Queue_Tint` (255, 128, 128, 215). The left or right tint is chosen by a component test that always picks the right one (unverified on screen). A left release on a queued slot cancels that entry (PU-17). Which mouse action FoC binds to cancel is unverified. | debug build; data (`gameconstants.xml`); unverified (the cancel gesture) |
-| PU-64 | The front entry of each queue shows its completed fraction and "<n>%" (truncated) as its text; the others show full and no text. The remake draws the progress as the build art over the part not yet built (unverified look). FoC also flickers a queued slot's alpha now and then (5 % of updates, 15 to 25 lower); the remake does not (PU-G14). | debug build |
+| PU-63 | The build queues show in the `tqueue` slots: the units queue in `tqueue05` to `tqueue09`, the upgrades queue in `tqueue00` to `tqueue04`, front first. Each slot shows the entry's icon tinted with `Right_Queue_Tint` (255, 128, 128, 215). The left or right tint is chosen by a component test that always picks the right one (unverified on screen). A right release cancels that entry and refunds its price (PU-17); a left release focuses its producer and keeps the entry (the remake currently only keeps it). | debug build (queue update, action table and cancellation dispatch); data (`gameconstants.xml`); owner observation on the build-queue dial and cancel report (legacy EAWR-982), 2026-10-01 |
+| PU-64 | The front entry of each queue shows its completed fraction and "<n>%" (truncated) as its text; the others show no text or dial. The front's `Build_Texture_Name` draws additively as a clock sweep, growing from empty to full as production completes. FoC also flickers a queued slot's alpha now and then (5 % of updates, 15 to 25 lower); the remake does not (PU-G14). | debug build (front-only update and component dial); owner observation on the build-queue dial and cancel report (legacy EAWR-982), 2026-10-01: growing sweep |
 | PU-65 | `Text_Credits_tactical` shows the whole credits rounded down (PU-07), right-justified, with its money icon. The pane's population text shows "<used>/<cap>" (PU-21). | debug build; data |
 | PU-66 | The reinforcements button (`b_reinforcement`) opens and closes the reinforcement pane, the `i_main_reinforce` shell, with its close button (`r_close`). The pane folds the pool by type into its slots `r_RRCC` (4 per row, 20 in all), in first-completion order. FoC orders the fold by an engine-internal key (unverified order). Each slot shows the type's icon and "x<n>" when it holds more than one, and it is greyed and disabled when the type's population exceeds the room left under the cap. | debug build; data |
-| PU-67 | The pane shows its filled rows (rows past the first = `min((n - 1) / 4, 4)`) at the top left of the screen, 100 shell units down (unverified placement). The close button moves down with the rows (46 shell units per row). | debug build |
+| PU-67 | The pane shows its filled rows (rows past the first = `min((n - 1) / 4, 4)`) at the top left of the screen, 100 shell units down. Its shell alternate is that row count (`ALT0` through `ALT4`), independently of faction. The close button moves down with the rows (46 shell units per row), keeping it in the bottom strip of the selected background. Fresh retail placement confirmation remains pending. | debug build (row-count alternate selection and close-bone offset); data (five reinforcement shell alternates) |
+| PU-72 | In battle, the reinforcement close button resolves `TEXT_BUTTON_CLOSE` from the localized text database. Its component supplies the normal, hover and pressed textures, `Scale`, font, point size, text colour and offset, outline, emboss and `Swap_Texture`. State art is centred on the shifted close-button bone at texture size times component scale; input uses that same visible rectangle. Setup-phase `TEXT_BUTTON_BEGIN` is outside the battle pane's scope. | debug build (reinforcement label selection and button draw); data (close-button component and text database); project (matching input to the visible art) |
 | PU-68 | Hold the left button on an enabled reserve slot, drag its preview models onto the battle plane, and release to request arrival (WR-11..15). Validity tints the models green or red. An invalid release cancels the drag and keeps the reserve; a right click also cancels. The authoritative command rechecks admission. | debug build WR-E04, WR-E09, WR-E38, WR-E41 |
 | PU-69 | A unit arriving through hyperspace is not drawn before its frame 35, for any player (PU-36). From then on it is drawn at once; FoC fades its model in (PU-G14). | debug build |
+| PU-70 | The reinforcement button stays visible at the shell's `b_reinforcement` anchor in the sidebar beside the minimap, including with an empty pool. It is disabled when the pool is empty, reinforcement permission is absent, or victory is pending. Draw its `Blank_Texture_Name` backing, then the space entry of `Icon_Alternate_Texture_Name` (the first two entries name the same reinforcement icon). Hover adds `Mouse_Over_Texture_Name`; press uses `Selected_Texture_Name` with `Selected_Alpha` and a 0.2 s fade; disabled adds `Disabled_Texture_Name`. | debug build (space button update, button draw and selection fade); data (shell anchor and component art); owner location clarification on the invisible reinforcement button report (legacy EAWR-981), 2026-10-01 |
+| PU-71 | Each addition to the local player's reinforcement pool starts a continuous component flash. The completion route passes `CB_Flash_Count` but requests duration -1, which selects continuous flashing and bypasses the count; neither `CB_Flash_Count` nor `CB_Flash_Duration` limits this notification. The component's default pulse lasts 0.5 s and fades `Flash_Texture_Name` additively, repeating until opening the pane or disabling the button stops it. An opponent's completion, queue cancellation and deployment do not start a notification; adding another copy of an existing type does. | debug build (pool addition, flash dispatch, component flash flag/service/draw, space button update); coordinator confirmation of the deeper trace (2026-10-01) |
+
+For PU-70's selected state, the debug build applies `Click_Shift` as one shell unit down
+and right to the button art. `Selected_Alpha` chooses alpha blending for the selected
+overlay; without it that overlay adds. The 0.2 s selected fade reduces its RGB intensity.
+These two data flags are applied to the reinforcement button; their use on other command
+bar components remains outside this change.
 
 ## Cases
 
@@ -145,32 +154,25 @@ command through the order scheduler (UI-07), so it enters the replay like any or
   data source is not established here.
 - PU-G11: hardpoint repair (space-hardpoints HR-01 to HR-05) costs credits per frame; M2 players
   now have credits, but the session has no repair command yet (HR-07).
-- PU-G12: the AI does not buy in M2. The M2 AI runs FoC's GC context (SK-41), where PU-50's build
-  goal evaluates to zero (foc-tactical-ai AI-23), so the Empire AI never queues or brings in a
-  unit. Whether M2 switches to the skirmish context is owner question
-  EAWR-571; until it is answered the
-  AI keeps the GC context (coordinator, 2026-09-29), PU-50 and PU-52 are not implemented, and the
-  AI's perception tokens for credits, unit-cap space and reinforcements (foc-tactical-ai PE-21)
-  and its `Get_Credits` still read 0. The session applies PU-51 to any AI-owned queue entry, but
-  nothing creates one.
 - PU-G13: the command bar's hover texts (the production tooltips: queue full, population cap,
   insufficient funds) and the button sounds are not drawn or played.
 - PU-G14: presentation flourishes not modelled: the queue slots' alpha flicker (PU-64) and the
   arriving model's fade-in (PU-69).
 - PU-G15: placement shows no ghost models and no valid-area overlay; an invalid point is refused by
   the simulation (PU-33) with no on-screen feedback.
-- PU-G16: where retail shows the reinforcements button (PU-66) is unverified. In a retail capture
-  (2026-09-29) the squadron waited in the pool while the HUD position the remake gives the button
-  held the cinematic-camera toggle, and no other call-in button was visible. That capture confirms
-  the 500 X-wing price and about 5 credits a second of income (PU-01 to PU-07); the arrival motion
-  itself still rests on the debug build alone.
+- PU-G16 closed by the reinforcement-button visibility fix (legacy EAWR-981): PU-70 sources the authored sidebar anchor, alternate-only idle icon,
+  layered states and empty-pool disable from the debug build and data. The previous production
+  panel had a hit target but no button draw. The 2026-09-29 retail still did not settle the
+  button's position; the owner's 2026-10-01 clarification identifies it beside the minimap.
+  A retail capture comparing idle, hover, press, disabled and completion flash appearance is
+  still requested; this is visual verification of the sourced behavior, not a placement guess.
 - PU-G17: retail draws each build button on a bronze pad, and the price in a larger bold face;
   the remake draws the icon alone. The pad is probably the slot's faction `Blank_Texture_Name`
   (`i_button_pad_rebel.tga`, `i_button_pad_empire.tga`), but when retail draws it is not
   established.
 - PU-G18: a replay does not record whether it runs with the economy. `sim_headless` and the
   viewer's replay path apply it when the M2 start rebuilt from the game data has the replay's
-  players and units, so an M2 replay recorded before EAWR-530 now replays with credits and different
+  players and units, so an M2 replay recorded before the station purchasing and reinforcements work were implemented now replays with credits and different
   hashes. The content identity covers the production data but not the on/off switch, the bounds or
   the queue length; a header flag belongs with a stable replay format.
 - PU-G19: the elevated vulnerability (PU-38) lasts at most to the end of the arrival (frame 150);
@@ -180,14 +182,14 @@ command through the order scheduler (UI-07), so it enters the replay like any or
   projectile hits only. No M2 script issues it.
 - PU-G21: the playable bounds of PU-31 are the map's declared extents about the origin; that they
   equal FoC's playable bounds is not verified.
-- PU-G22: income fields read but not modelled (for EAWR-541's mining facilities):
+- PU-G22: income fields read but not modelled for mining facilities in the space build-pad work (legacy EAWR-541):
   `Income_Multiplier`, `Interval_Multiplier`, `Reverse_Application_Logic` and
   `Affects_All_Allied_Sources` on the bonuses; `Split_Income_With_Allies`, `Full_Amount_To_Everyone`
   and `Split_Favors_Owner` (the recipient rule is fixed at the full amount to the owner and its
   allies) and `Allow_Reinforcement_Percentage_Normalized` (rounding up is fixed).
 - PU-G23: build limits and prerequisites are not checked (PU-11: the four M2 types author none), a
   completed upgrade or structure has no effect yet, and the human queue length is the built-in 5,
-  not a `Max_Build_Queue` a mod may set. EAWR-540 and EAWR-541 own these.
+  not a `Max_Build_Queue` a mod may set. The station-upgrade and space build-pad work owns these gaps (legacy EAWR-540, EAWR-541).
 - PU-G24: the pane's population text (PU-65) has no place to draw: FoC's data defines `r_pop_text`
   but its `i_main_reinforce.alo` has no bone of that name, so where retail shows it (if anywhere)
   is not established. The retail HUD shows "used/cap" in the planet panel (`Text_Pop_Cap`) next to
@@ -200,3 +202,6 @@ command through the order scheduler (UI-07), so it enters the replay like any or
   unit has left the simulation (and whose death clone has finished) goes to the next unit of its type,
   so the limit is what stands at once, not how many were ever bought; a slot count that still runs out
   (ten of one type alive) leaves the next unit simulated but not drawn.
+- PU-G27: fresh retail eye confirmation of the reinforcement pane with one and several ready
+  types remains pending (legacy EAWR-1045). Row alternates, close-button geometry and the localized
+  label follow the GUI data and debug build; the first two capture attempts did not show the pool.

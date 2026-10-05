@@ -31,15 +31,15 @@ void placements() {
            "shuffled minis decode by id, and a second type resolves");
     expect(p[1].position && p[1].position->y == 20.0F && p[1].orientation_degrees && p[1].orientation_degrees->z == 45.0F,
            "shuffled minis keep the authored transform");
-    expect(p[2].orientation_status == OrientationStatus::unsupported_three_axis_order && p[2].orientation_degrees
+    expect(p[2].orientation_status == OrientationStatus::three_axis && p[2].orientation_degrees
                && p[2].orientation_degrees->x == 10.0F && p[2].orientation_degrees->y == 20.0F && p[2].orientation_degrees->z == 30.0F,
-           "three-axis Euler stays gated with exact raw degrees");
+           "three-axis Euler is accepted with exact raw degrees (R-ROT-01..03)");
     expect(p[3].orientation_status == OrientationStatus::absent && !p[3].orientation_degrees, "an absent mini 5 is labelled absent");
     expect(p[4].orientation_status == OrientationStatus::nonfinite, "a NaN roll is labelled nonfinite, not three-axis");
     const auto& map = result.value();
     const auto* absent = find_issue(map, MapIssue::orientation_absent);
     expect(absent && absent->record_ordinal == 3U && absent->field_id == 5, "the absent orientation notice names ordinal and mini");
-    expect(count_issue(map, MapIssue::orientation_nonfinite) == 1 && count_issue(map, MapIssue::orientation_three_axis) == 1,
+    expect(count_issue(map, MapIssue::orientation_nonfinite) == 1 && count_issue(map, MapIssue::orientation_three_axis) == 0,
            "orientation notices are distinct");
     for (std::uint32_t index = 0; index < 5; ++index) expect(p[index].key.record_ordinal == index, "ordinals follow 1100 order");
 

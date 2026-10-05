@@ -1,40 +1,6 @@
-add_library(
-    eawr_presentation STATIC
-    animation/animation.cpp
-    animation/idle_playback.cpp
-    animation/shot_readiness.cpp
-    animation/unit_clips.cpp
-    audio/sfx.cpp
-    camera/camera.cpp
-    camera/constants_source.cpp
-    camera/controller.cpp
-    camera/free_camera.cpp
-    camera/input.cpp
-    camera/overview.cpp
-    fog/fog.cpp
-    lighting/lighting.cpp
-    lighting/scene_bloom.cpp
-    lighting/wind.cpp
-    godot/renderer_contract.cpp
-    particles/alo_particles.cpp
-    particles/map_effect_plan.cpp
-    particles/cpu_system.cpp
-    particles/proxy_binding.cpp
-    particles/render.cpp
-    space/debris.cpp
-    space/environment_scene.cpp
-    space/fog_field.cpp
-    space/live_units.cpp
-    space/projectiles.cpp
-    space/shield_hits.cpp
-    space/space.cpp
-    space/space_effects.cpp
-    space/space_geometry.cpp
-    space/space_surfaces.cpp
-    space/sun_retail.cpp
-    space/unit_fade.cpp
-    terrain/terrain.cpp
-)
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
+add_library(eawr_presentation STATIC ${EAWR_PRESENTATION_SOURCES} ${EAWR_PRESENTATION_ROOT_ONLY_SOURCES})
 add_library(eawr::presentation ALIAS eawr_presentation)
 target_include_directories(
     eawr_presentation

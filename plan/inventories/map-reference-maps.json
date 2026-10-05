@@ -118,15 +118,13 @@
         "sky_references": 2,
         "skies_resolved": 2,
         "skies_model_renderable": 2,
-        "notices": 2
+        "notices": 0
       },
       "semantics": {
         "volumes": 2,
         "water_textures": 0,
         "declared_extents": true,
-        "issues": {
-          "orientation_three_axis": 2
-        },
+        "issues": {},
         "three_axis_records": [
           {
             "ordinal": 1,
@@ -275,15 +273,13 @@
         "sky_references": 2,
         "skies_resolved": 2,
         "skies_model_renderable": 2,
-        "notices": 1
+        "notices": 0
       },
       "semantics": {
         "volumes": 2,
         "water_textures": 0,
         "declared_extents": false,
-        "issues": {
-          "orientation_three_axis": 1
-        },
+        "issues": {},
         "three_axis_records": [
           {
             "ordinal": 24,
@@ -333,14 +329,13 @@
         "sky_references": 4,
         "skies_resolved": 4,
         "skies_model_renderable": 4,
-        "notices": 3
+        "notices": 1
       },
       "semantics": {
         "volumes": 1,
         "water_textures": 2,
         "declared_extents": false,
         "issues": {
-          "orientation_three_axis": 2,
           "water_stream_invalid": 1
         },
         "terrain_height_range": [
@@ -450,15 +445,13 @@
         "sky_references": 2,
         "skies_resolved": 2,
         "skies_model_renderable": 2,
-        "notices": 2
+        "notices": 0
       },
       "semantics": {
         "volumes": 2,
         "water_textures": 0,
         "declared_extents": false,
-        "issues": {
-          "orientation_three_axis": 2
-        },
+        "issues": {},
         "three_axis_records": [
           {
             "ordinal": 15,

@@ -427,6 +427,107 @@ void test_session_speed() {
     }
 }
 
+void test_engine_deadline() {
+    auto profile = frigate();
+    profile.max_speed = units(3);
+    profile.hardpoints = {{tactical::HardpointRole::engine, true, units(10)}};
+    auto state = tactical::full_durability(profile);
+    tactical::disable_engines(state, 30, 10);
+    expect(state.engines_disabled_until == 40U && !tactical::engines_online(profile, state), "EN-09: engines disabled to frame 40");
+    tactical::disable_engines(state, 10, 20);
+    expect(state.engines_disabled_until == 40U, "EN-09: shorter reapplication cannot shorten the deadline");
+    tactical::disable_engines(state, 30, 25);
+    expect(state.engines_disabled_until == 55U, "EN-09: repeated hits keep the later deadline, without stacking");
+    expect(!tactical::service_disabled_engines(state, 54), "EN-09: engines stay offline before the deadline");
+    state.hardpoints[0] = Fixed{};
+    expect(tactical::service_disabled_engines(state, 55) && !state.engines_disabled_until
+        && !tactical::engines_online(profile, state), "EN-09: timer expiry never repairs destroyed engines");
+    state.hardpoints[0] = units(10);
+    tactical::disable_engines(state, 0, 56);
+    expect(tactical::service_disabled_engines(state, 56) && tactical::engines_online(profile, state),
+        "EN-09: zero-duration disable recovers at its service frame");
+}
+
+struct EngineRun {
+    bool disabled{};
+    bool recovered{};
+    Fixed slowest{units(100)};
+    std::vector<std::string> rows;
+};
+
+EngineRun engine_run(const eawr::sim::PartitionExecutor& executor, const bool flag = true,
+    const bool powered = true, const bool shield_holds = false, const std::uint32_t duration = 30) {
+    auto health = durability();
+    auto& target = health.profiles.back();
+    target.max_speed = units(3);
+    target.powered = powered;
+    target.max_energy = powered ? units(300) : Fixed{};
+    if (shield_holds) target.max_shields = units(100000);
+    auto weapons = combat(false);
+    if (flag) weapons.profiles.front().weapons.front().shot->disable_engines_frames = duration;
+    tactical::TacticalSetup setup;
+    setup.seed = 5610;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    setup.units = {unit(1, shooter_type, 1, at(0, 0)), unit(2, corvette_type, 2, at(300, 0))};
+    auto created = tactical::TacticalSession::create(setup, sensors(), health, motion(), std::nullopt, weapons);
+    expect(static_cast<bool>(created), "EN-08: engine-disable session creates");
+    if (!created) return {};
+    auto value = std::move(created).value();
+    expect(static_cast<bool>(value.submit({{0, 2, 0}, {2}, tactical::MovePayload{at(300, 3000)}})), "EN-08: target cruises");
+    EngineRun result;
+    auto previous = at(300, 0);
+    std::optional<std::uint64_t> last_deadline;
+    for (std::uint64_t tick = 0; tick < 200; ++tick) {
+        auto stepped = value.step(executor);
+        expect(static_cast<bool>(stepped), "EN-08: session step succeeds");
+        if (!stepped) break;
+        const auto state = value.durability_state(2);
+        expect(state && state->hull == target.max_hull, "EN-08: ordinary ion leaves target hull whole");
+        if (state && state->engines_disabled_until) {
+            last_deadline = state->engines_disabled_until;
+            if (!result.disabled) {
+                result.disabled = true;
+                expect(static_cast<bool>(value.submit({{stepped.value().completed_tick, 1, 0}, {1},
+                    tactical::DamagePayload{units(100000), tactical::hull_target}})), "EN-08: remove shooter after first drain");
+            }
+        }
+        for (const auto& instance : stepped.value().snapshot->instances()) {
+            if (instance.entity_id != 2 || !instance.durability) continue;
+            if (state && state->engines_disabled_until) {
+                expect(!instance.durability->engines_online, "EN-08: snapshot publishes engines offline");
+                expect(instance.durability->max_speed_factor == decimal("0.4"), "EN-08: snapshot publishes disabled speed factor");
+                result.slowest = std::min(result.slowest,
+                    Fixed::from_raw(std::abs(instance.fixed_transform.rows[1][3].raw() - previous.y.raw())));
+            } else if (result.disabled) {
+                result.recovered = true;
+                expect(tick >= *last_deadline && instance.durability->engines_online,
+                    "EN-09: engines recover at or after the last hit's deadline");
+            }
+        }
+        const auto live = value.units();
+        const auto found = std::find_if(live.begin(), live.end(), [](const auto& entry) { return entry.entity_id == 2; });
+        if (found != live.end()) previous = found->position;
+        result.rows.push_back(stepped.value().state_sha256 + ',' + stepped.value().snapshot->sha256());
+    }
+    return result;
+}
+
+void test_session_engine_disable() {
+    const eawr::sim::InlineExecutor executor;
+    const auto reference = engine_run(executor);
+    expect(reference.disabled && reference.recovered, "EN-08/09: a draining small ion disables engines then recovers");
+    expect(reference.slowest < units(2), "EN-09: engine disable slows a move already under way");
+    expect(!engine_run(executor, false).disabled, "EN-08: an ordinary ion without the disable flag leaves engines online");
+    expect(!engine_run(executor, true, false).disabled, "EN-08: a target without an energy pool cannot trigger disable");
+    expect(!engine_run(executor, true, true, true).disabled, "EN-08: a fully absorbed hit cannot trigger disable");
+    expect(engine_run(executor, true, true, false, 60).rows != reference.rows,
+        "EN-09: disable duration changes authoritative state hashes");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter parallel(workers);
+        expect(engine_run(parallel).rows == reference.rows, "EN-08: engine-disable hashes match at " + std::to_string(workers) + " workers");
+    }
+}
+
 void test_validation() {
     auto table = combat(true);
     expect(static_cast<bool>(tactical::validate_combat(table)), "the ion combat table is valid");
@@ -442,6 +543,8 @@ int main() {
     test_stun_rules();
     test_session_stun();
     test_session_speed();
+    test_engine_deadline();
+    test_session_engine_disable();
     if (failures != 0) {
         std::cerr << failures << " ion contract test(s) failed\n";
         return 1;

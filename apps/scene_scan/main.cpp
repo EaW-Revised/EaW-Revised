@@ -116,7 +116,7 @@ std::string sha256_text(const std::string& text) {
 std::string catalog_fingerprint(const eawr::data::Catalog& catalog) {
     std::ostringstream text;
     for (const auto& definition : catalog.definitions()) {
-        if (!definition.winner || definition.category != eawr::data::Category::game_object) continue;
+        if (!definition.namespace_winner || definition.category != eawr::data::Category::game_object) continue;
         text << definition.id << '\t' << definition.type_name << '\t'
              << definition.root.source.logical_path << '\t' << definition.root.source.line << '\n';
     }

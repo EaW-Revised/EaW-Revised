@@ -26,6 +26,8 @@ namespace tactical = sim::tactical;
     case HardpointType::weapon_missile:
     case HardpointType::weapon_torpedo:
     case HardpointType::weapon_ion_cannon:
+    case HardpointType::weapon_mass_driver:
+    case HardpointType::weapon_special:
         return tactical::HardpointRole::weapon;
     case HardpointType::engine:
         return tactical::HardpointRole::engine;
@@ -162,6 +164,10 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     }
     const auto types = damage_type_index(tables);
     tactical::DamageRules damage;
+    damage.asteroid_damage = scalar("Asteroid_Field_Damage").value_or(Fixed{});
+    damage.asteroid_rate = scalar("Asteroid_Field_Damage_Rate").value_or(Fixed{});
+    damage.ion_storm_disable_seconds = scalar("Ion_Storm_Shield_Disable_Time").value_or(Fixed{});
+    damage.asteroid_damage_type = types.damage("");
     // DG-13, EN-02: trunc(interval x fps + 0.5) frames, the retail service interval.
     const auto service_frames = [](const Fixed seconds, const std::string& tag) -> core::Result<std::uint32_t> {
         auto frames = sim::math::multiply(seconds, Fixed::from_raw(tactical::logical_frames_per_second * Fixed::scale));

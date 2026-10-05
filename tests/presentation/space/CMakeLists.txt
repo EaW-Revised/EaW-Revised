@@ -7,6 +7,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     get_filename_component(EAWR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
     add_executable(space_tests
         space_effect_tests.cpp
+    space_meshgloss_tests.cpp
+    space_meshadditive_tests.cpp
+    space_environment_effect_tests.cpp
         space_geometry_tests.cpp
         space_surface_tests.cpp
         space_tests.cpp
@@ -39,6 +42,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 else()
     add_executable(space_tests
         space_effect_tests.cpp
+    space_meshgloss_tests.cpp
+    space_meshadditive_tests.cpp
+    space_environment_effect_tests.cpp
         space_geometry_tests.cpp
         space_surface_tests.cpp
         space_tests.cpp
@@ -66,6 +72,11 @@ else()
     target_compile_features(live_units_tests PRIVATE cxx_std_20)
     eawr_target_project_warnings(live_units_tests)
     add_test(NAME live_units_contracts COMMAND live_units_tests)
+    add_executable(population_index_tests population_index_tests.cpp)
+    target_link_libraries(population_index_tests PRIVATE eawr::presentation Threads::Threads)
+    target_compile_features(population_index_tests PRIVATE cxx_std_20)
+    eawr_target_project_warnings(population_index_tests)
+    add_test(NAME population_index_contracts COMMAND population_index_tests)
     add_executable(fighter_heading_tests fighter_heading_tests.cpp)
     target_link_libraries(fighter_heading_tests PRIVATE eawr::presentation eawr::sim eawr::platform)
     target_compile_features(fighter_heading_tests PRIVATE cxx_std_20)
@@ -104,4 +115,7 @@ add_test(NAME space_contracts COMMAND space_tests)
 add_test(NAME sun_retail_contracts COMMAND sun_retail_tests)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+# Each file runs its CPU contracts; graphical exercises retain their opt-in gates.
+eawr_add_python_contract(python_presentation_space_environment_effect_graphical tests.presentation.space.test_environment_effect_graphical)
+
 eawr_label_tests()

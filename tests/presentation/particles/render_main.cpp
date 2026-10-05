@@ -5,12 +5,17 @@ using namespace particle_render_contracts;
 int main() {
     test_parser_retains_renderer_fields();
     test_death_burst_ignores_parent_velocity();
+    test_legacy_moving_kite();
     test_parent_link_rejection();
     test_plan_policy();
     test_quad_geometry();
     test_finite_rotation_boundary();
     test_stream_validation();
     test_fixed_seed_streams();
+    test_particle_detail_gates();
+    test_legacy_sort_triangles_and_atlas();
+    test_cpu_steady_state_allocates_nothing();
+    test_particle_detail_batch();
     test_release_and_replacement_lifecycle();
     test_effect_brightness();
     test_emitter_glow_follows_turning_pose();
@@ -37,8 +42,11 @@ int main() {
     test_attachment_merge_stats();
     test_heat_pixel_change_bound();
     test_batch_matches_serial();
+    test_attachment_batch_matches_serial();
+    test_attachment_batch_requires_stats();
     test_batch_hashes_on_request();
     test_batch_work_counts();
+    test_offscreen_updates_and_bounds();
     test_batch_rejects_repeats_and_unknown();
     test_batch_present_allocates_nothing();
     if (failures != 0) { std::cerr << failures << " particle render contract(s) failed\n"; return 1; }

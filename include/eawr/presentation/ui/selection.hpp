@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <map>
 #include <span>
 #include <vector>
 
@@ -66,7 +67,10 @@ struct BattleUnit {
     sim::EntityId part{sim::invalid_entity_id}; // the craft of a squadron; invalid for other units
     sim::tactical::TypeId part_type{};          // that craft's own type (WSU-38); `type` is the squadron's
     bool own{};     // owned by the local player: the only selectable units
-    bool hostile{}; // owned by another team: a right click attacks it
+    bool hostile{}; // ordinary combat relationship: a right click attacks it
+    bool selectable{true};
+    bool locomotion{true}; // WSU-21: behaviour presence, independent of speed
+    bool decoration{};
     UnitBox box{};
     // #665 (WSU-10 to WSU-12): the pick volume. The type's collision mesh in the box's frame
     // (null or empty: the box stands in for it, project policy), and its
@@ -75,8 +79,10 @@ struct BattleUnit {
     const PickMesh* mesh{};
     float sphere_radius{};
     Vec3f position{};
-    // The projected box centre in viewport pixels; empty behind the camera.
+    // WSU-15: the projected model origin in viewport pixels; empty behind the camera.
     std::optional<std::array<float, 2>> screen{};
+    bool neutral{}; // WSU-63: no selection or combat overlays for neutral scenery
+    bool mouse_sensitive{true}; // WSU-13: admission before testing the pick geometry
 };
 
 struct ScreenRect {
@@ -87,6 +93,19 @@ struct ScreenRect {
     [[nodiscard]] bool contains(const std::array<float, 2>& point) const noexcept {
         return point[0] >= min_x && point[0] <= max_x && point[1] >= min_y && point[1] <= max_y;
     }
+    [[nodiscard]] bool contains_origin(const std::array<float, 2>& point) const noexcept {
+        return point[0] >= min_x && point[0] < max_x && point[1] >= min_y && point[1] < max_y;
+    }
+    [[nodiscard]] bool contains_quad(const ScreenRect& quad) const noexcept {
+        return quad.min_x >= min_x && quad.min_y >= min_y && quad.max_x <= max_x && quad.max_y <= max_y;
+    }
+};
+
+struct SquadronIcon {
+    sim::EntityId entity{sim::invalid_entity_id};
+    bool own{};
+    bool selectable{true};
+    ScreenRect rect{};
 };
 
 // The rectangle a drag from `start` to `end` spans, and its larger side (FoC measures drags by it).
@@ -144,9 +163,10 @@ public:
     // craft, every own squadron with a craft of that craft type on screen (WSU-18).
     bool double_click(std::optional<sim::EntityId> picked, std::span<const BattleUnit> units,
                       const ScreenRect& viewport);
-    // A released drag box: the own units inside it. Without Shift the old selection is replaced,
-    // but only once a unit is found, so an empty box keeps it.
-    bool box(const ScreenRect& rect, bool shift, std::span<const BattleUnit> units);
+    // WSU-19, WSU-21: add own icon quads first; the first eligible model replaces that
+    // selection without Shift. A structure-only box preserves it, like an empty box.
+    bool box(const ScreenRect& rect, bool shift, std::span<const BattleUnit> units,
+             std::span<const SquadronIcon> icons = {});
     // Adds the own units of `type` on screen (Select_All_Objects_Of_Type_On_Screen).
     bool type_on_screen(sim::tactical::TypeId type, std::span<const BattleUnit> units, const ScreenRect& viewport);
     // WSU-38 (#550): the same test for a craft type: adds every own squadron with a craft of
@@ -157,6 +177,8 @@ public:
     // #425: the selection becomes `units` (a unit card click, unit_cards.hpp), in that order and
     // without repeats. Returns whether it changed.
     bool replace(std::span<const sim::EntityId> units);
+    // WPR-52: transfer membership even when the replaced unit is not selected.
+    void replace_entity(sim::EntityId previous, sim::EntityId replacement);
 
     // Control groups. Ctrl+n: the selection becomes group n. Alt+n: the selection joins group n,
     // which is then selected. A unit belongs to one group at most.
@@ -168,12 +190,15 @@ public:
                                       std::span<const BattleUnit> alive);
     std::optional<Vec3f> add_to_group(std::size_t group, double now_seconds, std::span<const BattleUnit> alive);
     [[nodiscard]] const std::vector<sim::EntityId>& group(std::size_t index) const { return groups_.at(index); }
+    // WSU-33, WSU-55: maintained on group edits, so drawing never scans group members.
+    [[nodiscard]] std::optional<std::size_t> group_of(sim::EntityId entity) const noexcept;
 
 private:
     void add(sim::EntityId entity);
     std::optional<Vec3f> selected_group(std::size_t group, double now_seconds, std::span<const BattleUnit> alive);
     std::vector<sim::EntityId> selected_;
     std::array<std::vector<sim::EntityId>, control_group_count> groups_{};
+    std::map<sim::EntityId, std::size_t> group_numbers_;
     std::optional<std::size_t> last_group_;
     double last_group_seconds_{};
 };

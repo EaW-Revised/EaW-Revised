@@ -3,12 +3,12 @@
 ## Applicability
 
 The FoC debug build `StarWarsI.exe` (PDB names, read in GhidrAssist) and the FoC
-effective XML and model archives. The question is bounded to the EAWR-81 states of a space unit:
+effective XML and model archives. The question is bounded to the tactical unit animation states of a space unit:
 idle, moving, firing, turret turn and death, for the M2 roster
 (`plan/phase-2/m2-skirmish.md`, pinned unit table). Evidence IDs `UC-E1` to `UC-E9` are opaque;
 the private map lives in the ignored `out/research/p2-81/`. Retail death references (owner
-footage and rig stills, EAWR-81) are under [Retail references](#retail-references-81). The implementation is `presentation/animation/unit_clips.hpp` and the
-live session's death clones (`apps/viewer/src/live_session_view.cpp`).
+footage and rig stills, tactical unit animation) are under [Retail references](#retail-references-81). The implementation is `presentation/animation/unit_clips.hpp` and the
+live session's death clones (`apps/viewer/src/live_session_death.cpp`).
 
 ## Interface
 
@@ -42,7 +42,7 @@ headless replay hashes do not change.
   `UNDEPLOY` when it is switched off, at `Deployment_Anim_Rate`, blended over 1/30 s, starting at the
   frame that mirrors the current clip's remaining frames. Attacking does not move the S-foils.
   `DEPLOY` folds the S-foils shut from the open bind pose and `UNDEPLOY` opens them; the live view
-  plays both from the snapshot since EAWR-76 ([space abilities](space-abilities.md) AB-31). (UC-E5)
+  plays both from the snapshot since the space ability implementation work ([space abilities](space-abilities.md) AB-31). (UC-E5)
 - **UA-07 Death clone.** A destroyed unit whose type lists a `Death_Clone` is replaced by an
   object of the clone type. Retail picks the clone by the killing blow's damage type, then the
   `Damage_Misc` entry, then the unit's own type. The clone appears at the unit's position and
@@ -65,7 +65,7 @@ headless replay hashes do not change.
 - **UA-10 Fighter death.** A fighter has no `Death_Clone` and no `DIE` clip, so its death is its
   death explosion; with `Spin_Away_On_Death` it first spirals away along a spline for
   `Spin_Away_On_Death_Time` with the chance `Spin_Away_On_Death_Chance` (a synchronized draw).
-  (UC-E4) The rules are [space-fighter-deaths](space-fighter-deaths.md) SP-01 to SP-09 (EAWR-447).
+  (UC-E4) The rules are [space-fighter-deaths](space-fighter-deaths.md) SP-01 to SP-09 (fighter death outcomes).
 
 ### Project policy
 
@@ -121,7 +121,9 @@ clip when they die.
   persistence the corvette clone then stays, drawn with nothing visible, for the rest of the
   battle (UA-08, UA-11).
 
-## Retail references (EAWR-81)
+<a id="retail-references-81"></a>
+
+## Retail references
 
 - **UA-R1** (owner footage, 2026-09-27: a retail Corellian corvette killed in battle, 30 fps
   video) The death is the `Death_Explosions` fireball and the breakup clone together. In the kill
@@ -139,7 +141,7 @@ clip when they die.
   so those stills may show UA-07's `Damage_Misc` or own-type fallback, not the `Damage_Normal`
   clone.
 - **UA-R3** The remake draws the same explosion and clone pieces (live session, scripted kill,
-  EAWR-387 clip route). It differs from UA-R1 and UA-R2 in three ways, all on the fidelity list and
+  animated and lit eye-check captures clip route). It differs from UA-R1 and UA-R2 in three ways, all on the fidelity list and
   none changed here. Its pieces carry no fire or smoke after about 1 s. The corvette's pieces are
   nearly gone at 3 s, where retail's still burn. No cloud of small fragments flies out.
 - **UA-R4** (rig recording, 2026-09-27, `-StagingProbe fighters`, station kills) An X-wing 0.3 s
@@ -157,8 +159,8 @@ clip when they die.
   the corvette's wreck ends empty (UA-C6) is not visible in the footage: its pieces are gone by 5 s.
 - Which damage type a projectile kill carries is unverified (UA-P1).
 - The clone keeps its unit's position, height included: FoC creates it without its own
-  `Layer_Z_Adjust` (space-movement LZ-02, EAWR-666).
-- Spin-away deaths (UA-10) move the unit, so the simulation runs them (EAWR-447,
+  `Layer_Z_Adjust` (space-movement LZ-02, per-unit flight heights).
+- Spin-away deaths (UA-10) move the unit, so the simulation runs them (fighter death outcomes,
   space-fighter-deaths SP-P1); the fighter itself still leaves the session at once.
 - The procedural turret aim of UA-05 is not modelled.
 - 27 FoC clips outside M2 fail the strict track binding (the `binding_failed` rows of

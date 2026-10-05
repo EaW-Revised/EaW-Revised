@@ -1,3 +1,4 @@
+#include "eawr/core/load_profile.hpp"
 #include "live_fog_view.hpp"
 
 #include "stored_output.hpp"
@@ -113,6 +114,7 @@ LiveFogView::LiveFogView(Node3D& host) : host_(&host) {
 LiveFogView::~LiveFogView() { release(); }
 
 void LiveFogView::prepare(const vfs::Vfs& filesystem, const bool revealed, const bool deploy_overlay) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::fog);
     prepared_ = true;
     revealed_ = revealed;
     deploy_overlay_ = deploy_overlay && !revealed;

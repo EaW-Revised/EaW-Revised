@@ -9,7 +9,7 @@ fonts or Godot binaries go in: players supply their own game installation and th
 
 Usage:
   python tools/release/package_release.py --build-dir out/build/linux-x64-gcc --platform linux-x64 \\
-      --version v0.1.0 --out out/release
+      --version v0.1.5 --out out/release
 """
 
 from __future__ import annotations

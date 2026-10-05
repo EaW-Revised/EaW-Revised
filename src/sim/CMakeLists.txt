@@ -1,46 +1,12 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
 add_subdirectory(
     "${PROJECT_SOURCE_DIR}/third_party/entt"
     "${PROJECT_BINARY_DIR}/third_party/entt"
     EXCLUDE_FROM_ALL
 )
 
-add_library(
-    eawr_sim
-    STATIC
-        fog.cpp
-        fog_sidecar.cpp
-        replay.cpp
-        snapshot.cpp
-        state_hash.cpp
-        tactical/abilities.cpp
-        tactical/collection.cpp
-        tactical/collision.cpp
-        tactical/damage.cpp
-        tactical/economy.cpp
-        tactical/projectiles.cpp
-        tactical/durability.cpp
-        tactical/motion.cpp
-        tactical/fighters.cpp
-        tactical/free_space.cpp
-        tactical/death_spin.cpp
-        tactical/combat.cpp
-        tactical/orders.cpp
-        tactical/formation.cpp
-        tactical/pathfind.cpp
-        tactical/encoding.cpp
-        tactical/fog_cells.cpp
-        tactical/ion.cpp
-        tactical/replay.cpp
-        tactical/session.cpp
-        tactical/space.cpp
-        tactical/victory.cpp
-        tactical/visibility.cpp
-        world.cpp
-        math/fixed.cpp
-        math/geometry.cpp
-        math/trig.cpp
-        math/wide.cpp
-)
+add_library(eawr_sim STATIC ${EAWR_SIM_SOURCES} ${EAWR_SIM_ROOT_ONLY_SOURCES})
 add_library(eawr::sim ALIAS eawr_sim)
 
 target_include_directories(

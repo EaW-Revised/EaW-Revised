@@ -54,4 +54,5 @@ The gameplay XML root excludes Data/megafiles.xml and
 Data/Text/xml/TranslationManifest.xml; this explains the 1,309 versus 1,311 file
 counts. Regenerate plan/inventories/numeric-ranges.json with
 tools/analyse_numeric_ranges.py using --xml-root, --ted-archive and --ted-root
-inputs, then --output. Labels identify sources without private absolute paths.
+inputs, then --output. Its implementation lives in tools/numeric_ranges/
+(report.py, xml.py and ted.py). Labels identify sources without private absolute paths.

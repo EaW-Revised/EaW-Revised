@@ -62,7 +62,8 @@ def check(condition: bool, message: str) -> None:
         FAILURES.append(message)
 
 
-def run(program: pathlib.Path, scenario: pathlib.Path, root: str, work: pathlib.Path, workers: int) -> Dict[str, bytes]:
+def run(program: pathlib.Path, scenario: pathlib.Path, root: str, work: pathlib.Path, workers: int,
+        contacts: bool = False) -> Dict[str, bytes]:
     stem = f"{scenario.stem[:4]}.w{workers}"
     outputs = {"trace": work / f"{stem}.csv", "hashes": work / f"{stem}.hashes.csv", "replay": work / f"{stem}.eawr-replay",
                "combat": work / f"{stem}.combat.csv"}
@@ -71,6 +72,7 @@ def run(program: pathlib.Path, scenario: pathlib.Path, root: str, work: pathlib.
          "--trace-out", str(outputs["trace"]), "--hash-out", str(outputs["hashes"]),
          "--replay-out", str(outputs["replay"]), "--combat-out", str(outputs["combat"])],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        env=dict(os.environ, EAWR_PROJECTILE_CONTACT_DIAGNOSTICS="1") if contacts else None,
     )
     check(completed.returncode == 0, f"{stem}: sim_headless failed: {completed.stdout}{completed.stderr}")
     if completed.returncode != 0:
@@ -167,14 +169,32 @@ def check_intercept(path: pathlib.Path, combat: bytes) -> str:
     deaths = sorted(min(tick for (tick, field), value in rows[name].items() if field == "alive" and value == "0")
                     for name in craft_of(rows) if name.startswith("bomber.")
                     and any(field == "alive" and value == "0" for (tick, field), value in rows[name].items()))
-    shots = hits = 0
+    shots = hits = live_redirects = post_death_hits = same_tick_hits = 0
+    death_ticks = {name: min(tick for (tick, field), value in fields.items() if field == "alive" and value == "0")
+                   for name, fields in rows.items() if name.startswith("bomber.")
+                   and any(field == "alive" and value == "0" for (_, field), value in fields.items())}
     for row in csv.DictReader(combat.decode("utf-8").splitlines()):
         if row["kind"] == "fired" and row["object"].startswith("xwing."):
             shots += 1
         elif row["kind"] == "hit" and row["other"].startswith("xwing.") and row["object"].startswith("bomber."):
             hits += 1
+            selected = row.get("selected_target") or ""
+            check(selected.startswith("bomber."), "S-98 (DG-30): each bomber hit names its original selected target")
+            if selected.startswith("bomber.") and selected != row["object"]:
+                tick = int(row["tick"])
+                check((tick, "alive") in rows.get(selected, {}), "S-98 (DG-30): selected-target lifetime is traced")
+                if rows.get(selected, {}).get((tick, "alive")) == "1":
+                    live_redirects += 1
+                elif death_ticks.get(selected, tick) < tick:
+                    # Native detach clears target links but lets the projectile fly on (DG-30g).
+                    post_death_hits += 1
+                else:
+                    # A tick snapshot cannot order the selected target's death against this hit.
+                    same_tick_hits += 1
     summary = (f"bombers lost {len(deaths)} {deaths} (recorded {RECORDED_BOMBER_DEATHS}); X-wing shots {shots} "
-               f"hits on bombers {hits} (recorded 162 and 98)")
+               f"hits on bombers {hits} (recorded 162 and 98); live-target redirects {live_redirects}, "
+               f"post-death hits {post_death_hits}, same-tick death/hits {same_tick_hits}")
+    check(live_redirects == 0, f"S-98 (DG-30): no redirect while the selected target is alive: {summary}")
     check(len(deaths) == len(RECORDED_BOMBER_DEATHS)
           and all(abs(ours - recorded) <= BOMBER_DEATH_WINDOW for ours, recorded in zip(deaths, RECORDED_BOMBER_DEATHS)),
           f"S-98 (FD-13): three bombers lost, each within {BOMBER_DEATH_WINDOW} ticks of the recording: {summary}")
@@ -217,7 +237,7 @@ def main() -> int:
             outcome = check_outcome(pathlib.Path(trace_path), runs[1]["combat"])
             print("S-97 outcome: " + outcome)
         intercept = args.scenarios / f"{INTERCEPT}.json"
-        pair = {workers: run(args.program, intercept, root, work, workers) for workers in (1, 8)}
+        pair = {workers: run(args.program, intercept, root, work, workers, contacts=True) for workers in (1, 8)}
         if all(pair.values()):
             for kind in ("trace", "hashes", "replay", "header", "combat"):
                 check(pair[8][kind] == pair[1][kind], f"S-98: {kind} differs with 8 workers")

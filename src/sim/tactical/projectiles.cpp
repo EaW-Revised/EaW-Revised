@@ -1,7 +1,9 @@
 #include "../math/wide.hpp"
+#include "eawr/sim/tactical/damage.hpp"
 #include "../replay_internal.hpp"
 #include "combat_internal.hpp"
 #include "motion_internal.hpp"
+#include "rocket_internal.hpp"
 #include "tactical_internal.hpp"
 
 #include <algorithm>
@@ -190,10 +192,16 @@ struct Facing {
 } // namespace
 
 core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotProfile& profile, const PlayerId owner,
-    const bool allow_diminishing_firepower, const std::uint64_t id, const math::Vec3& offset) {
+    const bool allow_diminishing_firepower, const std::uint64_t id, const math::Vec3& offset, const math::Fixed target_radius) {
     Arithmetic q;
     Projectile projectile;
     projectile.id = id;
+    if (profile.appearance_delay_frames != 0) {
+        if (shot.tick > std::numeric_limits<std::uint64_t>::max() - profile.appearance_delay_frames) {
+            return core::Result<Projectile>::failure(diagnostic(diagnostic_codes::invalid_setup, "projectile appearance frame overflow"));
+        }
+        projectile.muzzle_delay_until = shot.tick + profile.appearance_delay_frames;
+    }
     projectile.shooter = shot.shooter;
     projectile.owner = owner;
     projectile.weapon = shot.weapon;
@@ -202,11 +210,13 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     projectile.position = shot.origin;
     projectile.speed = profile.speed;
     projectile.damage = profile.damage;
+    projectile.blast = profile.blast;
     projectile.damage_type = profile.damage_type;
     projectile.shield_damage = profile.shield_damage;
     projectile.hitpoint_damage = profile.hitpoint_damage;
     // EN-07, IS-01 (#561): an ion shot drains energy and stuns what it hits.
     projectile.energy_damage = profile.energy_damage;
+    projectile.disable_engines_frames = profile.disable_engines_frames;
     projectile.ion_stun = profile.ion_stun;
     // DG-05: the shooter's mode flag and the projectile's internal damage type, both snapshotted at
     // the shot (docs/behaviour/space-damage.md DP-05).
@@ -221,9 +231,18 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
         projectile.step = math::Vec3{q.take(math::multiply(delta.x, scale)), q.take(math::multiply(delta.y, scale)),
             q.take(math::multiply(delta.z, scale))};
     }
-    // DG-23: its travel ends at the weapon's range (the soft radius is zero) plus the height
-    // between its origin and aim point.
-    projectile.max_travel = q.take(math::add(profile.max_travel, absolute(delta.z)));
+    // DG-23: travel includes the target's soft radius and the origin-to-aim height difference.
+    projectile.max_travel = q.take(math::add(q.take(math::add(profile.max_travel, target_radius)), absolute(delta.z)));
+    if (profile.flight) {
+        if (!valid_flight(*profile.flight) || (profile.homing && profile.flight->kind == FlightKind::rocket)) {
+            return core::Result<Projectile>::failure(diagnostic(diagnostic_codes::invalid_setup,
+                "unsupported flight profile or rocket classified as homing (WAD-04)"));
+        }
+        projectile.flight = FlightState{};
+        projectile.flight->profile = *profile.flight;
+        projectile.flight->origin = shot.origin;
+        projectile.flight->aim = shot.aim;
+    }
     if (q.error) return core::Result<Projectile>::failure(*q.error);
     // MS-02: a homing projectile faces the aim point and holds its target.
     if (profile.homing) {
@@ -241,12 +260,47 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     return core::Result<Projectile>::success(projectile);
 }
 
-core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Projectile& projectile, const TeamId owner_team,
+core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Projectile& projectile,
     ProjectileScratch& scratch) {
     Arithmetic q;
     ProjectileStep result;
     result.projectile = projectile;
     result.from = projectile.position;
+    if (projectile.explosion_requested) {
+        result.expired = true;
+        return core::Result<ProjectileStep>::success(std::move(result));
+    }
+    // WAD-37/40: equality makes it visible but still does not move it. The source resets
+    // flight age on that equality frame, so path age begins with the next movement.
+    if (projectile.muzzle_delay_until != 0 && world.frame <= projectile.muzzle_delay_until) {
+        return core::Result<ProjectileStep>::success(std::move(result));
+    }
+    std::optional<math::Vec3> path_point;
+    if (result.projectile.flight) {
+        auto& flight = *result.projectile.flight;
+        ++flight.age_frames;
+        if (flight.profile.kind == FlightKind::rocket) {
+            if (!flight.path_initialized) {
+                auto prepared = prepare_rocket_path(result.projectile);
+                if (!prepared) return core::Result<ProjectileStep>::failure(prepared.error());
+            }
+            flight.path_distance = q.take(math::add(flight.path_distance, projectile.speed));
+            auto point = rocket_point(flight, flight.path_distance);
+            if (!point) return core::Result<ProjectileStep>::failure(point.error());
+            if (!point.value()) {
+                // RFL-06 / WAD-04: exhausted lookup forces terminal advancement at
+                // the current pose without another collision query or snapping to aim.
+                result.projectile.travelled = q.take(math::add(projectile.travelled, projectile.speed));
+                result.expired = true;
+                if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
+                return core::Result<ProjectileStep>::success(std::move(result));
+            }
+            path_point = *point.value();
+            result.projectile.step = {q.take(math::subtract(path_point->x, projectile.position.x)),
+                q.take(math::subtract(path_point->y, projectile.position.y)),
+                q.take(math::subtract(path_point->z, projectile.position.z))};
+        }
+    }
     // MS-03 to MS-05: a homing projectile that holds its target turns toward it, then flies along
     // its new facing; once the target has left it keeps its last facing and never takes another.
     if (projectile.homing && projectile.locked) {
@@ -265,42 +319,31 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
     }
     const auto& step = result.projectile.step;
     const auto& from = projectile.position;
-    const math::Vec3 to{q.take(math::add(from.x, step.x)), q.take(math::add(from.y, step.y)),
-        q.take(math::add(from.z, step.z))};
+    const math::Vec3 to = path_point.value_or(math::Vec3{q.take(math::add(from.x, step.x)),
+        q.take(math::add(from.y, step.y)), q.take(math::add(from.z, step.z))});
     if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
 
-    // Broad phase: unit positions within the segment's box grown by the largest collision reach.
-    const auto half = [&](const Fixed a, const Fixed b) {
-        return Fixed::from_raw(std::llabs(b.raw() - a.raw()) / 2 + world.collision_reach.raw());
-    };
-    const auto mid = [](const Fixed a, const Fixed b) { return Fixed::from_raw(a.raw() + (b.raw() - a.raw()) / 2); };
-    const math::Vec3 centre{mid(from.x, to.x), mid(from.y, to.y), mid(from.z, to.z)};
-    const math::Vec3 extent{half(from.x, to.x), half(from.y, to.y), half(from.z, to.z)};
-    // #636: every point of the segment lies within this of its midpoint (half its length in each
-    // axis summed, which is at least half its length, and 2 for the midpoint's rounding).
-    const auto half_length = (std::llabs(to.x.raw() - from.x.raw()) + std::llabs(to.y.raw() - from.y.raw())
-                                 + std::llabs(to.z.raw() - from.z.raw())) / 2 + 2;
-    // DG-32: any unit of another team whose type has a collision box. #636: and whose own reach
-    // about its position meets the segment; the rest cannot be hit, so the exact tests below
-    // (the costly model-space transform) never see them.
-    world.index.box_positions(centre, extent, scratch.candidates);
-    scratch.near.clear();
-    for (const auto position : scratch.candidates) {
-        const auto& unit = world.units[position];
-        if (unit.team == owner_team || unit.profile == nullptr || !unit.profile->collision) continue;
-        const auto reach = unit.collision_reach.raw();
-        if (reach <= std::numeric_limits<std::int64_t>::max() - half_length
-            && !within_range(centre, unit.position, Fixed::from_raw(reach + half_length), RangeMetric::spatial)) {
-            continue;
-        }
-        scratch.near.push_back(position);
+    if (world.projectile_collection == nullptr) {
+        return core::Result<ProjectileStep>::failure(diagnostic(diagnostic_codes::worker_failure,
+            "projectile collision requires its persistent collection"));
     }
-    // The index keeps the units' ascending-ID order, so ascending positions are ascending IDs.
-    std::sort(scratch.near.begin(), scratch.near.end());
-    scratch.candidate_count += scratch.candidates.size();
-    scratch.exact_count += scratch.near.size();
+    // DG-30: players ascend, but contacts within each player's persistent tree follow its ray
+    // collection order. A nearer object or lower ID never displaces the first eligible contact.
+    scratch.near.clear();
+    for (const auto& player : world.relationships) {
+        if (!world.hostile(projectile.owner, player.player_id)) continue;
+        world.projectile_collection->ray_collect(player.player_id, from, to, scratch.contacts);
+        scratch.candidate_count += scratch.contacts.size();
+        for (const auto id : scratch.contacts) {
+            const auto* unit = world.find(id);
+            if (unit == nullptr || id == projectile.shooter || unit->profile == nullptr
+                || !unit->profile->collision || !unit->profile->living_projectile_collision) continue;
+            scratch.near.push_back(static_cast<std::uint32_t>(unit - world.units.data()));
+        }
+    }
     std::optional<Fixed> best;
     for (const auto position : scratch.near) {
+        ++scratch.exact_count;
         const auto* unit = &world.units[position];
         const auto id = unit->id;
         const auto& profile = *unit->profile;
@@ -321,7 +364,9 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
                     const auto& mesh = profile.meshes[index];
                     if (mesh.shield) {
                         return projectile.shield_damage && unit->durability != nullptr
-                            && unit->durability->shields.raw() > 0;
+                            && unit->durability->shields.raw() > 0 && (world.damage == nullptr
+                                || (!shield_depleted(*world.damage, *unit->durability, world.frame)
+                                    && !in_ion_storm(*world.damage, *unit->durability, world.frame)));
                     }
                     const auto source = mesh.source_hardpoint;
                     if (source == no_hardpoint || unit->durability == nullptr || unit->durability_profile == nullptr
@@ -362,12 +407,12 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
             && projectile.target_hardpoint < profile.aimed_routes.size()) {
             mesh_hardpoint = profile.aimed_routes[projectile.target_hardpoint];
         }
-        // The first along the segment; on a tie the lowest ID (the candidates ascend).
-        if (entry && (!best || *entry < *best)) {
+        if (entry) {
             best = entry;
             result.hit = id;
             result.mesh_hardpoint = mesh_hardpoint;
             result.meshed = !profile.meshes.empty();
+            break;
         }
     }
     if (best) {
@@ -378,7 +423,33 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
     // DG-33: it moves on and counts its travel; without a hit it ends at its maximum travel.
     result.projectile.position = to;
     result.projectile.travelled = q.take(math::add(projectile.travelled, projectile.speed));
-    result.expired = !result.hit && result.projectile.travelled >= projectile.max_travel;
+    bool terminal = result.projectile.travelled >= projectile.max_travel;
+    if (result.projectile.flight) {
+        const auto& flight = *result.projectile.flight;
+        terminal = projectile.max_travel.raw() > 0
+            ? result.projectile.travelled >= projectile.max_travel
+            : flight.profile.lifetime && flight.age_frames
+                > static_cast<std::uint64_t>(flight.profile.lifetime->raw() * 30 / Fixed::scale);
+        if (flight.profile.target_radius) {
+            if (flight.profile.kind == FlightKind::rocket) {
+                terminal = terminal || flight.path_distance >= flight.profile.authored_distance;
+            } else if (flight.profile.kind == FlightKind::default_projectile) {
+                // RFL-08: exact squared spatial displacement; equality does not expire.
+                namespace wide = math::detail;
+                const auto squared = [&](const math::Vec3& point) {
+                    wide::UInt192 total{};
+                    for (const auto& [a, b] : {std::pair{point.x, flight.origin.x},
+                         std::pair{point.y, flight.origin.y}, std::pair{point.z, flight.origin.z}}) {
+                        const auto magnitude = wide::unsigned_magnitude(a.raw() - b.raw());
+                        static_cast<void>(wide::add_magnitude(total, wide::multiply_u64(magnitude, magnitude)));
+                    }
+                    return total;
+                };
+                terminal = terminal || wide::compare(squared(to), squared(flight.aim)) > 0;
+            }
+        }
+    }
+    result.expired = !result.hit && terminal;
     if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
     return core::Result<ProjectileStep>::success(std::move(result));
 }
@@ -397,7 +468,10 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
     sim::detail::append_u32(bytes, (projectile.shield_damage ? 1U : 0U) | (projectile.hitpoint_damage ? 2U : 0U)
             | (projectile.allow_diminishing_firepower ? 0U : 4U) | (projectile.internal_damage_misc ? 0U : 8U)
             | (projectile.homing ? 16U : 0U) | (projectile.locked ? 32U : 0U) | (projectile.energy_damage ? 64U : 0U)
-            | (projectile.ion_stun ? 128U : 0U));
+            | (projectile.ion_stun ? 128U : 0U) | (projectile.blast.enabled() ? 256U : 0U)
+            | (projectile.explosion_requested ? 512U : 0U) | (projectile.flight ? 1024U : 0U)
+            | (projectile.muzzle_delay_until != 0 ? 2048U : 0U)
+            | (projectile.disable_engines_frames ? 4096U : 0U)); // coordinator-reserved bit 12, EN-08
     sim::detail::append_u32(bytes, 0);
     for (const auto& point : {projectile.position, projectile.step}) {
         sim::detail::append_i64(bytes, point.x.raw());
@@ -421,6 +495,44 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
         sim::detail::append_i64(bytes, projectile.ion_stun->rate_reduction.raw());
         sim::detail::append_u32(bytes, projectile.ion_stun->stack ? 1U : 0U);
     }
+    if (projectile.disable_engines_frames) sim::detail::append_u32(bytes, *projectile.disable_engines_frames);
+    if (projectile.blast.enabled()) {
+        const auto& blast = projectile.blast;
+        for (const auto value : {blast.damage, blast.radius, blast.max_delay}) sim::detail::append_i64(bytes, value.raw());
+        sim::detail::append_u32(bytes, blast.dropoff ? 1U : 0U);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(blast.tiers));
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(blast.max_victims));
+        sim::detail::append_u32(bytes, blast.immune_faction ? 1U : 0U);
+        sim::detail::append_u64(bytes, blast.immune_faction.value_or(0));
+        sim::detail::append_i64(bytes, projectile.source_damage_factor.raw());
+    }
+    if (projectile.flight) {
+        const auto& flight = *projectile.flight;
+        const auto& profile = flight.profile;
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(profile.kind));
+        sim::detail::append_u32(bytes, profile.target_radius ? 1U : 0U);
+        sim::detail::append_u32(bytes, profile.lifetime ? 1U : 0U);
+        if (profile.lifetime) sim::detail::append_i64(bytes, profile.lifetime->raw());
+        for (const auto value : {profile.authored_distance, profile.curve_distance, profile.curve_offset, profile.straight_distance}) {
+            sim::detail::append_i64(bytes, value.raw());
+        }
+        for (const auto& point : {flight.origin, flight.aim}) {
+            sim::detail::append_i64(bytes, point.x.raw()); sim::detail::append_i64(bytes, point.y.raw());
+            sim::detail::append_i64(bytes, point.z.raw());
+        }
+        sim::detail::append_u64(bytes, flight.age_frames);
+        sim::detail::append_i64(bytes, flight.path_distance.raw());
+        sim::detail::append_u32(bytes, flight.path_initialized ? 1U : 0U);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(flight.path.size()));
+        for (const auto& segment : flight.path) {
+            for (const auto& coefficient : {segment.a, segment.b, segment.c, segment.d}) {
+                sim::detail::append_i64(bytes, coefficient.x.raw()); sim::detail::append_i64(bytes, coefficient.y.raw());
+                sim::detail::append_i64(bytes, coefficient.z.raw());
+            }
+            sim::detail::append_i64(bytes, segment.length.raw());
+        }
+    }
+    if (projectile.muzzle_delay_until != 0) sim::detail::append_u64(bytes, projectile.muzzle_delay_until);
 }
 
 } // namespace eawr::sim::tactical::detail

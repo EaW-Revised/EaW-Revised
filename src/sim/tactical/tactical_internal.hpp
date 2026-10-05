@@ -27,7 +27,16 @@ inline constexpr std::size_t snapshot_player_record_size = 8;
 inline constexpr std::uint8_t opcode_attack_hardpoint = 12;
 // The highest command opcode the parser accepts. Whichever of #591 and #556/#574 lands second
 // changes only this line; an opcode in the range that no branch handles fails as unsupported.
-inline constexpr std::uint8_t max_command_opcode = opcode_attack_hardpoint;
+inline constexpr std::uint8_t opcode_pad_build = 13; // coordinator-reserved, WBP-09/10
+inline constexpr std::uint8_t opcode_credit_grant = 14; // coordinator-reserved, SAE-07
+inline constexpr std::uint8_t opcode_pad_sell = 15; // coordinator-reserved, WBP-30
+inline constexpr std::uint8_t opcode_intentional_quit = 16; // coordinator-reserved, WBF-43/48
+inline constexpr std::uint8_t opcode_area_ability = 17; // coordinator-reserved, WAD-38
+inline constexpr std::uint8_t opcode_manual_target = 18; // coordinator-reserved, WAD-39
+inline constexpr std::uint8_t opcode_reserved_reinforce = 19; // coordinator-reserved, SAE-11
+inline constexpr std::uint8_t opcode_hazard_move = 20; // coordinator-reserved, WHZ-08a
+inline constexpr std::uint8_t opcode_reveal_all = 21; // coordinator-reserved, V-20
+inline constexpr std::uint8_t max_command_opcode = opcode_reveal_all;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,

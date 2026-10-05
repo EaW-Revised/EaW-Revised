@@ -72,6 +72,8 @@ class P010PostRemediationChecks(unittest.TestCase):
             self.assertEqual("SHD_OUTPUT_OUTSIDE_CONFINEMENT", raised.exception.code)
             self.assertFalse((outside / "translation").exists())
 
+    @unittest.skipUnless(GLSLANG.is_file() and SPIRV_VAL.is_file(),
+                         "requires the optional pinned shader compiler and validator")
     def test_explicit_swapped_tools_fail_before_source_processing(self) -> None:
         self.assertTrue(GLSLANG.is_file() and SPIRV_VAL.is_file())
         with tempfile.TemporaryDirectory(dir=ROOT / "out" / "shaders", prefix="p010-preflight-") as output_parent:

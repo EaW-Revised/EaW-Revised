@@ -329,6 +329,12 @@ class ToolchainIntegrationTests(unittest.TestCase):
             manifest_b = translate(*args, Path(second), GLSLANG, SPIRV_VAL,
                                    allow_unpinned_synthetic=True)
             self.assertEqual(manifest_a["manifest_id"], manifest_b["manifest_id"])
+            source_names = ("fx_parser.py", "fx_tokens.py", "fx_include.py", "fx_ir.py", "fx_declarations.py",
+                            "toolchain.json", "translate.py", "translate_toolchain.py", "translate_state.py",
+                            "translate_compile.py")
+            expected_sources = {name: hashlib.sha256((ROOT / "tools" / "shaders" / name).read_bytes()).hexdigest()
+                                for name in source_names}
+            self.assertEqual(expected_sources, manifest_a["translator"]["source_sha256"])
             hashes_a = sorted(item["spirv_sha256"] for artifact in manifest_a["artifacts"]
                               for item in artifact.get("stages", []))
             hashes_b = sorted(item["spirv_sha256"] for artifact in manifest_b["artifacts"]

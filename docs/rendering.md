@@ -31,13 +31,13 @@ backbuffer. The viewer keeps those stored-value semantics:
   fog, glow) would see stored values, so they are not used.
 
 Compatibility (`rendering/rendering_device/fallback_to_opengl3`) is an unpinned,
-untested emergency fallback for one milestone after the Forward+ switch (EAWR-144,
-EAWR-153). It is not a second supported renderer or a capture target. It writes
+untested emergency fallback for one milestone after the Forward+ switch (Forward+ renderer decision,
+Forward+ fallback cleanup). It is not a second supported renderer or a capture target. It writes
 `ALBEDO` to its sRGB output through an approximate decode that darkens stored
 values below about 60/255 by up to 4 levels. Only the stored-product adapters
 (MeshAdditive, MeshAdditiveOffset, solid colour, space sky MeshAdditive)
 compensate that: `compatibility_source` swaps their `eawr_stored_albedo` writer
-for the fitted P1-06 compensation. `RenderingServer::shader_set_code` does not
+for the fitted terrain and environment rendering compensation. `RenderingServer::shader_set_code` does not
 run Godot's shader preprocessor, so `#if CURRENT_RENDERER` cannot make this
 choice. Dark Forward+ scenes therefore sit above Compatibility: Coruscant by a
 mean of 3.6 levels, and by 0.5 once its sky, nebula and planet are compensated
@@ -72,7 +72,7 @@ floor they use is set as described under [shadows](#shadows).
 
 ## Render profiles
 
-Owner decision D2 = B on EAWR-189 (EAWR-184): players get enhanced defaults, and every
+Owner decision D2 = B on graphics defaults and parity decisions: players get enhanced defaults, and every
 capture and test keeps the retail look. There is no player setting until M6
 (D1 = C). The host applies one profile to the root viewport before any mode
 starts (`apps/viewer/src/render_profile.hpp`):
@@ -125,11 +125,11 @@ frame-buffer alpha. `StencilDarkenFinalBlur.fx` averages that mask over four
 taps 0.0015 UV apart and multiplies the gamma backbuffer by
 lerp(colour, 1, lit) (`DESTBLEND=SRCCOLOR`), a multiply of stored values.
 
-The viewer draws Godot's directional shadow map instead (EAWR-150):
+The viewer draws Godot's directional shadow map instead:
 - **Casters.** Casters are the visible meshes. Terrain surfaces receive shadows
   but never cast them, as in retail; grass, water and sky domes do not cast
   either.
-- **Stable cascades (EAWR-231).** Godot 4.7.2 already fits each directional split
+- **Stable cascades.** Godot 4.7.2 already fits each directional split
   to its frustum's bounding sphere and snaps the light-space bounds to texels
   (`servers/rendering/renderer_scene_cull.cpp`, `_light_instance_setup_directional_shadow`).
   There is no separate stabilization switch or public per-cascade projection
@@ -146,7 +146,7 @@ The viewer draws Godot's directional shadow map instead (EAWR-150):
   Atlas storage
   remains 16-bit. Filtering complements the finer texels; screen-space AA
   alone cannot resolve shadow-map stair steps.
-- **Filter and depth bias (EAWR-291).** Godot multiplies the directional PCF
+- **Filter and depth bias.** Godot multiplies the directional PCF
   kernel and the depth bias by the light's blur and by the filter radius (2
   texels for Soft Medium, 3 for Soft High). The depth bias is a percentage of
   each cascade's depth range (its sphere diameter plus the 20-unit pancake), so
@@ -155,14 +155,17 @@ The viewer draws Godot's directional shadow map instead (EAWR-150):
   tap and left the depth bias without effect: land captures with bias 0 and 50
   were identical. Land now sets blur 1 and depth bias 0.05: 1 to 3 source
   units in the two near enhanced cascades of a 1280x720 tactical view. Bias 2
-  would have moved receivers 40 to 100 units toward the sun. Space still runs with blur 0,
-  depth bias 2 and normal bias 5.
+  would have moved receivers 40 to 100 units toward the sun. Space also sets
+  blur 1 and depth bias 0.05, with normal bias 5 (legacy EAWR-667): its earlier
+  blur 0 disabled the soft filter and made the configured depth bias 2
+  ineffective, leaving fine self-shadow hatching on sunlit hulls. Space reports
+  record blur as well as bias so a capture identifies the effective policy.
 - **Exceptions.** The top-down overview keeps a scene-fitted orthogonal map;
   the labelled debug-ship evidence view fits its shadow reach to the ship.
   Tactical shadows fade at the fixed reach, so distant geometry beyond it
   does not receive directional shadows. Capture reports record the atlas,
   split offsets, reach, filter and engine stabilization policy.
-- **Floor.** The floor is the environment's `0x17` colour, per channel (EAWR-225).
+- **Floor.** The floor is the environment's `0x17` colour, per channel.
   The candidate environment reader decodes it with its per-record default
   (0.5, 0.5, 0.5); a present mini of the wrong size or with a non-finite channel
   rejects the record. All 415 EaW and FoC records carry it as three floats.
@@ -184,7 +187,7 @@ candidates give:
 | Linear space, tint halved (P1 on Compatibility) | 0.54 |
 | Linear space, tint | 0.735 |
 
-The Highest-preset rig recapture (EAWR-150) confirms the stored-value multiply and
+The Highest-preset rig recapture confirms the stored-value multiply and
 gives its colour: retail multiplies by the current environment's `0x17` colour,
 per channel. A map with several environments draws one per battle at random
 (R-SEL-03 in [effective environment](behaviour/p1-effective-environment.md)):
@@ -202,17 +205,17 @@ run and a stored-preset rig run) measure 0.42–0.51 red, 0.41–0.48 green and
 0.58 plus 4.5–6 levels. The offset lifts the dark blue channel most and explains
 the raised blue; its source was not identified. A linear-space multiply by
 `0x17` would give 0.66, 0.67 and 0.79. Against retail the fixed 0.5 used before
-EAWR-225 was about 0.1 too light in red and green and 0.1 too dark in blue on
+The earlier shadow floor was about 0.1 too light in red and green and 0.1 too dark in blue on
 Sunrise_Clear, and 0.05 too dark on Coruscant. The Coruscant figure rests on `0x17` alone: at the
 player-station and truss-station close-ups retail shows no stencil-shadow edge
 to measure.
 
-With `0x17` as the floor (EAWR-225, RTX 4070 Laptop), each shadowed pixel over the same pixel
+With `0x17` as the floor (RTX 4070 Laptop), each shadowed pixel over the same pixel
 without shadows is `0x17` itself: 0.400, 0.415 and 0.600 on Sunrise_Clear, 0.65,
 0.64 and 0.73 on Noon_Clear (`--eawr-environment-record 1`) and 0.55 on the
 Coruscant Star Destroyer deck. The adjacent-patch method of the retail pairs
 gives 0.41–0.44 red, 0.43–0.46 green and 0.60–0.78 blue over six Sunrise_Clear
-pairs: the three EAWR-150 sensor-view pairs and three zoom-full pairs whose patches
+pairs: the three shadow-retune sensor-view pairs and three zoom-full pairs whose patches
 agree within 3% with shadows off. Before, those were 0.52–0.54, 0.51–0.54 and
 0.54–0.66. The means sit 0.03 red, 0.01 green and 0.05 blue below the retail
 pairs', about the 2.5–4 levels the retail pairs carry on top of `0x17`.
@@ -227,7 +230,7 @@ acne and penumbrae) fell from 25–50% to 0.7–7% of each Naboo view.
 Retail FoC draws `SceneBloom.fx` when the Bloom detail setting is on (Default_2
 and Highest). Land and space mode turn it on for their scene every frame; the
 map-preview render and reflection or refraction views turn it off. The pass
-(EAWR-201, traced in the FoC build):
+(bloom, traced in the FoC debug build):
 - **Source.** After the transparent phase the backbuffer is copied, pixel for
   pixel, into a full-size 8-bit target (shared with heat distortion). Heat
   draws come after the copy and bloom is added after the heat pass, so bloom
@@ -272,7 +275,7 @@ shaders:
   [the environment note](behaviour/p1-effective-environment.md)), so a rig
   capture may bloom with another record's values. Reports record the applied
   values under `scene_bloom`.
-- Only a lit scene blooms (EAWR-307). With the lighting policy off (no
+- Only a lit scene blooms. With the lighting policy off (no
   `--eawr-lighting`, a debug view whose hulls and terrain show their full-bright
   textures) bloom on top means nothing, so the default is off and the report
   says `scene_bloom.status: lighting_off`; an explicit `--eawr-bloom on` without a
@@ -307,7 +310,7 @@ meshgloss-hemisphere-v1 baseline uses ambient (0.08,0.08,0.10), directional
 (2.0,1.88,1.72) and normalized render key direction (0.35,0.75,0.56).
 A TED record's light directions take the retail heading of
 [R-LIT-01](behaviour/p1-effective-environment.md#c-lighting-semantics-and-effect-parameters)
-(`lighting::retail_light_direction`, EAWR-262): heading 0 lies toward -Y, not
+(`lighting::retail_light_direction`, light heading correction): heading 0 lies toward -Y, not
 alo-viewer's +X. The SH matrices, the sun's directional light and shadows,
 specular, the bump particles and the land sky sun all read this one direction.
 Candidate TED field decoding does not confirm original environment selection;
@@ -316,7 +319,7 @@ see [effective environment](behaviour/p1-effective-environment.md).
 ## Hull bump and specular
 
 `MeshBumpColorize` and `RSkinBumpColorize` draw their Highest technique,
-`sph_t2` (EAWR-199; `src/presentation/godot/legacy/bump_colorize.hpp`), on stored
+`sph_t2` (hull bump and specular rendering; `src/presentation/godot/legacy/bump_colorize.hpp`), on stored
 values like the retail ps_2_0:
 - **Lights.** The two fill lights and ambient are per vertex
   (`SPH_LIGHT_FILL`, `eawr_sph_fill_*`), clamped to [0, 1] as a vs_1_1 colour
@@ -355,7 +358,7 @@ preview; the scene no longer selects them.
 
 `BatchMeshGloss` (land rocks, crates and props), `BatchMeshAlpha` (bushes and
 ferns) and `MeshAlphaGloss` (the mineral extractor's asteroid shell, Gungan
-and Naboo building glass) draw their Highest technique, `sph_t0` (EAWR-200;
+and Naboo building glass) draw their Highest technique, `sph_t0` (legacy gloss and alpha shader paths;
 `src/presentation/godot/legacy/dx8_mesh.hpp`), on stored values like the
 retail vs_1_1/ps_1_1 pair:
 - **Vertex.** D = `Diffuse` x `SPH_LIGHT_ALL` irradiance x `LIGHT_SCALE` +
@@ -387,7 +390,8 @@ A second copy is therefore the caster, translated 120 units toward the sun and
 
 The camera is (286.96,133.73,95.24) toward (0,4.60,-5.20), 45 degrees,
 near/far 114.7/728.6. Use the orthogonal 4096 atlas, max distance 615 and the
-viewer's space shadow bias (2, normal bias 5; EAWR-150): on Forward+ the
+fixture's frozen shadow bias (2, normal bias 5, blur left at its engine default;
+the earlier space shadow policy): on Forward+ the
 RenderingServer light defaults acne the whole self-casting Hull.
 CPU masks ray-trace the source Hull triangles independently of GPU output; the
 rigid rest bind moves this Hull by at most 0.000044 units. Fixture changes
@@ -396,7 +400,7 @@ Controls toggle shadows, restore them, remove the caster, disable casting and
 disable receiving. Rigid-skinned and unskinned uploads must retain identical
 bind-space surface/mask pins. The plain route bakes the Hull's rigid rest
 transform before clearing its bone link, matching the production upload since
-EAWR-52. Matched route captures permit up to 32 pixels, 4 of them in the lit
+Rigid-mesh placement and animation strips. Matched route captures permit up to 32 pixels, 4 of them in the lit
 control, to differ by at most one decoded luma level; receiver-mask pixels must
 agree. Forward+ skins in a compute pass, and the two routes then differ in
 10-23 pixels (3 in the control), each by under one level, on the RX 7900 XTX. The run label binds
@@ -408,9 +412,9 @@ On Godot 4.7.2 Forward+ (Vulkan, RX 7900 XTX), as before on the GLES3 route,
 both receiver casting settings pass the mean controls and CPU-mask geometric
 agreement, without a self-shadow signature. The rigid-skinned and unskinned
 routes agree. The older failing
-verdicts came from drawing the Hull interior before the ALO winding fix (EAWR-57);
+verdicts came from drawing the Hull interior before the ALO winding fix;
 temporarily restoring that upload reproduced both old verdicts on the same GPU.
-The one-pixel CPU mask pin change follows the rigid rest-bounds correction (EAWR-52).
+The one-pixel CPU mask pin change follows the rigid rest-bounds correction.
 These are bounded regression expectations, not an original-game comparison or
 a general skinning result.
 
@@ -451,7 +455,7 @@ supplies a shorter clip. Planet and nebula placements keep their map positions.
 This is the viewer's environment presentation rule; sky object lookup and
 authored orientation still follow the TED environment fields below.
 
-The nebula moves only through the effect `TIME` parameter (EAWR-185). The
+The nebula moves only through the effect `TIME` parameter. The
 `W_NEBULA*` models have no idle clips. Nebula.fx offsets each vertex by
 `DistortionScale * sin(2π * frac(SFreq * world + TFreq * TIME))` per axis and
 scrolls its UVs by `3 * TIME * UVScrollRate`. Both Coruscant models author
@@ -539,9 +543,9 @@ Map particles advance in 1/30 s samples (`map_attachment_owner.hpp`). A fixed
 capture takes one sample per rendered frame and holds after its particle frames.
 The live view takes as many samples as the idle clips' real-time 30 Hz tick is
 due, at most 30 per frame (`map_owner_samples_due`), so an effect keeps its
-authored period at any display rate (EAWR-186). Before EAWR-186 the space live view took
+authored period at any display rate. Before the light-cycling fix the space live view took
 one sample per rendered frame, so at 144 Hz effects ran 4.8 times too fast. Before
-EAWR-196 the land live view stopped after a capture's 60 samples, so the Naboo
+the persistent-particle fix the land live view stopped after a capture's 60 samples, so the Naboo
 waterfall spray froze 2 s into the session. The
 Coruscant sensor lights show this clearly: the `p_sensornode01` proxy on
 `Skirmish_Merchant_Dock` and `Orbital_Resource_Container` loads `p_sensornode01.alo`,
@@ -573,7 +577,9 @@ stays under its 0.04 change threshold (the Alderaan speeder shimmer keys 5/255:
 it to change pixels; above 7/255 at 1280x720 heat is checked, although it
 still moves less than a pixel.
 
-### Space ambient particle allocation (EAWR-238)
+<a id="space-ambient-particle-allocation-238"></a>
+
+### Space ambient particle allocation
 
 FoC `corruption/Data/config.meg`, `DATA/XML/SPACEPROPS.XML`, defines
 `Asteroid Field Large` with `Space_Model_Name=w_asteroid_mass.alo`, scale 1,
@@ -611,7 +617,9 @@ which authored births survive, not the emitter schedule, simulation or replay.
 The space particle report includes each effect path, seed, allocation, live
 count and particle-state hash so density and repeated captures are checkable.
 
-### V1 particle size and bump lighting (EAWR-238)
+<a id="v1-particle-size-and-bump-lighting-238"></a>
+
+### V1 particle size and bump lighting
 
 Facts from the FoC debug build and the FoC `PrimParticleBumpAlpha.fx` source;
 they replace the MIT alo-viewer's V1 conversion where the two differ.
@@ -625,7 +633,7 @@ they replace the MIT alo-viewer's V1 conversion where the two differ.
   0.08-1.92: 0.69 of the mean width and 0.39 of the mean area.
 - The per-effect size scale (dynamic size setting) defaults to 1; the texture
   cell index is the integer part of the UV track's value at the particle's
-  relative age, on a square grid of sqrt(mini 0x10) cells, row-major (EAWR-434:
+  relative age, on a square grid of sqrt(mini 0x10) cells, row-major (death debris and station-death captures:
   the runtime rounded to the nearest cell until then; no V1 emitter in the
   corpus has an interpolated UV track, so no drawn cell changed). A track
   with interpolation mode 2 holds each key's value until the next key, so
@@ -643,6 +651,6 @@ they replace the MIT alo-viewer's V1 conversion where the two differ.
   at that camera-facing normal and clamped to [0, 1]. The viewer binds the
   renderer's lighting state (sun direction and colours, fill matrices) to
   every bump emitter; without scene lighting it uses the hemisphere fallback.
-  Coruscant's sun (the R-LIT-01 heading, EAWR-262) lies beyond the field from the
+  Coruscant's sun (the R-LIT-01 heading, light heading correction) lies beyond the field from the
   default camera, so its pebbles are back-lit: dark bodies with light rims, as
   in retail.

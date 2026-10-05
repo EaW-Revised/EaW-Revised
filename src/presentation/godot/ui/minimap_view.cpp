@@ -93,6 +93,29 @@ Rect2 EawrMinimap::minimap_rect() const {
                  static_cast<float>(rect.height));
 }
 
+void EawrMinimap::set_hazards(const std::span<const model::MinimapHazard> hazards,
+    const model::MinimapExtents& extents, const model::MinimapSettings& settings) {
+    const auto size = pixel_size();
+    const std::array<double, 4> bounds{extents.min_x, extents.min_y, extents.max_x, extents.max_y};
+    if (hazards_.is_valid() && size == hazard_size_ && bounds == hazard_extents_
+        && std::equal(hazards.begin(), hazards.end(), hazard_inputs_.begin(), hazard_inputs_.end())) return;
+    const auto texels = model::minimap_hazards(hazards, extents, settings, size[0], size[1]);
+    if (texels.empty()) return; // keep dirty inputs until a drawable texture can be built
+    PackedByteArray bytes;
+    bytes.resize(static_cast<int64_t>(texels.size()));
+    std::memcpy(bytes.ptrw(), texels.data(), texels.size());
+    const auto image = Image::create_from_data(static_cast<int32_t>(size[0]), static_cast<int32_t>(size[1]), false, Image::FORMAT_RGBA8, bytes);
+    if (image.is_null() || image->is_empty()) return;
+    hazards_ = ImageTexture::create_from_image(image);
+    if (hazards_.is_null()) return;
+    hazard_inputs_.assign(hazards.begin(), hazards.end());
+    hazard_extents_ = bounds;
+    hazard_size_ = size;
+    hazard_pixels_ = 0;
+    for (std::size_t pixel = 3; pixel < texels.size(); pixel += 4) if (texels[pixel] != 0) ++hazard_pixels_;
+    queue_redraw();
+}
+
 std::array<std::uint32_t, 2> EawrMinimap::pixel_size() const {
     const Rect2 rect = minimap_rect();
     // MM-10: the engine sizes its layers to the radar's screen extent, rounded up.
@@ -199,6 +222,7 @@ void EawrMinimap::_draw() {
     server->canvas_item_clear(layers_);
     // MM-14: the background layer, one colour in space.
     server->canvas_item_add_rect(layers_, rect, colour(setup_.background));
+    if (hazards_.is_valid()) server->canvas_item_add_texture_rect(layers_, rect, hazards_->get_rid());
     if (fog_.is_valid()) server->canvas_item_add_texture_rect(layers_, rect, fog_->get_rid());
     if (backdrop_tiles_.is_valid()) {
         const Vector2 tile = backdrop_tiles_->get_size();
@@ -206,8 +230,22 @@ void EawrMinimap::_draw() {
         server->canvas_item_add_texture_rect_region(layers_, rect, backdrop_tiles_->get_rid(),
                                                     Rect2(0.0F, 0.0F, tile.x * repeats, tile.y * repeats));
     }
+    // MM-13/MM-16: points precede every textured icon. Their texture coordinates are truncated
+    // at the rounded-up radar resolution; they retain pixel size when the world camera zooms.
+    const auto point_width = static_cast<std::uint32_t>(std::ceil(rect.size.x));
+    const auto point_height = static_cast<std::uint32_t>(std::ceil(rect.size.y));
+    for (auto blip = frame_.blips.rbegin(); blip != frame_.blips.rend(); ++blip) {
+        if (const auto pixels = model::minimap_point_pixels(*blip, point_width, point_height)) {
+            const float sx = rect.size.x / static_cast<float>(point_width);
+            const float sy = rect.size.y / static_cast<float>(point_height);
+            draw_rect(Rect2(rect.position.x + static_cast<float>(pixels->x) * sx,
+                rect.position.y + static_cast<float>(pixels->y) * sy,
+                static_cast<float>(pixels->width) * sx, static_cast<float>(pixels->height) * sy), colour(blip->colour));
+        }
+    }
     std::size_t missing = 0;
     for (const model::MinimapBlip& blip : frame_.blips) {
+        if (blip.icon.empty()) continue;
         const Ref<Texture2D> texture = setup_.texture ? setup_.texture(blip.icon) : Ref<Texture2D>();
         if (texture.is_null()) {
             ++missing;
@@ -245,6 +283,15 @@ std::string EawrMinimap::report_json() const {
            << "\", \"backdrop_drawn\": " << (backdrop_tiles_.is_valid() ? "true" : "false")
            << ", \"backdrop_repeats\": " << model::minimap_backdrop_repeats << ", \"frames\": " << frames_
            << ", \"blips\": " << frame_.blips.size() << ", \"icons_missing\": " << icons_missing_
+           << ", \"hazard_pixels\": " << hazard_pixels_ << ", \"hazards\": [" << [&] {
+                  std::ostringstream rows;
+                  for (std::size_t index = 0; index < hazard_inputs_.size(); ++index) {
+                      const auto& hazard = hazard_inputs_[index];
+                      rows << (index ? ", " : "") << "[" << hazard.x << ", " << hazard.y << ", " << hazard.x_extent << ", " << hazard.y_extent
+                           << ", " << static_cast<unsigned>(hazard.kind) << "]";
+                  }
+                  return rows.str();
+              }() << "]"
            << ", \"fog\": {\"width\": " << fog_width_ << ", \"height\": " << fog_height_ << ", \"passes\": " << fog_pass_
            << "}, \"looks\": " << looks_ << ", \"drags\": " << drags_ << ", \"moves\": " << moves_ << ", \"guide\": ";
     if (frame_.guide) {
@@ -263,7 +310,9 @@ std::string EawrMinimap::report_json() const {
         const model::MinimapBlip& blip = frame_.blips[index];
         const Vector2 at = to_screen(blip.centre);
         output << (index ? ", " : "") << "{\"id\": " << blip.id << ", \"icon\": \"" << blip.icon << "\", \"at\": [" << at.x
-               << ", " << at.y << "], \"rotation\": " << blip.rotation_degrees << ", \"colour\": [" << int(blip.colour.r)
+               << ", " << at.y << "], \"half_size\": [" << blip.half_size[0] << ", " << blip.half_size[1]
+               << "], \"point_pixels\": " << (blip.icon.empty() ? blip.point_pixels : 0U)
+               << ", \"rotation\": " << blip.rotation_degrees << ", \"colour\": [" << int(blip.colour.r)
                << ", " << int(blip.colour.g) << ", " << int(blip.colour.b) << ", " << int(blip.colour.a) << "]}";
     }
     output << "], \"log\": [";

@@ -65,15 +65,17 @@ struct EmitterRenderPlan final {
     DrawPhase phase{DrawPhase::transparent};
     bool depth_test{true};
     bool depth_write{};
-    // Converted V1 renderers all construct with sorting disabled, so quads
-    // are drawn in CPU particle order; emitters are ordered by index through
-    // `order_in_phase`, which a backend maps inside its pass priority range.
+    // PS-32: authored sort only for eligible blend modes with depth enabled.
     bool sort_particles{};
+    bool triangles{};
     std::uint32_t order_in_phase{};
     std::string texture;
     // Bump-mapped selectors only: the emitter's normal-map texture (may be empty).
     std::string normal_texture;
     float tail_size{};
+    bool legacy_kite_motion{};
+    bool inherit_emitter_motion{};
+    float kite_speed_limit{};
     bool drawable{};
     std::string cause;
 };
@@ -89,6 +91,21 @@ struct CameraFrame final {
     Vec3 right{1.0F, 0.0F, 0.0F};
     Vec3 up{0.0F, 0.0F, 1.0F};
 };
+
+// PS-39: scene culling precedes stream preparation. Planes use the particle
+// basis, with the outside half-space dot(normal, position) > distance.
+struct CullingFrame final {
+    std::array<Vec4, 6> planes{};
+    bool valid{};
+    bool enabled{};
+};
+struct ParticleBounds final {
+    Vec3 minimum{}, maximum{};
+    bool valid{};
+};
+[[nodiscard]] ParticleBounds particle_bounds(std::span<const EmitterRenderPlan> plans,
+    std::span<const Particle> particles);
+[[nodiscard]] bool intersects(const ParticleBounds& bounds, const CullingFrame& frame) noexcept;
 
 // Builds a camera frame from a render-basis (Y-up) look-at camera, applying the
 // inverse of the documented asset-to-render conversion (x, y, z) -> (x, z, -y).
@@ -115,13 +132,17 @@ struct VertexStream final {
     std::vector<ParticleVertex> vertices;
     std::vector<std::uint32_t> indices;
     std::size_t quads{};
+    std::size_t triangles{};
+    // Retained, emitter-local scratch; unused by modes that omit sorting.
+    std::vector<const Particle*> sorted_particles;
+    std::size_t sort_candidates{};
     Vec3 bounds_min{};
     Vec3 bounds_max{};
     void clear();
 };
 
-// Appends one quad per live particle of `plan.emitter_index`, in CPU particle
-// order. A non-drawable plan appends nothing. A particle whose consumed fields
+// Appends the authored primitive per eligible particle, farthest first only
+// when PS-32 requests sorting. A non-drawable plan appends nothing. A particle whose consumed fields
 // or computed positions, UVs, color, or bounds are nonfinite is skipped as a
 // whole quad; earlier stream contents remain intact. Camera axes are consumed
 // only by camera-facing families (or a kite using the no-direction fallback).
@@ -154,6 +175,10 @@ public:
     virtual void destroy_emitter(std::uint64_t resource) = 0;
     // Why the most recent create_emitter returned zero, for the per-emitter cause.
     [[nodiscard]] virtual std::string failure_cause() const { return {}; }
+    // Snapshotted on the caller thread, then read without backend calls by workers.
+    [[nodiscard]] virtual CullingFrame culling_frame() const { return {}; }
+    virtual void set_emitter_visible(std::uint64_t, bool) {}
+    virtual void record_group_work(bool, bool, bool) {}
 
 protected:
     RenderBackend() = default;
@@ -172,6 +197,7 @@ inline constexpr std::string_view batch = "EAWR-PARTICLE-0010";
 struct EmitterFrameStats final {
     std::size_t particles{};
     std::size_t quads{};
+    std::size_t triangles{};
     std::uint64_t hash{};
     bool drawn{};
     // Largest vertex colour alpha in the emitter's stream this frame (zero with
@@ -181,6 +207,8 @@ struct EmitterFrameStats final {
 
 struct EffectFrameStats final {
     AdvanceStats advance;
+    float elapsed_seconds{};
+    float deferred_seconds{};
     std::size_t particles{};
     std::vector<EmitterFrameStats> emitters;
     std::uint64_t hash{};
@@ -224,6 +252,9 @@ struct RegistryWorkCounts final {
     std::uint64_t uploads{};        // streams handed to the backend
     std::uint64_t batches{};        // advance_all / present_all calls that ran their tasks on the executor
     std::uint64_t tasks{};          // executor tasks those batches ran
+    std::uint64_t groups_visible{};
+    std::uint64_t groups_prepared{};
+    std::uint64_t updates_deferred{};
 };
 
 // Outcome of EffectRegistry::detach. `draining` keeps the instance and its
@@ -267,6 +298,10 @@ public:
     // appears twice, fails the batch before any instance changes.
     [[nodiscard]] core::Result<void> advance_all(std::span<const EffectHandle> handles, float delta_seconds,
         const CameraFrame& camera, std::vector<EffectFrameStats>& stats);
+    // The same batch with one step per handle: new attachment generations use zero while their
+    // older drains advance the clock. A size mismatch fails before any instance changes.
+    [[nodiscard]] core::Result<void> advance_all(std::span<const EffectHandle> handles,
+        std::span<const float> delta_seconds, const CameraFrame& camera, std::vector<EffectFrameStats>& stats);
     // present() on every handle of `handles`, batched as advance_all.
     [[nodiscard]] core::Result<void> present_all(std::span<const EffectHandle> handles, const CameraFrame& camera);
     // The pool advance_all and present_all run their tasks on (null, the default: the calling
@@ -277,6 +312,8 @@ public:
     // hashes are zero and every other statistic is unchanged (#638: the live battle's registries
     // leave them off, as nothing there reads them).
     void set_stream_hashes(bool on) noexcept;
+    // PS-34..PS-37: applies to existing and future effects; caller-thread only.
+    [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
     [[nodiscard]] const RegistryWorkCounts& work() const noexcept;
     // Frees every backend resource of the instance. Releasing twice is a
     // diagnostic, not a crash.
@@ -313,16 +350,21 @@ private:
     // Builds the instance's streams from its live particles and fills `stats` when given; touches
     // nothing but the instance and `stats`, so instances build concurrently.
     void build(Instance& instance, const CameraFrame& camera, EffectFrameStats* stats) const;
+    void step(Instance& instance, float delta_seconds, EffectFrameStats& stats) const;
     // Hands the instance's built streams to the backend (the calling thread only) and counts the work.
     void upload(Instance& instance, bool stepped, bool hashed);
     // Resolves `handles` to live, distinct instances into batch_, or records the diagnostic.
     [[nodiscard]] core::Result<void> resolve(std::span<const EffectHandle> handles);
+    [[nodiscard]] core::Result<void> advance_batch(std::span<const EffectHandle> handles, float uniform_delta,
+        std::span<const float> deltas, const CameraFrame& camera, std::vector<EffectFrameStats>& stats);
     // Runs task(i) for every instance of batch_, on the executor when there is more than one.
     [[nodiscard]] core::Result<void> run_batch(const std::function<void(std::size_t)>& task);
     RenderBackend* backend_;
     const StepExecutor* executor_{};
     bool stream_hashes_{true};
     RegistryWorkCounts work_;
+    ParticleDetail detail_;
+    CullingFrame culling_;
     std::vector<Instance*> batch_;
     std::vector<Instance*> sorted_;
     std::vector<std::unique_ptr<Instance>> instances_;

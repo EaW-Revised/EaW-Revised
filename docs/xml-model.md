@@ -1,24 +1,24 @@
 # XML object model and variant resolution
 
-P0-05 implementation contract, 2026-09-21. This document was written before the
+XML data model implementation contract, 2026-09-21. This document was written before the
 corresponding registry and merge cases were implemented. It records the permitted
 MIT evidence used by the loader; it does not assign gameplay meaning to XML tags.
 
 ## Pinned evidence and schema boundary
 
-The schema contract is the accepted P0-09 inventory contract at eaw-schema revision
+The schema contract is the accepted XML tag inventory contract at eaw-schema revision
 `3e1b825a124fbc13b2293665f34a36dd4d4be80f` (MIT, copyright 2026 Alamo Engine
 Tools). The checked inventory manifest contains 130 hashed schema files and the
 runtime's generated lookup is derived from `plan/inventories/xml-tags.json`; it is
 not a hand-maintained tag list. The variant reference is pg-starwarsgame-lsp revision
 `4461416d401b0f665bc1fe82aad60b90bd707fa9` (MIT), especially
 `EffectiveObjectResolver.cs`, its original tests, and the schema merge/replace tests.
-The private installed corpus is unchanged from the accepted P0-09 generation.
+The private installed corpus is unchanged from the accepted XML tag inventory generation.
 
 Every parsed node retains its original element spelling, ordered attributes, direct
 text (without numeric conversion), ordered nested children, logical VFS path, source
 ID, layer ID, and 1-based line/column. Repeated elements are separate occurrences.
-Unknown and deprecated nodes remain in the tree and produce diagnostics in P0-09's
+Unknown and deprecated nodes remain in the tree and produce diagnostics in the XML tag inventory's
 profile/type/path/tag vocabulary. No DTD, external entity, network fetch, embedded
 code, native path, or direct runtime filesystem read is allowed.
 

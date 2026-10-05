@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 
 import camera_fixture as fixture  # noqa: E402
 from viewer_mode_sources import mode_source  # noqa: E402
+from host_source_reads import host_source  # noqa: E402
 
 BINDINGS = ROOT / "apps/viewer/project/config/camera-bindings.json"
 EXPORT_PRESETS = ROOT / "apps/viewer/project/export_presets.cfg"
@@ -116,11 +117,11 @@ class CameraInputSourceContract(unittest.TestCase):
         source = mode_source("viewer_host")
         # UI-07: the GUI sees events first; the world, then the camera, get
         # what it leaves through route_world_input.
-        body = function_body(source, "void ViewerHost::route_world_input(")
+        body = function_body(host_source("void ViewerHost::route_world_input("), "void ViewerHost::route_world_input(")
         self.assertIn("if (!camera_interaction_ || event.is_null()) return;", body)
         for handler in ("void ViewerHost::_input(", "void ViewerHost::_unhandled_input("):
-            self.assertIn("route_world_input(event);", function_body(source, handler))
-        notification = function_body(source, "void ViewerHost::_notification(")
+            self.assertIn("route_world_input(event);", function_body(host_source(handler), handler))
+        notification = function_body(host_source("void ViewerHost::_notification("), "void ViewerHost::_notification(")
         self.assertIn("if (!camera_interaction_) return;", notification)
         # The interaction is created only by start_camera_interaction, reached
         # only from the tactical camera path when explicitly requested.
@@ -138,13 +139,13 @@ class CameraInputSourceContract(unittest.TestCase):
                           "void ViewerHost::_unhandled_input(",
                           "void ViewerHost::route_world_input(",
                           "void ViewerHost::_notification("):
-            body = function_body(source, signature)
+            body = function_body(host_source(signature), signature)
             self.assertIsNone(re.search(r"capture_camera_\s*(\.\w+(\[\d+\])?)?\s*=[^=]", body),
                               f"{signature} writes capture_camera_")
             self.assertNotIn("fixed_capture_snapshot_", body)
-        step = function_body(source, "bool ViewerHost::step_camera_interaction(")
+        step = function_body(host_source("bool ViewerHost::step_camera_interaction("), "bool ViewerHost::step_camera_interaction(")
         self.assertIn("if (run.adapter.capture_locked()) return true;", step)
-        start = function_body(source, "bool ViewerHost::start_camera_interaction(")
+        start = function_body(host_source("bool ViewerHost::start_camera_interaction("), "bool ViewerHost::start_camera_interaction(")
         self.assertIn("run->adapter.set_capture_locked(true);", start)
 
     def test_space_and_effect_modes_are_not_interactive(self):
@@ -178,11 +179,11 @@ class CameraInputSourceContract(unittest.TestCase):
 
     def test_free_flight_transitions_restore_and_respect_capture_lock(self):
         source = mode_source("viewer_host")
-        step = function_body(source, "bool ViewerHost::step_camera_interaction(")
+        step = function_body(host_source("bool ViewerHost::step_camera_interaction("), "bool ViewerHost::step_camera_interaction(")
         # The lock check precedes any toggle handling.
         self.assertLess(step.index("if (run.adapter.capture_locked()) return true;"),
                         step.index("free_toggle_requests"))
-        toggle = function_body(source, "bool ViewerHost::toggle_free_camera(")
+        toggle = function_body(host_source("bool ViewerHost::toggle_free_camera("), "bool ViewerHost::toggle_free_camera(")
         for token in ("run.pose = run.saved_pose;", "run.camera = run.saved_camera;",
                       "run.adapter.set_context(run.saved_context);",
                       "run.saved_pose = run.pose;", "run.saved_camera = run.camera;",
@@ -209,11 +210,11 @@ class CameraInputSourceContract(unittest.TestCase):
 
     def test_bindings_read_is_capped_before_allocation(self):
         source = mode_source("viewer_host")
-        start = function_body(source, "bool ViewerHost::start_camera_interaction(")
+        start = function_body(host_source("bool ViewerHost::start_camera_interaction("), "bool ViewerHost::start_camera_interaction(")
         self.assertIn("read_bytes_bounded(", start)
         self.assertIn("camera_input::max_binding_document_bytes", start)
         self.assertNotIn("read_bytes(", start)
-        bounded = function_body(source, "BoundedRead read_bytes_bounded(")
+        bounded = function_body(host_source("BoundedRead read_bytes_bounded("), "BoundedRead read_bytes_bounded(")
         godot_branch, native_branch = bounded.split("std::ifstream", 1)
         # The length check precedes every allocation or read in both branches.
         self.assertLess(godot_branch.index("length > max_bytes"),
@@ -222,7 +223,7 @@ class CameraInputSourceContract(unittest.TestCase):
         self.assertLess(native_branch.index("> max_bytes"), native_branch.index("input.read("))
         # The generic reader used by other call sites is unchanged in shape.
         self.assertIn("input->get_buffer(input->get_length())",
-                      function_body(source, "std::optional<std::vector<std::byte>> read_bytes("))
+                      function_body(host_source("std::optional<std::vector<std::byte>> viewer_host_detail::read_bytes("), "std::optional<std::vector<std::byte>> viewer_host_detail::read_bytes("))
         header = ADAPTER_HEADER.read_text(encoding="utf-8")
         self.assertIn("max_binding_document_bytes = std::size_t{1} << 20U", header)
         self.assertIn("json.size() > max_binding_document_bytes",
@@ -230,7 +231,7 @@ class CameraInputSourceContract(unittest.TestCase):
 
     def test_report_strings_use_the_control_escaping_encoder(self):
         source = mode_source("viewer_host")
-        body = function_body(source, "std::string json(const std::string_view value)")
+        body = function_body(host_source("std::string json(const std::string_view value)"), "std::string json(const std::string_view value)")
         self.assertIn("json_string_literal(value)", body)
 
 

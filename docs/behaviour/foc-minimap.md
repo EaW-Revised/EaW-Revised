@@ -1,4 +1,6 @@
-# FoC tactical space minimap (EAWR-455)
+<a id="foc-tactical-space-minimap-455"></a>
+
+# FoC tactical space minimap (minimap contents and camera input)
 
 ## Applicability
 
@@ -6,7 +8,7 @@ The minimap in the Forces of Corruption space tactical command bar on the pinned
 draws, how it maps the battle, how often it updates and what the pointer does on it. The rules were
 read in the FoC debug build (the radar map, its renderer, the game mode's per-frame radar update and
 radar icon submission, the command bar's mouse handling and component action table) unless marked
-as project policy. Evidence IDs MME-1 to MME-11 map to research notes kept outside the repository.
+as project policy. Evidence IDs MME-1 to MME-12 map to research notes kept outside the repository.
 Values are from the FoC `RadarMap.xml`, `GameConstants.xml` and object XML.
 
 The remake implements it in `presentation/ui/minimap.hpp` (settings, mapping, blips, guide, fog), the
@@ -48,9 +50,14 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   `Radar_Icon_Size`, turned by the unit's facing less a quarter turn when the type shows facing; a
   facing of exactly zero is not turned. The icon list is submitted from its end, so the first unit
   is drawn last.
-- MM-09 (MME-7). The camera outline: the rays through the viewport's four corners meet the plane at
+- MM-09 (MME-7, MME-12). The camera outline: the rays through the viewport's four corners meet the plane at
   the reference height (the mean height of the playable factions' radar-visible objects at the
-  start); a ray that misses it gives the view's far end instead. The four points are joined by white
+  start). If either upper ray meets that plane behind the near face or beyond the far face, both
+  upper points use the plane's cuts through the far face's vertical edges. If either lower ray
+  meets it behind the near face, both lower points use the near face's vertical-edge cuts and
+  both upper points use the far face's cuts (debug build: radar update and expanded frustum
+  intersections). Depth is along the view direction, not radial distance from the camera.
+  The four points are joined by white
   lines, cut where they leave the minimap. A rectangle guide (MM-01) joins their bounding box
   instead.
 - MM-10 (MME-8). The fog layer has one texel per minimap pixel (the radar's screen size, rounded
@@ -73,6 +80,34 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   in revealed areas of the retail stills; fogged areas add the fog colour on top (16, 47, 87 in the
   fog-on still).
 
+- MM-15 (MME-13; owner playtest, 2026-10-02). A fighter squadron presents one radar identity.
+  The debug build's team path uses the arithmetic mean of current member positions, its first
+  member's facing, and the team leader's radar fog admission. This centre is independent of the
+  world icon's idle or combat grid anchor. The debug build creates a separate team from
+  `Create_Team_Type`, defaulting to `Team`; that type supplies the radar visibility and icon
+  policy. The remake uses this loaded team type with the squadron's colour, selection and
+  identity once, suppresses its craft identities, and leaves dead, docked and empty teams out.
+  The exact upstream member exclusion in the original is unverified; the squadron identity count
+  follows the owner's observed presentation. Member deletion makes the first remaining member
+  the leader for this presentation path.
+
+- MM-16 (MME-14, debug build). An explicitly empty `Radar_Icon_Name` plots a point; an omitted
+  name retains the default textured icon. `Radar_Blip_Size` defaults to 2 and is truncated to an
+  integer. Only size 2 writes a 2-by-2 pixel block; every other size writes one pixel. The point
+  starts at the truncated projected texture coordinate (top row first), with its extra row and
+  column clipped at the radar edge. A centre at the right or bottom edge is outside. Point size
+  is independent of world-camera zoom. Points keep the owner/selected colour and the ordinary
+  radar visibility gates; their layer is below textured icons.
+- MM-17 (MME-15, debug build). `Radar_Draw_To_Scale` defaults to No. When No, a textured icon
+  uses `Radar_Icon_Size`, irrespective of `Radar_Icon_Scale_Space`. When Yes, its world bounding
+  box half extents are multiplied by `Radar_Icon_Scale_Space` (default 2) and projected to the
+  radar frame. A model-free team uses that scale itself as its X/Y world half extent around
+  the member mean, independently of member spread. Facing and icon rotation retain MM-08.
+  The stock Team authors scale 200 but no draw-to-scale override, so that value alone does not
+  justify resizing its default icon. The two newly supported tags `Radar_Blip_Size` and
+  `Radar_Draw_To_Scale` have no authored occurrences in the pinned FoC inventory, hence no
+  registry rows; existing icon-name and space-scale consumers record application.
+
 ## Cases
 
 - K-1. The M2 Coruscant start, Rebel local player: the Rebel station and fleet blips in the Rebel
@@ -82,20 +117,22 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   shorter than 12 pixels moves it once, a longer one follows the pointer.
 - K-3. `--eawr-live-reveal on` (project policy, matching [space-fog-presentation.md](space-fog-presentation.md)
   FW-14): the minimap's fog layer draws nothing, agreeing with the world's fog plane, while the fog
-  cells and revealers it reads are unchanged (the live session's sensor content stays untouched, EAWR-507).
+  cells and revealers it reads are unchanged (the live session's sensor content stays untouched, live-session reveal override).
 
 ## Unverified / fidelity list
 
 - The retail fog-on still shows some Neutral objects (grey icons, the planet star) through the fog;
   ours shows only what the snapshot's visibility shows the local player.
-- Fog reads the local player's fog cells that the live session publishes with each tick (EAWR-494, the
+- Fog reads the local player's fog cells that the live session publishes with each tick (world fog rendering, the
   grid of [space-visibility.md](space-visibility.md) V-11 to V-19): a texel is fogged where its cell
   is zero, so it lingers and is quantised as FoC's is, and it matches the fog drawn in the world
   ([space-fog-presentation.md](space-fog-presentation.md) FW-08). A battle without fog rules falls
   back to the local team's current sensor circles.
 - The opaque background (MM-14) covers the shell's radar scan lines, as in the retail stills.
 - `Radar_Rotate_Icon`'s quarter turn direction is unverified (no M2 type uses it).
-- The point layer (`Radar_Blip_Size` for types without an icon), damage flashes, reinforcement and
+- The stock team's retail size/style remains an open visual comparison (legacy EAWR-1369); its default
+  textured icon must not be replaced with guessed points or unconditional space scaling.
+- Damage flashes, reinforcement and
   shield range icons, background objects (the planet icon), asteroid field fill, radar events
   (click, death and beacon models) and the double click's tether release are not drawn.
 - The world square follows the project's camera bounds, not FoC's own space camera bounds.

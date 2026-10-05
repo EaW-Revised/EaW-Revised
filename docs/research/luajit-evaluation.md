@@ -1,6 +1,8 @@
-# LuaJIT for the script runtime: evaluation (EAWR-610)
+<a id="luajit-for-the-script-runtime-evaluation-610"></a>
 
-Research for EAWR-610, 2026-09-29.
+# LuaJIT for the script runtime: evaluation
+
+Research for LuaJIT evaluation (legacy EAWR-610), 2026-09-29.
 A modder suggested embedding LuaJIT instead of the stock Lua VM, on the grounds that it is "not a
 new Lua, just a faster way to run the same Lua". This note checks that claim against the
 project's three priorities: FoC fidelity including mods, performance parity with FoC, and
@@ -24,7 +26,7 @@ deterministic lockstep and replays. Nothing here changes code.
   code skips the instruction counter.
 - **There is almost nothing to speed up.** In the M2 battle, the FoC AI runs at most about
   1,500 Lua instructions in a tick and 77 on average. That is roughly 0.1 ms in the worst tick
-  and a few microseconds on average, out of the 33.3 ms tick. The EAWR-601 melee runs no Lua at
+  and a few microseconds on average, out of the 33.3 ms tick. The close-range battle benchmark melee runs no Lua at
   all, and there, projectiles take about two thirds of the tick.
 
 Keep the Lua 5.0.2 VM and optimise it only if a profile ever shows Lua as a hotspot. Look at
@@ -37,13 +39,13 @@ LuaJIT again only if the conditions in the [recommendation](#recommendation) are
 | **Benefit: speed** | Its interpreter is several times faster than stock Lua, and its JIT is far faster on loops over numbers and tables. | Low: Lua is ≤ 0.3% of the worst M2 tick and ~0.02% on average (see [Benefit](#benefit)). FoC scripts spend their time in engine calls, which the JIT doesn't compile. |
 | **Benefit: ecosystem** | It is widely used and well tested, and modders know it. | Low: FoC modders write for FoC's 5.0; EaWX tests its framework on PUC Lua 5.1, not LuaJIT. |
 | **Cost: language gap** | Lua 5.1 semantics, not 5.0 (see [Compatibility](#compatibility)). | High: FoC's own scripts and all six mods we scanned need shims; one gap needs parser changes. |
-| **Cost: determinism** | Hardware doubles only. NaN bits, out-of-range conversions and the number representation differ between x64 and ARM64. The JIT compiles different code depending on what ran before. | Blocking for authoritative scripts: breaks option B (EAWR-254) and ADR-010. |
+| **Cost: determinism** | Hardware doubles only. NaN bits, out-of-range conversions and the number representation differ between x64 and ARM64. The JIT compiles different code depending on what ran before. | Blocking for authoritative scripts: breaks option B and [checked Q24 math decision](../architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations). |
 | **Cost: sandbox, budget, persistence** | Our instruction budget, memory quota, canonical `pairs`/`next` and whole-state save are built into the Lua 5.0.2 VM. | High: each would have to be rebuilt on LuaJIT's internals. The instruction budget only works if the JIT is off. |
 | **Cost: build** | A custom build: a host tool generates the VM from assembler sources (DynASM). Separate paths for Windows (`msvcbuild.bat`) and POSIX (`make`). | Medium: a new CMake integration for five CI targets, with host/target pairs for cross builds. |
 | **Risk: maintenance** | Upstream is active (commits in September 2026) but has essentially one maintainer. Releases are rolling snapshots of the v2.1 branch. | Medium: we would pin a commit and carry our patches. |
 | **Risk: platforms** | x64 and ARM64 on Windows, Linux and macOS are supported. On macOS the hardened runtime needs `MAP_JIT` (`LUAJIT_ENABLE_OSX_HRT`). Where runtime code generation isn't allowed (iOS, consoles), only the interpreter runs. | Low to medium. |
 | **Risk: security** | FFI, `jit.*` and loading bytecode (`load`/`loadstring` accept LuaJIT bytecode, which isn't verified) must stay closed to mods. | Medium: all three can be closed (`LUAJIT_DISABLE_FFI`, no `jit` library, loaders limited to source), but a wrong build setting would expose them. |
-| **Risk: debugging** | LuaJIT has the 5.1 debug hooks, but line and count hooks are only serviced by the interpreter. | Low: EAWR-525 debugs retail FoC's own Lua and doesn't depend on our VM; our own tools would need changes. |
+| **Risk: debugging** | LuaJIT has the 5.1 debug hooks, but line and count hooks are only serviced by the interpreter. | Low: Lua debugger trial debugs retail FoC's own Lua and doesn't depend on our VM; our own tools would need changes. |
 | **Licence** | MIT, like Lua 5.0.2. | None. |
 | **Binary size** | A static library of a few hundred KB, several times our Lua build. | Negligible. |
 
@@ -56,8 +58,8 @@ LuaJIT again only if the conditions in the [recommendation](#recommendation) are
   - The **authoritative VM** (`src/script/sflua`) compiles the same sources as C++, with
     `lua_Number` replaced by a 64-bit integer word that encodes binary64. Every operation runs
     in integer code: rounding, NaN canonicalisation, `%.14g` and UCRT-style text, and x64-style
-    integer casts ([numeric profile](../lua-numeric-profile.md), EAWR-246/#254 option B). The
-    running retail game confirmed the profile (EAWR-376).
+    integer casts ([numeric profile](../lua-numeric-profile.md), owner option B). The
+    running retail game confirmed the profile.
 
   Libraries: base with coroutine, string and table, as FoC. There is no `math`, `io`, `os` or
   `debug` library.
@@ -67,7 +69,7 @@ LuaJIT again only if the conditions in the [recommendation](#recommendation) are
   ([sandbox](../lua-sandbox.md)). A whole-state save and state hash walk the VM's own objects
   ([persistence](../lua-persistence.md)).
 - **Where scripts run.**
-  - The FoC tactical space AI: the freestore and plan scripts through the EAWR-79 host, in the
+  - The FoC tactical space AI: the freestore and plan scripts through the tactical AI host, in the
     tick's partitioned `script-instances` phase ([simulation](../simulation.md)).
   - Galactic conquest and story scripts: not yet (M3).
   - Presentation-side Lua: none. The viewer and UI have no Lua today.
@@ -88,9 +90,9 @@ text was copied.
 | **`table.getn` and `table.setn`.** 5.0 honours an `n` field, then the `setn` size, then counts up to the first nil. LuaJIT's `getn` is `#t`, which can return any border when the table has holes, and LuaJIT has no `setn`. | `getn` in 20 files; no `setn` | `getn` in 14–103 files per mod; no `setn` | Yes: replace `getn` with a function that has 5.0's rules. It is slower than `#` but gives the same results. Without it, any table with nil holes can give a different count. |
 | **`unpack`** follows `getn` in 5.0 and `#` in 5.1. | 11 files (`unpack(arg)` in the debug helpers) | 1–14 files | Yes, with the same 5.0 length rule. Without it, trailing nil arguments get lost. |
 | **`collectgarbage(256)`.** 5.0 sets a threshold. In 5.1 a number is an invalid option and raises an error. | 1 file, which every script loads (`pgbasedefinitions.lua`) | 5 of 6 mods | Yes: a wrapper that accepts the 5.0 forms. Garbage collection can't be observed in our sandbox anyway. |
-| **Number formatting.** LuaJIT has its own formatter: exact, ties to even, like FoC's. But `string.format('%d', 3e9)` prints `3000000000` where FoC prints `-2147483648` (LuaJIT converts through int64), and NaN prints `nan` where FoC prints `-nan(ind)`. | `%d` in 2 files (`Dirty_Floor` in `pgbase.lua`); `tostring` in 211 files | `%d` in 1–2 files per mod | Only by patching LuaJIT's formatter and its number-to-integer conversions (a C fork). Cases L and M of the EAWR-376 retail probe would fail without the patch. |
+| **Number formatting.** LuaJIT has its own formatter: exact, ties to even, like FoC's. But `string.format('%d', 3e9)` prints `3000000000` where FoC prints `-2147483648` (LuaJIT converts through int64), and NaN prints `nan` where FoC prints `-nan(ind)`. | `%d` in 2 files (`Dirty_Floor` in `pgbase.lua`); `tostring` in 211 files | `%d` in 1–2 files per mod | Only by patching LuaJIT's formatter and its number-to-integer conversions (a C fork). Cases L and M of the retail Lua number-formatting probe would fail without the patch. |
 | **Integer arguments** (`string.rep`, `string.sub`, table indices) from out-of-range numbers. FoC saturates to INT32_MIN. LuaJIT's result depends on the CPU (below). | rare | rare | A C fork. |
-| **`^` operator.** FoC has no `__pow`, so `^` raises an error (EAWR-376 case P). In LuaJIT, `^` is built in and calls the platform's `pow`. | 0 | 0 | Parser or VM patch. As it stands, a script that fails in FoC would run here, with results that can differ between platforms. |
+| **`^` operator.** FoC has no `__pow`, so `^` raises an error (Lua number-formatting probe case P). In LuaJIT, `^` is built in and calls the platform's `pow`. | 0 | 0 | Parser or VM patch. As it stands, a script that fails in FoC would run here, with results that can differ between platforms. |
 | **`%`, `#` and `...` as expressions; `string.gmatch`, `select`.** These are 5.1 additions. | 0 | 0 | Nothing breaks, but mods written against our engine could use them and then fail in FoC. |
 | **`string.gfind`**, removed in 5.1 (only an alias under PUC's compatibility option; LuaJIT has none). | 0 | 0 | An alias to `gmatch`. The two differ only for a pattern anchored with `^`. |
 | **Yield across `pcall`, metamethods and iterators.** LuaJIT allows it; 5.0 raises an error. | 0 `pcall` | 0 `pcall` | Nothing breaks, but more states become possible suspension points, and our save codec assumes 5.0's. |
@@ -157,8 +159,8 @@ with the MSVC, clang-cl, GCC and Clang builds. LuaJIT would need every item abov
 then tested on all five CI targets, just as the soft-float VM already is. It checks this with
 SplitMix64 digests of a million operations and state hashes at 1, 2, 4 and 8 workers.
 
-**Verdict.** LuaJIT can't meet the current contract (option B, ADR-010). To accept hardware
-doubles, the owner would have to reopen EAWR-254 and ADR-010. Even then, a patched LuaJIT
+**Verdict.** LuaJIT can't meet the current contract (option B, [checked Q24 math decision](../architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations)). To accept hardware
+doubles, the owner would have to reopen the Lua numeric decision and [checked Q24 math decision](../architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations). Even then, a patched LuaJIT
 interpreter would be the only safe mode, and most of the speed would be gone.
 
 ## Benefit
@@ -169,13 +171,13 @@ interpreter would be the only safe mode, and most of the speed would be gone.
 | The engine step of the same battle (FoC AI host, C++ and Lua together) | about 0.1 ms a tick ([tactical AI](../behaviour/foc-tactical-ai.md#cost)) | ~0.3% |
 | `lua_script_bench`, synthetic, 64 script instances ([sandbox](../lua-sandbox.md#load)) | p99 0.40 ms on 1 worker, 0.15 ms on 4 | 1.2% / 0.5% |
 | `lua_script_bench`, 256 instances (stress) | p99 2.44 ms on 1 worker, 0.76 ms on 4 | 7% / 2.3% |
-| `lua_numeric_bench`, arithmetic-heavy (EAWR-246) | Soft-float costs about 2× hardware Lua; 256 plan steps p99 2.53 ms | 7.6% for a synthetic step far heavier in arithmetic than FoC's scripts |
-| EAWR-601 melee (S, 145 units) | no Lua: the melee gives scripted orders; projectiles take about 65% of the tick | 0% |
+| `lua_numeric_bench`, arithmetic-heavy | Soft-float costs about 2× hardware Lua; 256 plan steps p99 2.53 ms | 7.6% for a synthetic step far heavier in arithmetic than FoC's scripts |
+| close-range battle benchmark melee (S, 145 units) | no Lua: the melee gives scripted orders; projectiles take about 65% of the tick | 0% |
 | Galactic conquest and story scripts | not run until M3 | — |
 
-The per-instruction range is an estimate from the EAWR-246 operation costs (6–26 ns per soft-float
+The per-instruction range is an estimate from the Lua numeric profile operation costs (6–26 ns per soft-float
 operation, plus dispatch). A precise number needs `foc_plan_battle` timed on an offload host.
-EAWR-601 will report the script and AI share separately; the coordinator will add it here if it
+The close-range battle benchmark will report the script and AI share separately; the coordinator will add it here if it
 lands before this note merges.
 
 **Is Lua a hotspot? No.** Even an infinitely fast Lua would save at most about 0.1 ms in the
@@ -190,7 +192,7 @@ rendering, not Lua.
 
 ## Alternatives
 
-1. **Keep the VM and optimise it when a profile says so.** The EAWR-246 note already names the first
+1. **Keep the VM and optimise it when a profile says so.** The Lua numeric profile note already names the first
    lever: exact fast paths for integer-valued operands in the soft-float backend, which cover
    most of FoC's script arithmetic. Others are the host's binding dispatch and canonical `pairs`
    snapshots. Neither shows up today. Cost: small and local. Risk: none to fidelity or lockstep.
@@ -217,13 +219,13 @@ For the modder, the short version is this:
 **What would have to be true to reconsider:**
 
 1. **Lua becomes a hotspot.** A measured profile with AI in every slot, or M3 galactic conquest
-   and story scripts, shows script VM time above the EAWR-246 budget (p99 > 3 ms a tick, or a
+   and story scripts, shows script VM time above the Lua numeric profile budget (p99 > 3 ms a tick, or a
    visible hitch where FoC has none), and that is still true after the soft-float fast paths and
    more partitioning.
-2. **Determinism no longer needs our own number code.** The owner reopens EAWR-254 and ADR-010 to
+2. **Determinism no longer needs our own number code.** The owner reopens the Lua numeric decision and [checked Q24 math decision](../architecture-decisions.md#adr-010-checked-q24-math-and-finite-durations) to
    accept hardware doubles in authoritative scripts, or scripts leave authoritative state.
 3. **Fidelity can be shown.** A LuaJIT fork plus source rewriter runs FoC's full script set and
    the major mods (EaWX, Republic at War, the Remake) with results identical to the 5.0.2 VM,
-   including the EAWR-376 retail probe.
+   including the retail Lua number-formatting probe.
 4. **Our runtime services exist for it.** The instruction budget, memory quota, canonical
    iteration and whole-state save are rebuilt and tested on LuaJIT.

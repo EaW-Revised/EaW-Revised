@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -130,6 +131,38 @@ void test_validation() {
         "a session rejects rules naming a non-commandable contender");
 }
 
+void test_all_units_rules() {
+    auto selected = rules({1, 2, 3}, {1});
+    selected.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+    selected.relevant_types = {ship_type, station_type};
+    selected.controlled_players = {1, 2, 3};
+    selected.installed_players = {1, 2, 3, 4};
+    const std::vector<tactical::Player> players{player(1, 0), player(2, 1), player(3, 0), player(4, 2, false)};
+    expect(static_cast<bool>(tactical::validate_victory(selected, players)), "WBF-08: selected all-units rules validate");
+    using Counts = std::vector<tactical::OwnerUnitCount>;
+    expect(!tactical::all_units_destroyed_winner(selected, players, 2, Counts{{1, 1}, {2, 1}, {3, 1}, {4, 10}}),
+        "WBF-35: a surviving enemy relevant ship prevents victory");
+    expect(tactical::all_units_destroyed_winner(selected, players, 2, Counts{{1, 1}, {3, 1}, {4, 10}}) == 1U,
+        "WBF-32/35: allied units and uncontrolled scenery do not prevent the lowest enemy's win");
+    expect(!tactical::all_units_destroyed_winner(selected, players, 1, Counts{{2, 1}, {3, 1}}),
+        "WBF-35: all-units has no starbase AI shortcut while a human ally's units remain");
+    selected.controlled_players.push_back(4);
+    expect(!tactical::all_units_destroyed_winner(selected, players, 2, Counts{{1, 1}, {4, 1}}),
+        "WBF-35: an explicitly AI-controlled non-lobby owner still counts");
+    selected.controlled_players.pop_back();
+    selected.installed_players = {2, 4};
+    expect(!tactical::all_units_destroyed_winner(selected, players, 2, Counts{{1, 1}}),
+        "WBF-37: an uninstalled condition cannot award victory");
+    selected.condition = tactical::VictoryCondition::enemy_starbase_destroyed;
+    expect(!tactical::all_units_destroyed_winner(selected, players, 2, {}),
+        "WBF-35: starbase-only does not fall back to ship elimination");
+    const auto authored = tactical::parse_victory_condition("SKIRMISH_ALL_ENEMY_UNITS_DESTROYED");
+    expect(authored && authored.value() == tactical::VictoryCondition::all_enemy_units_destroyed,
+        "WBF-08: the authored all-unit selector resolves");
+    expect(!tactical::parse_victory_condition("SKIRMISH_COMMAND_HQ_DESTROYED"),
+        "WBF-36: unsupported land/shared branches are diagnosed");
+}
+
 // --- Session fixtures --------------------------------------------------------------------------
 
 [[nodiscard]] tactical::DurabilityTable durability() {
@@ -204,6 +237,9 @@ struct Trace {
     std::vector<std::string> rows; // tick,state,snapshot
     std::optional<tactical::BattleOutcome> outcome;
     std::size_t victory_events{};
+    std::size_t quit_events{};
+    std::vector<tactical::PlayerQuit> quits;
+    std::vector<tactical::BattleLoss> losses;
 };
 
 [[nodiscard]] Trace run(const tactical::TacticalReplay& replay, const eawr::sim::PartitionExecutor& executor,
@@ -222,9 +258,14 @@ struct Trace {
         trace.rows.push_back(std::to_string(stepped.value().completed_tick) + ',' + stepped.value().state_sha256 + ','
             + snapshot.sha256());
         for (const auto& event : snapshot.events()) trace.victory_events += event.kind == tactical::EventKind::victory;
+        for (const auto& event : snapshot.events()) trace.quit_events += event.kind == tactical::EventKind::player_quit;
         expect(snapshot.outcome() == session.outcome(), "the snapshot carries the session's outcome");
     }
     trace.outcome = session.outcome();
+    const auto quits = session.snapshot()->quits();
+    trace.quits.assign(quits.begin(), quits.end());
+    const auto losses = session.snapshot()->losses();
+    trace.losses.assign(losses.begin(), losses.end());
     return trace;
 }
 
@@ -321,6 +362,242 @@ void test_staging() {
         "a staged star base counts like a starting one");
 }
 
+void test_all_units_sessions() {
+    auto selected = m2_rules();
+    selected.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+    selected.relevant_types = {ship_type, station_type};
+    selected.controlled_players = {1, 2};
+    selected.installed_players = {1, 2, 3};
+    // The neutral relevant base survives; the enemy ship is the last counted loss.
+    const tactical::TacticalReplay battle{setup(), 7,
+        {damage(1, 1, 0, {3}), damage(3, 1, 1, {4}), damage(4, 2, 0, {1, 2})}};
+    const eawr::sim::InlineExecutor inline_executor;
+    const auto reference = run(battle, inline_executor, false, selected);
+    expect(reference.outcome && reference.outcome->winner == 1 && reference.outcome->decided_tick == 3
+        && reference.outcome->deciding_unit == 4 && reference.victory_events == 1,
+        "WBF-35/37: final relevant enemy ship decides and later losses cannot replace the winner");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(run(battle, executor, true, selected).rows == reference.rows,
+            "all-units hashes agree across workers and scrambled storage");
+    }
+    auto simultaneous = setup();
+    simultaneous.units = {unit(1, ship_type, 1, 0), unit(2, ship_type, 2, 100)};
+    const auto first = run({simultaneous, 2, {damage(0, 1, 0, {1, 2})}}, inline_executor, false, selected);
+    const auto reversed = run({simultaneous, 2, {damage(0, 1, 0, {2}), damage(0, 2, 0, {1})}}, inline_executor, false, selected);
+    expect(first.outcome && first.outcome->winner == 2 && reversed.outcome && reversed.outcome->winner == 1,
+        "WBF-32/37: simultaneous last-unit losses retain the first ordered hook's winner");
+    auto irrelevant = selected;
+    irrelevant.relevant_types = {station_type};
+    expect(!run({simultaneous, 2, {damage(0, 1, 0, {2})}}, inline_executor, false, irrelevant).outcome,
+        "WBF-31: loss of an irrelevant type does not trigger elimination");
+    auto team = setup();
+    team.units = {unit(1, ship_type, 1, 0), unit(2, container_type, 2, 100), unit(3, ship_type, 2, 100)};
+    team.squadrons = {{2, {3}}};
+    selected.relevant_types = {container_type};
+    const auto parent = run({team, 2, {damage(0, 1, 0, {3})}}, inline_executor, false, selected);
+    expect(parent.outcome && parent.outcome->winner == 1 && parent.outcome->deciding_unit == 2,
+        "WBF-31: the relevant team container leaving after its last irrelevant craft decides victory");
+}
+
+void test_conversion() {
+    auto start = setup();
+    start.units = {unit(1, ship_type, 1, 0), unit(2, station_type, 2, 10)};
+    tactical::EconomyRules economy;
+    economy.players = {{1, units(1000), 0}, {2, units(1000), 0}};
+    economy.pads.neutral = 3;
+    economy.pads.capture = {{station_type, units(100), Fixed{}, {1, 2, 3}, false, true, true}};
+    economy.pads.influence = {{ship_type, true}, {station_type, false}};
+    for (const auto condition : {tactical::VictoryCondition::all_enemy_units_destroyed,
+             tactical::VictoryCondition::enemy_starbase_destroyed}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto selected = m2_rules();
+            selected.condition = condition;
+            selected.relevant_types = {ship_type, station_type};
+            selected.controlled_players = {1, 2};
+            selected.installed_players = {1, 2, 3};
+            auto created = tactical::TacticalSession::create(start, {}, durability(), {}, {}, {}, selected, {}, economy);
+            expect(static_cast<bool>(created), "ownership-conversion victory fixture validates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> rows;
+            std::size_t destructions = 0;
+            for (std::size_t tick = 0; tick < 12; ++tick) {
+                const auto result = session.step(executor);
+                expect(static_cast<bool>(result), "ownership-conversion step succeeds");
+                if (!result) break;
+                rows.push_back(result.value().state_sha256 + result.value().snapshot->sha256());
+                for (const auto& event : result.value().snapshot->events()) {
+                    destructions += event.kind == tactical::EventKind::unit_destroyed;
+                }
+            }
+            expect(session.outcome() && session.outcome()->winner == 1 && session.outcome()->deciding_unit == 2
+                && destructions == 0, "WBF-31: conversion alone reevaluates the old owner's installed elimination condition");
+            if (reference.empty()) reference = rows;
+            else expect(rows == reference, "ownership conversion hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
+void test_elimination_rollback() {
+    class VisibilityFailure final : public eawr::sim::PartitionExecutor {
+    public:
+        std::size_t worker_count() const noexcept override { return 1; }
+        eawr::core::Result<void> execute(const std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            return inline_.execute(count, partition);
+        }
+        eawr::core::Result<void> execute_phase(const std::string_view phase, const std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            if (phase != "visibility") return execute(count, partition);
+            return eawr::core::Result<void>::failure(eawr::core::Diagnostic{
+                .code = std::string(tactical::diagnostic_codes::worker_failure),
+                .severity = eawr::core::Severity::error,
+                .message = "synthetic failure after elimination staging",
+                .logical_path = std::nullopt, .line = std::nullopt, .column = std::nullopt,
+                .source_id = std::string("victory-test")});
+        }
+    private:
+        eawr::sim::InlineExecutor inline_;
+    };
+    auto selected = m2_rules();
+    selected.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+    selected.relevant_types = {ship_type, station_type};
+    selected.controlled_players = {1, 2};
+    selected.installed_players = {1, 2, 3};
+    const tactical::TacticalReplay battle{setup(), 2, {damage(0, 1, 0, {3, 4})}};
+    auto created = tactical::TacticalSession::from_replay(battle, {}, durability(), {}, {}, {}, selected);
+    expect(static_cast<bool>(created), "elimination rollback fixture validates");
+    if (!created) return;
+    auto session = std::move(created).value();
+    const auto hash = session.state_sha256();
+    const auto snapshot = session.snapshot();
+    expect(!session.step(VisibilityFailure{}) && session.completed_tick() == 0 && !session.outcome()
+        && session.state_sha256() == hash && session.snapshot() == snapshot,
+        "failed tick retains its units, pending commands, outcome and published snapshot");
+    const eawr::sim::InlineExecutor executor;
+    const auto retried = session.step(executor);
+    expect(retried && retried.value().snapshot->losses().size() == 2,
+        "WBF-45: retry commits each staged death exactly once after a failed publication");
+    const auto reference = run(battle, executor, false, selected);
+    expect(retried && reference.outcome && session.outcome() == reference.outcome
+        && retried.value().state_sha256 == reference.rows[0].substr(reference.rows[0].find(',') + 1, 64),
+        "retry rebuilds elimination counts and preserves the first winner");
+    auto quit_created = tactical::TacticalSession::from_replay(
+        {setup(), 1, {{{0, 1, 0}, {}, tactical::QuitPayload{}}}}, {}, durability(), {}, {}, {}, selected);
+    expect(static_cast<bool>(quit_created), "quit rollback fixture validates");
+    if (!quit_created) return;
+    auto quit_session = std::move(quit_created).value();
+    const auto quit_hash = quit_session.state_sha256();
+    expect(!quit_session.step(VisibilityFailure{}) && quit_session.state_sha256() == quit_hash
+        && quit_session.snapshot()->quits().empty() && !quit_session.outcome(),
+        "failed departure tick records neither quit status nor a fallback outcome");
+    expect(quit_session.step(executor) && quit_session.snapshot()->quits().size() == 1
+        && quit_session.outcome() && quit_session.outcome()->winner == 2,
+        "retry consumes the retained departure exactly once");
+}
+
+void test_result_loss_lifetime() {
+    const tactical::TacticalReplay battle{setup(), 7, {damage(1, 1, 0, {3}), damage(3, 1, 1, {4})}};
+    const eawr::sim::InlineExecutor executor;
+    const auto reference = run(battle, executor, false, {});
+    expect(reference.losses == std::vector<tactical::BattleLoss>{{2, station_type, 1, 1, 1}, {2, ship_type, 1, 1, 3}},
+        "WBF-45/46: lifetime loss history keeps owner, scoring type, final attacker and ordered tick");
+    auto created = tactical::TacticalSession::from_replay(battle, {}, durability());
+    expect(static_cast<bool>(created), "loss-history sharing fixture validates");
+    if (created) {
+        auto session = std::move(created).value();
+        while (session.completed_tick() < 4) {
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "loss-history fixture tick completes");
+            if (!stepped) return;
+        }
+        const auto held = session.snapshot();
+        static_cast<void>(session.step(executor));
+        expect(session.snapshot()->losses().data() == held->losses().data(),
+            "ordinary ticks reuse immutable loss history with no per-history copy");
+    }
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter threaded(workers);
+        const auto actual = run(battle, threaded, true, {});
+        expect(actual.losses == reference.losses && actual.rows == reference.rows,
+            "derived loss history and replay hashes agree across workers and scrambled storage");
+    }
+    auto team = setup();
+    team.units = {unit(1, ship_type, 1, 0), unit(2, container_type, 2, 100), unit(3, ship_type, 2, 100)};
+    team.squadrons = {{2, {3}}};
+    const auto emptied = run({team, 2, {damage(0, 1, 0, {3})}}, executor, false, {});
+    expect(emptied.losses == std::vector<tactical::BattleLoss>{{2, ship_type, 1, 1, 0}, {2, container_type, 1, 1, 0}},
+        "WBF-45: a last-member death records its squadron scoring type with the final attacker's owner");
+}
+
+void test_intentional_quit() {
+    const eawr::sim::InlineExecutor executor;
+    const auto quit = [](const std::uint64_t tick, const tactical::PlayerId issuer, const std::uint64_t sequence = 0) {
+        return tactical::PlayerCommand{{tick, issuer, sequence}, {}, tactical::QuitPayload{}};
+    };
+    const tactical::TacticalReplay local{setup(), 3, {quit(0, 1)}};
+    const auto reference = run(local, executor, false, m2_rules());
+    expect(reference.outcome && reference.outcome->condition == tactical::VictoryCondition::intentional_quit
+        && reference.outcome->winner == 2 && reference.outcome->end_tick == 1 && reference.outcome->deciding_unit == 0
+        && reference.quit_events == 1 && reference.victory_events == 0
+        && reference.quits == std::vector<tactical::PlayerQuit>{{1, 0}},
+        "WBF-43/48: local intentional quit records status and an immediate enemy result without a destruction");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        expect(run(local, pool, true, m2_rules()).rows == reference.rows,
+            "intentional quit hashes agree across workers and scrambled storage");
+    }
+    const auto opponent = run({setup(), 3, {quit(0, 2)}}, executor, false, m2_rules());
+    expect(opponent.outcome && opponent.outcome->winner == 1 && opponent.outcome->end_tick == 1,
+        "WBF-48: the last opponent leaving routes the local player to results");
+    const auto pending = run({setup(), 4, {damage(0, 1, 0, {3}), quit(1, 1, 1)}}, executor, false, m2_rules());
+    expect(pending.outcome && pending.outcome->winner == 2 && pending.outcome->end_tick == 2,
+        "WBF-43: quitting before a pending winner matures uses the intentional enemy fallback");
+    auto short_countdown = m2_rules();
+    short_countdown.countdown_frames = 3;
+    const auto matured = run({setup(), 6, {damage(0, 1, 0, {3}), quit(4, 1, 1)}}, executor, false, short_countdown);
+    expect(matured.outcome && matured.outcome->winner == 1
+        && matured.outcome->condition == tactical::VictoryCondition::enemy_starbase_destroyed
+        && matured.outcome->end_tick == 3 && matured.quits.size() == 1,
+        "WBF-43: a matured result is retained while intentional status is still recorded");
+    const auto duplicate = run({setup(), 3, {quit(0, 1), quit(0, 1, 1), quit(0, 2)}}, executor, false, m2_rules());
+    expect(duplicate.outcome && duplicate.outcome->winner == 2 && duplicate.quit_events == 2
+        && duplicate.quits.size() == 2,
+        "duplicate quit notification is refused and later departure cannot replace the first quit result");
+    auto three = setup();
+    three.players[2] = player(3, 2);
+    auto three_rules = rules({1, 2, 3}, {1});
+    const auto departure = run({three, 2, {quit(0, 2)}}, executor, false, three_rules);
+    expect(!departure.outcome && departure.quits == std::vector<tactical::PlayerQuit>{{2, 0}},
+        "WBF-48: an opponent departure alone leaves a battle with two controlled players running");
+    auto created = tactical::TacticalSession::from_replay(
+        {setup(), 3, {quit(0, 1), damage(1, 1, 1, {3})}}, {}, durability(), {}, {}, {}, m2_rules());
+    expect(static_cast<bool>(created), "departure command-deactivation fixture creates");
+    if (created) {
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.step(executor)), "departure tick completes");
+        const auto after = session.step(executor);
+        expect(after && after.value().snapshot->instances().size() == setup().units.size()
+            && after.value().snapshot->events().size() == 1
+            && after.value().snapshot->events()[0].kind == tactical::EventKind::order_rejected,
+            "after end-frame deactivation, the departed player's next command cannot damage any unit");
+    }
+    const auto encoded = tactical::write_replay(local);
+    const auto parsed = encoded ? tactical::parse_replay(encoded.value())
+        : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+    expect(parsed && parsed.value().commands == local.commands && run(parsed.value(), executor, false, m2_rules()).rows == reference.rows,
+        "reserved quit opcode round-trips the smallest unitless command and reproduces status/results");
+    auto invalid = local;
+    invalid.commands[0].units = {1};
+    expect(!tactical::write_replay(invalid), "a quit command must list no units");
+    invalid = local;
+    invalid.commands[0].key.player_id = 3;
+    expect(!tactical::write_replay(invalid), "neutral scenery cannot issue an intentional quit");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -331,9 +608,15 @@ int main(int argc, char** argv) {
     const bool update = argc > 2 && std::string_view(argv[2]) == "--update";
     test_rules();
     test_validation();
+    test_all_units_rules();
     test_fixtures(argv[1], update);
     test_nonplayable_base_remaining();
     test_staging();
+    test_all_units_sessions();
+    test_conversion();
+    test_elimination_rollback();
+    test_intentional_quit();
+    test_result_loss_lifetime();
     if (failures != 0) {
         std::cerr << failures << " victory check(s) failed\n";
         return 1;

@@ -6,6 +6,7 @@
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
+#include "eawr/presentation/ui/minimap.hpp"
 #include "ui_test_support.hpp"
 
 #include <algorithm>
@@ -131,7 +132,9 @@ data::ui::CommandBarCatalog synthetic_catalog() {
   <Font_Point_Size>7</Font_Point_Size><Text_Color>255 212 33 255</Text_Color><Right_Justified>True</Right_Justified>
   <Blink_Duration>0.5</Blink_Duration><Blink_Rate>0.25</Blink_Rate></CommandBarComponent>
 <CommandBarComponent Name="b_reinforcement"><Type>Button</Type>
-  <Icon_Texture_Name>i_button_skirmish_reinforcements.tga</Icon_Texture_Name></CommandBarComponent>
+  <Icon_Alternate_Texture_Name>i_button_skirmish_reinforcements.tga i_button_skirmish_reinforcements.tga special.tga</Icon_Alternate_Texture_Name>
+  <Blank_Texture_Name>pad.tga</Blank_Texture_Name><Flash_Texture_Name>flash.tga</Flash_Texture_Name>
+  <Click_Shift>Yes</Click_Shift><Selected_Alpha>Yes</Selected_Alpha></CommandBarComponent>
 </CommandBarComponents>)";
     data::ui::CommandBarCatalog catalog;
     std::vector<core::Diagnostic> diagnostics;
@@ -172,6 +175,10 @@ void shell_parts() {
            "the credits text takes its money icon, font and blink");
     expect(rebel.reinforcement && rebel.reinforcement->normal == "i_button_skirmish_reinforcements.tga",
            "the reinforcements button takes its icon");
+    expect(rebel.reinforcement && rebel.reinforcement->click_shift && rebel.reinforcement->selected_alpha,
+           "the reinforcement pressed state takes its shift and blend flags");
+    expect(rebel.reinforcement && rebel.reinforcement->blank == "pad.tga" && rebel.reinforcement->flash == "flash.tga",
+           "PU-70/71: alternate-only icon, backing and notification art are preserved");
     std::vector<std::string> names;
     for (const auto& mesh : rebel.meshes) names.push_back(mesh.name);
     expect((names == std::vector<std::string>{"b_Help_Droid_Rebel_ALT1", "Rebel_Faceplate_ALT1", "radar"}),
@@ -335,7 +342,15 @@ void planet_names() {
                                               "<Planet Name=\"Unlisted\"><Text_ID>TEXT_NOT_THERE</Text_ID></Planet></Planets>");
     for (const auto* registry : {"HardpointDataFiles.xml", "FactionFiles.xml", "CampaignFiles.xml", "SFXEventFiles.xml"})
         test::ui::write_text(xml / registry, "<Files/>");
-    test::ui::write_text(xml / "units.xml", "<Units><SpaceUnit Name=\"Kuat\"><Text_ID>TEXT_UNIT</Text_ID></SpaceUnit></Units>");
+    test::ui::write_text(xml / "units.xml", R"xml(<Units>
+<SpaceUnit Name="Kuat"><Text_ID>TEXT_UNIT</Text_ID></SpaceUnit>
+<UpgradeObject Name="CardUpgrade"><Icon_Name>owner-icon.tga</Icon_Name>
+<Text_ID>TEXT_OBJECT_STAR_SYSTEM_CORUSCANT</Text_ID><Tactical_Build_Cost_Multiplayer>950</Tactical_Build_Cost_Multiplayer>
+<Is_Visible_On_Radar>No</Is_Visible_On_Radar><Radar_Icon_Name>owner-radar.tga</Radar_Icon_Name>
+<Abilities><Combat_Bonus_Ability Name="CardUpgrade"><Icon_Name>ability-icon.tga</Icon_Name>
+<Tactical_Build_Cost_Multiplayer>0</Tactical_Build_Cost_Multiplayer><Is_Visible_On_Radar>Yes</Is_Visible_On_Radar>
+<Radar_Icon_Name>ability-radar.tga</Radar_Icon_Name></Combat_Bonus_Ability></Abilities></UpgradeObject>
+</Units>)xml");
     const std::array mounts{vfs::MountSpec{"base", tree.root, "data", {}}};
     auto mounted = vfs::Vfs::mount(mounts);
     expect(static_cast<bool>(mounted), "planet fixture mounts");
@@ -350,6 +365,13 @@ void planet_names() {
     expect(static_cast<bool>(text), "planet fixture text DB loads");
     if (!text) return;
     const auto* objects = &catalog.value().catalog;
+    const auto legacy = objects->resolve("CardUpgrade");
+    expect(legacy && legacy.value().category == data::Category::ability, "HUD fixture warms the global ability winner");
+    const auto card = ui::unit_card_looks("CardUpgrade", objects, &text.value());
+    expect(card.icon == "owner-icon.tga" && card.name == "Coruscant" && card.build_cost == 950,
+           "build card icon, title and cost come from the owning game object despite a same-name ability");
+    const auto radar = ui::minimap_type_looks("CardUpgrade", objects);
+    expect(!radar.visible && radar.icon == "owner-radar.tga", "radar type looks use the same owning object namespace");
 
     const auto found = ui::planet_name(std::string("coruscant"), objects, &text.value());
     expect(found.source == ui::PlanetNameSource::text && found.text == "Coruscant"
@@ -366,6 +388,54 @@ void planet_names() {
            "a map without a context name shows no planet name");
     expect(ui::planet_name(std::string("Coruscant"), nullptr, nullptr).source == ui::PlanetNameSource::context_name,
            "without a catalogue the context name is shown");
+}
+
+void reinforcement_panes() {
+    data::ui::ShellAnchors shell;
+    for (std::size_t rows = 0; rows < 5; ++rows)
+        shell.add(anchor("pool_ALT" + std::to_string(rows), {0, -100, 194, 100},
+                         "MeshAlpha.fx", "panel.tga", true));
+    shell.add(anchor("frame", {0, -100, 5, 100}, "MeshAlpha.fx", "frame.tga", true));
+    shell.add(anchor("r_close", {50, -280, 100, 20}));
+    const std::string xml = R"(<CommandBarComponents><CommandBarComponent Name="r_close">
+<Type>TextButton</Type><Icon_Texture_Name>normal.tga</Icon_Texture_Name>
+<Mouse_Over_Texture_Name>hover.tga</Mouse_Over_Texture_Name>
+<Selected_Texture_Name>pressed.tga</Selected_Texture_Name><Scale>1.25</Scale>
+<Font_Name>FixtureFace</Font_Name><Font_Point_Size>9</Font_Point_Size>
+<Text_Offset>3 -2</Text_Offset><Text_Color>37 38 47 255</Text_Color>
+<Text_Outline>False</Text_Outline><Text_Emboss>True</Text_Emboss><Swap_Texture>True</Swap_Texture>
+</CommandBarComponent></CommandBarComponents>)";
+    data::ui::CommandBarCatalog catalog;
+    std::vector<core::Diagnostic> diagnostics;
+    vfs::AssetRecord record;
+    record.canonical_path = "data/xml/commandbarcomponents.xml";
+    expect(data::ui::parse_command_bar_components(std::as_bytes(std::span(xml.data(), xml.size())),
+               record, catalog, diagnostics).has_value(), "close-button fixture parses");
+    assets::Source source;
+    const auto database = data::ui::load_text_database(text_file("TEXT_BUTTON_CLOSE", u"Fermer"), source);
+    expect(database.has_value(), "localized close label loads");
+    if (!database) return;
+    const auto pane = ui::reinforce_pane(shell, catalog, &database.value());
+    for (std::size_t rows = 0; rows < 5; ++rows) {
+        expect(pane.meshes[rows].size() == 2
+                   && pane.meshes[rows][0].name == "pool_ALT" + std::to_string(rows)
+                   && pane.meshes[rows][1].name == "frame",
+               "PU-67: each row count chooses only its own background and shared frame");
+    }
+    expect(pane.close_label == "Fermer" && pane.close_text_key == "TEXT_BUTTON_CLOSE",
+           "PU-72: the close label is resolved from the supplied database, not an English literal");
+    expect(pane.close && pane.close->normal == "normal.tga" && pane.close->mouse_over == "hover.tga"
+               && pane.close->pressed == "pressed.tga" && near(pane.close->scale, 1.25) && pane.close_swap_texture,
+           "PU-72: all button states and their scale come from the component");
+    expect(pane.close_text && pane.close_text->text.face == "FixtureFace"
+               && pane.close_text->text.point_size == 9 && pane.close_text->text.colour.r == 37
+               && pane.close_text->text.colour.g == 38 && pane.close_text->text.emboss
+               && !pane.close_text->text.outline && near(pane.close_text->text_offset.x, 3)
+               && near(pane.close_text->text_offset.y, -2),
+           "PU-72: the label retains its authored font, colour, offset and emboss style");
+    const auto missing = ui::reinforce_pane(shell, catalog);
+    expect(missing.close_label.empty() && missing.diagnostics.size() == pane.diagnostics.size() + 1,
+           "a missing database diagnoses the absent label without substituting hardcoded text");
 }
 
 void corpus() {
@@ -452,10 +522,19 @@ void corpus() {
     auto text = data::ui::load_language_text_database(*filesystem, "ENGLISH");
     expect(objects && text, "FoC objects and text load");
     if (!objects || !text) return;
+    const auto reactor = ui::unit_card_looks("US_BlackMarket_Reactors_L1_Upgrade", &objects.value().catalog, &text.value());
+    expect(reactor.icon == "i_multi_black_market_eng1.tga" && reactor.build_cost == 850,
+           "stock same-name Underworld build card keeps its owning upgrade icon and price");
     const auto name = ui::planet_name(std::string("Coruscant"), &objects.value().catalog, &text.value());
     expect(name.source == ui::PlanetNameSource::text && name.text == "Coruscant"
                && name.text_id == "TEXT_OBJECT_STAR_SYSTEM_CORUSCANT",
            "_mp_space_coruscant's planet resolves through Planets.xml and the text DB");
+    const auto construction = ui::unit_card_looks("UC_Empire_Mineral_Extractor", &objects.value().catalog, &text.value());
+    expect(!construction.name.empty() && !construction.description.empty(),
+           "WBP-36 construction portraits resolve their localized name and description");
+    const auto mine = ui::unit_card_looks("Empire_Mineral_Extractor", &objects.value().catalog, &text.value());
+    expect(mine.description.find('\n') != std::string::npos,
+           "WBP-36 comma-separated multiplayer encyclopedia entries retain every paragraph");
 }
 
 } // namespace
@@ -464,5 +543,6 @@ void hud_shell_contracts() {
     shell_parts();
     shell_layout();
     planet_names();
+    reinforcement_panes();
     corpus();
 }

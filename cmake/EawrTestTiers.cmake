@@ -10,10 +10,18 @@
 # end of the root list file fails the configure when one does not.
 
 set(EAWR_SLOW_TESTS
+
+    python_presentation_godot_qualify_package_runtime
+    python_presentation_p1_capture_compare
+    python_presentation_p1_capture_migration_pair
+    python_validation_p1_capture_build_manifest
+
     fidelity_trace_comparator_contracts
     foc_ai_turn_668
     foc_burn_battle
+    foc_ai_economy
     foc_plan_battle
+    foc_schedule_957
     foc_soak_615
     foc_soak_664
     inventory_contracts
@@ -22,6 +30,7 @@ set(EAWR_SLOW_TESTS
     path_bench_melee_workers
     path_bench_owner_work
     replay_hash_comparator_contracts
+    roster_gate_game_data
     scene_inventory_contracts
     sim_boundary_fixtures
     sim_boundary_supplemental
@@ -29,9 +38,44 @@ set(EAWR_SLOW_TESTS
     tactical_replay_contracts
     tag_applied_check_smoke
     tag_coverage_m2_scene
+    unit_census_game_data
     vfs_supplemental
 )
 set(EAWR_GPU_TESTS
+    python_presentation_space_environment_effect_graphical
+    python_presentation_renderer_atlas_overlay
+    python_presentation_renderer_batchmesh_alpha
+    python_presentation_renderer_batchmesh_alpha_fog
+    python_presentation_renderer_battle_input
+    python_presentation_renderer_battle_load
+    python_presentation_renderer_camera_contract
+    python_presentation_renderer_camera_input
+    python_presentation_renderer_capture_size
+    python_presentation_renderer_effect_mode
+    python_presentation_renderer_effect_mode_capture
+    python_presentation_renderer_font_mode
+    python_presentation_renderer_hull_preview
+    python_presentation_renderer_input_routing
+    python_presentation_renderer_live_session
+    python_presentation_renderer_map_attached_effects
+    python_presentation_renderer_map_camera
+    python_presentation_renderer_map_fog
+    python_presentation_renderer_map_foliage
+    python_presentation_renderer_map_free_camera
+    python_presentation_renderer_map_mode
+    python_presentation_renderer_map_particles
+    python_presentation_renderer_particle_texture_origin
+    python_presentation_renderer_render_profile
+    python_presentation_renderer_runtime_renderer
+    python_presentation_renderer_space_camera
+    python_presentation_renderer_space_fog
+    python_presentation_renderer_space_map_mode
+    python_presentation_renderer_space_meshadditive_sky
+    python_presentation_renderer_space_meshgloss_sky
+    python_presentation_renderer_tactical_hud
+    python_presentation_renderer_ui_gallery
+    python_presentation_renderer_ui_movies
+    battle_cursor_runtime
     fog_godot_runtime
     fog_renderer_godot_runtime
     hull_asset_shadow_probe_contracts

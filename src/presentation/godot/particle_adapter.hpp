@@ -54,6 +54,9 @@ public:
     void update_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
     void destroy_emitter(std::uint64_t resource) override;
     [[nodiscard]] std::string failure_cause() const override;
+    [[nodiscard]] particles::CullingFrame culling_frame() const override;
+    void set_emitter_visible(std::uint64_t resource, bool visible) override;
+    void record_group_work(bool visible, bool prepared, bool stepped) override;
     // The scene light of bump-mapped emitters (PrimParticleBumpAlpha): light
     // 0's toward-light vector in the render (Y-up) world basis, its diffuse
     // and specular colours, and the SPH_LIGHT_FILL irradiance matrices in the
@@ -87,6 +90,19 @@ public:
     [[nodiscard]] std::size_t live_rids() const noexcept;
     [[nodiscard]] std::size_t live_emitters() const noexcept;
     [[nodiscard]] std::vector<FogEmitterEvidence> fog_emitter_evidence() const;
+
+    // Opt-in frame profiling across the main thread's particle backends. Uploads include
+    // only nonempty streams; replacements count newly allocated mesh surfaces.
+    struct FrameWork final {
+        std::uint64_t streams{};
+        std::uint64_t uploads{};
+        std::uint64_t replacements{};
+        double conversion_ms{};
+        double submission_ms{};
+        std::uint64_t groups{}, visible_groups{}, prepared_groups{}, stepped_groups{};
+    };
+    static void begin_frame_measurement(bool enabled);
+    [[nodiscard]] static FrameWork frame_work();
 
 private:
     class Impl;

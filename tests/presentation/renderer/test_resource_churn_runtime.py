@@ -30,6 +30,9 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
+from viewer_mode_sources import source_text  # noqa: E402
+
 PROJECT = pathlib.Path(__file__).resolve().parent / "churn" / "project"
 HARNESS_PATH = ROOT / "apps/viewer/tools/qualify_package_runtime.py"
 HARNESS_SPEC = importlib.util.spec_from_file_location("qualify_package_runtime", HARNESS_PATH)
@@ -142,6 +145,37 @@ def sample_report():
 
 
 class ResourceChurnReport(unittest.TestCase):
+    def test_environment_idle_uses_the_allocation_budget_path(self):
+        # Connect the engine-free allocation/work budget to its production
+        # callers: warming and retained caches must not be replaced by temporaries.
+        read = source_text
+        environment = (ROOT / "apps/viewer/src/space_environment_view.cpp").read_text(encoding="utf-8")
+        load, process = environment.split("std::optional<int> EnvironmentView::process", 1)
+        effects = (ROOT / "apps/viewer/src/space_environment_effects.cpp").read_text(encoding="utf-8")
+        initialize, advance = effects.split("std::optional<int> EnvironmentView::advance_effects", 1)
+        advance, bind = advance.split("bool EnvironmentView::bind_idle", 1)
+        self.assertIn("if (!initialize_idle()) return false;", load)
+        self.assertIn("if (!bind_idle(placement, *model, filesystem, placed)) return false;", load)
+        self.assertIn("if (const auto failed = advance_effects(tick)) return failed;", process)
+        load = load + initialize + bind
+        process = process + advance
+        self.assertIn("idle.pose.advance", load)
+        self.assertIn("idle.pose.advance", process)
+        self.assertNotIn("animation::sample_idle(", process)
+        renderer = read("src/presentation/godot/renderer_instances.cpp")
+        binding = renderer.split("GodotRenderer::Impl::set_skin_pose", 1)[1].split(
+            "GodotRenderer::Impl::set_light_scale", 1)[0]
+        self.assertIn("cache_skin_pose(skin_poses_, entity_id, asset_id, bones", binding)
+        self.assertNotIn("PendingPose pose", binding)
+        self.assertNotIn("std::move(pose)", binding)
+        refresh = renderer.split("void GodotRenderer::Impl::refresh_billboards", 1)[1].split(
+            "void GodotRenderer::Impl::bind_instance_skin", 1)[0]
+        self.assertIn("billboard_pose_.reset", refresh)
+        self.assertIn("visit_skin_descendants", refresh)
+        self.assertNotIn("std::vector<", refresh)
+        upload = read("src/presentation/godot/renderer_upload.cpp")
+        self.assertIn("billboard_pose_.prepare(source.bones.size())", upload)
+
     def test_sample_passes(self):
         self.assertEqual(verify_report(sample_report()), [])
 

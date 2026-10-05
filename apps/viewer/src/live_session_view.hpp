@@ -1,6 +1,7 @@
 #pragma once
 
 #include "battle_effects.hpp"
+#include "battle_scoring.hpp"
 #include "debris_props.hpp"
 #include "space_environment.hpp"
 #include "space_populate.hpp"
@@ -14,6 +15,7 @@
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
+#include "eawr/presentation/ui/battle_results.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
@@ -25,6 +27,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -33,6 +36,7 @@
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -55,8 +59,8 @@ namespace eawr::presentation::godot_backend {
 //
 // `--eawr-live-session replay --eawr-live-replay <file>` (#80) runs a recorded setup and its
 // commands instead of the M2 start, such as the #74 duel sim_headless --scenario writes; its
-// tables must be the content the replay names. There, `--eawr-live-reveal on` gives every unit
-// type of the setup the revealed sensor range, as the fixed-force recordings stage fog revealed.
+// tables must be the content the replay names. `--eawr-live-reveal on` draws every unit while
+// retaining the recorded session's sensors and fog rules.
 //
 // `--eawr-live-reveal on` also works with `--eawr-live-session m2` (a viewer debug aid, #80): it
 // draws every instance regardless of the local player's fog there too, but presentation-only
@@ -128,7 +132,7 @@ public:
     // <tick>:<click|rclick|hover>:ability=N  (#454: the N-th shown ability button)
     // <tick>:<click|rclick>:minimap=x,y, <tick>:box:minimap=x,y/minimap=x,y  (#455: a minimap
     //     point, x and y from -1 to 1 with +y up; a box is a left drag across the minimap)
-    // <tick>:<click|hover>:hud=<pause|fast_forward|resume|quit>  (#459, #453: a time panel
+    // <tick>:<click|rclick|hover>:hud=<pause|fast_forward|resume|quit>  (#459, #453: a time panel
     //     button, the pause banner's Resume Game or the end panel's Quit Game)
     // f<frame> in place of <tick> fires the gesture on that frame after the warm-up instead:
     // a paused battle's presented tick holds, so a gesture that plays again needs a frame.
@@ -164,6 +168,7 @@ public:
         bool hostile{};
         std::array<double, 3> position{};
         double yaw{}; // degrees, (-180, 180]
+        bool neutral{}; // WSU-63: owner-directed neutral-prop presentation policy
     };
     struct Options final {
         std::string fixture;                                  // --eawr-live-session (m2|skirmish|replay|melee)
@@ -173,6 +178,8 @@ public:
         std::optional<skirmish::MeleeSize> melee_size;
         std::optional<std::uint64_t> melee_seed;
         bool reveal{};                                        // --eawr-live-reveal on|off
+        // Explicit capture-driver policy; interactive local battles require Begin by default.
+        std::optional<bool> begin_barrier;                     // --eawr-live-begin manual|auto
         bool deploy_overlay{};                                // --eawr-live-deploy-overlay on|off (#563)
         // --eawr-live-ai on|off (#79): the FoC tactical AI runs the non-human lobby players of
         // the m2 fixture; on by default there. A replay already holds its AI's commands.
@@ -211,6 +218,7 @@ public:
         std::optional<std::uint64_t> end_tick;                // --eawr-live-ticks
         double ticks_per_frame{0.5};                          // --eawr-live-step
         std::optional<std::size_t> workers;                   // --eawr-live-workers
+        particles::ParticleDetail particle_detail{};          // independent presentation settings
         std::optional<std::size_t> particle_workers;          // --eawr-live-particle-workers (#638)
         // --eawr-live-speed 0..4: the tactical speed setting (#459 TP-05, default 2).
         std::uint32_t speed_step{ui::default_speed_step};
@@ -237,6 +245,9 @@ public:
         // looks at where this unit was last drawn (live, or spinning away), so it tracks the
         // unit smoothly and holds its last spot once it is gone.
         std::optional<sim::EntityId> follow;
+        // #660 capture hook: follow the first homing projectile fired by this unit,
+        // then hold its final camera focus. Uses BP-61's existing presented pose only.
+        std::optional<sim::EntityId> follow_projectile;
         // --eawr-live-audio-pace on|off (#474, default off): driven pacing only. Caps the render
         // rate to logical_frames_per_second / ticks_per_frame so a frame's real duration matches
         // the battle's own tick rate, on every host. Without it, driven pacing advances ticks (and
@@ -289,10 +300,19 @@ public:
     // The local player's order input on the view's CommandScheduler (UI-07; selection and
     // clicks come with #82). Main thread only; null before start().
     [[nodiscard]] ui::OrderInput* order_input() noexcept { return order_input_.get(); }
+    [[nodiscard]] const ui::OrderInput* order_input() const noexcept { return order_input_.get(); }
     [[nodiscard]] const Options& options() const noexcept { return options_; }
     // The tick an order issued now is stamped for (UI-07 scheduler's open tick; the report's evidence).
     [[nodiscard]] std::uint64_t order_tick() const { return scheduler_ ? scheduler_->open_tick() : 0U; }
     [[nodiscard]] sim::tactical::PlayerId local_player() const noexcept { return player_; }
+    // BA-71: battle parties come from retained setup metadata, including replays.
+    [[nodiscard]] bool battle_participant(sim::tactical::PlayerId owner) const noexcept {
+        if (!setup_) return false;
+        for (const auto& player : setup_->players) {
+            if (player.player_id == owner) return player.commandable();
+        }
+        return false;
+    }
     [[nodiscard]] const skirmish::SkirmishStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
@@ -306,6 +326,11 @@ public:
     void press_pause();
     void press_fast_forward();
     void resume();
+    enum class Phase : std::uint8_t { loading, ready, running, quitting, results, returning };
+    [[nodiscard]] Phase phase() const noexcept { return phase_; }
+    // WBF-05/10: called after scene, camera and HUD finalization, never by the builder.
+    void loading_complete();
+    void begin();
     // #453 (docs/behaviour/battle-end.md): the local player's result from the first frame that
     // carries the outcome, and the frame that reached end_tick, where the session halts.
     struct BattleEnd final {
@@ -316,10 +341,16 @@ public:
         std::optional<std::uint64_t> ended_frame;
     };
     [[nodiscard]] const std::optional<BattleEnd>& battle_end() const noexcept { return battle_end_; }
-    // BEP-03: the end panel's Quit Game; the next frame ends the run.
-    void quit() noexcept { quit_ = true; }
+    [[nodiscard]] const ui::BattleResults& results() const noexcept { return results_; }
+    // WBF-43/48: active Quit records an intentional departure; results Exit returns to staging.
+    void quit();
     // The units the last frame drew for the local player (#82 selection and orders).
     [[nodiscard]] const std::vector<VisibleUnit>& visible_units() const noexcept { return visible_; }
+    [[nodiscard]] const sim::tactical::PadView* pad_view(sim::EntityId entity) const noexcept;
+    [[nodiscard]] bool pad_visible(sim::EntityId entity) const noexcept;
+    [[nodiscard]] bool pad_action_allowed(sim::EntityId entity) const;
+    [[nodiscard]] sim::EntityId pad_selection_target(sim::EntityId entity) const noexcept;
+    [[nodiscard]] const sim::tactical::ConstructionState* pad_construction(sim::EntityId child) const noexcept;
     // #558: what the ticks completed after `after` cost the simulation thread (empty before the
     // session runs); the performance overlay's tick-cost source.
     [[nodiscard]] std::vector<platform::LiveTickCost> tick_costs_after(std::uint64_t after) const;
@@ -330,6 +361,7 @@ public:
     }
     // Whether every entity the session holds is still standing (destroyed units leave it).
     [[nodiscard]] const std::vector<sim::EntityId>& alive_units() const noexcept { return snapshot_index_.alive(); }
+    [[nodiscard]] std::span<const sim::EntityId> unfogged_map_props() const noexcept { return unfogged_map_props_; }
     // One presentation frame: poses the population's live ships and says whether to capture.
     // After a simulation failure it keeps the last poses and carries the error instead. A unit
     // the session destroyed is replaced by its death clone playing its death clip (#81).
@@ -373,6 +405,12 @@ public:
     };
     void trace_frames(bool enabled) noexcept { trace_frames_ = enabled; }
     [[nodiscard]] double bookkeeping_ms() const noexcept { return bookkeeping_ms_; }
+    [[nodiscard]] double pose_ms() const noexcept { return pose_ms_; }
+    [[nodiscard]] double opacity_ms() const noexcept { return opacity_ms_; }
+    [[nodiscard]] double tick_wait_ms() const noexcept { return tick_wait_ms_; }
+    [[nodiscard]] double live_frame_ms() const noexcept { return live_frame_ms_; }
+    [[nodiscard]] double session_tail_ms() const noexcept { return session_tail_ms_; }
+    [[nodiscard]] double clip_pose_ms() const noexcept { return clip_pose_ms_; }
     [[nodiscard]] const space::SnapshotIndex& snapshot_index() const noexcept { return snapshot_index_; }
     void set_pose_workers(const particles::StepExecutor* workers) noexcept { pose_workers_ = workers; }
     [[nodiscard]] const BattleFrame& battle_frame() const noexcept { return battle_frame_; }
@@ -390,15 +428,22 @@ public:
     // order, so they reach the simulation at a tick boundary and enter the replay.
     [[nodiscard]] const sim::tactical::EconomyRules& economy() const noexcept { return economy_; }
     [[nodiscard]] const sim::tactical::EconomyView* local_economy() const noexcept;
+    [[nodiscard]] std::uint64_t reinforcement_notifications() const noexcept { return reinforcement_notifications_; }
+    [[nodiscard]] double reinforcement_notification_tick() const noexcept { return reinforcement_notification_tick_; }
+    [[nodiscard]] bool build_allowed(const sim::tactical::BuildOption& option) const;
+    [[nodiscard]] ui::BuildOptionState build_menu_state(const sim::tactical::BuildOption& option) const;
     // The local player's faction ID in the setup (the station menus' key), or nothing.
     [[nodiscard]] std::optional<sim::tactical::FactionId> local_faction_id() const noexcept;
     bool buy(sim::EntityId station, sim::tactical::TypeId type);
+    [[nodiscard]] bool pad_sale_allowed(sim::EntityId child, bool single_step = false) const;
+    bool sell_pad_structure(sim::EntityId child, bool single_step = false);
     bool cancel_build(sim::tactical::BuildQueue queue, std::uint32_t index);
     bool reinforce(sim::tactical::TypeId type, const sim::math::Vec3& point);
     [[nodiscard]] bool reinforcement_allowed() const noexcept;
     [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const noexcept;
     // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
     void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
+    [[nodiscard]] bool placement_valid() const noexcept { return preview_valid_ && reinforcement_allowed(); }
     struct EconomyRequests final {
         std::uint64_t buys{};
         std::uint64_t cancels{};
@@ -431,7 +476,8 @@ public:
 
 private:
     [[nodiscard]] bool prepare_m2(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure);
-    [[nodiscard]] bool prepare_replay(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure);
+    [[nodiscard]] bool prepare_replay(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+        std::string_view map_path, std::string& failure);
     // #459: hands the time panel's state to the session (pause, target rate).
     void apply_time();
 
@@ -445,6 +491,12 @@ private:
     std::optional<sim::tactical::TacticalSetup> setup_;
     std::optional<sim::tactical::TacticalReplay> replay_;
     std::optional<units::UnitTables> tables_;
+    std::map<sim::tactical::TypeId, const units::UnitType*> presentation_types_;
+    std::map<sim::EntityId, sim::tactical::ConstructionState> presented_construction_;
+    std::shared_ptr<const sim::tactical::TacticalSnapshot> construction_snapshot_;
+    std::map<sim::EntityId, sim::EntityId> construction_successors_;
+    std::map<sim::EntityId, std::array<float, 3>> pad_tints_;
+    std::map<sim::EntityId, std::uint64_t> pad_empty_since_; // WBP-32 presentation epochs
     std::optional<skirmish::SessionContent> content_;
     sim::tactical::VictoryRules victory_; // #77: the start's victory rules
     sim::tactical::EconomyRules economy_; // #530: the start's economy
@@ -456,6 +508,10 @@ private:
     std::unique_ptr<platform::LiveSession> session_;
     std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
     std::vector<std::uint32_t> session_records_;
+    std::vector<sim::EntityId> unfogged_map_props_;
+    std::vector<sim::EntityId> draw_visibility_;
+    std::uint64_t reinforcement_notifications_{};
+    double reinforcement_notification_tick_{};
     std::map<sim::EntityId, std::size_t> ship_of_entity_;
     // #79: model slots for the craft the SK-23 launches bring in after tick zero, composed with
     // the start. A launched craft takes the first free slot of its type when it first shows,
@@ -465,6 +521,8 @@ private:
         std::size_t ship{};
         bool bound{};
         std::optional<std::size_t> clone;  // index in launch_clones_
+        sim::tactical::TypeId required_station{};
+        sim::tactical::PlayerId station_owner{};
     };
     std::vector<LaunchSlot> launch_slots_;
     struct PlacementClone {
@@ -527,6 +585,20 @@ private:
     // and the ticks it has already run through (frame() may see the same tick more than once
     // while paused).
     space::UnitFade fade_;
+    space::FogGhosts fog_ghosts_;
+    std::vector<sim::EntityId> fog_immediate_;
+    std::vector<space::FogGhosts::Observation> fog_observations_;
+    std::optional<std::array<float, 3>> neutral_fog_colour_;
+    std::map<sim::tactical::TypeId, std::vector<animation::BonePose>> neutral_fog_poses_;
+    std::map<sim::tactical::TypeId, std::pair<bool, bool>> fog_memory_types_;
+    std::vector<sim::RenderInstance> fog_ghost_instances_;
+    std::vector<std::string> fog_ghost_rows_;
+    std::map<sim::EntityId, std::tuple<bool, bool, std::size_t>> fog_ghost_logged_states_;
+    std::uint64_t fog_ghost_logged_tick_{std::numeric_limits<std::uint64_t>::max()};
+    std::map<sim::EntityId, space::NebulaBlend> nebula_blends_;
+    std::optional<std::uint64_t> nebula_blend_tick_;
+    std::uint64_t nebula_blend_missing_ticks_{};
+    data::ui::Rgba8 nebula_colour_{255, 255, 255, 64};
     std::optional<double> fade_presented_tick_;
     std::size_t fading_units_{};
     // #535: one row a fading entity every reached tick (fading_log_limit rows), so a test can
@@ -565,6 +637,14 @@ private:
     // #453.
     std::optional<BattleEnd> battle_end_;
     bool quit_{};
+    Phase phase_{Phase::loading};
+    std::optional<std::uint64_t> ready_tick_;
+    std::optional<std::uint64_t> begin_tick_;
+    std::optional<std::uint64_t> begin_frame_;
+    std::optional<std::chrono::steady_clock::time_point> battle_clock_start_;
+    ui::BattleResults results_;
+    std::unique_ptr<BattleScoring> scoring_;
+    std::string scoring_failure_;
 
     // #81 (docs/behaviour/unit-animation.md): each start unit's death clone, a placed ship
     // shown from the frame its unit is destroyed, at the unit's last drawn pose, playing
@@ -629,6 +709,12 @@ private:
     std::vector<std::string> retired_clone_rows_;
     bool trace_frames_{};
     double bookkeeping_ms_{};
+    double pose_ms_{};
+    double opacity_ms_{};
+    double tick_wait_ms_{};
+    double live_frame_ms_{};
+    double session_tail_ms_{};
+    double clip_pose_ms_{};
     std::map<sim::EntityId, SpacePopulation::LivePose> last_poses_;
     // Report rows: the clips each start unit type's model has, and each clone set up.
     std::vector<std::string> unit_clip_rows_;

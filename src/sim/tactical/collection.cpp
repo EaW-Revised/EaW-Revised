@@ -1,6 +1,7 @@
 #include "collection.hpp"
 
 #include "../replay_internal.hpp"
+#include "../math/wide.hpp"
 
 #include <algorithm>
 #include <array>
@@ -66,6 +67,43 @@ void append_box(std::vector<std::uint8_t>& bytes, const CullBox& box) {
         sim::detail::append_i64(bytes, corner.y.raw());
         sim::detail::append_i64(bytes, corner.z.raw());
     }
+}
+
+// Closed slab intersection in Q24, without division or a model-space transform. Clip to the
+// segment before multiplying: every retained numerator is between zero and its denominator.
+// Unsigned subtraction also covers coordinates on opposite sides of the signed range.
+[[nodiscard]] bool ray_meets(const CullBox& box, const math::Vec3& from, const math::Vec3& to) noexcept {
+    struct Fraction { std::uint64_t numerator; std::uint64_t denominator; };
+    const auto less = [](const Fraction a, const Fraction b) {
+        std::uint64_t lh{}, ll{}, rh{}, rl{};
+        math::detail::multiply_64(a.numerator, b.denominator, lh, ll);
+        math::detail::multiply_64(b.numerator, a.denominator, rh, rl);
+        return lh < rh || (lh == rh && ll < rl);
+    };
+    const auto distance = [](const std::int64_t high, const std::int64_t low) {
+        return static_cast<std::uint64_t>(high) - static_cast<std::uint64_t>(low);
+    };
+    Fraction enter{0, 1}, leave{1, 1};
+    for (int axis = 0; axis < 3; ++axis) {
+        const auto start = axis_of(from, axis), end = axis_of(to, axis);
+        const auto low = axis_of(box.min, axis), high = axis_of(box.max, axis);
+        if (std::max(start, end) < low || std::min(start, end) > high) return false;
+        if (start == end) continue;
+        Fraction near{0, 1}, far{1, 1};
+        if (start < end) {
+            const auto denominator = distance(end, start);
+            if (start < low) near = {distance(low, start), denominator};
+            if (end > high) far = {distance(high, start), denominator};
+        } else {
+            const auto denominator = distance(start, end);
+            if (start > high) near = {distance(start, high), denominator};
+            if (end < low) far = {distance(start, low), denominator};
+        }
+        if (less(enter, near)) enter = near;
+        if (less(far, leave)) leave = far;
+        if (less(leave, enter)) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -138,9 +176,13 @@ void CollectionTree::moved(const EntityId id, const CullBox& bounds) {
 }
 
 void CollectionTree::service(const std::uint64_t frame) {
-    if (!need_rebuild_ || frame < last_service_frame_ || frame - last_service_frame_ <= service_interval_frames) return;
+    if (!service_due(frame)) return;
     last_service_frame_ = frame;
     rebuild();
+}
+
+bool CollectionTree::service_due(const std::uint64_t frame) const noexcept {
+    return need_rebuild_ && frame >= last_service_frame_ && frame - last_service_frame_ > service_interval_frames;
 }
 
 // CO-08: every link in tree order into the root, the small ones split again (CO-09), the big ones
@@ -264,6 +306,24 @@ std::vector<EntityId> CollectionTree::collect(const CullBox& query) const {
     return out;
 }
 
+void CollectionTree::ray_node(const std::int32_t node, const math::Vec3& from, const math::Vec3& to,
+    std::vector<EntityId>& out) const {
+    const auto& current = nodes_[static_cast<std::size_t>(node)];
+    if (!ray_meets(current.box, from, to)) return;
+    for (const auto id : current.links) {
+        if (ray_meets(links_.at(id).bounds, from, to)) out.push_back(id);
+    }
+    for (const auto child : current.child) {
+        if (child >= 0) ray_node(child, from, to, out);
+    }
+}
+
+void CollectionTree::ray_collect(const math::Vec3& from, const math::Vec3& to, std::vector<EntityId>& out) const {
+    out.clear();
+    ray_node(0, from, to, out);
+    std::reverse(out.begin(), out.end());
+}
+
 void CollectionTree::append_state(std::vector<std::uint8_t>& bytes) const {
     sim::detail::append_u64(bytes, moved_);
     sim::detail::append_u64(bytes, last_service_frame_);
@@ -282,45 +342,63 @@ void CollectionTree::append_state(std::vector<std::uint8_t>& bytes) const {
     }
 }
 
+CollectionTree& CollectionTrees::edit(const PlayerId owner) {
+    auto& tree = trees_[owner];
+    if (!tree) tree = std::make_shared<CollectionTree>();
+    else if (tree.use_count() != 1) tree = std::make_shared<CollectionTree>(*tree);
+    return *tree;
+}
+
 void CollectionTrees::update(const std::vector<Member>& members, const std::uint64_t frame) {
     // Units gone, or now owned by another player, leave their tree first, in ascending ID.
     std::vector<EntityId> gone;
     auto next = members.begin();
-    for (const auto& [id, owner] : owners_) {
+    for (const auto& [id, owner] : *owners_) {
         while (next != members.end() && next->id < id) ++next;
         if (next == members.end() || next->id != id || next->owner != owner) gone.push_back(id);
     }
+    const auto edit_owners = [&]() -> std::map<EntityId, PlayerId>& {
+        if (owners_.use_count() != 1) owners_ = std::make_shared<std::map<EntityId, PlayerId>>(*owners_);
+        return *owners_;
+    };
     for (const auto id : gone) {
-        const auto owner = owners_.at(id);
-        trees_.at(owner).remove(id);
-        owners_.erase(id);
+        const auto owner = owners_->at(id);
+        edit(owner).remove(id);
+        edit_owners().erase(id);
     }
     for (const auto& member : members) {
-        auto& tree = trees_[member.owner];
-        if (owners_.emplace(member.id, member.owner).second) {
-            tree.add(member.id, member.bounds);
-        } else if (*tree.bounds(member.id) != member.bounds) {
-            tree.moved(member.id, member.bounds);
+        if (!owners_->contains(member.id)) {
+            edit_owners().emplace(member.id, member.owner);
+            edit(member.owner).add(member.id, member.bounds);
+        } else if (*trees_.at(member.owner)->bounds(member.id) != member.bounds) {
+            edit(member.owner).moved(member.id, member.bounds);
         }
     }
     for (auto& [owner, tree] : trees_) {
         static_cast<void>(owner);
-        tree.service(frame);
+        if (tree->service_due(frame)) edit(owner).service(frame);
     }
 }
 
 std::vector<EntityId> CollectionTrees::collect(const PlayerId owner, const CullBox& query) const {
     const auto found = trees_.find(owner);
-    return found != trees_.end() ? found->second.collect(query) : std::vector<EntityId>{};
+    return found != trees_.end() ? found->second->collect(query) : std::vector<EntityId>{};
 }
 
-bool CollectionTrees::empty() const noexcept { return owners_.empty(); }
+void CollectionTrees::ray_collect(const PlayerId owner, const math::Vec3& from, const math::Vec3& to,
+    std::vector<EntityId>& out) const {
+    const auto found = trees_.find(owner);
+    out.clear();
+    if (found != trees_.end()) found->second->ray_collect(from, to, out);
+}
+
+bool CollectionTrees::empty() const noexcept { return owners_->empty(); }
 
 void CollectionTrees::append_state(std::vector<std::uint8_t>& bytes) const {
     sim::detail::append_u64(bytes, trees_.size());
     for (const auto& [owner, tree] : trees_) {
         sim::detail::append_u64(bytes, owner);
-        tree.append_state(bytes);
+        tree->append_state(bytes);
     }
 }
 

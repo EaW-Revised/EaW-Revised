@@ -2,12 +2,12 @@
 
 ## Applicability
 
-The Forces of Corruption debug build (EAWR-447) for how a killed space craft dies, and the FoC XML
+The Forces of Corruption debug build (fighter death outcomes) for how a killed space craft dies, and the FoC XML
 under `Data/XML` for the M2 values. Sources: the debug build (death handling, the dead copy's
 service, its path and the kill routine), the unit XML (`SPACEUNITSFIGHTERS.XML`,
 `UNITS_SPACE_EMPIRE_TIE_INTERCEPTOR.XML`, `PARTICLES.XML`), a headless and a live remake run.
-No retail recording shows a spin-away yet (unit-animation UA-R4); the owner capture queue has a
-request. Project policy is marked as such.
+The owner's moving TIE death recordings provide the retail eye check (unit-animation UA-R4).
+Project policy is marked as such.
 
 ## Interface
 
@@ -76,6 +76,8 @@ when each explosion plays. Frames are logic frames (30 per second).
 - **SP-08** (debug build) When the spin ends, the copy plays one of `Death_Explosions` and
   `Death_SFXEvent_Start_Die` where it stands and goes. With the M2 values this is the 60th service
   after the kill, 2 s later; float rounding in retail may add a frame (unverified).
+  The ordinary death effects stop any sound still attached to the copy before playing the
+  death cue (debug build: death effects and sound removal).
 - **SP-09** (debug build) Both explosions are separate objects at the copy's position with its
   facing, and their particles inherit the copy's velocity, so the burst drifts on along the
   flight. A spinning copy is dead and neutral: nothing targets or selects it and it has no health
@@ -102,7 +104,9 @@ when each explosion plays. Frames are logic frames (30 per second).
   fidelity list), draws the copy with the craft's model and its emitters on the interpolated spin
   pose (with pitch; between ticks it turns along the shortest arc between its two rotations, as a
   pitched live craft does), and does not move the explosions with the copy's velocity (fidelity list).
-  No sounds yet.
+  The spinning sound follows the interpolated dead copy's position (SP-03); when the spin ends,
+  any remaining attached sample stops there and the ordinary death cue plays at that final
+  position (SP-08, battle-audio BA-16).
 
 ## Cases
 
@@ -129,21 +133,24 @@ The M2 unit tables carry the SP-01 values (`tests/units/unit_tables_tests.cpp`),
 
 ## Unknowns
 
-- No retail footage of a spin-away yet (UA-R4); the path, roll and timing rest on the debug build.
+- Retail comparison uses the owner's moving TIE footage (UA-R4); its different map and camera
+  leave exact world-distance drift to the debug-build rules.
 - Whether the first service runs in the kill frame (SP-P1), the float frame count (SP-08) and the
   neutral copy's fog (SP-P4).
 - A replay session composes no launch slots, so there a launched craft's spin shows only its two
-  explosions; the live M2 session draws it on its launch slot's model (EAWR-446).
+  explosions; the live M2 session draws it on its launch slot's model (live tactical AI battle).
 
-## The EAWR-442 Y-wing note
+<a id="the-442-y-wing-note"></a>
 
-The EAWR-442 eye check said that Y-wing kills showed only the explosion because the viewer had no
+## The Y-wing death debris note
+
+The death-debris eye check said that Y-wing kills showed only the explosion because the viewer had no
 Y-wing model. That was wrong. In its Rebel fighter clip the second kill is unit 45, the first
 craft of the start `Y-Wing_Squadron`: hit by the scripted order of tick 190, it dies in tick 191
 and its explosion shows from the clip's tick 192 frame (6.4 s). The viewer composed all 61 start
 units, drew the Y-wings
 with `rv_ywing` throughout, and the run spawned one `Small_Explosion_Space` for each of its three
 kills (X-wing 35, Y-wing 45, X-wing 36). The Y-wing simply exploded in place, as every fighter did
-before EAWR-447. The note came from a stale Phase 2 fidelity line from EAWR-81 that said the Y-wing and
-TIE types had no drawable model in the placed-ship path; they place and draw there too (EAWR-447
+before the fighter death outcomes work. The note came from a stale Phase 2 fidelity line from tactical unit animation that said the Y-wing and
+TIE types had no drawable model in the placed-ship path; they place and draw there too (fighter death outcomes
 check), and that line is removed.

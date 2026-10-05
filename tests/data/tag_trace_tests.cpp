@@ -135,6 +135,37 @@ void tag_trace_contracts() {
     expect(max_speed != entries.end() && max_speed->logical_path == "data/xml/units.xml" && max_speed->column == 4,
            "tag trace: an entry carries the node's logical path, line and column");
 
+    {
+        trace::Recording recording;
+        auto indexed = [&] {
+            const trace::Unrecorded index_resolve;
+            return off.value().catalog.resolve("Derived_Ship");
+        }();
+        expect(static_cast<bool>(indexed), "tag trace: a cached index resolve succeeds while unrecorded");
+        if (!indexed) return;
+        (void)indexed.value().value("Max_Speed");
+        const auto index_entries = recording.finish();
+        expect(!has_entry(index_entries, trace::Kind::object, "SpaceUnit", 6, "Derived_Ship") &&
+                   !has_entry(index_entries, trace::Kind::object, "SpaceUnit", 2, "Derived_Ship") &&
+                   !has_entry(index_entries, trace::Kind::used, "Variant_Of_Existing_Type", 7),
+               "tag trace: a cached index resolve does not add whole variant roots or links");
+        expect(has_entry(index_entries, trace::Kind::used, "Max_Speed", 3),
+               "tag trace: value reads after the index resolve scope remain recorded");
+    }
+    {
+        trace::Recording recording;
+        auto ordinary = off.value().catalog.resolve("Derived_Ship");
+        expect(static_cast<bool>(ordinary), "tag trace: an ordinary cached resolve succeeds after the index scope");
+        if (!ordinary) return;
+        (void)ordinary.value().value("Tactical_Health");
+        const auto ordinary_entries = recording.finish();
+        expect(has_entry(ordinary_entries, trace::Kind::object, "SpaceUnit", 6, "Derived_Ship") &&
+                   has_entry(ordinary_entries, trace::Kind::object, "SpaceUnit", 2, "Derived_Ship") &&
+                   has_entry(ordinary_entries, trace::Kind::used, "Variant_Of_Existing_Type", 7) &&
+                   has_entry(ordinary_entries, trace::Kind::used, "Tactical_Health", 8),
+               "tag trace: an ordinary cached resolve still records the full chain and subsequent reads");
+    }
+
     const std::vector<trace::Entry> escaped{
         {trace::Kind::attribute, "data/xml/a\"b.xml", "base", 1, 2, "Unit", std::string("N\\a\tme\x01")}};
     const auto json = trace::to_json(escaped);

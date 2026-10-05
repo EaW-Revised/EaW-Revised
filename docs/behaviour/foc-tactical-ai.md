@@ -1,6 +1,6 @@
 # FoC Tactical Space AI
 
-Scope: which parts of the original Forces of Corruption AI drive a tactical space battle for Empire and Rebel, which original data and scripts define it, and which engine functions the EAWR-79 run needs. It covers only the M2 fixture: Empire vs Rebel on `_mp_space_coruscant.ted` with fixed forces and the galactic-conquest (GC) tactical configuration. The owner decided this on EAWR-64.
+Scope: which parts of the original Forces of Corruption AI drive a tactical space battle for Empire and Rebel, which original data and scripts define it, and which engine functions the tactical AI host run needs. The fixed-force contracts below retain their original galactic-conquest (GC) context. The live M2 fixture now supplies skirmish context and live economy inputs through [skirmish AI economy](skirmish-ai-economy.md), SAE-01 to SAE-10.
 
 ## Applicability
 
@@ -8,11 +8,11 @@ Data: the FoC profile of the installed retail corpus as our VFS resolves it: FoC
 
 The claims come from five kinds of source, and each rule is tagged with one:
 
-- **guide**: the AI guide by evilbobthebob, [*Advanced Modding – Empire at War AI*](https://steamcommunity.com/sharedfiles/filedetails/?id=1171759326), cited by section name to credit its author. As of 2026-09-25 the guide is not publicly accessible on Steam, so a reader cannot check a citation against it. Every rule that cites the guide is therefore also backed by the pinned files below, or the unbacked statement is marked **pending confirmation**: it is the guide author's statement, not yet confirmed by the data, the code or a test. The guide is not copied into this repository (owner decision EAWR-141).
+- **guide**: the AI guide by evilbobthebob, [*Advanced Modding – Empire at War AI*](https://steamcommunity.com/sharedfiles/filedetails/?id=1171759326), cited by section name to credit its author. As of 2026-09-25 the guide is not publicly accessible on Steam, so a reader cannot check a citation against it. Every rule that cites the guide is therefore also backed by the pinned files below, or the unbacked statement is marked **pending confirmation**: it is the guide author's statement, not yet confirmed by the data, the code or a test. The guide is not copied into this repository (owner decision on AI guide inclusion).
 - **correspondence**: correspondence with a community developer, not public. Rules that rest on it are stated in our own words and still need a data, code or test check.
 - **data**: read from the pinned FoC XML/Lua listed below.
 - **inference**: our conclusion from the above. It is not established until the data or the code confirms it or a test observes it.
-- **code**: the FoC debug build, read for the behaviour [audit](debug-build-audit.md#foc-tactical-ai) (EAWR-265). A code reading that says the engine never does something still needs a runtime check.
+- **code**: the FoC debug build, read for the behaviour [audit](debug-build-audit.md#foc-tactical-ai) (debug-build behaviour audit). A code reading that says the engine never does something still needs a runtime check.
 
 ## Architecture
 
@@ -33,7 +33,7 @@ The claims come from five kinds of source, and each rule is tagged with one:
 
 | Rule | Behaviour | Source |
 |---|---|---|
-| AI-11 | FoC GC assigns `BasicEmpire` and `BasicRebel` through `AI_Player_Control` in `campaigns_underworld_gc.xml`. `factions.xml` names the same players as each faction's `Basic_AI`. | data |
+| AI-11 | A skirmish lobby AI receives its faction's authored `Basic_AI` controller (WSS-35): `BasicEmpire`, `BasicRebel`, or `AI_Player_Underworld` in the stock faction XML. Human lobby slots do not receive a controller through this path. GC assigns the Empire/Rebel names through `AI_Player_Control` separately. | debug build WSS-35; faction XML |
 | AI-12 | `BasicEmpire` and `BasicRebel` both use the Space template `Test_Space` and `BusyTacticalFreeStore`. The only goal-function set among their sets that contains space-mode goals is `BasicOffensiveSpaceSet`. Their other sets hold only galactic or land goals. `SystemFunctions` scores the galactic `AlwaysOff` goal with the constant `Zero`, so a plan bound to `AlwaysOff` never starts. | data |
 | AI-13 | `Test_Space` has trigger `One` and turns on the categories Hero, NoBudget, Tactical_Targeted, Defensive, Tactical_Untargeted, StoryArc, High_Priority, Med_Priority and Map_Control. It turns Macro_Goal off. The Tactical_Targeted budget is `Game.ForceVisibility`, Tactical_Untargeted is its complement, and Defensive is constant. | data |
 | AI-14 | `Game.ForceVisibility` is the fraction of the other players' objects of the requested category that the AI player can see, so it is 1 only when all of them are visible. Whether `AIUsesFogOfWarSpace = False` makes that so needs a runtime check (RO-6 in the [audit](debug-build-audit.md#foc-tactical-ai)). Even a Tactical_Untargeted budget of 0 does not disable that category (AI-05); it only puts it last. | data; code |
@@ -72,12 +72,12 @@ Selected XML (FoC effective winners):
 | AI-22 | In the data, the two differ only through perception values. 16 of the 64 equations test `Game.IsCampaignGame`, 7 test `Variable_Self.IsDefender` and 6 test `Variable_Self.BaseLevel`. Other tokens reflect the in-battle economy: credits, open build pads, built mineral extractors, unit-cap space and reinforcements. | data; inference (AI-G01) |
 | AI-23 | The skirmish-only goals evaluate to zero when `IsCampaignGame = 1`: unit building (`Tactical_Multiplayer_Build_Space_Units_Generic`), station upgrade (`Skirmish_Upgrade_Space_Station`) and cash drops (`Skirmish_Generate_Magic_Cash_Drop_Space`). | data |
 | AI-24 | Some goals are active only in the GC context: `Return_To_Base` (defender near its own starbase) and `Space_Retreat` (needs `Variable_Self.CanRetreat`, not the Pirates faction). In GC, `Burn_Units_Space` has three triggers: the AI wants to retreat but may not; after 180 s, the enemy's fighter, bomber, corvette and frigate force is below 500; or after 500 s, the AI's force is more than 1.5 times the enemy's. The burn plan purges other goals, gathers every free unit and attacks the nearest enemy structure or capital ship (otherwise the nearest enemy) until it is destroyed. It repeats this while the first trigger holds, then releases its units. Only the first trigger also calls `FogOfWar.Reveal_All` for the AI player. | data |
-| AI-25 | Some goals stay live in the GC context but need an economy. `Purchase_Space_Upgrades_Generic` gains a GC-only desire term after 120 s. `Build_Structure_Space` and `Build_Refinery_Space` have no mode gate but need credits and friendly build pads. `Secure_Build_Pad_Space` sends one fighter or corvette, with up to four escorts, to a contestable pad while no enemy starbase is within 2500 units. | data |
+| AI-25 | Some goals stay live in the GC context but need an economy. `Purchase_Space_Upgrades_Generic` gains a GC-only desire term after 120 s. `Build_Structure_Space` and `Build_Refinery_Space` have no mode gate but need credits and friendly build pads. `Secure_Build_Pad_Space` sends one fighter or corvette, with up to four escorts, to a contestable pad while no enemy starbase is within 2500 units. In skirmish, its equation prioritizes refinery pads until the player has a resource structure. Live skirmish uses SAE-01/02/03/08, so the zero-credit regression below does not describe its capture or construction results. | data; SAE-01/02/03/08 |
 | AI-26 | `_mp_space_coruscant.ted` contains 6 `Mineral_Extractor_Pad` and 7 `Defense_Satellite_Laser_Pad` build pads, 8 `Orbital_Resource_Container`, `Team_00/01_Space_Station` markers, base and spawn markers, `Skirmish_Merchant_Dock` and `N_Gravity_Well_Station`. The AI-25 pad goals therefore have targets on this map. | data |
 
 ## Plans with fixed forces in the GC context
 
-Assumed fixture: `IsCampaignGame = 1`, zero credits, Normal difficulty (all multipliers 1.0, goal-cycle sleep 0), AI fog of war off, and no heroes. EAWR-64 pins the station, defender, retreat and roster inputs in [m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) (SK-20 to SK-47; AI-G03).
+Assumed fixed-force regression: `IsCampaignGame = 1`, zero credits, Normal difficulty (all multipliers 1.0, goal-cycle sleep 0), AI fog of war off, and no heroes. This table describes that regression; live M2 production follows SAE-01 to SAE-10. The fixture's station, defender, retreat and roster inputs are described in [m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) (SK-20 to SK-47; AI-G03).
 
 | Goal (category) | Plan script | Status |
 |---|---|---|
@@ -96,7 +96,7 @@ Assumed fixture: `IsCampaignGame = 1`, zero credits, Normal difficulty (all mult
 | `Space_Retreat` (Defensive) | `retreatplan.lua` | depends on fixture: needs `CanRetreat`; inert if retreat is disabled |
 | `Return_To_Base`, `Patrol_Structure_Space` (Defensive) | `movetolocation.lua` | depends on fixture: defender with friendly structures or a starbase |
 | `Defend_Space_Station` (High_Priority) | `ai_plan_expansiongeneric_defendspacestation.lua` | depends on fixture: a station and defender status |
-| `Purchase_Space_Upgrades_Generic`, `Build_Structure_Space`, `Build_Refinery_Space` | `purchasespaceupgradesgeneric.lua`, `buildstructurespace.lua`, `buildrefineryspace.lua` | inert (inference, AI-G08): with zero credits production cannot be afforded, so the goal fails activation and takes the activation-failure penalty |
+| `Purchase_Space_Upgrades_Generic`, `Build_Structure_Space`, `Build_Refinery_Space` | `purchasespaceupgradesgeneric.lua`, `buildstructurespace.lua`, `buildrefineryspace.lua` | fixed-force regression: zero credits prevent affordable production (AI-G08); live skirmish: pad plans select an available friendly pad, reserve it and issue ordinary construction commands with the economy's credits and build times (SAE-02/03/08) |
 | `Tactical_Multiplayer_Build_Space_Units_Generic`, `Skirmish_Upgrade_Space_Station`, `Skirmish_Generate_Magic_Cash_Drop_Space` | `tacticalmultiplayerbuildspaceunitsgeneric.lua`, `ai_plan_expansiongeneric_skirmishupgradespacestation.lua`, `data/scripts/ai/ai_plan_expansiongeneric_generatemagiccashdrop.lua` | inert: evaluates to zero in the GC context (AI-23) |
 | `Ground_To_Space_Damage`, `Ground_To_Space_Disable` | `groundtospacedamage.lua`, `groundtospacedisable.lua` | inert: needs a planetary Hypervelocity Gun or Ion Cannon, and the map has none |
 | `Fire_Death_Star` (Tactical_Untargeted) | `firedeathstar.lua` | inert: no Death Star (a zero category budget alone would not disable it, AI-05) |
@@ -104,7 +104,7 @@ Assumed fixture: `IsCampaignGame = 1`, zero credits, Normal difficulty (all mult
 
 | Rule | Behaviour | Source |
 |---|---|---|
-| AI-30 | The EAWR-79 selection is the 17 plan scripts in the first 15 rows of the table above, together with their library chain and the space freestore and evaluator. That is 26 Lua files. The rosters and the AI-G03 inputs decide which of them start. Without stations and with retreat disabled, `retreatplan`, the station-defence plan and most likely `movetolocation` stay dormant. | inference |
+| AI-30 | The initial tactical AI host selection is the 17 plan scripts in the first 15 rows of the table above, together with their library chain and the space freestore and evaluator: 26 Lua files. SAE-03 extends the mounted selection with six skirmish economy plans. The rosters and the AI-G03 inputs decide which start. Without stations and with retreat disabled, `retreatplan`, the station-defence plan and most likely `movetolocation` stay dormant. | inference; mounted host selection |
 | AI-31 | The engine still has to evaluate every goal in the set, including the inert ones, because the XML is used unmodified. Inert goals must evaluate to exactly zero or fail activation; they must not be removed. | inference; project policy (owner decision: the GC configuration, no script or XML edits) |
 | AI-32 | These FoC unit object scripts load when the matching unit is in either roster, AI or human: `interdictor.lua` (Interdictor_Cruiser), `objectscript_powertoshields.lua` (Alliance_Assault_Frigate, Calamari_Cruiser, Nebulon_B_Frigate, Home_One), `objectscript_pointdefense.lua` (Crusader_Gunship) and `objectscript_mc30.lua` (MC30_Frigate). All of them require `PGStateMachine`. | data |
 
@@ -146,9 +146,11 @@ Selected Lua (FoC `Data/64Patch.meg`, text sources):
 
 Each plan requires the chain `pgevents` → `PGTaskForce` → `PGAICommands` → `PGCommands` → `PGBaseDefinitions` → `PGBase` → `PGDebug`. The freestore requires only the chain from `pgcommands` down, and the evaluator only the chain from `PGBaseDefinitions` down. Each instance has its own state (L-01 in the [Lua host contract](lua-script-model.md)).
 
-## EAWR-79 function subset
+<a id="79-function-subset"></a>
 
-Method used: we took the call sites from `lua-manifest.json`, read the method names on dynamic receivers from the source text, and followed only the library functions reachable from the plan, freestore and evaluator entry points and the `Default_*` TaskForce event handlers. We typed receivers by variable role (TaskForce, game object, player, type, command object) and checked each name against the GlyphX `lua-declarations.json` index available at that time. "Declared" means present in that index (D-01). "Outside index" means not found in its scan scope (D-03). It does not mean the engine lacks the function. The new FoC registration index in `plan/inventories/foc-lua-registrations.json` should be used when refreshing the EAWR-79 subset.
+## Tactical AI function subset
+
+Method used: we took the call sites from `lua-manifest.json`, read the method names on dynamic receivers from the source text, and followed only the library functions reachable from the plan, freestore and evaluator entry points and the `Default_*` TaskForce event handlers. We typed receivers by variable role (TaskForce, game object, player, type, command object) and checked each name against the GlyphX `lua-declarations.json` index available at that time. "Declared" means present in that index (D-01). "Outside index" means not found in its scan scope (D-03). It does not mean the engine lacks the function. The new FoC registration index in `plan/inventories/foc-lua-registrations.json` should be used when refreshing the tactical AI host subset.
 
 | Rule | Behaviour | Source |
 |---|---|---|
@@ -156,8 +158,8 @@ Method used: we took the call sites from `lua-manifest.json`, read the method na
 | AI-41 | The P0 host already provides the module loader (`require`), `GetEvent`, `GetEvent.Params`, `GetEvent.Reset` and single-value coroutine yields. The library's `PumpEvents` yields `true` and then drains `GetEvent`, and `Sleep` and `BlockOnCommand` loop over it; `ScriptExit` yields `false`. This matches L-23 and L-31. Every other engine entry below is absent from the P0 host today. Missing global functions reach the L-16 diagnostic; missing members and methods do not yet (AI-44). | data; code |
 | AI-42 | The selection (AI-30) needs **106 engine entries**. Of these, **79 are declared**: 21 global functions and 58 receiver methods. **27 are outside the index**: 23 TaskForce methods, `FindTarget.Reachable_Target`, `FogOfWar.Reveal_All`, `WeightedTypeList.Create` and the list-instance `Parse`. All 106 are registered in the FoC debug build; the TaskForce methods are split between a generic set and a space-only set. A first tier made of `destroyunit`, `destroyunitminimal`, `areasweep` and the freestore needs 83 of them. | data; code |
 | AI-43 | The AI-32 unit scripts, if their units are fielded, add `GameRandom()`, `Get_All_Projectile_Types`, `Get_Parent_Object`, `Get_Rate_Of_Damage_Taken`, `Is_Ability_Autofire`, `Get_Combat_Rating`, `Is_Enemy` and `Is_Human`. All of these are declared. | data |
-| AI-44 | `ScriptHost::register_api` binds flat global names only. 85 of the 106 entries are members of an engine command object (`ThreadValue.Set`, `FindTarget.Reachable_Target`) or methods on a returned receiver (`MainForce.Produce_Force`, `unit.Attack_Move`). EAWR-79 therefore needs member and receiver binding, with the same missing-API diagnostic, before these scripts can reach a missing call cleanly. `PumpEvents` reads `ThreadValue` before its first yield, and `Sleep` and `BlockOnCommand` also read `GetCurrentTime`, so every plan, freestore and unit script depends on those two. | code; data |
-| AI-45 | Engine commands issued from these scripts must enter the replay command queue: game-object and TaskForce moves, attacks, guards, ability activation, garrison changes, special-weapon fire and `FogOfWar.Reveal_All`. Queries and perception reads must be pure reads of the simulation state. | project policy (EAWR-79) |
+| AI-44 | `ScriptHost::register_api` binds flat global names only. 85 of the 106 entries are members of an engine command object (`ThreadValue.Set`, `FindTarget.Reachable_Target`) or methods on a returned receiver (`MainForce.Produce_Force`, `unit.Attack_Move`). The tactical AI host therefore needs member and receiver binding, with the same missing-API diagnostic, before these scripts can reach a missing call cleanly. `PumpEvents` reads `ThreadValue` before its first yield, and `Sleep` and `BlockOnCommand` also read `GetCurrentTime`, so every plan, freestore and unit script depends on those two. | code; data |
+| AI-45 | Engine commands issued from these scripts must enter the replay command queue: game-object and TaskForce moves, attacks, guards, ability activation, garrison changes, special-weapon fire and `FogOfWar.Reveal_All`. Queries and perception reads must be pure reads of the simulation state. | project policy (tactical AI host) |
 
 Declared global functions (21; those marked \* are not needed by the first tier): `DumpCallStack`, `EvaluatePerception`, `FindDeadlyEnemy`, `FindTarget`, `Find_All_Objects_Of_Type`, `Find_Nearest`, `Find_Nearest_Space_Field`\*, `Find_Object_Type`, `Find_Player`\*, `GetCurrentTime`, `GetThreadID`, `Get_Game_Mode`, `Get_Most_Defended_Position`, `Is_Multiplayer_Mode`\*, `Project_By_Unit_Range`, `Purge_Goals`\*, `ThreadValue`, `_MessagePopup`, `_OuputDebug`, `_ScriptExit`, `_ScriptMessage`.
 
@@ -179,32 +181,37 @@ The limit of this derivation: shared library helpers take a `thing` or `object` 
 | AI-50 | The engine must implement the goal loop itself. The data gives its inputs: templates, goal-function sets pairing goals with equations, category switches and budgets, failure-tracking adjustments and the plan categories. The FoC loop: a bounded number of (goal, target) pairs is scored per frame, so a full pass takes about five seconds of game time; desire is the equation value plus the failure-tracking adjustments, and only positive desire is proposed; after a full pass each category is maintained, largest budget share first, dropping finished or failed goals; new goals are activated by a desire-weighted draw until the category's goal-set extension limit; then plans are attached. The full order is in the [audit](debug-build-audit.md#foc-tactical-ai). | guide "Goals", "Plans"; data; code |
 | AI-51 | The engine must evaluate the 64 equations of AI-15 with the full operator set of AI-04. It must also supply the 38 token literals: force, concentration, distance and health/shield terms; start-location, build-pad and contestable flags; `TimeLastSeen`; game age; campaign and defender flags; credits; unit-cap space; and reinforcements. It must pass `Parameter_*` qualifiers through and call the `GetDistanceToNearestSpaceField` evaluator in its own Lua instance. The equations and evaluator used here are archive members. The engine runs an evaluator by setting the globals `PlayerObject` and `Target`, calling its `Evaluate` with the script string and number parameters as arguments, and then calling `Evaluator_Clean_Up`. Two statements are **pending confirmation**: string parameters reach evaluators upper-cased, and retail loads equations and evaluators only from archives. | guide "Lua + XML: Evaluator Scripts", "Getting the AI to Actually Work" (pending confirmation); data; code |
 | AI-52 | TaskForce production (correspondence) and freestore ownership are engine responsibilities that Lua only parameterises, and so is contrast sizing if AI-07 is confirmed. So are plan event dispatch (`<Force>_Unit_Damaged`, `_No_Units_Remaining`, `_Unit_Move_Finished`, `_Target_In_Range` and the rest), target/location search (`FindTarget`, `Reachable_Target`) and the threat grid. `gameconstants.xml` sets `AI_SpaceEvaluatorRegionSize` 2000, the threat decay step (DT-02), distance and turn-rate factors, and the reachability tolerances. | guide "TaskForce", "FreeStores"; correspondence; data |
-| AI-53 | Randomness enters at several points: the `(a # b)` draws in 5 equations, the best-target probability in every `FindTarget` and `Reachable_Target` call (AI-10), `GameRandom` in the library, the engine's choice among plans (AI-06), and goal activation: new goals are drawn with weight equal to their desire. The engine's goal, plan and target draws all use the synchronized game random stream; `Reachable_Target` is an ordinary draw, not a static random. For the EAWR-79 1/2/4-worker repeatability, every draw must come from the simulation RNG. | guide "Goals", "Lua + XML: EvaluatePerception"; data; code; project policy |
+| AI-53 | Randomness enters at several points: the `(a # b)` draws in 5 equations, the best-target probability in every `FindTarget` and `Reachable_Target` call (AI-10), `GameRandom` in the library, the engine's choice among plans (AI-06), and goal activation: new goals are drawn with weight equal to their desire. The engine's goal, plan and target draws all use the synchronized game random stream; `Reachable_Target` is an ordinary draw, not a static random. For the tactical AI host 1/2/4-worker repeatability, every draw must come from the simulation RNG. | guide "Goals", "Lua + XML: EvaluatePerception"; data; code; project policy |
 
-## EAWR-79 host
+<a id="79-host"></a>
+
+## Tactical AI host
 
 What `eawr::script::foc` (`include/eawr/script/foc/tactical_ai.hpp`) runs. It hosts the
 **space freestore** of each AI player; with the map bounds and the AI XML it also runs the goal
-system and the plans (EAWR-449, next section). The freestore commands every unit no plan owns
+system and the plans (AI goals, perception and TaskForces, next section). The freestore commands every unit no plan owns
 (AI-08). The rules cite the FoC debug build unless they say otherwise.
 
 | Rule | Behaviour | Source |
 |---|---|---|
-| FH-01 | Each AI player's `BusyTacticalFreeStore` (SK-40) runs in its own authoritative Lua instance (`freestore_instance`), created at tick 0 from the pinned files with the library chain `pgcommands` → `PGBaseDefinitions` → `PGBase` → `PGDebug`. The instance is serviced in the tick's partitioned script phase; bindings read an immutable view of the completed tick and never touch the world. | debug build; ADR-009 |
+| FH-01 | Each AI player's `BusyTacticalFreeStore` (SK-40) runs in its own authoritative Lua instance (`freestore_instance`), created at tick 0 from the pinned files with the library chain `pgcommands` → `PGBaseDefinitions` → `PGBase` → `PGDebug`. The instance is serviced in the tick's partitioned script phase; bindings read an immutable view of the completed tick and never touch the world. | debug build; [EnTT storage decision](../architecture-decisions.md#adr-009-entt-storage-and-stable-simulation-ids) |
 | FH-10 | Attach, before the first service: the engine calls `Base_Definitions`, creates the thread of `main`, then sets the globals `PlayerObject` (the AI player), `LastService = 0` and `LastUnitService = 0`. `FreeStore` is also set in retail; no selected script reads it, and the host leaves it unset. | debug build |
 | FH-11 | Each frame the engine reads `ServiceRate` and `LastService`: when the rate is a number and `now − LastService > ServiceRate` (or `LastService` is not a number), it pumps the script's threads and sets `LastService = now`. Then the same with `UnitServiceRate` and `LastUnitService`, calling `On_Unit_Service(unit)` for each freestore unit no plan reserves. `now` is the mode's frame count times the single-precision 1/30 s, widened to the Lua double. With `ServiceRate = 20`, the first pump, and so the first `FreeStoreService` and its `aggressive_mode`, comes after 20 s; units are serviced every 2 s from the start. | debug build; data (`busytacticalfreestore.lua`) |
-| FH-12 | Retail visits the freestore units in hash order; the host uses ascending entity ID. | code (hash map); project policy (audit "For EAWR-79") |
+| FH-12 | Retail visits the freestore units in hash order; the host uses ascending entity ID. | code (hash map); project policy (audit "For tactical AI host") |
 | FH-13 | The space freestore holds the AI player's own objects that are not squadron members and that move (BEHAVIOR_LOCO, or a special weapon): ships with a locomotor and squadron containers. Stations and map objects are not in it (the station is serviced by `FreeStoreService` through `Get_Space_Station`). | debug build |
-| FH-20 | `Find_Nearest(object[, type\|property\|category][, player, is_ally])`: the filter string is read first as a properties mask, then as a category mask, then as a type name. A mask names one or more values separated by `\|`, spaces, commas, tabs or newlines, case-insensitive, and is their union; one unknown name fails that reading (the properties and categories are bitfield readings). So the retail plans' `"Structure \| Capital"` (burn plan), `"Fighter \| Bomber \| Corvette"` (area sweep) and `"Frigate \| Capital"` (station defence) are category masks: on the rig the debug build answers them without a script error, and its burn plan attack-moves at the `Structure` it finds. A string no reading accepts is a script error (the rig's debug build logs one for an unknown name), which ends the calling script (PL-42). Players in ID order, neutral-faction players skipped, and with a player argument only those whose alliance with it equals `is_ally`; their live objects other than the source whose type, property mask or category mask matches (an object whose type has no category never matches); with a player argument, objects fogged for that player are skipped. The nearest by straight distance wins; the first of equals stays. An AI player sees everything (SK-45); map objects are not in the AI content, so they are never found (fidelity list). | debug build; rig (debug build AI log, EAWR-532) |
+| FH-20 | `Find_Nearest(object[, type\|property\|category][, player, is_ally])`: the filter string is read first as a properties mask, then as a category mask, then as a type name. A mask names one or more values separated by `\|`, spaces, commas, tabs or newlines, case-insensitive, and is their union; one unknown name fails that reading (the properties and categories are bitfield readings). So the retail plans' `"Structure \| Capital"` (burn plan), `"Fighter \| Bomber \| Corvette"` (area sweep) and `"Frigate \| Capital"` (station defence) are category masks: on the rig the debug build answers them without a script error, and its burn plan attack-moves at the `Structure` it finds. A string no reading accepts is a script error (the rig's debug build logs one for an unknown name), which ends the calling script (PL-42). Players in ID order, neutral-faction players skipped, and with a player argument only those whose alliance with it equals `is_ally`; their live objects other than the source whose type, property mask or category mask matches (an object whose type has no category never matches); with a player argument, objects fogged for that player are skipped. The nearest by straight distance wins; the first of equals stays. An AI player sees everything (SK-45); map objects are not in the AI content, so they are never found (fidelity list). | debug build; rig (debug build AI log, retail AI attack-pause comparison) |
 | FH-21 | `Get_Space_Station()`: the first object behaving like DUMMY_STAR_BASE owned by a player allied with this one. The host takes the tables' station types. | debug build |
 | FH-22 | Without the goal system, `EvaluatePerception("Allowed_As_Defender_Land", player)` is evaluated from its equation with SK-41 to SK-44: 1 for the attacker; any other equation gives 0 with an EAWR-SCRIPT-0216 record. With it, every equation is evaluated (PE-30). | data (`basiclandequations.xml`); code (AI-04) |
-| FH-23 | `Get_Hull()` is the display health fraction (hull over maximum; 1 without durability); `Get_Attack_Target()` is the ship's attack target; `Has_Active_Orders()` is true with an attack target, false without a locomotor, else whether the unit is moving. Any attack target counts, a scan's too, so the free store leaves a ship that holds a target alone except for `Service_Kite` and `Service_Heal` (EAWR-668: in the retail staging the free store serviced such a ship every 2 s and gave it no order; see A-08 in [space weapon fire](space-weapon-fire.md)). A squadron container counts as busy only under an attack order on a live target (unverified: retail reads its formation). | debug build; rig (retail staging, EAWR-668) |
-| FH-24 | `Activate_Ability(name, …)` on a unit without the ability only draws a script warning. Since EAWR-76, `Has_Ability`, `Is_Ability_Ready`, `Is_Ability_Active`, `Is_Ability_Autofire` and `Activate_Ability` read and switch the simulated abilities ([space abilities](space-abilities.md) AB-44); `Activate_Ability` issues an ability command into the replay queue (AI-45). For a cut ability (`HUNT`, `ION_CANNON_SHOT`, AB-03) the host records EAWR-SCRIPT-0216 and does nothing. | debug build |
+| FH-23 | `Get_Hull()` is the display health fraction (hull over maximum; 1 without durability). `Get_Attack_Target()` reads the object's formation target first, using the parent formation for a squadron member, then falls back to its weapon target. `Has_Active_Orders()` is true with a live attack target, false without a locomotor, otherwise reads formation movement. The host therefore projects a squadron's target and point travel into its container view even though the container has no ship combat or motion state. Any attack target counts, a scan's too, so the freestore opens its S-foils and keeps its orders except for `Service_Kite` and `Service_Heal`. Ship behavior is unchanged (AI ship facing before combat (legacy EAWR-668); see A-08 in [space weapon fire](space-weapon-fire.md)). Commanded formation targets stay separate from weapon targets used for combat eligibility (PL-21) and in-range events. Formation point travel is a Lua query input; taskforce movement completion remains unchanged and unverified for squadron containers. Point travel, target reporting and the actual combat eligibility distinction are covered by the snapshot and Lua contracts. | debug build; rig retail staging, AI ship facing before combat (legacy EAWR-668); squadron context contracts |
+| FH-28 | **AI power modes.** The authored `Unit_Abilities_Data` selects the available modes, durations and multipliers; `Supports_Autofire` enables the separate autofire path (AB-40). The effective definitions for S-foils, turbo, power to weapons and defend have no separate per-ability AI usage or distance hint. Stock Lua supplies their conditions: the freestore opens S-foils with an attack target and locks them when idle; healing travel may request turbo and foil lock. Area sweep, scouting, rush and bombing plans request travel modes around their movement commands. A target-in-range plan event requests power to weapons; a damage event requests defend below 80% shields, while the object script independently uses the damage-rate threshold (AB-41). Deliberate fighter damage releases the victim to dogfight with open foils; diversion completion opens foils and ends turbo. Ability readiness and boolean activation keep AB-13/44 semantics. The host must supply those scripts with formation state rather than substituting a generic use-when-ready policy. | effective XML and Lua; debug build (ability call and formation queries); AB-13/40/41/44 |
+| FH-24 | `Activate_Ability(name, …)` on a unit without the ability only draws a script warning. Since space ability implementation, `Has_Ability`, `Is_Ability_Ready`, `Is_Ability_Active`, `Is_Ability_Autofire` and `Activate_Ability` read and switch the simulated abilities ([space abilities](space-abilities.md) AB-44); `Activate_Ability` issues an ability command into the replay queue (AI-45). For a cut ability (`HUNT`, `ION_CANNON_SHOT`, AB-03) the host records EAWR-SCRIPT-0216 and does nothing. | debug build |
 | FH-25 | `Should_Switch_Weapons(target)` is false for a type with fewer than two projectile types; the tables keep one at most. | debug build |
 | FH-26 | `Get_Garrisoned_Units()` is an empty list: no M2 unit has a garrison. | data (m2-skirmish.md, Q1 notes) |
 | FH-27 | `Fire_Special_Weapon(target, player)` on a star base fires only through a hardpoint that takes a manual target; a star base without one draws a script warning and answers nil, and the script goes on. In the game data only the Underworld level-3 station's main cannon takes a manual target, so the host answers nil for every star base. On any other object the call stays the missing API. | debug build; data (hardpoints) |
 | FH-30 | `Is_Good_Against(target)`: for each category bit of the target's type, the average contrast factor of this unit's type against that category; true when the largest exceeds 1.0. The factor averages the weights other than 1.0 of the friendly entries that match the type (1.0 when only weights of 1.0 matched, 0 when none did; an exact type entry gives its weight). The weights come from `PGAICommands`' `Set_Contrast_Values`, which the host runs once through the same runtime; that the global contrast list holds exactly those values is an inference (every selected plan loads them unchanged). | debug build; data (`pgaicommands.lua`); inference |
-| FH-40 | Orders become next-tick replay commands issued by the unit's owner: `Attack_Target(unit)` an attack order; `Move_To` a move to the point or object position; `Attack_Move` and `Guard_Target` the EAWR-452 attack-move and guard orders (space-orders.md OR-12, OR-14): of a live object with it as the target, of any other position to that point. | project policy (EAWR-79); code (verbs) |
+| FH-40 | Orders become next-tick replay commands issued by the unit's owner: `Attack_Target(unit)` an attack order; `Move_To` a move to the point or object position; `Attack_Move` and `Guard_Target` the attack approach, attack-move and guard attack-move and guard orders (space-orders.md OR-12, OR-14): of a live object with it as the target, of any other position to that point. | project policy (tactical AI host); code (verbs) |
+| FH-41 | Unit `Move_To`, `Attack_Move` and `Guard_Target` accept a game object, AI target, TaskForce or position. `Move_To` resolves the position at the call. Attack-move retains an object destination (including an AI target's object); a TaskForce becomes its average position (EX-50). Guard of a TaskForce follows its first member other than the mover or the mover's parent container, using the average position if none qualifies. An object destination equal to the mover or its parent also becomes a point. Region AI targets and positions become points. An expired object or AI target is rejected; wrong kinds remain errors. | debug build (unit movement dispatch and shared position extraction) |
+| FH-42 | Unit `Attack_Target` accepts a live object or an AI target representing a live object. A region AI target, TaskForce, position or invalid value is rejected; it never substitutes a move for an attack. Space TaskForce `Attack_Target` accepts object and AI target handles (including region targets), but rejects TaskForce and bare position destinations. | debug build (unit and space attack-target entry points) |
 | FH-50 | The Lua load is the instructions each instance ran in the service (metered in steps of 128). In the M2 fixture the freestores use at most about 1,400 instructions in a tick against a 4,000,000 budget per instance. | test (`foc_ai_battle`) |
 
 ### Unsupported
@@ -220,10 +227,18 @@ the EAWR-SCRIPT-0215 missing-API diagnostic (L-16).
 - Diversion (`Divert` moves; `Is_On_Diversion` false), weather (`Is_In_*` false), garrisons
   (`Can_Garrison` false), `Get_Time_Till_Dead` (DT-04).
 - `Fire_Special_Weapon` on a star base answers nil (FH-27).
-- Missing API: `Fire_Special_Weapon` on other objects, `Garrison`, `Leave_Garrison`, `Get_Build_Pad_Contents`,
-  `Get_Parent_Object`, `Get_Combat_Rating`, `Get_All_Projectile_Types`, `FogOfWar.Reveal_All`.
+- `Get_Build_Pad_Contents` returns the pad's completed child, else its construction child,
+  else nil. Capture and refinery plans use this live state (SAE-02).
+- Missing API: `Fire_Special_Weapon` on other objects, `Garrison`, `Leave_Garrison`,
+  `Get_Parent_Object`, `Get_Combat_Rating`, `Get_All_Projectile_Types`.
+- `FogOfWar.Reveal_All(player)` queues a persistent reveal of that player's entire fog grid
+  ([V-20](space-visibility.md)), returns nil, and preserves tactical/player argument errors.
+  A firesale can also reveal the local player's map through the script's separate call in
+  an eligible single-player game.
 
-## EAWR-449 goal system and space plans
+<a id="449-goal-system-and-space-plans"></a>
+
+## Goal system and space plans
 
 With the map bounds (the TED header's declared extents) and the AI XML of AI-15 loaded, the host
 also runs the goal system of each AI player and the retail space plans it chooses
@@ -240,6 +255,27 @@ fidelity list below.
 | Rule | Behaviour | Source |
 |---|---|---|
 | GS-01 | Each frame, for every AI player in ascending ID: perception, goal service (delay 0: every frame), planning (0.1 s), execution (0.1 s), learning (10 s). A system's next frame is the frame plus the larger of 1 and the truncated single-precision product of its delay and 30. | debug build |
+| GS-01a | No system has a phase. Every system of every AI player starts with "next service frame" 0, so the players' plan pumps, execution services and learning services fall on the same frames (every third frame), and the players' goal passes start together. A system runs when its next frame is at most the current frame, and sets its next frame when it runs. | debug build (checked 2026-10-01 for staggered AI and Lua service schedule) |
+| GS-01b | Nothing caps a service's work per frame except the goal system's proposal budget (GS-05). The planning service pumps every live plan of the player, in list order, on its frame, with no limit on the plans or on the time; the goal service does its set maintenance, and the plan attach that follows (GS-30, PL-40), on the frame its proposal pass ends; execution and learning have no budget. The first service of a plan is on the frame it starts. | debug build (checked 2026-10-01 for staggered AI and Lua service schedule); GS-30, PL-40 |
+
+<a id="schedule-stagger-sch-957-project-rule"></a>
+
+### Schedule stagger (SCH, staggered AI and Lua service schedule, project rule)
+
+Owner decision in the AI scheduling deviation approval: the serial AI step and the Lua service are spread over ticks, per player, with a
+per-tick work cap, using the smallest offsets that keep the visible behaviour (who attacks what, and roughly
+when) the same as FoC. It deviates from GS-01a and GS-01b on purpose; `AiSchedule::Mode::faithful` keeps FoC's
+schedule for measurement and for the behaviour comparison, `staggered` is the default. Every number below is a
+project constant, counted in frames, never in wall-clock time; the schedule is part of the tick's deterministic
+order, so the state hashes are the same at every worker count.
+
+| Rule | Behaviour | Source |
+|---|---|---|
+| SCH-01 | The staggered schedule changes when work runs, never what it does: the goal, plan and learning rules (GS, PL, LS) and the per-unit rules are unchanged, a service still runs in ascending player ID on the frames it is due, and the goal set maintenance and the pumps of the plans keep FoC's periods, and the faithful schedule is the reference the deviation is measured against (docs/performance, staggered AI and Lua service schedule). | project rule; GS-01 |
+| SCH-02 | Phase. The AI player at position k (0-based, ascending ID among the AI players) starts its goal service k frames after the first service, and its planning, execution and learning services k modulo their period (3 frames for 0.1 s) frames after it, instead of all on it. The offsets count from the first serviced frame (the world has completed a tick before the AI's first service), so the first two players never share a frame. The periods are FoC's (GS-01); only the start moves, at most 2 frames (67 ms) for a player. With more AI players than the period, players k and k + 3 share their planning and execution frames. | project rule; GS-01a |
+| SCH-03 | Freestore. The same phase for the player's freestore script: its service clocks start k frames into their periods, so the players' freestore services (and their pass over every free unit) fall on different ticks. | project rule; FH-11 |
+| SCH-04 | Attach cap. At most one plan script is created and started in a tick. The goals a maintenance (GS-30) keeps without a plan wait in a queue in the order the pass made them (player, then goal order), keep their reserved units, and get their plan on a following tick; a goal that a later pass drops or finishes leaves the queue unattached. A plan that waits starts up to a few ticks later than in FoC, never earlier. | project rule; PL-40 |
+| SCH-05 | Not staggered: perception and the threat grid (PG), damage tracking (DT), the execution blocks' per-tick checks and the per-unit AI service (WTA-26), which are cheap per tick or per unit and on the partitioned path. The plans' pumps (PL-42) are spread by SCH-02 only; a plan's own script timing (Sleep, events) is FoC's. | project rule |
 
 ### Perception grid (PG)
 
@@ -258,14 +294,14 @@ fidelity list below.
 | Rule | Behaviour | Source |
 |---|---|---|
 | GS-10 | Targets: every object whose type has `Has_Space_Evaluator`, in object order (later objects appended, dead ones removed), then a region per `AI_SpaceEvaluatorRegionSize` (2000) square of the map, columns outer, rows inner, the last row and column clamped to the map. Names: `OBJECT_<id>`, `CELL_<column>_<row>`. | debug build; data |
-| GS-11 | A region is a tactical location; an object is a friendly (owner allied with the player) or enemy unit, or a structure (a star base). A goal applies where its `AIGoalApplicationFlags` name the target's kind; `Global` goals take no target. | debug build; data |
+| GS-11 | A region is a tactical location; an object is a friendly (owner allied with the player) or enemy unit, or a structure. A goal applies where its `AIGoalApplicationFlags` name the target's kind; `Global` goals take no target. Build-pad application requires a real build pad, not merely capture ownership: capturable non-pad targets such as the neutral merchant dock and gravity station still participate in ordinary goal evaluation, as structures when they have no locomotor. Native application matching does not reject `CAPTURE_POINT` targets or test combat hostility; neutral attack admission remains a separate rule (WHZ-51). | debug build (application matching rechecked 2026-10-04); data |
 | GS-12 | Two goals are alike when they share a target and a goal type, or one lists the other's type in `Is_Like`. | debug build |
 | PE-06 | An evaluation's context: Self is the player; Enemy the first non-neutral enemy by ID; Human the first human player; Target the goal target. | debug build |
 | PE-07 | A normalised token is its value over the normaliser: 0 stays 0, above the normaliser 1. | debug build |
 | PE-12 | Every function evaluation reseeds the AI random with the game seed + (player ID + 1) × 0x83 + 0x12345678 + CRC-32 of the function name + CRC-32 of the target name (32-bit wrap), so a `#` draw is fixed per seed, player, equation and target. | debug build |
 | PE-20 | Game tokens: `Age` (mode frame × single-precision 1/30), `IsCampaignGame` (SK-41), `ForceUnnormalized` (total force of every player), `ForceVisibility`. | debug build |
-| PE-21 | Player tokens: friendly/enemy force unnormalised and normalised (by the game's total force, or by the player's own for `NBTD`), `IsDefender`, `BaseLevel`, `IsFaction`, `IsDifficulty` (Normal), and the M2 constants: `CanRetreat` 0 (SK-43), credits, open pads, built structures, reinforcements and unit space 0. | debug build; SK-30 to SK-45 |
-| PE-22 | Unit tokens: `Health`, `Shield`, `ForceUnnormalized` (power × attenuation when the type has the category), `Force` and `ForceNBTD` normalised by the game total and by the owner's friendly force, `AreEnginesOnline`, the distance tokens (PE-27); `IsContestable`, `IsBuildPad`, `HasBuiltObject`, `ContainsHero` and `HardPointHealth` are 0 for M2 content. | debug build; data |
+| PE-21 | Player tokens: friendly/enemy force unnormalised and normalised (by the game's total force, or by the player's own for `NBTD`), `IsDefender`, `BaseLevel`, `IsFaction`, `IsDifficulty` (Normal), and `CanRetreat` 0 (SK-43). Credits, open pads, built structures, reinforcement power and population room use the completed economy state in live M2 (SAE-02). | debug build; project fixture SK-30 to SK-45; SAE-02 |
+| PE-22 | Unit tokens: `Health`, `Shield`, `ForceUnnormalized` (power × attenuation when the type has the category), `Force` and `ForceNBTD` normalised by the game total and by the owner's friendly force, `AreEnginesOnline`, and the distance tokens (PE-27). `IsContestable`, `IsBuildPad` and `HasBuiltObject` use live pad/type state (SAE-02). `ContainsHero` and `HardPointHealth` remain 0 in this fixture. | debug build; data; SAE-02 |
 | PE-24 | Location tokens: a region's rectangle, or the square of side twice the object's reach around an object target (`Target.Location`); friendly and enemy force in it, normalised by the game's or the player's total. | debug build |
 | PE-25 | `TimeLastSeen` only grows in fogged cells, so it is 0 for an AI player. | debug build; SK-45 |
 | PE-26 | Start-location flags read GC entry markers; the M2 fixture has none, so they are 0. | debug build; data |
@@ -280,7 +316,7 @@ fidelity list below.
 | GS-02 | A player's goal functions are the space goals of its player type's function sets, in order (`BasicEmpire` / `BasicRebel` by faction, AI-11), with the Space template's budget and switches and the Normal difficulty adjustments. | debug build; data |
 | GS-03 | A goal is proposable while no plan blocks proposal and the template turns its category on and not off. | debug build; data |
 | GS-04 | Proposal visits (function, target) pairs from where it stopped, a per-frame budget of them. Unproposable functions, targets the goal does not apply to and goals alike an active one are free. Each other pair counts as non-trivial and is evaluated; the desire is the value plus `Per_Failure_Desire_Adjust` × recent goal failures plus `Per_Activation_Failure_Desire_Adjust` × recent activation failures. A positive desire draws a plan (PL-01) and, when its units are valid, joins the proposals. Past the last function the pass is complete and maintenance is due. | debug build |
-| GS-05 | After maintenance the per-frame budget is ceil(non-trivial count / (30 × 5)), at most (int)(20 / max(1, players − humans) + 0.5), at least 1; the goal system then sleeps `Space_AI_Goal_Cycle_Sleep_Duration` × 30 frames (0 on Normal). | debug build; data |
+| GS-05 | Before the first proposal pass, the estimated count is max(1, initial perception targets) × space goal functions. After maintenance it is the pass's non-trivial count. In both cases the per-frame budget is ceil(count / (30 × 5)), at most (int)(20 / max(1, players − humans) + 0.5), at least 1. Players includes non-playable faction players; humans counts active human lobby players, not every non-AI non-neutral entry. After maintenance the goal system sleeps `Space_AI_Goal_Cycle_Sleep_Duration` × 30 frames (0 on Normal). | debug build (initialization and player counts checked 2026-10-04); data |
 | GS-30 | Maintenance: active goals by desire; categories by their template budget equation, largest first; the proposals of each category culled to its active count plus the goal set extension (2, the engine default; the player types set none). | debug build; data |
 | GS-31 | Per category: with no proposals the active goals stay. Otherwise finished goals and goals whose plan ended leave; goals at or above the best candidate's desire (or whose plan is not removable) stay when their contrast still holds; the others become abandon candidates. Pass 1 takes the pool (abandon candidates and candidates) in desire order until a goal cannot go in, is alike a kept one, fails its unit test (an activation failure), matches the best abandon candidate, or the limit (active count + extension) is reached. Pass 2 draws the rest by desire on the synchronized random until the limit. Goals left in the pool that were active end. Kept goals get their plans. | debug build |
 | GS-32 | Goal activation, goal outcomes and plan outcomes are recorded with an expiry (`Activation_Tracking_Duration` / `Tracking_Duration` × 30 frames); the learning service drops expired records every 10 s. A plan's success rate is successes over attempts, 1 before any. | debug build; data |
@@ -294,14 +330,15 @@ fidelity list below.
 | PL-10 | A plan's definition load (`PlanDefinitionLoad`, `Base_Definitions`) gives `Category` (goal names), `TaskForce` (definitions), `IgnoreTarget`, `MagicPlan`, `AllowFreeStoreUnits`, `AllowEngagedUnits`, `PerFailureContrastAdjust`, `MinContrastScale`, `MaxContrastScale` and `RequiredCategories`. A plan without goals or TaskForces is rejected. | debug build |
 | PL-11 | A TaskForce entry `X = a, b` is a team of a to b (b 0 means a), `X = a` exactly a, `X = p%` a percentage. X is a keyword (`EscortForce`, `TaskForceRequired`, `MinimumTotalSize`, `MinimumTotalForce`, attach and stage options, `-Type` exclusions), else a `|` list of categories — every type of those categories that does not create a team and is not a squadron member — else a `|` list of type names. A team with no possible type is dropped. A squadron in the freestore counts as its team's type: the `Create_Team_Type` container when the squadron names one (Y-wings, hero squadrons), else the squadron type, whose categories come from its craft (PL-13). So `Bomber = 3, 10` matches TIE bomber squadrons and `Fighter = 1, 4` TIE fighter and interceptor squadrons. Every category and type name the FoC space plans use has possible FoC types, so none of their teams is dropped (the host keeps one it cannot fill, fidelity list). | debug build; data |
 | PL-13 | At load, a type with squadron units replaces its own categories, properties and `AI_Combat_Power` with its craft's: the union of their `CategoryMask` and `Property_Flags` and the sum of their power, one term per `Squadron_Units` entry. A TIE bomber squadron is `Bomber \| AntiCapital` with power 4 × 60 = 240, a TIE fighter squadron `Fighter \| AntiBomber` with 7 × 35 = 245. The squadron is the container the AI counts; a `Create_Team_Type` container (Y-wings, hero squadrons) is an extra object with categories of its own. | debug build; data |
+| PL-14 | Each string in `RequiredCategories` is converted to one category bitmask: category names separated by `\|`, comma, space, tab or newline are ORed together. Every row must match at least one selected unit (PL-25); rows are separate requirements, while names within a row are alternatives. A string containing an unknown name is reported and that entire row is omitted; non-string entries are ignored. In the authored AI plans, 12 of 25 files declaring this field use unions, all with `\|`; no other operators occur. The two tactical space unions are `hidesurpriseunits` (`Bomber \| Corvette`) and `tacticalmultiplayerbuildspaceunitsgeneric` (six combat categories). The hide plan cannot admit fighter-only escorts, so its guarded MainForce is present. | debug-build plan definition loading and category conversion; data audit |
 | PL-20 | A goal's units are selected one at a time from the proposal types (the team types the player's free store holds). Each type's weight sums the marshallers: free store (1 − the nearest object's cost / the largest cost, cost the XY distance squared to the target), tech tree (`Tech_Level` / 5 × 2), plan (the first team of the type with room: 1 − count / maximum; percentage teams 1; none: reject), reinforcement (a type the free store lacks is dropped for good), hero and build (0), contrast (PL-30). Unit variety: a type that is half the selection yields while another can go in. The largest weight wins, first among equals. | debug build |
 | PL-21 | The free store (EX-01) lists the player's own moving objects (FH-13) that no TaskForce holds and no other goal reserved, at least `Health_Low_Percent_Threshold` healthy; with `AllowEngagedUnits = false`, fighter teams in combat are left out. | debug build |
-| PL-22 | Teams are filled rotating from a start drawn on the synchronized random; each unit adds its power to its TaskForce. | debug build |
+| PL-22 | Each proposed unit type draws its own start among its eligible teams on the synchronized random; a single eligible team consumes no draw. Filling rotates that type's teams from its start; each unit adds its power to its TaskForce. | debug build |
 | PL-25 | The selection is valid when every team has its minimum, each TaskForce its minimum size and force, the required categories are present and the contrast is met (a plan with no units is valid only with a required TaskForce). | debug build |
 | PL-30 | Contrast: the threshold is 1 − (min + f × adjust) / (max + f × adjust), f the recent failures of the plan against the target. The target list is the target's force (an object's power, a region's enemy force) and its force per enemy contrast category, each times the maximum scale and the difficulty's `Space_AI_Contrast_Multiplier`. A unit's contrast weight is, over the categories left, the largest max(1 − (max(force − p × c, 0) / max(force, p × c))², 0) × c (c the average contrast factor, FH-30), doubled when positive. Once the contrast is met a unit weighs 0 while the plan still needs units, else it is rejected. `IgnoreTarget` plans weigh a unit by a draw in [0, power / 500]. | debug build |
 | PL-32 | A selected unit takes its power off the total, and power × c off its category entry. | debug build |
 | PL-33 | The contrast is met when what is left of the total, and the category breakdown, are at most the threshold of the target list. | debug build |
-| PL-40 | A kept goal's plan starts in its own instance (`100000 + n`): `Base_Definitions`, then `Target` (the target object), `AITarget` (the AI target), each TaskForce global, `PlayerObject`, and the thread `<TaskForce>_Thread` of each TaskForce, in definition order. A TaskForce without its thread function is dropped. | debug build |
+| PL-40 | A kept goal's plan starts in its own instance (`100000 + n`): `Base_Definitions`, then `Target` (the target object), `AITarget` (the AI target), each TaskForce global, `PlayerObject`, and the thread `<TaskForce>_Thread` of each TaskForce, in definition order. A TaskForce's selected types follow authored team order, preserving selection order within each team; `Produce_Force` creates its build tasks in that order. An optional TaskForce with no selected live or reinforcement units is omitted, including its global and coroutine; a required TaskForce is created even when empty, preserving its authored failure. A TaskForce without its thread function is dropped. | debug-build plan attachment, team collection, ordered production and empty optional/required force recheck |
 | PL-42 | Every 0.1 s each plan's threads are pumped; a plan whose script exited or that has no live thread ends. | debug build |
 | PL-43 | A plan ends: its goal and plan outcomes are learned (`Set_Plan_Result`), its units go back to the free store, its build tasks and blocks are dropped and its instance is removed. | debug build |
 | PL-45 | `Purge_Goals(player)` abandons every running plan of that AI player other than the calling one that the goal system may remove (`Set_As_Goal_System_Removable`), in plan order. An abandoned plan ends as in PL-43, except that only its goal's outcome is learned, with the plan's result so far, and its goal is finished. Retail abandons them inside the call; the host applies it at the player's next planning service (at most 0.1 s later; the burn plan sleeps 1 s before it collects units). | debug build; project policy (deferred apply) |
@@ -312,11 +349,14 @@ fidelity list below.
 |---|---|---|
 | EX-10 | `Produce_Force` stages one build task per selected unit of the TaskForce and returns its block. | debug build |
 | EX-11 | Every 0.1 s each task takes a free store object of its type, the one its goal reserved first, else any free one; the object joins the TaskForce. A type the free store no longer holds fails; with nothing produced the TaskForce signals `No_Units_Remaining`. The block finishes when every task has; its result is whether the TaskForce has units. | debug build |
-| EX-12 | `Collect_All_Free_Units` moves every free store object of the player into the TaskForce. | debug build |
+| EX-12 | `Collect_All_Free_Units([categories])` moves matching free store objects of the player into the TaskForce. With no argument the category mask is all; one argument must be a recognized category string, including `|` unions, otherwise the call fails. Matching uses the original object's type category mask (PL-13 for squadrons); other goals' reservations remain unavailable. The area's `Fighter \| Corvette \| Frigate` call leaves `Bomber \| AntiCapital` TIE bomber squadrons free. | debug build; data |
+| EX-13 | A space reinforcement joins its TaskForce when its incoming-arrival signal is received, after hyperspace travel, rather than when its object first exists. Its block remains unfinished while purchases are pending or ships are incoming. An accepted incoming purchase keeps its reservation and is not submitted again. Lua's separate reinforcement timeout may abandon an empty plan before arrival; the ship remains unavailable to AI freestore until arrival even after its pooled reservation is released. | debug build (reinforcement completion, arrival signal and freestore registration); SAE-11 |
 | EX-20 | Blocks are named by their instance and the sequence of the command that created them; a block the engine has not taken yet is not finished. `BlockOnCommand` polls `IsFinished` and returns `Result`. | debug build; project policy (naming) |
-| EX-30 | Movement blocks: `Attack_Target` on an object attacks it with every mover, else they move to the point; `Attack_Move` and `Guard_Target` give every mover the EAWR-452 attack-move or guard of the object, or of the point (FH-40; research E452-18: the TaskForce's attack-move and guard are moves with the attack-on-path and escort types); `Move_To` moves to the target's position at the order. Movers are the TaskForce's live members that move. With nothing to move, the call returns nil. | debug build; FH-40 |
-| EX-31 | A mover whose movement ends signals `Unit_Move_Finished(tf, unit)` and leaves the block; the block finishes when no mover is left, unless it attacks or attack-moves to a visible enemy object; it finishes when the attacked object dies (signalling `Current_Target_Destroyed`) or the TaskForce is empty. An attacking unit reports no end of movement. | debug build; unverified (end of movement is "stopped for 2 ticks") |
+| EX-30 | Movement blocks: `Attack_Target` on an object attacks it with every mover, else they move to the point; `Attack_Move` and `Guard_Target` give every mover the simulation's attack-move or guard of the object, or of the point (FH-40; research E452-18: the TaskForce's attack-move and guard are moves with the attack-on-path and escort types); `Move_To` moves to the target's position at the order. Movers are the TaskForce's live members that move. With nothing to move, the call returns nil. | debug build; FH-40 |
+| EX-31 | A mover whose movement ends signals `Unit_Move_Finished(tf, unit)` and leaves the block; this includes a squadron container's formation travel. The block finishes when no mover is left, unless it attacks or attack-moves to a visible enemy object; it finishes when the attacked object dies (signalling `Current_Target_Destroyed`) or the TaskForce is empty. An attacking unit reports no end of movement. | debug build; movement-finished signal and formation-admission recheck; unverified (host polls stopped movement after 2 ticks) |
+| EX-32 | TaskForce attack-move and movement accept object, AI target, TaskForce and position destinations; attack-move of a TaskForce uses its average position. TaskForce guard chooses a random member of a destination TaskForce and follows that object; an empty destination force returns nil with a warning. Guard accepts object and AI target destinations but rejects a bare position, nil and other kinds, even though the movement verbs accept positions. An expired object or AI target returns nil without an order. The host uses its existing deterministic script random stream for member selection. | debug build (space order entry points); project policy (script random stream) |
 | EX-35 | `Prepare_Ambush(target, side, distance, tolerance)`: the point on the target's front, left, right or back (its facing) at the distance, stepped outward by the target's reveal range (the region size without one) until a square of that size holds no more enemy threat than the tolerance; no such point inside the map finishes the block unready. Movers go there; the block is ready when all arrived, and re-aims every 150 frames. | debug build; unverified (re-aim on a timer, not on polling) |
+| EX-36 | `Guard_Target` uses the escort movement kind. After movers signal arrival and leave the move list, a live visible guarded object keeps the command pending regardless of its owner; an empty TaskForce or destroyed target releases it. The movement-finished and ownership-change handlers both preserve that escort condition. Visibility loss can finish the command for objects without persistent fog visibility; the hosted skirmish AI sees the whole map (SK-45). This is the guard exception to EX-31: WBP-40 can wait up to 60 seconds for pad ownership and then indefinitely for a mineral pad's construction child, through Lua's timeout and child predicate. | debug build: space guard entry, movement-block initialization and movement/ownership signal handling; effective space plan and blocking-command library |
 | EX-40 | A plan event calls `<TaskForce>_<Event>` when the plan defines it, else `Default_<Event>`, with the TaskForce first: `Unit_Destroyed`, `No_Units_Remaining`, `Target_In_Range(tf, unit, target)` (a member's new attack target), `Original_Target_Destroyed`, `Current_Target_Destroyed`, `Unit_Move_Finished`. | debug build; unverified (target-in-range fires on a new attack target) |
 | EX-44 | `Unit_Damaged(tf, unit, attacker, deliberate)` is queued on the TaskForce's thread, at most one between pumps; deliberate when the unit (or its squadron) is the attacker's target. | debug build |
 | EX-50 | A TaskForce's position is the average position of its live members (0 without any); `Get_Distance` measures from it. | debug build |
@@ -344,24 +384,30 @@ In the pinned battle the Empire AI proposes `Destroy_Unit`, `Destroy_Unit_Minima
 `Sweep_Area` and `Turbo_Attack_Location` goals among others and starts `destroyunit`,
 `destroyunitminimal`, `flankplan`, `areasweep` and `turboattacklocation` depending on the seed
 (`foc_plan_battle`). The Empire's squadrons fill category teams of fighters and bombers
-(PL-11, PL-13): in the pinned battle `escortplan` guards a ship with TIE squadrons from the
-start and `hidesurpriseunits` hides the TIE bombers early on. `bombingrun` needs three free TIE
-bomber squadrons; in the pinned battle it starts at tick 1,403 and at 1,423 orders its three
-bomber and three fighter squadrons to attack a Rebel corvette that is fogged to the Empire. The
+(PL-11, PL-13): `escortplan` can guard a ship with TIE squadrons and `hidesurpriseunits` can
+hide the TIE bombers. The mounted `bombingrun.lua`
+definition requires 3–10 bomber and 1–4 fighter squadrons (PL-25). A previous M2 selection
+started at tick 1,403 and at 1,423 ordered three bombers and three fighters against a fogged
+Rebel corvette; that count and the named plans' startup schedule are not guaranteed.
+Per-type team draws (PL-22) and competing goals' reservations (PL-20/21, GS-30/31) can leave
+no valid sweep, escort or bombing force in the same battle. `foc_plan_battle` retains the full
+battle and tests those three plans separately by filtering the mounted goal-function entries
+to the relevant goal, keeping its authored equation, templates and Lua. The bombing case
+checks the authored force bounds and attack membership before the flight checks. The
 TaskForce attack gives every squadron its own attack order (debug build: a space unit's attack
 order leaves the TaskForce's formation move), and each flies its approach to the fogged target
-and fires at it (space-fighters FT-01, FA-07, EAWR-633). Before EAWR-532 the host rejected the area
+and fires at it (space-fighters FT-01, FA-07, AI bombing-run departure). Before the retail AI attack-pause comparison work the host rejected the area
 sweep's category mask, which ended the sweep and freed its squadrons for a bombing run at tick
-2,126. In the debug-build skirmish on the rig (EAWR-532) the
+2,126. In the debug-build skirmish on the rig (retail AI attack-pause comparison) the
 Empire AI proposed `Bomb_Unit` goals but activated none either.
-A community player confirmed that the retail Empire AI flies bombing runs and escorts (EAWR-485).
+A community player confirmed that the retail Empire AI flies bombing runs and escorts (retail bombing-run and escort confirmation).
 Plans whose teams only M2-external types can fill (`hidetransports`, `spaceartillery`) stay
 dormant.
 
-**The pause before the starbase attack (EAWR-532).** Once the Rebel ships and squadrons are nearly
+**The pause before the starbase attack (retail AI attack-pause comparison).** Once the Rebel ships and squadrons are nearly
 gone, nothing sends the whole Empire force at the Rebel starbase until `Burn_Units_Space` fires
 (AI-24): the game must be older than 180 s and the Rebel fighter, bomber, corvette and frigate
-force below 500, so the last few craft may still be alive. The burn plan then purges the other
+raw force below 500 (PG-08; this equation does not attenuate it by health), so the last few craft may still be alive. The burn plan then purges the other
 plans (PL-45), sleeps 1 s, collects every free unit and attack-moves it at the nearest enemy
 structure or capital ship (FH-20), which is the starbase. A wipe before 180 s therefore waits
 for 180 s, plus the proposal pass, the 1 s sleep and the flight across the map. Single units of
@@ -369,26 +415,44 @@ other plans (`destroyunitminimal`, `turboattack`) may reach the starbase sooner.
 data's rule, not a host choice. In the debug-build skirmish on the rig the Empire's burn goal
 passed at 255 s, the plan purged and attack-moved 1 s after its start, at a `Structure` (a map
 prop nearer than the starbase), and it kept running; the goal came back about once a minute.
-The M2 Rebel fleet's MC80 (EAWR-537) is a `Capital`: the burn trigger's fighter, bomber, corvette and
+The M2 Rebel fleet's MC80 (MC80 roster and station squadrons) is a `Capital`: the burn trigger's fighter, bomber, corvette and
 frigate force leaves it out, so the plan may start while it lives, and the plan's search may
 answer the MC80 instead of the starbase when it is nearer. The plan then attacks the MC80 until
 it dies. This follows from the FoC data (AI-24, the MC80's category mask) and FH-20; no original
 run has had an MC80 in the Rebel fleet. In seed 6 of the M2 battle the MC80 and the frigate
-outlive the Empire station, so `foc_burn_battle` plays the fleet without the MC80. There
-(seed 2, since EAWR-669's hardpoint routing, with the free-space start of EAWR-597 whose start angle is the
-marker's yaw less 45 degrees, space-movement PL-03, the idle grid of EAWR-687 and the ships at their
-`Layer_Z_Adjust` heights of EAWR-666; seeds 6 and 1 no longer bring three Empire units to the starbase
-together) the burn plan starts at about 194 s, while the last Rebel craft still live (the fleet is
-gone at about 195 s), and attack-moves the Empire's ships and free squadrons at the starbase about
-1 s later. A plan that made its force unremovable keeps its
+outlive the Empire station, so `foc_burn_battle` plays the fleet without the MC80. Its seed-2
+fixture sends the Rebel fleet at the Empire station and destroys the remaining ships and craft
+with scripted hull damage at 180 s. It verifies an empty mobile fleet from the resulting snapshot,
+then checks the authored age and raw-force gates, the purge, collection, order and eventual
+approach and hit on the starbase. Craft count as craft even when they also have a self squadron
+profile; squadron containers are excluded from the physical fleet count. This avoids mistaking
+surviving craft for a fleet wipe or depending on combat timing to exercise the burn branch.
+A plan that made its force unremovable keeps its
 units (PL-45): the bombing run its bombers, the turbo attack on a location
-(`turboattacklocation.lua`) its ship. Three Empire units are near the starbase (within 3,000)
-about 64 s after the wipe and the first hit comes about 80 s after it. A retail skirmish (Easy AI)
+(`turboattacklocation.lua`) its ship. The fixture requires three Empire units near the starbase
+(within 3,000) and a hit after the verified wipe. A retail skirmish (Easy AI)
 measured 46 s and 58 s after a wipe at 282 s.
 
 ### Fidelity list
 
-- Orders use the M2 simulation's move, attack, attack-move and guard orders (FH-40, EAWR-452): no
+- The AI's scheduled work is staggered across ticks (SCH-01 to SCH-05, owner decision in the AI scheduling deviation approval, staggered AI and Lua service schedule):
+  the players' services start 0 to 2 frames apart from the first service, the freestore services
+  likewise, and one plan script is attached a tick, in order. FoC runs every system of every player
+  from frame 0 and attaches a pass's plans together (GS-01a, GS-01b). Measured against the faithful
+  schedule on the same ten seeds, 4,000 ticks each: the first attack order falls 3 ticks later on the
+  same target in all ten seeds; 3,151 of the 3,974 plan starts and orders of the faithful runs (79%)
+  recur (same player, plan, goal, target and occurrence) within 30 ticks, 99.9% of those within 9
+  ticks (0.3 s). The runs then drift apart, as any change of timing does (different draws and
+  fights): the first faithful event without a counterpart is at tick 504 to 2,499 depending on the
+  seed. The drift shows in what the AI starts, not only when: plan starts per goal over the ten seeds,
+  faithful / staggered, are BOMB_UNIT 13 / 9, DESTROY_UNIT 21 / 20, DESTROY_UNIT_MINIMAL 4 / 2,
+  HIDE_SURPRISE_UNITS 56 / 56, SPACE_ESCORT_GOAL 19 / 19, SPACE_SCOUT 40 / 40, SWEEP_AREA 60 / 68,
+  TURBO_ATTACK_LOCATION 26 / 24 and TURBO_ATTACK_UNIT 2 / 0 (241 / 238 in all), with 218 attack orders
+  in both and the same median tick (1,426 and 1,425.5). The per-goal counts are therefore not equal
+  (the rare goals vary most, and no staggered run starts TURBO_ATTACK_UNIT); the cause is the
+  changed timing of the fights, not studied further. A plan whose attach waits starts up to 3 ticks
+  late. The pump of a plan keeps FoC's period (0.1 s).
+- Orders use the M2 simulation's move, attack, attack-move and guard orders (FH-40, attack approach, attack-move and guard): no
   formations; a movement ends when a unit has stopped for 2 ticks.
 - Abilities, exploration sweeps (`Explore_Area` moves to the area centre), reinforcements,
   weather fields and hero attachment are not simulated (`unsupported_plan_calls`).
@@ -399,11 +463,11 @@ measured 46 s and 58 s after a wipe at 282 s.
   a Y-wing team with its container's categories (Bomber, AntiFrigate, AntiCapital), which would
   make it good against frigates and make a frigate it hurts kite (`Service_Kite`). The remake
   tests the craft's categories (Bomber, AntiCapital). No retail staging has had a Y-wing team
-  attack an AI frigate yet (EAWR-668; EAWR-747).
-- From the tactical AI walk ([walks/tactical-ai.md](walks/tactical-ai.md), EAWR-737), not modelled:
-  the unit AI's retaliation on damage (EAWR-730; it attacks without an order, so it never turns a
-  ship, A-08), attack positioning (`Enable_Attack_Positioning`, EAWR-731), the plans' targeting
-  priorities (`Set_Targeting_Priorities`, EAWR-729) and `Lock_Current_Orders` (EAWR-732).
+  attack an AI frigate yet (AI ship facing before combat; Y-wing container combat suitability verification).
+- From the tactical AI walk ([walks/tactical-ai.md](walks/tactical-ai.md), tactical AI rule walk (legacy EAWR-737)), not modelled:
+  the unit AI's retaliation on damage (unit-AI damage retaliation; it attacks without an order, so it never turns a
+  ship, A-08), attack positioning (`Enable_Attack_Positioning`, least-defended attack positioning), the plans' targeting
+  priorities (`Set_Targeting_Priorities`, AI plan targeting priorities) and `Lock_Current_Orders` (locked fleeing-unit orders).
 - The host loads only the M2 types, so a TaskForce team lists only those of its possible types;
   a team none of them fills stays and blocks its plan, as the full FoC type list would (PL-11).
 - Retail hash-map orders (targets, maps, categories of equal budget) are ID or definition order.
@@ -420,17 +484,14 @@ measured 46 s and 58 s after a wipe at 282 s.
   the caller's player whatever player it is given; it skips a plan whose script has exited but
   that has not ended yet; and an abandoned plan's reserved credits are not refunded (the host
   has no refund).
-- `areasweep`'s move-finished handler attack-moves a unit at its own TaskForce when no deadly
-  enemy is found (`unit.Attack_Move(tf)`); the host's `Attack_Move` takes no TaskForce target and
-  reports a script error there.
-- The M2 battle's bombing run (EAWR-633) reaches its target, a corvette beside the Rebel star base,
+- The M2 battle's bombing run (AI bombing-run departure) reaches its target, a corvette beside the Rebel star base,
   but lands no hit on it: the craft's shots strike the star base, and the squadrons die at the
   base by tick 4,802 (the plan fails when the bombers are gone). Unverified against retail;
   FoC's time for the run is not measured (the remake's squadrons close at the FoC maximum speed).
-- The retail pause timing (EAWR-532) is one skirmish on the Easy AI (a 15 s sleep per goal cycle),
+- The retail pause timing (retail AI attack-pause comparison) is one skirmish on the Easy AI (a 15 s sleep per goal cycle),
   and one debug-build skirmish with a third AI player on the map; the 180 s gate itself has not
   been seen in retail (a wipe before 180 s).
-- No original run has had an MC80 in the Rebel fleet (EAWR-537): that the burn plan starts while it
+- No original run has had an MC80 in the Rebel fleet (MC80 roster and station squadrons): that the burn plan starts while it
   lives and may attack it before the starbase follows from the data and FH-20, unverified in a
   run. `foc_burn_battle` plays the M2 fleet without the MC80, which in seed 6 outlives the Empire
   station.
@@ -438,9 +499,33 @@ measured 46 s and 58 s after a wipe at 282 s.
 ### Cost
 
 The Lua cost of every tick is in the AI journal (`AiJournal::costs`: freestore and plan
-instructions, plan instances). In the M2 battle the AI uses at most about 1,500 instructions in
-a tick (plans about 1,300, two plan instances at most) against 4,000,000 per instance; the serial
-engine step costs about 0.1 ms a tick (`foc_plan_battle`).
+instructions, plan instances, and since the AI and Lua schedule was staggered, the tick's scheduled work: goals scored, maintenances,
+plans attached, deferred and pumped). In the M2 battle the AI uses at most about 5,500 instructions
+in a tick against 4,000,000 per instance; instructions are not what costs time. Two things did:
+
+- A plan attach (script load and definition run) costs 2 to 3 ms, and a goal pass attached up to four
+  plans on one tick (a 12 ms AI step, the audit's worst). Under SCH-04 no tick attaches more than
+  one; the AI step's worst tick is then the goal system's own proposal budget (6 evaluations a
+  frame in FoC, up to 7 ms).
+- `FindTarget` scored every tactical location before its distance test: the hide plan's search
+  took 25 to 60 ms a call (the Lua service's worst ticks, which are not a schedule problem). The
+  distance test now comes first (the answer is the same): the Lua service's p99 fell from 17 ms
+  to under 1 ms.
+
+Which change gave what (M2 battle, three seeds of 2,500 ticks, per-tick minimum of three runs; ms,
+p99 / worst of the whole `session.step`; run on the shared local lane with other jobs in the other
+slots, so the world step's noise is a few ms): FoC's schedule with the old `FindTarget` 27.0 / 50.1;
+with the new `FindTarget` 15.0 / 27.7; the SCH-02 phases added (no attach cap) 17.4 / 36.7 (no gain
+beyond the noise: the goal pass still attaches four plans at once); phases and the attach cap (the
+default) 14.8 / 24.2. The whole step includes post-service work and script/combined state hashing;
+the phase sum covers only the measured world step, AI before-service and Lua service intervals.
+Summing those three phases within each repetition before taking each tick's minimum gives
+21.4 / 45.2 with the old `FindTarget`, 7.6 / 11.9 with the new order, 8.9 / 22.5 with phases only
+and 7.6 / 12.1 with phases and the attach cap. The `FindTarget` order is nearly all of the p99 gain
+and most of the whole-step worst-tick gain; the stagger's own gain is the AI step's worst tick,
+8.8 ms to 6.2 ms (p99.9 6.4 to 4.1), from the attach cap; the phases alone did not move the AI step.
+
+`foc_schedule_957` counts the attach work per tick (no clock) under both schedules.
 
 ## Cases
 
@@ -469,10 +554,10 @@ Expected: execution stops with the L-16 missing-API diagnostic naming `ThreadVal
 | Gate | Unknown | Effect on consumers |
 |---|---|---|
 | AI-G01 | Whether the engine uses any tactical space configuration other than the AI player's Space template when a battle is launched from GC. The data says it does not (AI-21). | If a GC-only mechanism exists, the GC context is more than the tokens of AI-22. |
-| AI-G02 | Resolved: a draw weighted by recorded success rate plus one, on the synchronized random stream (AI-06). | EAWR-79 draws from the simulation RNG. |
-| AI-G03 | Fixture inputs: whether the Team station markers spawn stations (`BaseLevel`), which side is `IsDefender`, whether retreat is allowed, and the exact rosters. EAWR-64 pins defaults in [m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) (SK-20, SK-22, SK-34, SK-43, SK-46, SK-47); the owner confirmed the stations, the rosters and the attacker role in EAWR-179. | Changes the live plan set, not the function subset. |
+| AI-G02 | Resolved: a draw weighted by recorded success rate plus one, on the synchronized random stream (AI-06). | The tactical AI host draws from the simulation RNG. |
+| AI-G03 | Fixture inputs: whether the Team station markers spawn stations (`BaseLevel`), which side is `IsDefender`, whether retreat is allowed, and the exact rosters. The M2 skirmish fixture pins defaults in [m2-skirmish.md](../../plan/phase-2/m2-skirmish.md) (SK-20, SK-22, SK-34, SK-43, SK-46, SK-47); the owner confirmed the stations, the rosters and the attacker role in starting-force and AI fixture decisions. | Changes the live plan set, not the function subset. |
 | AI-G04 | Resolved: a zero budget does not disable a category; budget values order the categories (AI-05). | AI-14 corrected. |
-| AI-G05 | Goal-cycle cadence is resolved (AI-50). Perception evaluation frequency and TaskForce event dispatch order, in game time, remain. | Needed for deterministic scheduling in EAWR-79. |
+| AI-G05 | Goal-cycle cadence is resolved (AI-50). Perception evaluation frequency and TaskForce event dispatch order, in game time, remain. | Needed for deterministic scheduling in the tactical AI host. |
 | AI-G06 | Exact signatures and return shapes of the 106 entries (D-04). All of them exist in FoC (AI-42). | Needs per-API behaviour notes before implementation. |
-| AI-G07 | Resolved for space (EAWR-449): PG-01 to PG-08, GS-10, FT-01. | `FindTarget` and the location tokens are hosted. |
+| AI-G07 | Resolved for space (AI goals, perception and TaskForces): PG-01 to PG-08, GS-10, FT-01. | `FindTarget` and the location tokens are hosted. |
 | AI-G08 | What a desirable goal does when its TaskForce needs production that cannot be afforded. In part resolved: activation fails when the goal's build-time limit is positive and the build-time estimate exceeds it, and succeeds otherwise; how the estimate treats unaffordable units is not known. | Decides whether the economy goals of AI-25 are truly inert or tie up units. |

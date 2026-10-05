@@ -170,9 +170,10 @@ void record_tick(RunOutput& output, const tactical::TacticalTick& tick, const bo
     const tactical::TacticalReplay& replay,
     const eawr::sim::PartitionExecutor& executor,
     const bool scramble,
-    std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr) {
+    std::shared_ptr<eawr::sim::StateHasher> hasher = nullptr,
+    const tactical::EconomyRules& economy = {}) {
     RunOutput output;
-    auto created = tactical::TacticalSession::from_replay(replay);
+    auto created = tactical::TacticalSession::from_replay(replay, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
     expect(static_cast<bool>(created), "fixture session is created from replay");
     if (!created) {
         return output;
@@ -256,6 +257,161 @@ void test_format(const std::string& fixtures) {
         "truncated header is malformed");
 }
 
+void test_match_policy_format(const std::string& fixtures) {
+    const auto legacy_bytes = read_bytes(fixtures + "/tactical-v2.eawr-replay");
+    const auto legacy = load_fixture(fixtures);
+    const auto reference = run_replay(legacy, eawr::sim::InlineExecutor{}, false);
+    for (std::uint32_t flags = 1; flags <= 15; ++flags) {
+        auto replay = legacy;
+        replay.setup.match_policy = tactical::SkirmishMatchPolicy{
+            (flags & 1U) == 0, (flags & 2U) == 0, (flags & 4U) == 0, (flags & 8U) == 0};
+        // Independent byte construction from the unchanged v2 oracle fixture.
+        auto expected = legacy_bytes;
+        expected[8] = 4;
+        expected[10] = 116;
+        const std::array<std::uint8_t, 12> extension{
+            1, 0, 0, 0, 1, 0, 4, 0, static_cast<std::uint8_t>(flags), 0, 0, 0};
+        expected.insert(expected.begin() + 104, extension.begin(), extension.end());
+        const auto written = tactical::write_replay(replay);
+        expect(written && written.value() == expected, "v4 tagged policy bytes match independent encoding");
+        const auto parsed = tactical::parse_replay(expected);
+        expect(parsed && parsed.value() == replay, "every non-default policy combination round-trips");
+        const auto wrong = tactical::TacticalSession::from_replay(replay);
+        expect(!wrong && wrong.error().message.find("match policy") != std::string::npos,
+            "default content cannot reproduce a non-default policy silently");
+        tactical::EconomyRules bound;
+        bound.match_policy = *replay.setup.match_policy;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            expect(run_replay(replay, ReverseInline(workers), true, nullptr, bound) == reference,
+                "policy binding preserves the command stream, hashes and snapshots across workers");
+        }
+        auto session = tactical::TacticalSession::from_replay(replay, {}, {}, {}, std::nullopt, {}, {}, {}, bound);
+        if (session) {
+            while (session.value().completed_tick() < replay.final_tick_count) {
+                if (!session.value().step(eawr::sim::InlineExecutor{})) break;
+            }
+            const auto recorded = tactical::write_replay(session.value().record());
+            expect(recorded && recorded.value() == expected, "a reproduced policy replay records byte-for-byte");
+        }
+    }
+    auto replay = legacy;
+    replay.setup.match_policy = tactical::SkirmishMatchPolicy{false, true, true, true};
+    const auto written = tactical::write_replay(replay);
+    if (!written) return;
+    const auto rejects = [&](const std::size_t offset, const std::uint8_t value, const std::string_view label) {
+        auto bytes = written.value();
+        bytes[offset] = value;
+        expect(!tactical::parse_replay(bytes), label);
+    };
+    rejects(104, 0, "empty extension list rejected");
+    rejects(104, 255, "oversized extension count rejected before allocation");
+    rejects(108, 99, "unknown header extension tag rejected");
+    rejects(110, 8, "policy body length rejected");
+    rejects(112, 0, "redundant all-enabled v4 policy rejected");
+    rejects(112, 16, "unsupported policy flag rejected");
+    rejects(10, 104, "extension outside declared header rejected");
+    auto truncated = written.value(); truncated.resize(115);
+    expect(!tactical::parse_replay(truncated), "truncated extension rejected");
+    auto duplicate = written.value();
+    duplicate[10] = 124; duplicate[104] = 2;
+    duplicate.insert(duplicate.begin() + 116, written.value().begin() + 108, written.value().begin() + 116);
+    expect(!tactical::parse_replay(duplicate), "duplicate policy record rejected");
+    replay.setup.match_policy = tactical::SkirmishMatchPolicy{};
+    expect(!tactical::write_replay(replay), "all-enabled policy has only the legacy encoding");
+    replay.setup.match_policy = tactical::SkirmishMatchPolicy{true, false, true, true};
+    replay.setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    replay.setup.units = {{1, 101, 1}, {2, 102, 1}};
+    replay.setup.squadrons = {{1, {2}}};
+    replay.commands.clear();
+    const auto squadron_bytes = tactical::write_replay(replay);
+    const auto squadron = squadron_bytes ? tactical::parse_replay(squadron_bytes.value())
+        : eawr::core::Result<tactical::TacticalReplay>::failure(squadron_bytes.error());
+    expect(squadron_bytes && squadron_bytes.value()[8] == 5 && squadron && squadron.value() == replay,
+        "v5 retains the squadron table beside tagged policy records");
+}
+
+void test_skirmish_setup_format(const std::string& fixtures) {
+    const auto legacy = load_fixture(fixtures);
+    auto replay = legacy;
+    tactical::ReplaySkirmishSetup metadata;
+    metadata.map = "data/art/maps/recorded.ted";
+    metadata.map_sha256 = std::string(64, 'a');
+    metadata.victory_condition = 2;
+    metadata.match.credits = eawr::sim::math::Fixed::from_raw(123);
+    metadata.match.start_tech = 3;
+    metadata.match.max_tech = 5;
+    metadata.match.game_timer = -7;
+    metadata.match.win_integer = 11;
+    metadata.match.auto_resolve = -9;
+    metadata.match.win_float = eawr::sim::math::Fixed::from_raw(-456);
+    metadata.match.allow_random_events = true;
+    metadata.match.space_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
+    for (const auto& player : replay.setup.players) if (player.commandable())
+        metadata.slots.push_back({player.player_id, player.player_id != 1U, 2U, {"Test_Fleet"}});
+    replay.setup.skirmish = metadata;
+    const auto written = tactical::write_replay(replay);
+    expect(written && written.value()[8] == 4, "SKSU alone selects v4 without a redundant default policy");
+    if (!written) return;
+    const auto parsed = tactical::parse_replay(written.value());
+    expect(parsed && parsed.value() == replay, "SKSU round-trips roles, map, palette, fleet and every match field");
+    const auto reference = run_replay(legacy, eawr::sim::InlineExecutor{}, false);
+    for (const auto workers : {1U, 2U, 4U, 8U})
+        expect(run_replay(replay, ReverseInline(workers), true) == reference,
+            "load-time metadata does not change canonical hashes, snapshots or events across workers");
+    auto session = tactical::TacticalSession::from_replay(replay);
+    if (session) {
+        while (session.value().completed_tick() < replay.final_tick_count)
+            if (!session.value().step(eawr::sim::InlineExecutor{})) break;
+        const auto recorded = tactical::write_replay(session.value().record());
+        expect(recorded && recorded.value() == written.value(), "session recording preserves SKSU bytes");
+    }
+    const auto rejects = [&](const std::size_t offset, const std::uint8_t value, const std::string_view label) {
+        auto bytes = written.value(); bytes[offset] = value;
+        expect(!tactical::parse_replay(bytes), label);
+    };
+    const std::size_t flags = 112U + 2U + metadata.map.size() + 2U + metadata.map_sha256.size();
+    rejects(112, 255, "oversized SKSU string rejects before allocation");
+    rejects(flags, 32, "unknown SKSU match flag rejects");
+    rejects(flags + 16U, 127, "out-of-range signed tech value rejects");
+    const std::size_t victory = flags + 60U + 2U + metadata.match.win_condition.size()
+        + 2U + metadata.match.space_win_condition.size();
+    rejects(victory, 3, "non-lobby victory condition rejects");
+    rejects(victory + 4U, 65, "oversized SKSU slot count rejects");
+    rejects(victory + 12U, 2, "non-boolean role rejects");
+    auto truncated = written.value(); truncated.resize(115);
+    expect(!tactical::parse_replay(truncated), "truncated SKSU rejects");
+    const auto header = static_cast<std::size_t>(written.value()[10]) + 256U * written.value()[11];
+    auto duplicate = written.value();
+    std::vector<std::uint8_t> record(duplicate.begin() + 108, duplicate.begin() + static_cast<std::ptrdiff_t>(header));
+    duplicate.insert(duplicate.begin() + static_cast<std::ptrdiff_t>(header), record.begin(), record.end());
+    duplicate[104] = 2;
+    const auto larger = header + record.size();
+    duplicate[10] = static_cast<std::uint8_t>(larger); duplicate[11] = static_cast<std::uint8_t>(larger >> 8U);
+    expect(!tactical::parse_replay(duplicate), "duplicate SKSU rejects");
+    auto invalid = replay;
+    invalid.setup.skirmish->slots.push_back(metadata.slots.front());
+    expect(!tactical::write_replay(invalid), "extra or duplicate recorded player rejects");
+    invalid = replay; invalid.setup.skirmish->map = "../unrecorded.ted";
+    expect(!tactical::write_replay(invalid), "nonlogical map path rejects");
+    replay.setup.match_policy = tactical::SkirmishMatchPolicy{false, true, true, true};
+    expect(!tactical::write_replay(replay), "contradictory SKSU and policy reject");
+    replay.setup.skirmish->match.allow_heroes = false;
+    replay.setup.units = {{1, 101, replay.setup.players.front().player_id}, {2, 102, replay.setup.players.front().player_id}};
+    replay.setup.squadrons = {{1, {2}}}; replay.commands.clear();
+    const auto both = tactical::write_replay(replay);
+    const auto squadron = both ? tactical::parse_replay(both.value())
+        : eawr::core::Result<tactical::TacticalReplay>::failure(both.error());
+    expect(both && both.value()[8] == 5 && squadron && squadron.value() == replay,
+        "v5 stores SKSU, policy and squadron tables together");
+    if (both) {
+        auto reversed = both.value();
+        const auto end = static_cast<std::size_t>(reversed[10]) + 256U * reversed[11];
+        std::rotate(reversed.begin() + 108, reversed.begin() + 116,
+            reversed.begin() + static_cast<std::ptrdiff_t>(end));
+        expect(!tactical::parse_replay(reversed), "header extensions have one canonical tag order");
+    }
+}
+
 void test_golden_across_workers(const std::string& fixtures, const Golden& golden) {
     const auto replay = load_fixture(fixtures);
     const eawr::sim::InlineExecutor inline_executor;
@@ -290,11 +446,11 @@ void test_golden_across_workers(const std::string& fixtures, const Golden& golde
 }
 
 // CI guard of the phase map (docs/simulation.md): every tick hands its per-unit phases to the
-// executor under their names, in order, with the fixed partition count. A phase that turns
+// executor under their names, in order, with deterministic partition counts. A phase that turns
 // serial, loses its name or changes its partition count fails here. A new partitioned phase
 // adds its name to `required` and to the phase map.
 void test_phase_map(const std::string& fixtures) {
-    const std::vector<std::string_view> required{"movement", "targeting", "unit-systems", "visibility"};
+    const std::vector<std::string_view> required{"gather", "movement", "targeting", "unit-systems", "visibility"};
     const auto replay = load_fixture(fixtures);
     auto created = tactical::TacticalSession::from_replay(replay);
     expect(static_cast<bool>(created), "phase map fixture session is created");
@@ -310,8 +466,9 @@ void test_phase_map(const std::string& fixtures) {
         auto next = required.begin();
         for (const auto& call : recorder.calls) {
             expect(!call.phase.empty(), "tick " + tick + ": every partitioned phase is named");
-            expect(call.partitions == eawr::sim::tick_partition_count,
-                "tick " + tick + ": phase '" + call.phase + "' uses the fixed partition count");
+            const auto expected_partitions = call.phase == "gather" ? 1U : eawr::sim::tick_partition_count;
+            expect(call.partitions == expected_partitions,
+                "tick " + tick + ": phase '" + call.phase + "' uses its deterministic partition count");
             if (next != required.end() && call.phase == *next) {
                 ++next;
             }
@@ -506,6 +663,24 @@ void test_atomicity_and_snapshots(const std::string& fixtures) {
     expect(held != session.snapshot(), "each tick publishes a new snapshot");
 }
 
+void test_gripper_metadata_is_not_canonical() {
+    tactical::TacticalInstance instance;
+    instance.entity_id = 1;
+    instance.type_id = 10;
+    instance.owner = 1;
+    instance.team = 1;
+    instance.fixed_transform = eawr::sim::math::identity_matrix();
+    instance.visible_to = 1;
+    const tactical::TacticalSnapshot plain(0, {{1, 1}}, {instance}, {});
+    instance.craft_velocity_per_frame = eawr::sim::math::Vec3{
+        eawr::sim::math::Fixed::from_raw(100), eawr::sim::math::Fixed::from_raw(200),
+        eawr::sim::math::Fixed::from_raw(300)};
+    instance.squadron_in_idle_grid = true;
+    const tactical::TacticalSnapshot presented(0, {{1, 1}}, {instance}, {});
+    expect(plain.canonical_bytes() == presented.canonical_bytes() && plain.sha256() == presented.sha256(),
+        "WSU-34: icon velocity and idle-grid metadata do not change canonical bytes or hashes");
+}
+
 // An empty session steps cheaply, so this walks the real tick limit.
 void test_tick_limit() {
     auto created = tactical::TacticalSession::create(tactical::TacticalSetup{});
@@ -552,6 +727,50 @@ void test_setup_validation() {
         "an empty setup issues stable ID 1 next");
 }
 
+void test_sparse_registry_commit() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        for (const bool scramble : {false, true}) {
+            tactical::TacticalSetup setup;
+            setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+            for (eawr::sim::EntityId id = 1; id <= 2048; ++id) {
+                tactical::UnitState unit;
+                unit.entity_id = id;
+                unit.type_id = 1;
+                unit.owner = 1;
+                setup.units.push_back(unit);
+            }
+            auto created = tactical::TacticalSession::create(setup);
+            expect(static_cast<bool>(created), "sparse registry setup creates");
+            if (!created) return;
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (std::uint64_t frame = 0; frame < 4; ++frame) {
+                if (scramble) session.scramble_storage_for_testing();
+                if (frame == 1) {
+                    tactical::PlayerCommand command;
+                    command.key = {frame, 1, 0};
+                    command.units = {1024};
+                    command.payload = tactical::StopPayload{};
+                    expect(static_cast<bool>(session.submit(command)), "one sparse command submits");
+                }
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "sparse registry tick executes");
+                if (!stepped) return;
+                expect(stepped.value().registry_emplacements == 0,
+                    "steady registry never recreates an existing unit's components");
+                expect(stepped.value().registry_component_writes == (frame == 1 ? 1U : 0U),
+                    "registry writes depend on changed components, not the 2048 live units");
+                expect(stepped.value().staged_map_copies == 0, "absent flight state has no journal copies");
+                hashes.push_back(stepped.value().state_sha256);
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "sparse commits agree at 1/2/4/8 workers and scrambled storage");
+        }
+    }
+}
+
 } // namespace
 
 int main(const int argc, const char* const argv[]) {
@@ -574,13 +793,17 @@ int main(const int argc, const char* const argv[]) {
         return 1;
     }
     test_format(fixtures);
+    test_match_policy_format(fixtures);
+    test_skirmish_setup_format(fixtures);
     test_golden_across_workers(fixtures, golden);
     test_phase_map(fixtures);
     test_live_submission_and_recording(fixtures, golden);
     test_submit_diagnostics(fixtures);
     test_atomicity_and_snapshots(fixtures);
+    test_gripper_metadata_is_not_canonical();
     test_tick_limit();
     test_setup_validation();
+    test_sparse_registry_commit();
     if (failures != 0) {
         std::cerr << failures << " tactical contract test(s) failed\n";
         return 1;

@@ -367,17 +367,17 @@ void EawrFogProbe::record_calibration(const Step& step) {
 
 void EawrFogProbe::build_steps() {
     for (int offset = 0; offset < 256; offset += calibration_levels_per_frame) {
-        steps_.push_back({"calibration-" + std::to_string(offset), [this, offset] {
+        steps_.push_back({.name = "calibration-" + std::to_string(offset), .act = [this, offset] {
             calibration_material_->set_shader_parameter("eawr_level_offset", static_cast<double>(offset));
             surface_->set_material_override(calibration_material_);
-        }, true, {}, offset});
+        }, .renders = true, .expected = {}, .calibration_offset = offset});
     }
 
     const fog::StreamTeam key{1, 0};
     const auto dark = [] { return static_cast<const sim_fog::FogGrid*>(nullptr); };
     const auto shown = [this] { return current_ ? &*current_ : nullptr; };
 
-    steps_.push_back({"unbound-consumer", [this] {
+    steps_.push_back({.name = "unbound-consumer", .act = [this] {
         // A current consumer registered before any grid renders dark.
         surface_->set_material_override(material_a_);
         bool monotonic = transfer_[0] == 0 && transfer_[255] == 255;
@@ -387,9 +387,9 @@ void EawrFogProbe::build_steps() {
         check(monotonic, "output transfer is monotonic from 0 to 255");
         check(static_cast<bool>(cache_->add_consumer(consumer_a_)), "consumer A registers");
         record_stage("unbound-consumer");
-    }, true, dark});
+    }, .renders = true, .expected = dark, .calibration_offset = -1});
 
-    steps_.push_back({"first-upload", [this, key] {
+    steps_.push_back({.name = "first-upload", .act = [this, key] {
         // Baseline after the viewport has rendered, before any fog texture.
         texture_memory_baseline_ = RenderingServer::get_singleton()->get_rendering_info(
             RenderingServer::RENDERING_INFO_TEXTURE_MEM_USED);
@@ -399,9 +399,9 @@ void EawrFogProbe::build_steps() {
         check(s.uploads == 1 && s.upload_bytes == 6 && s.creates == 1 && s.binds == 1, "first upload is one 6-byte create");
         expect_readback(base_cells, 3, 2, "first-upload");
         record_stage("first-upload");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"identical-and-revision-only", [this, key] {
+    steps_.push_back({.name = "identical-and-revision-only", .act = [this, key] {
         // Forward+ updates the memory counters once per drawn frame, so the
         // first upload's texture is sampled here, after its frames.
         texture_memory_with_fog_ = RenderingServer::get_singleton()->get_rendering_info(
@@ -413,18 +413,18 @@ void EawrFogProbe::build_steps() {
         submit(make_set({*current_}), key, fog::SubmitAction::metadata_only, "revision-only");
         check(cache_->stats().uploads == 1 && cache_->stats().binds == 1, "revision-only bump uploads and binds nothing");
         record_stage("identical-and-revision-only");
-    }, false, {}});
+    }, .renders = false, .expected = {}, .calibration_offset = -1});
 
-    steps_.push_back({"origin-shift", [this, key] {
+    steps_.push_back({.name = "origin-shift", .act = [this, key] {
         auto desc = base_desc(3);
         desc.origin_x_raw += one;
         current_ = make_grid(desc, base_cells);
         submit(make_set({*current_}), key, fog::SubmitAction::metadata_only, "origin-shift");
         check(cache_->stats().uploads == 1 && cache_->stats().binds == 2, "origin shift rebinds uniforms without upload");
         record_stage("origin-shift");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"cell-change", [this, key] {
+    steps_.push_back({.name = "cell-change", .act = [this, key] {
         current_ = make_grid(base_desc(4), base_cells);
         submit(make_set({*current_}), key, fog::SubmitAction::metadata_only, "origin-restore");
         auto changed = base_cells;
@@ -435,9 +435,9 @@ void EawrFogProbe::build_steps() {
         check(s.uploads == 2 && s.updates == 1 && s.upload_bytes == 12 && s.creates == 1, "one cell change is one 6-byte update");
         expect_readback(changed, 3, 2, "cell-change");
         record_stage("cell-change");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"rejected-revisions", [this, key] {
+    steps_.push_back({.name = "rejected-revisions", .act = [this, key] {
         const auto texture = cache_->texture(key);
         reject(make_set({make_grid(base_desc(4), base_cells)}), key, fog::diagnostic_codes::revision_rollback, "rollback");
         auto divergent = current_->cells();
@@ -447,17 +447,17 @@ void EawrFogProbe::build_steps() {
         check(cache_->texture(key) == texture && cache_->stats().uploads == 2, "rejections upload nothing");
         expect_readback({current_->cells().begin(), current_->cells().end()}, 3, 2, "rejected-revisions");
         record_stage("rejected-revisions");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"missing-team", [this, key] {
+    steps_.push_back({.name = "missing-team", .act = [this, key] {
         auto other = base_desc(1);
         other.team_id = 7;
         reject(make_set({make_grid(other, base_cells)}), key, fog::diagnostic_codes::missing_team, "missing-team");
         check(!cache_->active() && cache_->live_textures() == 1, "missing team unbinds but keeps the cached texture");
         record_stage("missing-team");
-    }, true, dark});
+    }, .renders = true, .expected = dark, .calibration_offset = -1});
 
-    steps_.push_back({"backend-failure", [this, key] {
+    steps_.push_back({.name = "backend-failure", .act = [this, key] {
         submit(make_set({*current_}), key, fog::SubmitAction::reselected, "reselect");
         const auto uploads = cache_->stats().uploads;
         auto wide = base_desc(6);
@@ -468,9 +468,9 @@ void EawrFogProbe::build_steps() {
         check(cache_->accepted(key)->revision() == 5 && cache_->active() == key, "failed create keeps accepted grid and binding");
         expect_readback({current_->cells().begin(), current_->cells().end()}, 3, 2, "backend-failure");
         record_stage("backend-failure", ",\"failure_cause\":\"" + escape(backend_->failure_cause()) + "\"");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"recreate", [this, key] {
+    steps_.push_back({.name = "recreate", .act = [this, key] {
         auto desc = base_desc(7);
         desc.width = 4;
         desc.height = 3;
@@ -486,18 +486,18 @@ void EawrFogProbe::build_steps() {
         check(backend_->live_textures() == 1, "one live texture after recreation");
         expect_readback(cells, 4, 3, "recreate");
         record_stage("recreate");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"late-consumer", [this] {
+    steps_.push_back({.name = "late-consumer", .act = [this] {
         consumer_b_ = backend_->register_material(material_b_->get_rid());
         const auto binds = cache_->stats().binds;
         check(static_cast<bool>(cache_->add_consumer(consumer_b_)), "late consumer B registers");
         check(cache_->stats().binds == binds + 1, "late consumer is bound immediately");
         surface_->set_material_override(material_b_);
         record_stage("late-consumer");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"team-switch", [this] {
+    steps_.push_back({.name = "team-switch", .act = [this] {
         auto seven = base_desc(1);
         seven.team_id = 7;
         seven.width = 2;
@@ -511,24 +511,24 @@ void EawrFogProbe::build_steps() {
             std::uint64_t{12}, std::vector<eawr::sim::RenderInstance>{}, make_set({*current_, *team7_}));
         submit(snapshot_->fog_grids(), {1, 7}, fog::SubmitAction::created, "team-7");
         record_stage("team-7");
-    }, true, [this] { return team7_ ? &*team7_ : nullptr; }});
+    }, .renders = true, .expected = [this] { return team7_ ? &*team7_ : nullptr; }, .calibration_offset = -1});
 
-    steps_.push_back({"team-switch-back", [this, key] {
+    steps_.push_back({.name = "team-switch-back", .act = [this, key] {
         const auto uploads = cache_->stats().uploads;
         submit(snapshot_->fog_grids(), key, fog::SubmitAction::reselected, "team-0-again");
         check(cache_->stats().uploads == uploads && cache_->stats().reselects == 2, "switch back reuses the cached texture");
         record_stage("team-switch-back");
-    }, true, shown});
+    }, .renders = true, .expected = shown, .calibration_offset = -1});
 
-    steps_.push_back({"reset", [this] {
+    steps_.push_back({.name = "reset", .act = [this] {
         cache_->reset();
         check(cache_->live_textures() == 0 && backend_->live_textures() == 0, "reset releases every texture");
         const auto* retained = snapshot_->fog_grids().find(7);
         check(retained != nullptr && *retained == *team7_, "retained snapshot survives reset");
         record_stage("reset");
-    }, true, dark});
+    }, .renders = true, .expected = dark, .calibration_offset = -1});
 
-    steps_.push_back({"teardown", [this] {
+    steps_.push_back({.name = "teardown", .act = [this] {
         submit(snapshot_->fog_grids(), {2, 7}, fog::SubmitAction::created, "after-reset");
         check(backend_->live_textures() == 1, "one texture before teardown");
         record_stage("before-teardown");
@@ -536,14 +536,14 @@ void EawrFogProbe::build_steps() {
         check(cleanup_order_verified_, "teardown releases the cache before its backend and material Refs");
         const auto* retained = snapshot_->fog_grids().find(0);
         check(retained != nullptr && *retained == *current_, "retained snapshot survives teardown");
-    }, true, dark});
+    }, .renders = true, .expected = dark, .calibration_offset = -1});
 
-    steps_.push_back({"texture-memory", [this] {
+    steps_.push_back({.name = "texture-memory", .act = [this] {
         texture_memory_after_teardown_ = RenderingServer::get_singleton()->get_rendering_info(
             RenderingServer::RENDERING_INFO_TEXTURE_MEM_USED);
         check(texture_memory_with_fog_ > texture_memory_baseline_, "fog texture is visible in texture memory");
         check(texture_memory_after_teardown_ == texture_memory_baseline_, "texture memory returns to baseline");
-    }, false, {}});
+    }, .renders = false, .expected = {}, .calibration_offset = -1});
 }
 
 void EawrFogProbe::_ready() {

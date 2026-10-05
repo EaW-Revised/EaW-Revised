@@ -64,8 +64,9 @@ class MeshGlossStructure(unittest.TestCase):
 
     def test_viewer_opts_in_and_draws_through_its_own_adapter(self):
         source = mode_source("space_environment")
+        physical = (ROOT / "apps/viewer/src/space_environment_internal.hpp").read_text(encoding="utf-8")
         self.assertIn("input.material_routes = space::material_routes();", source)
-        gloss = shader_source(source, "meshgloss_sky_shader")
+        gloss = shader_source(physical, "meshgloss_sky_shader")
         # The sky preview's render state: seen from inside, unshaded, no depth write.
         self.assertIn("render_mode unshaded, fog_disabled, cull_disabled, depth_draw_never;", gloss)
         # Authored fields are uniforms; Shininess is recorded, not consumed.

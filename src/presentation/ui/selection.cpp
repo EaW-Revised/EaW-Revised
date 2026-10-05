@@ -191,7 +191,7 @@ std::optional<std::size_t> pick_index(const PickRay& ray, const std::span<const 
     float best_z = -std::numeric_limits<float>::infinity();
     for (std::size_t index = 0; index < units.size(); ++index) {
         const BattleUnit& unit = units[index];
-        if (unit.entity == sim::invalid_entity_id) continue;
+        if (unit.entity == sim::invalid_entity_id || !unit.mouse_sensitive) continue;
         const auto contact = pick_contact(ray, unit);
         if (!contact) continue;
         const bool lower = best && (unit.entity < units[*best].entity
@@ -253,7 +253,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
         selected_.clear();
         return true;
     }
-    if (!unit->own) {
+    if (!unit->own || !unit->selectable || unit->neutral) {
         // FoC: another player's unit gives no select action; with nothing selected the click
         // falls through to the deselect, which has nothing to clear.
         return false;
@@ -273,7 +273,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
 bool Selection::double_click(const std::optional<sim::EntityId> picked, const std::span<const BattleUnit> units,
                              const ScreenRect& viewport) {
     const BattleUnit* unit = picked ? find(units, *picked) : nullptr;
-    if (unit == nullptr || !unit->own) return false;
+    if (unit == nullptr || !unit->own || !unit->selectable || unit->neutral) return false;
     // WSU-18: the picked object's type; for a craft, the craft type, whose objects select as their
     // squadrons (the squadron's first craft stands for the one under the pointer; M2 squadrons are
     // of one craft type).
@@ -281,22 +281,31 @@ bool Selection::double_click(const std::optional<sim::EntityId> picked, const st
     return type_on_screen(unit->type, units, viewport);
 }
 
-bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<const BattleUnit> units) {
+bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<const BattleUnit> units,
+                    const std::span<const SquadronIcon> icons) {
+    bool icon_found = false;
+    for (const SquadronIcon& icon : icons) {
+        if (!icon.own || !icon.selectable || !rect.contains_quad(icon.rect)) continue;
+        add(icon.entity);
+        icon_found = true;
+    }
     bool found = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.screen || !rect.contains(*unit.screen)) continue;
+        if (!unit.own || !unit.selectable || unit.neutral || !unit.locomotion || unit.decoration
+            || !unit.screen || !rect.contains_origin(*unit.screen)) continue;
         if (!shift && !found) selected_.clear();
         found = true;
         add(unit.entity);
     }
-    return found;
+    return found || icon_found;
 }
 
 bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span<const BattleUnit> units,
                                const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || unit.type != type || !unit.screen || !viewport.contains(*unit.screen)) continue;
+        if (!unit.own || !unit.selectable || unit.neutral || unit.decoration || unit.type != type
+            || !unit.screen || !viewport.contains_origin(*unit.screen)) continue;
         if (contains(unit.entity)) continue;
         selected_.push_back(unit.entity);
         added = true;
@@ -308,8 +317,9 @@ bool Selection::craft_type_on_screen(const sim::tactical::TypeId craft_type, con
                                      const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || unit.part == sim::invalid_entity_id || unit.part_type != craft_type) continue;
-        if (!unit.screen || !viewport.contains(*unit.screen) || contains(unit.entity)) continue;
+        if (!unit.own || !unit.selectable || unit.neutral || unit.decoration
+            || unit.part == sim::invalid_entity_id || unit.part_type != craft_type) continue;
+        if (!unit.screen || !viewport.contains_origin(*unit.screen) || contains(unit.entity)) continue;
         selected_.push_back(unit.entity);
         added = true;
     }
@@ -321,7 +331,13 @@ void Selection::retain(const std::span<const sim::EntityId> alive) {
         return std::find(alive.begin(), alive.end(), entity) == alive.end();
     };
     std::erase_if(selected_, gone);
-    for (auto& group : groups_) std::erase_if(group, gone);
+    for (auto& group : groups_) {
+        std::erase_if(group, [this, &gone](const sim::EntityId entity) {
+            if (!gone(entity)) return false;
+            group_numbers_.erase(entity);
+            return true;
+        });
+    }
 }
 
 bool Selection::replace(const std::span<const sim::EntityId> units) {
@@ -334,9 +350,27 @@ bool Selection::replace(const std::span<const sim::EntityId> units) {
     return true;
 }
 
+void Selection::replace_entity(const sim::EntityId previous, const sim::EntityId replacement) {
+    const auto transfer = [=](std::vector<sim::EntityId>& members) {
+        std::replace(members.begin(), members.end(), previous, replacement);
+        for (auto at = members.begin(); at != members.end(); ++at) {
+            members.erase(std::remove(at + 1, members.end(), *at), members.end());
+        }
+    };
+    transfer(selected_);
+    for (auto& members : groups_) transfer(members);
+}
+
 void Selection::assign_group(const std::size_t group) {
+    for (const auto entity : groups_.at(group)) group_numbers_.erase(entity);
     for (auto& members : groups_) std::erase_if(members, [this](const sim::EntityId entity) { return contains(entity); });
     groups_.at(group) = selected_;
+    for (const auto entity : selected_) group_numbers_[entity] = group;
+}
+
+std::optional<std::size_t> Selection::group_of(const sim::EntityId entity) const noexcept {
+    const auto found = group_numbers_.find(entity);
+    return found == group_numbers_.end() ? std::nullopt : std::optional<std::size_t>(found->second);
 }
 
 std::optional<Vec3f> Selection::recall_group(const std::size_t group, const bool add, const double now_seconds,
@@ -353,6 +387,7 @@ std::optional<Vec3f> Selection::add_to_group(const std::size_t group, const doub
             if (other != group) std::erase(groups_[other], entity);
         }
         if (std::find(members.begin(), members.end(), entity) == members.end()) members.push_back(entity);
+        group_numbers_[entity] = group;
     }
     return selected_group(group, now_seconds, alive);
 }

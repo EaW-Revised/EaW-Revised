@@ -1,4 +1,5 @@
-add_executable(script_tests main.cpp)
+add_executable(script_tests main.cpp
+    host_tests.cpp)
 target_link_libraries(script_tests PRIVATE eawr::script eawr::vfs)
 target_compile_features(script_tests PRIVATE cxx_std_20)
 target_compile_definitions(
@@ -18,4 +19,6 @@ add_subdirectory(authoritative)
 add_subdirectory(foc)
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+eawr_add_python_contract(python_script_acceptance_p007_fixtures tests.script.acceptance.test_p007_fixtures)
+
 eawr_label_tests()

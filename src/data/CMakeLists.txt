@@ -1,3 +1,5 @@
+include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(EAWR_XML_SCHEMA_INC "${CMAKE_CURRENT_BINARY_DIR}/generated/xml_schema_contract.inc")
@@ -13,7 +15,7 @@ add_custom_command(
     VERBATIM
 )
 
-add_library(eawr_data STATIC tag_trace.cpp xml.cpp xml_merge.cpp xml_override.cpp xml_registry.cpp "${EAWR_XML_SCHEMA_INC}")
+add_library(eawr_data STATIC ${EAWR_DATA_SOURCES} "${EAWR_XML_SCHEMA_INC}")
 add_library(eawr::data ALIAS eawr_data)
 target_include_directories(
     eawr_data

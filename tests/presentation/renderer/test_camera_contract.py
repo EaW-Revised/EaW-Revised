@@ -224,9 +224,10 @@ class CameraViewerContract(unittest.TestCase):
 
     def test_camera_mode_does_not_disturb_the_frozen_fixed_capture(self):
         source = mode_source("viewer_host")
-        start = source.index("bool ViewerHost::start_tactical_camera()")
-        end = source.index("bool ViewerHost::start_atlas_overlay()")
-        body = source[start:end]
+        physical = (ROOT / "apps/viewer/src/viewer_host_exercises_effects.cpp").read_text(encoding="utf-8")
+        start = physical.index("bool ViewerHost::start_tactical_camera()")
+        end = physical.index("bool ViewerHost::start_atlas_overlay()")
+        body = physical[start:end]
         # The #22 fixed-capture override pins its own camera and must stay the
         # sole owner of the regression framing.
         self.assertNotIn("fixed_capture_snapshot_", body)

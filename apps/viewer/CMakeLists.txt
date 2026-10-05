@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(EawrViewer VERSION 0.1.0 LANGUAGES CXX)
+find_package(Threads REQUIRED)
 
 set(EAWR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "EmpireAtWar-Revised source root")
 set(EAWR_GODOT_CPP_ROOT "${EAWR_ROOT}/out/godot/deps/godot-cpp" CACHE PATH
@@ -64,6 +65,11 @@ endif()
 # The map mode resolves a TED skydome field against the XML catalog, so the
 # viewer needs the same generated schema contract the root build generates.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${EAWR_ROOT}/data/skirmish/roster-gate.json"
+    "${EAWR_ROOT}/tools/inventory/roster_gate.py")
+execute_process(COMMAND "${Python3_EXECUTABLE}" "${EAWR_ROOT}/tools/inventory/roster_gate.py"
+    --header "${CMAKE_BINARY_DIR}/generated/roster_gate_data.hpp" COMMAND_ERROR_IS_FATAL ANY)
 set(EAWR_VIEWER_XML_SCHEMA_INC "${CMAKE_BINARY_DIR}/generated/xml_schema_contract.inc")
 add_custom_command(
     OUTPUT "${EAWR_VIEWER_XML_SCHEMA_INC}"
@@ -81,34 +87,27 @@ add_custom_command(
 # profile, upstream Lua 5.0.2 compiled as C++ in its own namespace, the sandbox and the
 # scheduler) and the freestore host. Its own library: upstream Lua keeps its own warnings and
 # private include paths, as in the root build (src/script/CMakeLists.txt).
-set(_eawr_viewer_sflua_units
-    lapi lcode ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate
-    lstring ltable ltm lundump lvm lzio lauxlib lbaselib lstrlib ltablib)
-set(_eawr_viewer_script_sources
-    "${EAWR_ROOT}/src/script/numeric/binary64.cpp"
-    "${EAWR_ROOT}/src/script/numeric/decimal.cpp"
-    "${EAWR_ROOT}/src/script/numeric/q24_boundary.cpp"
-    "${EAWR_ROOT}/src/script/sflua/sflua_hooks.cpp"
-    "${EAWR_ROOT}/src/script/sflua/sflua_state.cpp"
-    "${EAWR_ROOT}/src/script/sflua/sflua_sandbox.cpp"
-    "${EAWR_ROOT}/src/script/sflua/sflua_persist.cpp"
-    "${EAWR_ROOT}/src/script/authoritative/bindings.cpp"
-    "${EAWR_ROOT}/src/script/authoritative/clock_rng.cpp"
-    "${EAWR_ROOT}/src/script/authoritative/persistence.cpp"
-    "${EAWR_ROOT}/src/script/authoritative/scheduler.cpp"
-    "${EAWR_ROOT}/src/script/authoritative/tactical_bridge.cpp"
-    "${EAWR_ROOT}/src/script/foc/tactical_ai.cpp"
-    "${EAWR_ROOT}/src/script/foc/ai_equations.cpp"
-    "${EAWR_ROOT}/src/script/foc/ai_data.cpp"
-    "${EAWR_ROOT}/src/script/foc/ai_perception.cpp"
-    "${EAWR_ROOT}/src/script/foc/ai_engine.cpp"
-    "${EAWR_ROOT}/src/script/foc/ai_plans.cpp"
-    "${EAWR_ROOT}/src/script/foc/plan_bindings.cpp"
+include("${EAWR_ROOT}/src/core/sources.cmake")
+include("${EAWR_ROOT}/src/sim/sources.cmake")
+include("${EAWR_ROOT}/src/vfs/sources.cmake")
+include("${EAWR_ROOT}/src/data/sources.cmake")
+include("${EAWR_ROOT}/src/assets/sources.cmake")
+include("${EAWR_ROOT}/src/data/ui/sources.cmake")
+include("${EAWR_ROOT}/src/presentation/sources.cmake")
+include("${EAWR_ROOT}/src/presentation/ui/sources.cmake")
+include("${EAWR_ROOT}/src/scene/sources.cmake")
+include("${EAWR_ROOT}/src/units/sources.cmake")
+include("${EAWR_ROOT}/src/skirmish/sources.cmake")
+include("${EAWR_ROOT}/src/platform/sources.cmake")
+include("${EAWR_ROOT}/src/script/sources.cmake")
+
+add_library(eawr_viewer_script STATIC
+    ${EAWR_SCRIPT_NUMERIC_SOURCES}
+    ${EAWR_SFLUA_HOOKS_SOURCES}
+    ${EAWR_SFLUA_SOURCES}
+    ${EAWR_SCRIPT_AUTHORITATIVE_SOURCES}
+    ${EAWR_SCRIPT_FOC_SOURCES}
 )
-foreach(_eawr_unit IN LISTS _eawr_viewer_sflua_units)
-    list(APPEND _eawr_viewer_script_sources "${EAWR_ROOT}/src/script/sflua/upstream/${_eawr_unit}.cpp")
-endforeach()
-add_library(eawr_viewer_script STATIC ${_eawr_viewer_script_sources})
 target_include_directories(eawr_viewer_script PUBLIC "${EAWR_ROOT}/include")
 target_include_directories(eawr_viewer_script PRIVATE "${EAWR_ROOT}/src/script/sflua" "${EAWR_ROOT}/src/script/authoritative")
 target_include_directories(eawr_viewer_script SYSTEM PRIVATE
@@ -122,140 +121,21 @@ if(NOT MSVC)
 endif()
 
 add_library(eawr_viewer_core STATIC
-    "${EAWR_ROOT}/src/core/diagnostic.cpp"
-    "${EAWR_ROOT}/src/core/sha256.cpp"
-    "${EAWR_ROOT}/src/vfs/vfs.cpp"
-    "${EAWR_ROOT}/src/vfs/vfs_archive.cpp"
+    ${EAWR_CORE_SOURCES}
+    ${EAWR_SIM_SOURCES}
+    ${EAWR_VFS_SOURCES}
+    ${EAWR_DATA_SOURCES}
+    ${EAWR_ASSETS_SOURCES}
+    ${EAWR_UI_DATA_SOURCES}
+    ${EAWR_PRESENTATION_SOURCES}
+    ${EAWR_UI_MODEL_SOURCES}
+    ${EAWR_SCENE_SOURCES}
+    ${EAWR_UNITS_SOURCES}
+    ${EAWR_SKIRMISH_SOURCES}
+    ${EAWR_PLATFORM_SOURCES}
+    ${EAWR_PLATFORM_LIVE_AI_SOURCES}
     "${EAWR_ROOT}/third_party/pugixml/src/pugixml.cpp"
-    "${EAWR_ROOT}/src/assets/animation.cpp"
-    "${EAWR_ROOT}/src/presentation/animation/animation.cpp"
-    "${EAWR_ROOT}/src/presentation/animation/idle_playback.cpp"
-    "${EAWR_ROOT}/src/presentation/animation/unit_clips.cpp"
-    "${EAWR_ROOT}/src/presentation/audio/sfx.cpp"
-    "${EAWR_ROOT}/src/presentation/particles/alo_particles.cpp"
-    "${EAWR_ROOT}/src/presentation/particles/map_effect_plan.cpp"
-    "${EAWR_ROOT}/src/presentation/particles/cpu_system.cpp"
-    "${EAWR_ROOT}/src/presentation/particles/proxy_binding.cpp"
-    "${EAWR_ROOT}/src/presentation/particles/render.cpp"
-    "${EAWR_ROOT}/src/assets/map.cpp"
-    "${EAWR_ROOT}/src/assets/map_decode.cpp"
-    "${EAWR_ROOT}/src/assets/map_references.cpp"
-    "${EAWR_ROOT}/src/assets/model.cpp"
-    "${EAWR_ROOT}/src/assets/texture.cpp"
-    "${EAWR_ROOT}/src/assets/mega_texture.cpp"
-    "${EAWR_ROOT}/src/data/tag_trace.cpp"
-    "${EAWR_ROOT}/src/data/xml.cpp"
-    "${EAWR_ROOT}/src/data/xml_merge.cpp"
-    "${EAWR_ROOT}/src/data/xml_override.cpp"
-    "${EAWR_ROOT}/src/data/xml_registry.cpp"
     "${EAWR_VIEWER_XML_SCHEMA_INC}"
-    "${EAWR_ROOT}/src/presentation/camera/camera.cpp"
-    "${EAWR_ROOT}/src/presentation/camera/constants_source.cpp"
-    "${EAWR_ROOT}/src/presentation/camera/controller.cpp"
-    "${EAWR_ROOT}/src/presentation/camera/free_camera.cpp"
-    "${EAWR_ROOT}/src/presentation/camera/input.cpp"
-    "${EAWR_ROOT}/src/presentation/camera/overview.cpp"
-    "${EAWR_ROOT}/src/presentation/fog/fog.cpp"
-    "${EAWR_ROOT}/src/presentation/lighting/lighting.cpp"
-    "${EAWR_ROOT}/src/presentation/lighting/scene_bloom.cpp"
-    "${EAWR_ROOT}/src/presentation/lighting/wind.cpp"
-    "${EAWR_ROOT}/src/presentation/terrain/terrain.cpp"
-    "${EAWR_ROOT}/src/presentation/space/environment_scene.cpp"
-    "${EAWR_ROOT}/src/presentation/space/space.cpp"
-    "${EAWR_ROOT}/src/presentation/space/space_effects.cpp"
-    "${EAWR_ROOT}/src/presentation/space/space_geometry.cpp"
-    "${EAWR_ROOT}/src/presentation/space/space_surfaces.cpp"
-    "${EAWR_ROOT}/src/presentation/space/sun_retail.cpp"
-    "${EAWR_ROOT}/src/data/ui/command_bar.cpp"
-    "${EAWR_ROOT}/src/data/ui/sfnt.cpp"
-    "${EAWR_ROOT}/src/data/ui/shell_anchors.cpp"
-    "${EAWR_ROOT}/src/data/ui/dialog_catalog.cpp"
-    "${EAWR_ROOT}/src/data/ui/dialog_script.cpp"
-    "${EAWR_ROOT}/src/data/ui/text_database.cpp"
-    "${EAWR_ROOT}/src/data/ui/movie.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/command_sink.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/fonts.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/hud.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/hud_shell.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/input_routing.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/layout.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/minimap.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/perf_stats.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/selection.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/world_ui.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/time_controls.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/ability_buttons.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/battle_messages.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/shell_alpha.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/theme.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/production.cpp"
-    "${EAWR_ROOT}/src/presentation/ui/unit_cards.cpp"
-    "${EAWR_ROOT}/src/scene/idle_tags.cpp"
-    "${EAWR_ROOT}/src/scene/scene.cpp"
-    "${EAWR_ROOT}/src/scene/scene_assets.cpp"
-    "${EAWR_ROOT}/src/scene/scene_build.cpp"
-    "${EAWR_ROOT}/src/scene/scene_evidence.cpp"
-    "${EAWR_ROOT}/src/scene/space_population.cpp"
-    "${EAWR_ROOT}/src/sim/fog.cpp"
-    "${EAWR_ROOT}/src/sim/replay.cpp"
-    "${EAWR_ROOT}/src/sim/snapshot.cpp"
-    "${EAWR_ROOT}/src/sim/state_hash.cpp"
-    "${EAWR_ROOT}/src/sim/world.cpp"
-    "${EAWR_ROOT}/src/sim/math/fixed.cpp"
-    "${EAWR_ROOT}/src/sim/math/geometry.cpp"
-    "${EAWR_ROOT}/src/sim/math/trig.cpp"
-    "${EAWR_ROOT}/src/sim/math/wide.cpp"
-    # #80: the live tactical session (M2 skirmish start, unit tables, the
-    # simulation thread and its worker pool) and its presentation.
-    "${EAWR_ROOT}/src/sim/tactical/abilities.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/collection.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/collision.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/combat.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/damage.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/projectiles.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/durability.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/economy.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/encoding.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/fog_cells.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/ion.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/motion.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/fighters.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/free_space.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/death_spin.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/formation.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/orders.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/pathfind.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/replay.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/session.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/space.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/victory.cpp"
-    "${EAWR_ROOT}/src/sim/tactical/visibility.cpp"
-    "${EAWR_ROOT}/src/units/unit_abilities.cpp"
-    "${EAWR_ROOT}/src/units/unit_combat.cpp"
-    "${EAWR_ROOT}/src/units/unit_durability.cpp"
-    "${EAWR_ROOT}/src/units/unit_identity.cpp"
-    "${EAWR_ROOT}/src/units/unit_motion.cpp"
-    "${EAWR_ROOT}/src/units/unit_priority.cpp"
-    "${EAWR_ROOT}/src/units/unit_support.cpp"
-    "${EAWR_ROOT}/src/units/unit_tables.cpp"
-    "${EAWR_ROOT}/src/skirmish/ai.cpp"
-    "${EAWR_ROOT}/src/skirmish/census.cpp"
-    "${EAWR_ROOT}/src/skirmish/content.cpp"
-    "${EAWR_ROOT}/src/skirmish/economy.cpp"
-    "${EAWR_ROOT}/src/skirmish/inputs.cpp"
-    "${EAWR_ROOT}/src/skirmish/melee.cpp"
-    "${EAWR_ROOT}/src/platform/live_ai.cpp"
-    "${EAWR_ROOT}/src/skirmish/placement.cpp"
-    "${EAWR_ROOT}/src/skirmish/start.cpp"
-    "${EAWR_ROOT}/src/platform/live_session.cpp"
-    "${EAWR_ROOT}/src/platform/sim_workers.cpp"
-    "${EAWR_ROOT}/src/presentation/space/debris.cpp"
-    "${EAWR_ROOT}/src/presentation/space/fog_field.cpp"
-    "${EAWR_ROOT}/src/presentation/space/live_units.cpp"
-    "${EAWR_ROOT}/src/presentation/space/projectiles.cpp"
-    "${EAWR_ROOT}/src/presentation/space/shield_hits.cpp"
-    "${EAWR_ROOT}/src/presentation/space/unit_fade.cpp"
-    "${EAWR_ROOT}/src/presentation/godot/renderer_contract.cpp"
 )
 target_include_directories(eawr_viewer_core PUBLIC
     "${EAWR_ROOT}/include"
@@ -273,57 +153,136 @@ target_link_libraries(eawr_viewer_script PUBLIC eawr_viewer_core)
 add_library(eawr_viewer SHARED
     src/register_types.cpp
     src/viewer_host.cpp
+    src/viewer_host_ready.cpp
+    src/viewer_host_config.cpp
+    src/viewer_host_scene.cpp
+    src/viewer_host_process.cpp
     src/viewer_host_camera.cpp
+    src/viewer_host_camera_setup.cpp
+    src/viewer_host_camera_probe.cpp
+    src/viewer_host_camera_steps.cpp
     src/viewer_host_exercises.cpp
+    src/viewer_host_exercises_renderer.cpp
+    src/viewer_host_exercises_effects.cpp
     src/viewer_host_report.cpp
+    src/viewer_host_report_scene.cpp
     src/model_preview.cpp
     src/camera_binding_config.cpp
+    src/camera_binding_tokens.cpp
+    src/camera_binding_values.cpp
+    src/camera_binding_table.cpp
     src/camera_input.cpp
     src/map_camera.cpp
     src/map_mode.cpp
+    src/map_mode_ready.cpp
+    src/map_mode_ready_terrain.cpp
+    src/map_mode_ready_population.cpp
+    src/map_mode_live.cpp
+    src/map_mode_camera_probe.cpp
     src/map_mode_particles.cpp
     src/map_mode_hud.cpp
     src/map_mode_report.cpp
+    src/map_mode_report_scene.cpp
+    src/map_mode_report_effects.cpp
+    src/map_mode_report_live.cpp
     src/map_mode_scene.cpp
+    src/map_mode_placements.cpp
+    src/map_mode_units.cpp
+    src/map_mode_assets.cpp
     src/land_look.cpp
     src/fog_mode.cpp
     src/space_environment.cpp
+    src/space_environment_config.cpp
+    src/space_environment_prepare.cpp
+    src/space_environment_probe.cpp
     src/space_environment_fog.cpp
     src/space_environment_report.cpp
+    src/space_environment_report_surfaces.cpp
     src/space_environment_view.cpp
+    src/space_environment_surfaces.cpp
+    src/space_environment_effects.cpp
     src/space_fog.cpp
     src/space_fog_units.cpp
+    src/space_fog_units_compose.cpp
     src/space_populate.cpp
+    src/space_populate_compose.cpp
+    src/space_populate_materials.cpp
+    src/space_populate_animation.cpp
+    src/space_populate_report.cpp
     src/space_populate_assets.cpp
     src/battle_audio.cpp
+    src/battle_audio_prepare.cpp
+    src/battle_audio_events.cpp
+    src/battle_audio_report.cpp
     src/battle_input.cpp
+    src/battle_input_cards.cpp
+    src/battle_input_commands.cpp
+    src/battle_input_pick.cpp
+    src/battle_input_production.cpp
+    src/battle_input_replay.cpp
+    src/battle_input_report.cpp
+    src/battle_cursor.cpp
     src/world_ui_view.cpp
+    src/world_ui_prepare.cpp
+    src/world_ui_groups.cpp
+    src/world_ui_bars.cpp
+    src/world_ui_report.cpp
     src/overview_fade_view.cpp
     src/battle_effects.cpp
+    src/battle_effects_prepare.cpp
+    src/battle_effects_projectiles.cpp
+    src/battle_effects_impacts.cpp
+    src/battle_effects_report.cpp
     src/unit_emitters.cpp
+    src/unit_emitters_prepare.cpp
+    src/unit_emitters_frame.cpp
+    src/unit_emitters_report.cpp
     src/perf_trace.cpp
     src/debris_props.cpp
     src/particle_workers.cpp
     src/live_fog_view.cpp
     src/live_session_view.cpp
+    src/battle_scoring.cpp
+    src/live_session_death.cpp
+    src/live_session_economy.cpp
+    src/live_session_fighters.cpp
+    src/live_session_frame.cpp
+    src/live_session_config.cpp
+    src/live_session_prepare.cpp
+    src/live_session_report.cpp
     src/effect_mode.cpp
     src/effect_mode_probe.cpp
     src/effect_mode_report.cpp
+    src/effect_mode_report_probe.cpp
     src/unit_mode.cpp
     src/font_mode.cpp
     src/input_routing_mode.cpp
     src/ui_gallery_mode.cpp
+    src/ui_gallery_controls.cpp
+    src/ui_gallery_report.cpp
+    src/skirmish_setup_mode.cpp
     "${EAWR_ROOT}/src/presentation/godot/renderer.cpp"
     "${EAWR_ROOT}/src/presentation/godot/renderer_fog.cpp"
     "${EAWR_ROOT}/src/presentation/godot/renderer_instances.cpp"
     "${EAWR_ROOT}/src/presentation/godot/renderer_upload.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/renderer_uniforms.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/renderer_materials.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/renderer_mesh_upload.cpp"
     "${EAWR_ROOT}/src/presentation/godot/fog_adapter.cpp"
     "${EAWR_ROOT}/src/presentation/godot/particle_adapter.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/font_provider.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/input_routing.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/kit.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/kit_text.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/kit_frames.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/kit_buttons.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/kit_controls.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/theme_builder.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_shell.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_build.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_resources.cpp"
+    "${EAWR_ROOT}/src/presentation/godot/ui/tactical_hud_report.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/battle_overlay.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/production_view.cpp"
     "${EAWR_ROOT}/src/presentation/godot/ui/perf_overlay_view.cpp"
@@ -338,7 +297,7 @@ target_include_directories(eawr_viewer PRIVATE
     "${EAWR_ROOT}/include"
     "${EAWR_ROOT}/src/presentation/godot"
 )
-target_link_libraries(eawr_viewer PRIVATE godot-cpp eawr_viewer_core)
+target_link_libraries(eawr_viewer PRIVATE godot-cpp eawr_viewer_core Threads::Threads)
 get_target_property(GODOTCPP_SUFFIX godot-cpp GODOTCPP_SUFFIX)
 set(PROJECT_BIN "${CMAKE_CURRENT_LIST_DIR}/project/bin")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/project/common")

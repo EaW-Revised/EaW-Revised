@@ -15,8 +15,8 @@ No retail capture was made for this walk. XML values below are the effective FoC
 
 The code comparison has two baselines. The integration checkout at `5ac16e9a` has no economy
 or arrival system; its script `Reinforce` binding is a stub. The useful implementation
-comparison is pending PR EAWR-556,
-head `62ab82a3`, and UI PR EAWR-574,
+comparison is pending simulation economy, build queue and arrivals (legacy EAWR-556),
+head `62ab82a3`, and UI purchase UI and reinforcement placement (legacy EAWR-574),
 head `d462cc23`. **Same** means those pending changes implement the verified rule for M2,
 not that they have merged. Every rule below has a comparison in the final table.
 
@@ -40,10 +40,10 @@ applies the timing hooks below. Population is a query over registered objects, n
 periodic cap enforcement that destroys excess units.
 
 Campaign retreat has a battle-wide service: initial lockout, escape countdown, escape,
-optional station destruction, and completion. Its internals are outside M2. **Unverified**:
-the absolute ordering of incoming commands, population unregistration, fog-grid service and
-object services in one original-game frame. The numbered stages describe verified local
-evaluation order, not a newly established global frame schedule.
+optional station destruction, and completion. Its internals are outside M2.
+[WFO-02/08/12/17/18/26/31](frame-order.md) now establishes command, grid-decay, object and
+queue placement. Incoming equal-player ties and exact population-unregistration callbacks
+remain frame-order UFO-01/05; U-4 below distinguishes that residual race from the settled schedule.
 
 ## Rule list
 
@@ -82,7 +82,7 @@ evaluation order, not a newly established global frame schedule.
 | WR-19 | A pending victory drops an arrival command before any creation. It also prevents offering a new placement through WR-07. | debug build WR-E16 |
 | WR-20 | In space, resolve a skirmish command to a unit type, check room, check placement, then instantiate; instantiation checks the player's pool still contains that type. Any failure produces no arrival and removes no reserve. Campaign resolves an object identity instead (WR-48). | debug build WR-E16, WR-E24 |
 | WR-21 | Reject an invalid player. For an ordinary request, first reject a point fogged for that player. This uses the fog subsystem's point query, not merely whether any friendly ship lies within a hand-coded distance. | debug build WR-E01; V-11 to V-19 interface |
-| WR-22 | Next reject a point whose planar squared distance is strictly less than a positive `Reinforcement_Prevention_Radius` squared for any non-allied registered modifying object. Allied objects never prohibit it; equality at the radius is allowed. The query does not itself add a visible-enemy test or a generic enemy distance threshold. M2 skirmish stations author 2000. | debug build WR-E02; XML data |
+| WR-22 | Next reject a point whose planar squared distance is strictly less than a positive `Reinforcement_Prevention_Radius` squared for any non-allied registered modifying object. Allied objects never prohibit it; equality at the radius is allowed. There is no neutral-owner bypass or visible-enemy test. A neutral gravity station therefore still blocks with its authored 2200 radius, although ordinary combat cannot destroy it; M2 skirmish stations author 2000. | debug build WR-E02 (relationship recheck); XML data |
 | WR-23 | Next require the point inside the space mode's playable XY bounds. This is not a fog-outline or camera clamp test. Equality semantics and the construction of those bounds remain U-3. | debug build WR-E01 |
 | WR-24 | A type-less query passes after the preceding tests. A non-squadron type with no `Space_Layer`, a missing tracking system, or a missing chosen tracking layer also passes without a collision test. A squadron with no layer uses the corvette layer. | debug build WR-E01 |
 | WR-25 | Construct a linear collision query from the point 200 units back along reinforcement facing to the requested point (`Space_Reinforcement_Collision_Check_Distance` = 200). Use the current logical frame through current frame + 115; 115 is a code constant for the visible arrival, not an XML time. Query the selected tracking layer using the type's hard XY extents. | debug build WR-E01, WR-E36; XML data |
@@ -90,6 +90,12 @@ evaluation order, not a newly established global frame schedule.
 | WR-27 | Any collision in the chosen layer rejects a type with an authored layer. For a layer-less squadron, inspect collision IDs: a resolved object outside the corvette layer rejects; corvette-layer objects and unresolved IDs do not. The collision query's prediction and object registration belong to movement, not this walk. | debug build WR-E01 |
 | WR-28 | After the chosen-layer test, query the static-object layer with the same sweep. No static layer means allowed; otherwise any collision rejects. Hazards prohibit arrival when their registered footprint participates in that query or they author a prevention radius. No separate asteroid-damage, nebula, ion-storm or mine flag is read by this placement function. Which hazards register is the hazards walk's interface (U-7). | debug build WR-E01 |
 | WR-29 | A privileged placement flag skips fog, prevention circles and playable bounds, but still runs type/layer/collision checks. Ordinary UI and reinforcement commands pass the flag false. Its scripted callers and validation are outside this skirmish walk. | debug build WR-E01, WR-E04, WR-E16 |
+
+Space AI placement uses the same ordinary verdict. Its verified search geometry starts opposite
+arrival facing, samples ten angles 36 degrees apart, expands the radius by 500 after a failed
+ring and clamps candidate XY to playable bounds. A point inside a prevention circle starts
+at radius 1000; otherwise it starts at zero. The remake's bounded, distributed search and its
+remaining cadence differences are recorded as SAE-10 in [skirmish AI economy](../skirmish-ai-economy.md).
 
 ### Creation and per-object arrival service
 
@@ -142,12 +148,12 @@ All values here are **code constants**, verified by WR-E35 and WR-E43.
 The comparison is against the pending purchasing heads above. **Missing** includes a
 partly implemented rule with a missing branch; details say which part. GC interfaces are
 excluded from M2 gap totals. Integration has only WR-42 and the fog presentation interface;
-the arrival implementations below depend on EAWR-556/#574 merging.
+the arrival implementations below depend on simulation economy, build queue and arrivals/purchase UI and reinforcement placement merging.
 
 | Rule | Existing behaviour notes | Ours: pending implementation or boundary | Status / gap |
 |---|---|---|---|
 | WR-01 | same: WPR-04, PU-21 | `src/skirmish/economy.cpp` `economy_rules` | same |
-| WR-02 | same: WPR-32/41, PU-21 | `src/sim/tactical/session.cpp` `execute_economy`, population shares | same |
+| WR-02 | same: WPR-32/41, PU-21 | `src/sim/tactical/session_economy.cpp` `execute_economy`, population shares | same |
 | WR-03 | differs: WPR-41/PU-21 omit ignored/mixed member branches | `population_share` covers M2 homogeneous rosters; general branches absent | missing G-5 |
 | WR-04 | same: WPR-41, PU-21 | `src/sim/tactical/economy.cpp` `population_count` hardcodes fraction threshold 0 | differs G-5 |
 | WR-05 | same: PU-21/33 | `execute_economy`, `layout_pool`, placement input | same |
@@ -162,11 +168,11 @@ the arrival implementations below depend on EAWR-556/#574 merging.
 | WR-14 | missing there | no placement-validity clone tint | missing G-3 |
 | WR-15 | differs: PU-68 replaces drag-release with a subsequent world click | UI input uses click placement; command still validates | differs G-3 |
 | WR-16 | missing there except PU-68's pick sound | no full reinforcement-selection/drop/cap audio | missing G-6 |
-| WR-17 | same: FW-22/23 | `LiveFogView`, EAWR-574 overlay/provider hook | same, subject to G-1's exact validity |
+| WR-17 | same: FW-22/23 | `LiveFogView`, purchase UI and reinforcement placement overlay/provider hook | same, subject to G-1's exact validity |
 | WR-18 | differs: PU-G8 leaves possible space delay unverified | no 90-frame space delay | same |
 | WR-19 | missing there | `execute_economy` has no pending-victory guard | missing G-4 |
 | WR-20 | same: WPR-32, PU-33 | `execute_economy` checks room/placement/pool | same |
-| WR-21 | same: PU-31 | `TacticalSession::Impl::placement_valid`, fog point query | same; tests EAWR-751 |
+| WR-21 | same: PU-31 | `TacticalSession::Impl::placement_valid`, fog point query | same; tests tracked by production data-to-rules validation (legacy EAWR-751) |
 | WR-22 | same: PU-31 | `placement_valid`, non-allied strict planar circles | same |
 | WR-23 | same: PU-31, PU-G21 | bounds checked, original bounds construction unverified | same predicate; U-3 |
 | WR-24 | missing there | `placement_valid` still tests static circles for no-layer single ships | differs G-1 |
@@ -178,7 +184,7 @@ the arrival implementations below depend on EAWR-556/#574 merging.
 | WR-30 | same: PL-08; PU-34 and PU-G26 retain height uncertainty | `execute_economy` single-ship branch and `layer_z_adjust` | same placement; U-5 |
 | WR-31 | same: PL-08/current PU-34; WPR-32's older formation-placement gap superseded | `find_free_space` used per craft, point fallback | same |
 | WR-32 | same: WPR-32, PU-34/38 | `execute_economy`, ledger/shares/arrival record | same |
-| WR-33 | same: PU-35/37/39 | `ArrivalState`, movement phase and hidden-instance mask; scripted damage faithfully bypasses invulnerability | same; EAWR-916 is not a gap |
+| WR-33 | same: PU-35/37/39 | `ArrivalState`, movement phase and hidden-instance mask; scripted damage faithfully bypasses invulnerability | same; arrival script-damage immunity review is not a gap |
 | WR-34 | missing there | no cinematic-delay input | missing G-10; no default M2 trigger known |
 | WR-35 | missing there | fog `revealers` sees arriving craft without service-disable state | differs G-2 |
 | WR-36 | same: PU-35 to PU-37 | `arrival_position`, visible frame 35 | same |
@@ -197,29 +203,29 @@ WR-43..48. These counts concern rules; gap tickets group related rules.
 
 ## Gaps and ticket ownership
 
-Tracking issue: EAWR-919.
+Tracking issue: reinforcement and retreat rule walk (legacy EAWR-919).
 
 No implementation changes are part of this walk. Existing issues were checked before filing.
 Sizes are implementation estimates: S (bounded change), M (several services), L (new system).
 
-| Gap | Rules | Work and observable acceptance | Size | Ticket |
+| Gap | Rules | Work and observable acceptance | Size | Work |
 |---|---|---|---|---|
-| G-1 | WR-24..28 | Use rectangular hard extents, a 200-unit facing sweep over 115 frames, correct layer bypasses and squadron filters. Pin a blocker behind the point, moving into the lane, static obstruction, corvette exception and no-layer ship bypass. | M | EAWR-911 |
-| G-2 | WR-35, WR-39 | Suppress arrival reveal service during early frames and enable at 120, separately from model frame 35. Pin fog before/after 120 while respecting grid cadence. | S | EAWR-912 |
-| G-3 | WR-12..15 | Create/pose/tint space placement clones with hidden emitters and implement drag-release placement. Pin preview geometry and validity separately from actual craft free-space positions; capture a lit clip of valid and invalid placement. | M | EAWR-913 |
-| G-4 | WR-07, WR-19 | Gate pane/placement on reinforcement permission, command-bar visibility and pending victory; authoritative arrival must refuse after pending victory without changing pool/population. Pin both preselected and new requests. | S | EAWR-914 |
-| G-5 | WR-03, WR-04 | Read the rounding threshold; support share accounting beyond M2 homogeneous small squadrons and verify ignored/mixed roster branches before implementing them. | S | EAWR-753; U-6 |
-| G-6 | WR-16, WR-37 | Wire pane selection, landing-zone selection, drop acknowledgement/cap failure and spatial frame-35 arrival audio. The existing production-sound issue already owns arrival audio; use this rule list to bound its reinforcement hooks. | S | EAWR-725; broader audio EAWR-443 |
-| G-7 | WR-37 | Apply independent black-to-normal arrival light fade from frame 35 for 115/120 s at 30 FPS, multiplied with fog/death presentation. Preserve headless hashes and compare a lit arrival clip. | S | EAWR-915 |
-| G-8 | WR-41 | Retain timed vulnerability independently after landing and pin a modded duration above 150 frames. Direct debug-build verification corrected the former script-immunity claim: script/cheat damage bypasses immunity in FoC, pinned before 35 and at 35. | S | EAWR-844 for timed vulnerability; EAWR-916 is not a gap (debug build WR-E46/47) |
-| G-9 | WR-40 | Emit unloaded completion for plans and force the existing fog-refresh interface at arrival end. Pin one completion per surviving arrival; a destroyed arrival emits none. AI reinforcement planning remains EAWR-603, EAWR-786. | S | EAWR-917 |
-| G-10 | WR-34 | Provide a cinematic-delay gate that holds arrival counter and visibility. Needs a sourced M2 trigger or a focused capture before adding a live-game dependency. | S | EAWR-918 |
+| G-1 | WR-24..28 | Use rectangular hard extents, a 200-unit facing sweep over 115 frames, correct layer bypasses and squadron filters. Pin a blocker behind the point, moving into the lane, static obstruction, corvette exception and no-layer ship bypass. | M | arrival-lane sweep and layer filters (legacy EAWR-911) |
+| G-2 | WR-35, WR-39 | Suppress arrival reveal service during early frames and enable at 120, separately from model frame 35. Pin fog before/after 120 while respecting grid cadence. | S | frame-120 arrival sensors (legacy EAWR-912) |
+| G-3 | WR-12..15 | Create/pose/tint space placement clones with hidden emitters and implement drag-release placement. Pin preview geometry and validity separately from actual craft free-space positions; capture a lit clip of valid and invalid placement. | M | reinforcement preview and drag release (legacy EAWR-913) |
+| G-4 | WR-07, WR-19 | Gate pane/placement on reinforcement permission, command-bar visibility and pending victory; authoritative arrival must refuse after pending victory without changing pool/population. Pin both preselected and new requests. | S | pending-victory reinforcement gate (legacy EAWR-914) |
+| G-5 | WR-03, WR-04 | Read the rounding threshold; support share accounting beyond M2 homogeneous small squadrons and verify ignored/mixed roster branches before implementing them. | S | data-driven economy constants (legacy EAWR-753); U-6 |
+| G-6 | WR-16, WR-37 | Wire pane selection, landing-zone selection, drop acknowledgement/cap failure and spatial frame-35 arrival audio. The existing production-sound issue already owns arrival audio; use this rule list to bound its reinforcement hooks. | S | production and arrival sounds (legacy EAWR-725); broader battle audio foundation (legacy EAWR-443) |
+| G-7 | WR-37 | Apply independent black-to-normal arrival light fade from frame 35 for 115/120 s at 30 FPS, multiplied with fog/death presentation. Preserve headless hashes and compare a lit arrival clip. | S | frame-35 arrival light fade (legacy EAWR-915) |
+| G-8 | WR-41 | Retain timed vulnerability independently after landing and pin a modded duration above 150 frames. Direct debug-build verification corrected the former script-immunity claim: script/cheat damage bypasses immunity in FoC, pinned before 35 and at 35. | S | combat-constant application (legacy EAWR-844) for timed vulnerability; arrival script-damage immunity review (legacy EAWR-916) is not a gap (debug build WR-E46/47) |
+| G-9 | WR-40 | Emit unloaded completion for plans and force the existing fog-refresh interface at arrival end. Pin one completion per surviving arrival; a destroyed arrival emits none. AI reinforcement planning remains purchasing-capable skirmish AI setup (legacy EAWR-603), live AI economy queries (legacy EAWR-786). | S | arrival completion and fog reevaluation (legacy EAWR-917) |
+| G-10 | WR-34 | Provide a cinematic-delay gate that holds arrival counter and visibility. Needs a sourced M2 trigger or a focused capture before adding a live-game dependency. | S | cinematic arrival-delay trigger research (legacy EAWR-918) |
 
 The five highest M2 impacts are G-1 (unsafe/incorrect placement), G-2 (early sensors), G-4
 (arrivals after battle decision), G-3 (the placement interaction), and G-6/G-7 (audible and
-visible arrival). EAWR-530/#556/#574 remain the main delivery path; this walk does not duplicate
-production's buying, build-queue, flash (EAWR-726)
-or AI-buying tickets. EAWR-751 already owns fog-admission test coverage.
+visible arrival). Station purchasing and reinforcements (legacy EAWR-530)/simulation economy, build queue and arrivals/purchase UI and reinforcement placement remain the main delivery path; this walk does not duplicate
+production's buying, build-queue and reinforcement-button flash (legacy EAWR-726)
+or AI-buying tickets. Production data-to-rules validation (legacy EAWR-751) already owns fog-admission test coverage.
 
 ## XML/tag registry audit
 
@@ -229,18 +235,18 @@ update the applying code location and rule IDs in their implementation PRs.
 
 | Tags / object class | Registry target | Rule / boundary |
 |---|---|---|
-| `Space_Tactical_Unit_Cap` (Faction), `Population_Value` (Container, SpaceUnit, Squadron, UniqueUnit) | todo EAWR-654 | WR-01..05 |
-| `Allow_Reinforcement_Percentage_Normalized` (GameConstants) | todo EAWR-650; implementation hardcode tracked EAWR-753 | WR-04 |
-| `Reinforcement_Prevention_Radius` (SecondaryStructure, SpaceUnit, SpecialStructure, StarBase) | todo EAWR-650 | WR-22 |
-| `Space_Reinforcement_Collision_Check_Distance` (GameConstants) | todo EAWR-649 | WR-25 |
-| `ReinforcementOverlayGoodColor`, `ReinforcementOverlayBadColor` (GameConstants) | todo EAWR-653 | WR-14; read in space preview, not just land |
-| `Reinforcements_Selection_SFXEvent`, `Reinforcements_Enroute_SFXEvent` (Faction) | todo EAWR-653 | WR-07, WR-16 |
-| `Reinforcements_Pick_Landing_Zone_SFXEvent` (Faction) | todo EAWR-651 | WR-11 |
-| `SFXEvent_Tactical_Unit_Cap_Reached` (Faction) | todo EAWR-654 | WR-16 |
+| `Space_Tactical_Unit_Cap` (Faction), `Population_Value` (Container, SpaceUnit, Squadron, UniqueUnit) | todo: economy tag support (legacy EAWR-654) | WR-01..05 |
+| `Allow_Reinforcement_Percentage_Normalized` (GameConstants) | todo: combat tag support (legacy EAWR-650); hardcoded implementation tracked by data-driven economy constants (legacy EAWR-753) | WR-04 |
+| `Reinforcement_Prevention_Radius` (SecondaryStructure, SpaceUnit, SpecialStructure, StarBase) | todo: combat tag support (legacy EAWR-650) | WR-22 |
+| `Space_Reinforcement_Collision_Check_Distance` (GameConstants) | todo: movement tag support (legacy EAWR-649) | WR-25 |
+| `ReinforcementOverlayGoodColor`, `ReinforcementOverlayBadColor` (GameConstants) | todo: presentation tag support (legacy EAWR-653) | WR-14; read in space preview, not just land |
+| `Reinforcements_Selection_SFXEvent`, `Reinforcements_Enroute_SFXEvent` (Faction) | todo: presentation tag support (legacy EAWR-653) | WR-07, WR-16 |
+| `Reinforcements_Pick_Landing_Zone_SFXEvent` (Faction) | todo: fighter tag support (legacy EAWR-651) | WR-11 |
+| `SFXEvent_Tactical_Unit_Cap_Reached` (Faction) | todo: economy tag support (legacy EAWR-654) | WR-16 |
 | `SFXEvent_Command_Fleet_Move` (space types) | absent as a literal effective-data registry row; fallback getter is traced but no authored M2 event verified | WR-16 |
-| `SFXEvent_Arrive_From_Hyperspace` (Faction) | incorrectly marked land-or-galactic at audit; corrected to todo EAWR-725 by this walk | WR-37 directly reads it during skirmish arrival |
-| `Space_Elevated_Vulnerability_Duration`, `Space_Elevated_Vulnerability_Factor` (GameConstants) | todo EAWR-844, parsed but not applied on integration | WR-41 |
-| `Squadron_Offsets` (Container), `Space_Layer` (Container, SpaceStructure, Projectile) | todo EAWR-651 / EAWR-649 respectively | WR-13, WR-24..27; Container population/formations are later interfaces, not the M2 Squadron row |
+| `SFXEvent_Arrive_From_Hyperspace` (Faction) | incorrectly marked land-or-galactic at audit; corrected to todo production and arrival sounds (legacy EAWR-725) by this walk | WR-37 directly reads it during skirmish arrival |
+| `Space_Elevated_Vulnerability_Duration`, `Space_Elevated_Vulnerability_Factor` (GameConstants) | todo combat-constant application (legacy EAWR-844), parsed but not applied on integration | WR-41 |
+| `Squadron_Offsets` (Container), `Space_Layer` (Container, SpaceStructure, Projectile) | todo: fighter tag support (legacy EAWR-651) / movement tag coverage (legacy EAWR-649) respectively | WR-13, WR-24..27; Container population/formations are later interfaces, not the M2 Squadron row |
 | `Icon_Name`, `Space_Model_Name`, `Scale_Factor`, `Layer_Z_Adjust`, `Space_Layer` (arrivable space types), `Squadron_Units` / `Squadron_Offsets` (Squadron) | applied in existing UI, movement and start readers; does not imply arrival-preview application | WR-09, WR-12/13, WR-24..31; G-3 still needs clones |
 | `Idle_Anim_00_Rate_Mod`, `Loop_Idle_Anim_00`, `Ignore_For_Reoptimization` | no todo/deferred arrival-type row: idle-rate authored on props, idle-loop on other classes, ignored-member tag authored on GroundCompany | WR-03, WR-12 describe generic type getters and defaults; mods require a per-class registry update when authored |
 
@@ -250,15 +256,15 @@ The following nearby tags are explicitly outside the traced M2 space rules:
   `Reinforcement_Region_Blob_Name` and point-ownership countdown sounds: land placement
   interfaces. The enabling-point switch's two direct readers are land company placement
   (WR-E44/45); the space placement and cap functions read none of them. Existing todo rows
-  EAWR-650/#653 are not space arrival implementation requirements.
+  combat tag coverage (legacy EAWR-650)/presentation tag coverage (legacy EAWR-653) are not space arrival implementation requirements.
 - `Skirmish_Reinforcement_Delay_Frames` (90), `Reinforcement_Time_Multiplier`,
   `Reinforcement_Deploy_Time_Multiplier` and transport progress: WR-18's separate transport
-  interface. Existing rows todo EAWR-650/#760 remain; do not apply 90 to space arrivals.
+  interface. Existing rows todo: combat tag support (legacy EAWR-650)/space ability rule walk (legacy EAWR-760) remain; do not apply 90 to space arrivals.
 - `Reinforcements_Shadow_Blob_Material_Name`: land preview blob (WR-E38); space uses model
   clones. `Reinforcements_Cancelled_SFXEvent`, `Reinforcements_Ready_SFXEvent` and
   `Reinforcements_Requesting_SFXEvent`: other pane/transport notification paths, not proved
-  by this walk; keep U-9 and their todo EAWR-653 rows.
-- `Disable_Reinforcement_Vulnerability`: battlefield modifier supplied by abilities (EAWR-760).
+  by this walk; keep U-9 and their todo: presentation tag support (legacy EAWR-653) rows.
+- `Disable_Reinforcement_Vulnerability`: battlefield modifier supplied by abilities (legacy EAWR-760).
   WR-E39 verifies that it adds the disable state; whether each space damage route consumes
   it is not established here. No M2 starting unit supplies it.
 - `Hyperspace`, `Disallows_Hyperspace_Retreat`, retreat-prevention/protection abilities and
@@ -270,26 +276,26 @@ The following nearby tags are explicitly outside the traced M2 space rules:
   `Space_Retreat_Attrition_Factor`, `Space_Retreat_Countdown_Seconds`,
   `Space_Retreat_Flight_Move_Increment`, `Space_Retreat_Off_Map_Dest_Pos`,
   `Space_Retreat_Pursue_Max_Speed_Mod_Factor`, `Space_Retreat_Unit_Increment_Wait_Frames`
-  and `Space_Retreat_Units_Damaged_Mod_Factor` (EAWR-649), plus
+  and `Space_Retreat_Units_Damaged_Mod_Factor` movement tag coverage (legacy EAWR-649), plus
   `Space_Retreat_Begin_SFXEvent`, `Space_Retreat_Cancel_SFXEvent`,
   `Space_Retreat_Countdown_Color_RGBA`, `Space_Retreat_Countdown_Text_ID`,
   `Space_Retreat_Enemy_Begin_SFXEvent`, `Space_Retreat_Not_Allowed_SFXEvent` and
   `Space_Retreat_Not_Allowed_Reason_1_SFXEvent` through
-  `Space_Retreat_Not_Allowed_Reason_3_SFXEvent` (EAWR-653).
+  `Space_Retreat_Not_Allowed_Reason_3_SFXEvent` presentation tag coverage (legacy EAWR-653).
 - `Hyperspace_Speed`, `Hyperspace_Speed_Factor`: galaxy/story travel interfaces; not read
   by WR-38. `Additional_Population_Capacity` is not read by WR-01's space cap query.
 
-No subsystem-applied tag in this docs-only PR is newly marked `applied`. The only registry
+No subsystem-applied tag in this docs-only is newly marked `applied`. The only registry
 change corrects the verified skirmish use of the arrival-sound tag.
 
 ## Unverified and requested captures
 
 | ID | Unknown / fidelity deviation | Focused evidence to settle it |
 |---|---|---|
-| U-1 | Whether an arriving ship/craft can fire or accept attack/ability orders before 150. The movement lock is proven; EAWR-556's blanket fire/order suppression is a project choice, not settled by it. | Debug-build or retail arrival next to a hostile target, orders at 34/35/119/120/149/150, with fog stated; record first accepted order and first shot. |
+| U-1 | Whether an arriving ship/craft can fire or accept attack/ability orders before 150. The movement lock is proven; simulation economy, build queue and arrivals's blanket fire/order suppression is a project choice, not settled by it. | Debug-build or retail arrival next to a hostile target, orders at 34/35/119/120/149/150, with fog stated; record first accepted order and first shot. |
 | U-2 | Stable visible ordering of grouped pool types. Internal key traversal is proven, first-completion order is not. | Build two types in both completion orders and capture the pool; repeat a new session. |
-| U-3 | Original playable-bound construction and inclusive edge semantics. EAWR-556 uses declared extents. | Read the bounds supplier; capture cursor validation immediately inside/outside an asymmetric map edge with fog off. |
-| U-4 | Global same-frame ordering: arriving reveal hooks versus the next fog service, simultaneous population release and two arrivals. | Logical-frame stepping with pool/population and fog state via the existing debugger harness; no new output-scraping probe. |
+| U-3 | Original playable-bound construction and inclusive edge semantics. Simulation economy, build queue and arrivals uses declared extents. | Read the bounds supplier; capture cursor validation immediately inside/outside an asymmetric map edge with fog off. |
+| U-4 | **Partly settled:** grid decay before arrivals; local-120 reveal enabling can feed the later same-object reveal service that frame; command creation charges population before object/deletion service | [WFO-02/08/12/17/18/26/31](frame-order.md), debug build. Competing same-player events and exact share-unregistration callbacks remain UFO-01/05 there; step a full-cap death plus two requests through the existing debugger harness. |
 | U-5 | Exact interpretation of the creation flags controlling `Layer_Z_Adjust`, PU-G26. Preview height is directly verified, created input height 0 is directly verified. | Resolve the creation signature/read its height branch or stage a buyable ship with nonzero height and capture its settled Z. |
 | U-6 | The general ignored/mixed squadron share branch differs from the simple equal-share description; crafted XML can visit multiple roster entries before finding a match. | Confirm with targeted disassembly and a mixed/ignored roster population observation before implementing the unusual branch. Homogeneous M2 rosters are settled. |
 | U-7 | Hazard registration: which specific asteroid/nebula/storm/mine footprints enter the static sweep. No direct hazard flag is read in arrival validation. | Hazards walk supplies registration evidence; request arrival previews inside and beside each hazard only where a remaining mismatch needs capture. |

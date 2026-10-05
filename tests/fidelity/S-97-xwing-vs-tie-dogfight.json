@@ -150,156 +150,168 @@
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -386.7605895996094,
+        -1522.8681640625,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 75.06857299804688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.2",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -324.8799743652344,
+        -1487.0426025390625,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 75.06857299804688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.3",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -396.1784362792969,
+        -1451.988037109375,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 75.06857299804688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.4",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -443.5398254394531,
+        -1479.4078369140625,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 75.06857299804688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "xwing.5",
       "type": "X-Wing",
       "owner": "rebel",
       "position": [
-        0,
-        0,
-        0
+        -448.6412048339844,
+        -1558.6937255859375,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 75.06857299804688,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.1",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        399.9999694824219,
+        -1499.9998779296875,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.2",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        419.9221496582031,
+        -1465.5888671875,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.3",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        389.75482177734375,
+        -1461.5804443359375,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.4",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        360.5844421386719,
+        -1494.7626953125,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.5",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        380.0777893066406,
+        -1534.410888671875,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.6",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        410.2451171875,
+        -1538.4193115234375,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     },
     {
       "label": "tie.7",
       "type": "TIE_Fighter",
       "owner": "empire",
       "position": [
-        0,
-        0,
-        0
+        439.4154968261719,
+        -1505.237060546875,
+        0.0
       ],
-      "facing_degrees": 0,
+      "facing_degrees": 104.93141174316406,
       "spawn": "observed",
-      "staging": []
+      "staging": [],
+      "apply_initial_pose": true
     }
   ],
   "hardpoints": [],
@@ -326,7 +338,8 @@
   "expect": [],
   "notes": [
     "#457: the X-wing squadron attacks the TIE squadron at tick 30; the TIEs have no order. Fog revealed, AI suspended.",
-    "The squadrons start as their team containers with their craft on the Squadron_Offsets slots; observed slots bind the craft in creation order (<label>.<k> from 1, as the recorder labels them)."
+    "The squadrons start as their team containers with their craft on the Squadron_Offsets slots; observed slots bind the craft in creation order (<label>.<k> from 1, as the recorder labels them).",
+    "Initial world positions and yaw are the native tick-zero poses from the 2026-10-04 S-97 single-team-wrapper control (1800 samples, no gaps or errors; raw SHA256 93c0cd0016e9b170fbd3b210f0a2870de10efc6b8db9acd9ad9468ef30c64a90). Observed craft explicitly apply this pose instead of generated Squadron_Offsets placement. Velocity, reload and pursuit state were not recorded and are not seeded; command timing, references and tolerances are unchanged."
   ],
   "record_only": true
 }

@@ -86,8 +86,8 @@ void run_one(const std::function<void(std::size_t)>& job, const std::size_t part
 
 class ThreadWorkerAdapter::Pool final {
 public:
-    Pool(const std::size_t workers, const Dispatch dispatch)
-        : workers_(workers), dispatch_(dispatch), budget_(ThreadWorkerAdapter::inline_budget(workers)) {
+    Pool(const std::size_t workers, const Dispatch dispatch, ClockRead clock)
+        : workers_(workers), dispatch_(dispatch), budget_(ThreadWorkerAdapter::inline_budget(workers)), clock_(std::move(clock)) {
         try {
             threads_.reserve(workers - 1);
             for (std::size_t worker = 1; worker < workers; ++worker) {
@@ -132,7 +132,7 @@ public:
         }
 
         // A small phase last time: partitions in order on this thread until the budget is spent.
-        const auto began = Clock::now();
+        const auto began = now();
         auto elapsed = Clock::duration::zero();
         std::size_t next = 0;
         const auto* const outer = running_pool;
@@ -140,7 +140,7 @@ public:
         while (next < partitions) {
             run_one(job, next, failure_);
             ++next;
-            elapsed = Clock::now() - began;
+            elapsed = now() - began;
             if (elapsed > budget_) {
                 break;
             }
@@ -163,6 +163,10 @@ public:
 
 private:
     using Clock = std::chrono::steady_clock;
+
+    [[nodiscard]] Clock::time_point now() const {
+        return clock_ ? clock_() : Clock::now();
+    }
 
     [[nodiscard]] core::Result<void> run_inline(const std::size_t partitions, const std::function<void(std::size_t)>& job) {
         PhaseFailure failure;
@@ -250,7 +254,7 @@ private:
 
     // Worker w's pinned partition w, then partitions claimed in turn.
     void run_share(const std::size_t worker) {
-        const auto began = Clock::now();
+        const auto began = now();
         const auto& job = *job_;
         if (pinned_ && worker < partitions_) {
             run_one(job, worker, failure_);
@@ -259,7 +263,7 @@ private:
              partition = next_.fetch_add(1, std::memory_order_relaxed)) {
             run_one(job, partition, failure_);
         }
-        const auto spent = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - began);
+        const auto spent = std::chrono::duration_cast<std::chrono::nanoseconds>(now() - began);
         work_ns_.fetch_add(static_cast<std::uint64_t>(spent.count()), std::memory_order_relaxed);
     }
 
@@ -278,6 +282,7 @@ private:
     std::size_t workers_;
     Dispatch dispatch_;
     Clock::duration budget_;
+    ClockRead clock_;
     std::vector<std::thread> threads_;
     std::optional<std::string> start_error_;
     std::mutex phase_mutex_; // one phase at a time
@@ -298,10 +303,10 @@ private:
     std::atomic<std::uint64_t> pool_phases_{0};
 };
 
-ThreadWorkerAdapter::ThreadWorkerAdapter(const std::size_t worker_count, const Dispatch dispatch)
+ThreadWorkerAdapter::ThreadWorkerAdapter(const std::size_t worker_count, const Dispatch dispatch, ClockRead clock)
     : worker_count_(worker_count) {
     if (worker_count >= 1 && worker_count <= max_worker_count) {
-        pool_ = std::make_unique<Pool>(worker_count, dispatch);
+        pool_ = std::make_unique<Pool>(worker_count, dispatch, std::move(clock));
     }
 }
 

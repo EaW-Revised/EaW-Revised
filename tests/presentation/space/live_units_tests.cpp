@@ -2,6 +2,7 @@
 // (presentation::space::interpolate_units). Synthetic snapshots only.
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
+#include "eawr/presentation/space/unit_fade.hpp"
 #include "eawr/presentation/particles/render.hpp"
 
 #include <atomic>
@@ -95,6 +96,46 @@ void test_interpolation() {
     expect(near(space::instance_yaw_degrees(pose(0.0, 0.0, -90.0)), -90.0), "yaw is read from the forward column");
     expect(near(space::instance_yaw_degrees(pose(0.0, 0.0, 180.0)), 180.0), "yaw 180 stays in (-180, 180]");
     expect(!half.empty() && near(half[0].roll_degrees, 0.0), "a level unit draws no roll");
+}
+
+void test_map_prop_fog_visibility() {
+    const std::vector<std::string> idle{"SPACE_OBSTACLE", "IDLE", "UNIT_AI"};
+    const std::vector<std::string> hidden{"HIDE_WHEN_FOGGED"};
+    const std::vector<std::string> team{"team"};
+    expect(!space::map_prop_fog_bound(idle, {}) && !space::map_prop_fog_bound({}, {}),
+           "FW-24: asteroid and behavior-free props are not fog-bound");
+    expect(space::map_prop_fog_bound(hidden, {}) && space::map_prop_fog_bound({}, hidden)
+        && space::map_prop_fog_bound(team, idle), "FW-24: either behavior list can bind a prop to fog");
+
+    const std::vector<eawr::sim::EntityId> visible{2, 6}, alive{1, 2, 4, 6}, props{1, 2, 3, 4, 7};
+    std::vector<eawr::sim::EntityId> drawn;
+    space::map_prop_draw_visibility(visible, alive, props, drawn);
+    expect(drawn == std::vector<eawr::sim::EntityId>{1, 2, 4, 6},
+           "unfogged props merge in ID order once, excluding destroyed owners");
+    expect(visible == std::vector<eawr::sim::EntityId>{2, 6}, "drawing preserves sensor contacts");
+
+    const auto previous = snapshot(10, {
+        {1, 100, 2, 2, pose(0, 0, 0), 0b10, {}, {}},
+        {2, 200, 2, 2, pose(50, 0, 0), 0b10, {}, {}},
+    });
+    const auto latest = snapshot(11, {
+        {1, 100, 2, 2, pose(10, 0, 0), 0b10, {}, {}},
+        {2, 200, 2, 2, pose(60, 0, 0), 0b10, {}, {}},
+    });
+    const std::vector<eawr::sim::EntityId> prop{1}, living{1, 2};
+    space::map_prop_draw_visibility({}, living, prop, drawn);
+    std::vector<space::LiveUnitPose> poses;
+    expect(space::interpolate_visible_units(previous, latest, 0.5, drawn, false, {}, poses)
+        && poses.size() == 1 && poses.front().entity == 1 && near(poses.front().position[0], 5),
+        "a fogged prop keeps its true interpolated pose while an unseen enemy remains hidden");
+    space::UnitFade fade;
+    fade.advance(drawn, living, 1);
+    expect(fade.opacity(1).value_or(0) == 1 && !fade.opacity(2),
+           "the prop remains fully opaque from its first frame without revealing an enemy");
+    const auto historical = space::interpolate_units(previous, latest, 0.5, 1, false, prop);
+    expect(historical.size() == 1 && historical.front().entity == 1,
+           "emitter catch-up samples retain the same unfogged owner");
+    expect(latest.visible_entities(1).empty(), "map-prop drawing never changes snapshot visibility");
 }
 
 // #351: the bank roll is read from the transform and eases between ticks like the position.
@@ -315,6 +356,7 @@ void test_pose_worker_budget() {
 
 int main() {
     test_interpolation();
+    test_map_prop_fog_visibility();
     test_roll();
     test_reveal();
     test_snapshot_index_budget();

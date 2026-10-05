@@ -1,5 +1,11 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 
+add_executable(tactical_station_upgrade_tests station_upgrade_tests.cpp station_allocations.cpp)
+target_link_libraries(tactical_station_upgrade_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_station_upgrade_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_station_upgrade_tests)
+add_test(NAME tactical_station_upgrade_contracts COMMAND tactical_station_upgrade_tests)
+
 add_executable(replay_contract_tests replay_tests.cpp)
 target_link_libraries(replay_contract_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(replay_contract_tests PRIVATE cxx_std_20)
@@ -49,7 +55,9 @@ add_test(
     COMMAND tactical_ability_tests
 )
 # #530: skirmish purchasing (credits, build queues, hyperspace arrival).
-add_executable(tactical_economy_tests economy_tests.cpp)
+add_executable(tactical_economy_tests economy_tests.cpp
+    economy_purchase_tests.cpp
+    economy_arrival_tests.cpp)
 target_link_libraries(tactical_economy_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_economy_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_economy_tests)
@@ -57,6 +65,13 @@ add_test(
     NAME tactical_economy_contracts
     COMMAND tactical_economy_tests
 )
+# #77: fixed-force victory and defeat.
+add_executable(tactical_pads_tests pads_tests.cpp)
+target_link_libraries(tactical_pads_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_pads_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_pads_tests)
+add_test(NAME tactical_pad_contracts COMMAND tactical_pads_tests)
+
 # #77: fixed-force victory and defeat.
 add_executable(tactical_victory_tests victory_tests.cpp)
 target_link_libraries(tactical_victory_tests PRIVATE eawr::sim eawr::platform)
@@ -90,7 +105,9 @@ target_compile_features(tactical_path_cost_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_path_cost_tests)
 add_test(NAME tactical_path_cost_contracts COMMAND tactical_path_cost_tests "${EAWR_REPLAY_FIXTURES}")
 # #344: group moves (FoC's space movement coordinator).
-add_executable(tactical_formation_tests formation_tests.cpp)
+add_executable(tactical_formation_tests formation_tests.cpp
+    formation_slots_tests.cpp
+    formation_search_tests.cpp)
 target_link_libraries(tactical_formation_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_formation_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_formation_tests)
@@ -99,7 +116,10 @@ add_test(
     COMMAND tactical_formation_tests
 )
 # #75: fighter squadrons (hangars, the fighter locomotor, squadron targets).
-add_executable(tactical_fighter_tests fighter_tests.cpp)
+add_executable(tactical_fighter_tests fighter_tests.cpp
+    fighter_spawner_tests.cpp
+    fighter_orders_tests.cpp
+    fighter_scans_tests.cpp)
 target_link_libraries(tactical_fighter_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_fighter_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_fighter_tests)
@@ -126,7 +146,9 @@ add_test(
     COMMAND tactical_flight_tests
 )
 # #457: squadron dogfights (space-fighters FD rules).
-add_executable(tactical_dogfight_tests dogfight_tests.cpp)
+add_executable(tactical_dogfight_tests dogfight_tests.cpp
+    dogfight_chase_tests.cpp
+    dogfight_order_tests.cpp)
 target_link_libraries(tactical_dogfight_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_dogfight_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_dogfight_tests)
@@ -134,6 +156,13 @@ add_test(
     NAME tactical_dogfight_contracts
     COMMAND tactical_dogfight_tests
 )
+# #893: chase indexing agrees with the old scan, with deterministic work budgets.
+add_executable(tactical_chase_candidates_tests chase_candidates_tests.cpp)
+target_link_libraries(tactical_chase_candidates_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_chase_candidates_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_chase_candidates_tests)
+add_test(NAME tactical_chase_candidates_contracts COMMAND tactical_chase_candidates_tests)
+
 # #469: the target scans' collection trees (space-targeting CO-01 to CO-12).
 add_executable(tactical_collection_tests collection_tests.cpp)
 target_link_libraries(tactical_collection_tests PRIVATE eawr::sim eawr::platform)
@@ -226,7 +255,12 @@ foreach(workers IN ITEMS 1 2 4)
             --workers ${workers}
         VERBATIM)
 endforeach()
-add_executable(tactical_damage_tests damage_tests.cpp)
+add_executable(tactical_damage_tests
+    damage_tests.cpp
+    damage_shields_tests.cpp
+    damage_hits_tests.cpp
+    damage_missile_tests.cpp
+)
 target_link_libraries(tactical_damage_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_damage_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_damage_tests)
@@ -235,6 +269,16 @@ add_test(
     COMMAND tactical_damage_tests "${EAWR_REPLAY_FIXTURES}"
 )
 add_executable(tactical_ion_tests ion_tests.cpp)
+add_executable(tactical_blast_tests blast_tests.cpp)
+target_link_libraries(tactical_blast_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_blast_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_blast_tests)
+add_test(NAME tactical_blast_contracts COMMAND tactical_blast_tests)
+add_executable(tactical_rocket_tests rocket_tests.cpp)
+target_link_libraries(tactical_rocket_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_rocket_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_rocket_tests)
+add_test(NAME tactical_rocket_contracts COMMAND tactical_rocket_tests)
 target_link_libraries(tactical_ion_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_ion_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_ion_tests)
@@ -250,7 +294,12 @@ add_test(
     NAME tactical_ion_shot_contracts
     COMMAND tactical_ion_shot_tests
 )
-add_executable(tactical_combat_tests combat_tests.cpp)
+add_executable(tactical_combat_tests
+    combat_tests.cpp
+    combat_targeting_tests.cpp
+    combat_aim_tests.cpp
+    combat_orders_tests.cpp
+)
 target_link_libraries(tactical_combat_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_combat_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_combat_tests)
@@ -259,5 +308,18 @@ add_test(
     COMMAND tactical_combat_tests "${EAWR_REPLAY_FIXTURES}" "${PROJECT_SOURCE_DIR}/tests/behaviour/space-targeting-cases.json"
 )
 
+add_executable(tactical_hotpath_tests hotpath_tests.cpp)
+target_link_libraries(tactical_hotpath_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_hotpath_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_hotpath_tests)
+add_test(NAME tactical_hotpath_contracts COMMAND tactical_hotpath_tests)
+
 # Tier labels (cmake/EawrTestTiers.cmake).
+add_test(NAME replay_independent_acceptance_contract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/acceptance/test_p004_acceptance.py"
+            --program "$<TARGET_FILE:sim_headless>"
+            --fixtures "${EAWR_REPLAY_FIXTURES}"
+            --audit "${EAWR_REPLAY_FIXTURES}/original-v1.audit.json"
+            --comparator "${PROJECT_SOURCE_DIR}/tools/compare_replay_hashes.py")
+
 eawr_label_tests()

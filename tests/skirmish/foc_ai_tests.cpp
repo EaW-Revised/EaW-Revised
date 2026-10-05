@@ -14,6 +14,7 @@
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/script/numeric/q24_boundary.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/skirmish/ai.hpp"
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -102,7 +104,7 @@ struct Content {
     std::map<tactical::TypeId, std::string> type_names;
 };
 
-std::optional<Content> load(const std::filesystem::path& root) {
+std::optional<Content> load(const std::filesystem::path& root, bool rebel_ai = false) {
     std::vector<eawr::vfs::MountSpec> specs;
     for (const auto& [id, folder] : {std::pair{std::string("expansion"), std::string("corruption")},
                                      std::pair{std::string("base"), std::string("GameData")}}) {
@@ -126,7 +128,13 @@ std::optional<Content> load(const std::filesystem::path& root) {
     auto tables = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(tables), "FoC unit tables load");
     if (!tables) return std::nullopt;
-    const auto& fixture = skirmish::m2_fixture();
+    auto fixture = skirmish::m2_fixture();
+    if (rebel_ai) {
+        fixture.slots[0].faction = "Empire";
+        fixture.slots[0].fleet = {"Tartan_Patrol_Cruiser", "Acclamator_Assault_Ship"};
+        fixture.slots[1].faction = "Rebel";
+        fixture.slots[1].fleet = {"Rebel_X-Wing_Squadron", "Corellian_Corvette", "Nebulon_B_Frigate"};
+    }
     auto inputs = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog, tables.value());
     expect(static_cast<bool>(inputs), "FoC start inputs read");
     if (!inputs) return std::nullopt;
@@ -143,6 +151,11 @@ std::optional<Content> load(const std::filesystem::path& root) {
     content.value().fog = fog.value();
     Content out{start.value(), std::move(content).value(), skirmish::victory_rules(start.value(), tables.value()),
         skirmish::ai_setup(start.value(), inputs.value(), tables.value()), {}, {}, {}};
+    if (rebel_ai) {
+        auto enabled = skirmish::enable_goal_system(filesystem.value(), out.ai);
+        expect(static_cast<bool>(enabled), "the Rebel goal system loads");
+        if (!enabled) return std::nullopt;
+    }
     auto modules = skirmish::ai_modules(filesystem.value(), out.ai);
     expect(static_cast<bool>(modules), "the AI's Lua files load: " + (modules ? std::string() : modules.error().message));
     if (!modules) return std::nullopt;
@@ -153,6 +166,101 @@ std::optional<Content> load(const std::filesystem::path& root) {
     out.plan_modules = std::move(plan_modules).value();
     for (const auto& type : tables.value().units) out.type_names.emplace(skirmish::type_id(type.id), type.id);
     return out;
+}
+
+// Diagnostic battle with the stock scripts. Requests and actual transitions are separate:
+// redundant requests and timed expiration must remain visible in a cause investigation.
+int ability_trace(const Content& content, std::uint64_t ticks, const std::filesystem::path& path) {
+    auto world = tactical::TacticalSession::create(content.start.setup, content.content.sensors, content.content.durability,
+        content.content.motion, content.content.fog, content.content.combat, content.victory, content.content.abilities);
+    if (!world) { std::cerr << world.error().message << '\n'; return 1; }
+    auto setup = content.ai;
+    setup.journal = std::make_shared<foc::AiJournal>();
+    auto session = foc::create_session(std::move(world).value(), setup, content.modules);
+    if (!session) { std::cerr << session.error().message << '\n'; return 1; }
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    std::ofstream output(path);
+    output << "tick,event,unit,type,ability,action,issuer,nearest_enemy,attack_range,enemies_in_range,formation_target,order\n";
+    std::map<std::pair<eawr::sim::EntityId, tactical::AbilityKind>, bool> active;
+    std::map<eawr::sim::EntityId, eawr::sim::EntityId> last_target;
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        auto result = session.value().step(executor);
+        if (!result) { std::cerr << result.error().message << '\n'; return 1; }
+        const auto& current = session.value().world();
+        const auto row = [&](std::string_view event, eawr::sim::EntityId id, tactical::AbilityKind kind,
+            std::int64_t action, std::uint64_t issuer) {
+            const auto units = current.units();
+            const auto unit = std::find_if(units.begin(), units.end(), [&](const auto& item) { return item.entity_id == id; });
+            if (unit == units.end()) return;
+            double nearest = -1;
+            for (const auto& other : units) {
+                if ((other.owner != 1 && other.owner != 2) || other.owner == unit->owner) continue;
+                const double dx = static_cast<double>(other.position.x.raw() - unit->position.x.raw()) / eawr::sim::math::Fixed::scale;
+                const double dy = static_cast<double>(other.position.y.raw() - unit->position.y.raw()) / eawr::sim::math::Fixed::scale;
+                const double distance = std::hypot(dx, dy);
+                if (nearest < 0 || distance < nearest) nearest = distance;
+            }
+            const auto mind = current.squadron_state(id);
+            auto type = unit->type_id;
+            if (mind && !mind->roster.empty()) {
+                const auto member = std::find_if(units.begin(), units.end(), [&](const auto& item) {
+                    return std::find(mind->roster.begin(), mind->roster.end(), item.entity_id) != mind->roster.end();
+                });
+                if (member != units.end()) type = member->type_id;
+            }
+            double range = 0;
+            for (const auto& profile : content.ai.content.types) if (profile.type_id == type) {
+                const auto fixed = eawr::script::numeric::to_fixed(profile.max_attack_distance);
+                if (fixed) range = static_cast<double>(fixed.value().raw()) / eawr::sim::math::Fixed::scale;
+            }
+            output << current.completed_tick() << ',' << event << ',' << id << ',' << content.type_names.at(unit->type_id)
+                << ',' << tactical::to_string(kind) << ',' << action << ',' << issuer << ',' << nearest << ',' << range << ','
+                << (nearest >= 0 && nearest <= range ? 1 : 0) << ','
+                << (mind ? mind->target : 0) << ',' << static_cast<int>(unit->order.kind) << '\n';
+        };
+        for (const auto& routed : result.value().script_input) {
+            const auto& command = routed.command;
+            if (command.verb != foc::verb_ability || command.arguments.size() != 4) continue;
+            const auto& id = std::get<auth::Handle>(command.arguments[1].data);
+            const auto kind = eawr::script::numeric::to_exact_integer(std::get<eawr::script::numeric::LuaNumber>(command.arguments[2].data));
+            const auto action = eawr::script::numeric::to_exact_integer(std::get<eawr::script::numeric::LuaNumber>(command.arguments[3].data));
+            if (kind && action) row(routed.submitted ? "request" : "dropped", id.id,
+                static_cast<tactical::AbilityKind>(kind.value()), action.value(), command.issuer);
+        }
+        for (const auto& instance : result.value().world.snapshot->instances()) {
+            if (instance.owner != 2) continue;
+            for (const auto& slot : instance.abilities) {
+                const auto key = std::pair{instance.entity_id, slot.kind};
+                const bool before = active[key];
+                if (slot.active != before) row("transition", instance.entity_id, slot.kind, slot.active ? 1 : 2, 0);
+                active[key] = slot.active;
+            }
+        }
+        const auto current_units = current.units();
+        for (const auto& squadron : current.squadrons()) {
+            const auto mind = current.squadron_state(squadron.container);
+            if (!mind || mind->target == 0 || mind->target == last_target[squadron.container]) continue;
+            last_target[squadron.container] = mind->target;
+            bool locked = false;
+            for (const auto member : squadron.members) {
+                const auto state = current.ability_state(member);
+                const auto unit = std::find_if(current_units.begin(), current_units.end(),
+                    [&](const auto& item) { return item.entity_id == member; });
+                if (!state || unit == current_units.end() || unit->owner != 2) continue;
+                const auto* profile = current.abilities().find(unit->type_id);
+                if (profile == nullptr) continue;
+                const auto slot = tactical::ability_slot(*profile, tactical::AbilityKind::spoiler_lock);
+                locked = locked || (slot && state->slots[*slot].active);
+            }
+            row("engagement", squadron.container, tactical::AbilityKind::spoiler_lock, locked ? 1 : 2, 0);
+        }
+    }
+    std::ofstream journal(path.string() + ".plans.csv");
+    journal << "tick,plan,event,detail\n";
+    for (const auto& event : setup.journal->plans)
+        journal << event.tick << ',' << event.plan << ',' << event.event << ",\"" << event.detail << "\"\n";
+    std::cout << "Ability trace: " << ticks << " ticks, " << path << '\n';
+    return output && journal ? 0 : 1;
 }
 
 std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_t ticks) {
@@ -257,9 +365,12 @@ int main(int argc, char** argv) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the FoC AI battle\n";
         return 0;
     }
-    const std::uint64_t ticks = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 3600;
-    auto content = load(*root);
+    const bool tracing = argc > 1 && std::string_view(argv[1]) == "--ability-trace";
+    const std::uint64_t ticks = tracing ? (argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 3600)
+                                      : (argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 3600);
+    auto content = load(*root, tracing);
     if (!content) return 1;
+    if (tracing) return ability_trace(*content, ticks, argc > 3 ? argv[3] : "abilities.csv");
 
     std::vector<Run> runs;
     for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
@@ -424,7 +535,7 @@ int main(int argc, char** argv) {
     auto plans = foc::inspect_plans(content->ai, files);
     expect(static_cast<bool>(plans), "the selected plans are inspected");
     if (plans) {
-        expect(plans.value().size() == 17, "AI-30: 17 selected plans");
+        expect(plans.value().size() == 23, "AI-30: 23 selected combat and economy plans");
         for (const auto& plan : plans.value()) {
             std::cout << "plan " << plan.path << ": category " << (plan.category.empty() ? "(none)" : plan.category)
                       << (plan.loaded ? "" : " NOT LOADED") << '\n';

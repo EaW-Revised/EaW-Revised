@@ -30,7 +30,7 @@ inline constexpr std::uint32_t ability_count = 77; // ABILITY_COUNT
 // The UnitAbilityType name of a value (`POWER_TO_WEAPONS`), empty past the enum.
 [[nodiscard]] std::string_view ability_name(std::uint32_t ability) noexcept;
 
-// One thing a card can show: a unit, or a squadron (a homogeneous team) standing for its craft.
+// One thing a card can show: a unit, or a squadron whose type requests one team card.
 struct CardUnit {
     sim::EntityId id{};                 // the unit, or the squadron's container
     std::vector<sim::EntityId> members; // what selecting the card selects: the unit, or the live craft
@@ -48,7 +48,7 @@ struct SquadronOf {
     sim::EntityId container{};
     std::string type;         // the squadron type
     std::uint32_t ability{ability_none};
-    bool homogeneous{true};   // every craft of the squadron type is one type (CARD-1)
+    bool homogeneous{true};   // authored Is_Homogeneous, default yes (L-2)
     std::vector<sim::EntityId> members; // its live craft, in roster order
     double health{1.0};       // the mean of its live craft's health (CARD-3, the debug build)
     std::uint32_t second_ability{ability_none};

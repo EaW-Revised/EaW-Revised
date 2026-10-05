@@ -3,6 +3,7 @@
 #include "eawr/core/sha256.hpp"
 
 #include <span>
+#include <algorithm>
 
 namespace eawr::units {
 namespace {
@@ -85,6 +86,10 @@ void encode(Encoder& out, const Weapon& weapon) {
     });
     out.flag(weapon.opportunity_fire_when_targeting);
     out.flag(weapon.opportunity_fire_when_idle);
+    if (weapon.appearance_delay_frames.value_or(0) != 0) {
+        out.text("APPEARANCE-DELAY-v1");
+        out.u32(*weapon.appearance_delay_frames);
+    }
 }
 
 void encode(Encoder& out, const std::optional<Weapon>& weapon) {
@@ -110,6 +115,21 @@ void encode(Encoder& out, const Hardpoint& hardpoint) {
     out.text(hardpoint.special_ability_name);
     out.fixed(hardpoint.fighter_bay_flyout_distance);
     out.vec3(hardpoint.bay_axis);
+    if (hardpoint.requires_manual_target) {
+        out.text("MANUAL-TARGET-v1");
+        out.text("MANUAL-CANNON-v1");
+        out.fixed(hardpoint.manual_cooldown_seconds);
+        out.flag(hardpoint.manual_is_turret);
+        if (hardpoint.manual_is_turret) {
+            encode(out, hardpoint.manual_turret);
+            encode(out, hardpoint.manual_barrel);
+            out.vec3(hardpoint.manual_rest);
+            out.vec3(hardpoint.manual_offset);
+            out.fixed(hardpoint.manual_rotate_speed);
+            out.fixed(hardpoint.manual_yaw_extent);
+            out.fixed(hardpoint.manual_pitch_extent);
+        }
+    }
 }
 
 void encode(Encoder& out, const SpawnEntry& entry) {
@@ -126,6 +146,15 @@ void encode(Encoder& out, const SpaceFootprint& footprint) {
     out.fixed(footprint.obstacle_radius);
     out.fixed(footprint.collision_x);
     out.fixed(footprint.collision_y);
+    out.texts(footprint.hazard.behavior);
+    out.texts(footprint.hazard.space_behavior);
+    out.flag(footprint.hazard.asteroid_field);
+    out.flag(footprint.hazard.ion_storm);
+    out.flag(footprint.hazard.nebula);
+    out.flag(footprint.hazard.impassable_asteroid);
+    out.flag(footprint.hazard.asteroid_damage);
+    out.flag(footprint.hazard.nebula_service);
+    out.vec3(footprint.hazard.obstacle_offset);
 }
 
 void encode(Encoder& out, const UnitType& unit) {
@@ -160,6 +189,10 @@ void encode(Encoder& out, const UnitType& unit) {
     out.text(unit.targeting_priority_set);
     out.u32(unit.targeting_priority_set_index);
     out.fixed(unit.targeting_max_attack_distance);
+    if (unit.targeting_min_attack_distance) {
+        out.text("targeting-min-distance-v1");
+        out.fixed(unit.targeting_min_attack_distance);
+    }
     out.fixed(unit.targeting_stickiness_seconds);
     out.texts(unit.category_mask);
     out.u64(unit.category_bits);
@@ -169,6 +202,9 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.space_fow_reveal_range);
     out.flag(unit.reveal);
     out.text(unit.team_type);
+    if (!unit.replenish_team.empty() || unit.redirect_damage_to_teammates) {
+        out.text("hero-wingmen-v1"); out.text(unit.replenish_team); out.flag(unit.redirect_damage_to_teammates);
+    }
     out.fixed(unit.team_reveal_range);
     out.flag(unit.victory_relevant);
     out.flag(unit.destroyed_with_hardpoints);
@@ -201,6 +237,22 @@ void encode(Encoder& out, const UnitType& unit) {
             out.fixed(modifier.value);
         });
         out.flag(ability.supports_autofire);
+        if (!ability.spawned_object.empty()) {
+            out.text("hero-spawn-v1"); out.text(ability.spawned_object); out.u32(ability.spawned_projectile_index);
+            out.fixed(ability.bomb_countdown_seconds); out.fixed(ability.effective_radius); out.fixed(ability.target_position_z_offset);
+        }
+        if (ability.type == "CONCENTRATE_FIRE" || ability.type == "ENERGY_WEAPON" || ability.type == "TRACTOR_BEAM") {
+            out.text("concentrate-fire-v1");
+            out.fixed(ability.effective_radius);
+            out.text(ability.gui_activated_ability_name);
+        }
+        if (ability.type == "BARRAGE") {
+            out.text("BARRAGE-v1");
+            out.text(ability.projectile_override);
+            out.u32(ability.projectile_index);
+            out.fixed(ability.fixed_inaccuracy);
+            out.fixed(ability.target_z_offset);
+        }
     });
     out.each(unit.team_abilities, [&](const Ability& ability) {
         out.text(ability.type);
@@ -255,6 +307,24 @@ void encode(Encoder& out, const UnitType& unit) {
         out.fixed(bonus.multiplier);
         out.text(bonus.target_source);
     });
+    // WPR-22/33/51/52: gameplay content, including absent versus zero limits.
+    for (const auto limit : {production.lifetime_player, production.current_player,
+             production.lifetime_allies, production.current_allies}) {
+        out.flag(limit.has_value());
+        if (limit) out.u32(*limit);
+    }
+    out.texts(production.prerequisites);
+    out.text(production.next_level);
+    out.flag(production.upgrade_object);
+    out.flag(production.level_up);
+    out.flag(production.increments_tech);
+    out.text(production.removes_previous);
+    out.each(production.combat_bonuses, [&](const CombatBonus& bonus) {
+        out.u32(bonus.stacking_category);
+        out.texts(bonus.types);
+        out.texts(bonus.categories);
+        for (const auto percentage : bonus.percentages) out.fixed(percentage);
+    });
     out.fixed(unit.follow_distance);
 }
 
@@ -262,7 +332,7 @@ void encode(Encoder& out, const UnitType& unit) {
 
 std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
     Encoder out;
-    out.text("eawr-unit-tables-v5");
+    out.text("eawr-unit-tables-v7");
     out.each(tables.units, [&](const UnitType& unit) { encode(out, unit); });
     out.each(tables.obstacles, [&](const ObstacleType& obstacle) {
         out.text(obstacle.id);
@@ -291,6 +361,29 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.fixed(projectile.ion_stun_shot_rate_reduction);
         out.flag(projectile.ion_stun_stack_duration);
         out.fixed(projectile.ion_stun_radius);
+        out.fixed(projectile.blast.damage);
+        out.fixed(projectile.blast.radius);
+        out.flag(projectile.blast.dropoff);
+        out.u32(static_cast<std::uint32_t>(projectile.blast.tiers));
+        out.u32(static_cast<std::uint32_t>(projectile.blast.max_victims));
+        out.text(projectile.blast_immune_faction);
+        out.fixed(projectile.blast.max_delay);
+        if (projectile.weaken.on_detonation) {
+            const auto& weaken = projectile.weaken;
+            out.text("hero-weaken-v1"); out.fixed(weaken.radius); out.fixed(weaken.take_damage_increase);
+            out.fixed(weaken.cause_damage_reduction); out.u32(weaken.duration_frames); out.u64(weaken.categories);
+            out.text(weaken.status_effect);
+        }
+        // RFL-01..08: conditional extension leaves tables without flight inputs byte-identical.
+        if (projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)
+            || projectile.rocket_curve_distance || projectile.rocket_curve_offset || projectile.rocket_straight_distance) {
+            out.text("RFL1");
+            out.fixed(projectile.max_lifetime);
+            out.flag(projectile.explode_at_target_radius.value_or(false));
+            out.fixed(projectile.rocket_curve_distance);
+            out.fixed(projectile.rocket_curve_offset);
+            out.fixed(projectile.rocket_straight_distance);
+        }
     });
     out.each(tables.priority_sets, [&](const TargetingPrioritySet& set) {
         out.text(set.id);
@@ -324,6 +417,176 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.text(row.armor_type);
         out.fixed(row.multiplier);
     });
+    // WAD-14: collision eligibility matters even in content without live capture points.
+    out.text("BLAST-COLLISION-v1");
+    out.each(tables.units, [&](const UnitType& unit) {
+        out.text(unit.id);
+        out.flag(unit.living_projectile_collision);
+    });
+    // WBP-01: the optional live-pad content extension leaves tables without capture points unchanged.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.capture_point; })) {
+        out.text("PADS-v1");
+        out.fixed(tables.pad_ai_build_multiplier);
+        out.each(tables.pad_neutral_factions, [&](const std::uint64_t faction) { out.u64(faction); });
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.capture_point);
+            out.flag(unit.build_pad);
+            out.flag(unit.under_construction);
+            out.flag(unit.living_projectile_collision);
+            out.flag(unit.influences_capture);
+            out.flag(unit.ownership_sticks);
+            out.flag(unit.community_property);
+            out.flag(unit.construction_blocker);
+            out.flag(unit.child_persists);
+            out.fixed(unit.capture_radius);
+            out.fixed(unit.capture_seconds);
+            out.text(unit.constructed_type);
+            encode(out, unit.build_attachment);
+        });
+        // WBP-02/07: stock noncapture obstacles use both defaults. Bind mod opt-outs
+        // when present without changing the stock identity for these additional reads.
+        if (std::any_of(tables.obstacles.begin(), tables.obstacles.end(), [](const ObstacleType& obstacle) {
+                return !obstacle.influences_capture || !obstacle.construction_blocker || obstacle.living_projectile_collision;
+            })) {
+            out.text("pad-obstacle-candidates-v1");
+            out.each(tables.obstacles, [&](const ObstacleType& obstacle) {
+                out.text(obstacle.id);
+                out.flag(obstacle.influences_capture);
+                out.flag(obstacle.construction_blocker);
+                out.flag(obstacle.living_projectile_collision);
+            });
+        }
+    }
+    // SAE-02: bind station-level perceptions without changing profiles that have no station.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.base_level != 0; })) {
+        out.text("ai-station-levels-v1");
+        out.each(tables.units, [&](const UnitType& unit) { out.text(unit.id); out.u32(unit.base_level); });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return unit.destroy_when_child_dies || unit.pad_rebuild_seconds || unit.tactical_respawn_seconds;
+        })) {
+        // WHZ-52/WBP-27/28: bind authored lifecycle content to replay identity.
+        out.text("pad-lifecycle-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.destroy_when_child_dies);
+            out.fixed(unit.pad_rebuild_seconds);
+            out.fixed(unit.tactical_respawn_seconds);
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.tactical_sale; })) {
+        out.text("pad-sale-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.tactical_sale);
+            out.fixed(unit.tactical_sell_percentage);
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return std::any_of(unit.production.income_bonuses.begin(), unit.production.income_bonuses.end(),
+                [](const IncomeBonus& bonus) { return !bonus.target_source.empty(); });
+        })) {
+        out.text("income-modifiers-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.production.income_bonuses, [&](const IncomeBonus& bonus) {
+                out.fixed(bonus.interval_multiplier);
+                out.text(bonus.activation_style);
+                out.u32(bonus.stacking_category);
+                out.flag(bonus.all_allied_sources);
+                out.flag(bonus.reverse);
+            });
+        });
+    }
+    // EN-08: bind the optional engine-disable content without changing profiles that omit it.
+    if (std::any_of(tables.projectiles.begin(), tables.projectiles.end(), [](const Projectile& projectile) {
+            return projectile.disables_engines_when_power_drained;
+        })) {
+        out.text("engine-disable-v1");
+        out.each(tables.projectiles, [&](const Projectile& projectile) {
+            out.text(projectile.id);
+            out.flag(projectile.disables_engines_when_power_drained);
+            out.fixed(projectile.disable_engines_duration);
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.company_members.empty();
+        })) {
+        out.text("hero-deployment-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.named_hero);
+            out.flag(unit.generic_hero);
+            out.flag(unit.team_named_hero);
+            out.flag(unit.team_generic_hero);
+            out.text(unit.company_transport);
+            out.text(unit.deployed_space_type);
+            out.flag(unit.creates_carried_heroes);
+            out.each(unit.company_members, [&](const UnitType::CompanyMember& member) {
+                out.text(member.type);
+                out.flag(member.named_hero);
+                out.flag(member.generic_hero);
+                out.text(member.unique_space_unit);
+            });
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.special_abilities.empty() || !unit.team_special_abilities.empty();
+        })) {
+        out.text("nested-special-abilities-v1");
+        const auto special = [&](const sim::tactical::SpecialAbilityProfile& profile) {
+            out.text(profile.name); out.u8(static_cast<std::uint8_t>(profile.kind));
+            out.u8(static_cast<std::uint8_t>(profile.style));
+            out.flag(profile.initially_enabled.has_value());
+            if (profile.initially_enabled) out.flag(*profile.initially_enabled);
+            out.flag(profile.causes_despawn); out.u32(profile.service_interval);
+            out.each(profile.filter.applicable_types, [&](const auto id) { out.u64(id); });
+            out.u64(profile.filter.applicable_categories);
+            out.each(profile.filter.excluded_types, [&](const auto id) { out.u64(id); });
+            out.u64(profile.filter.excluded_categories);
+            if (profile.kind == sim::tactical::SpecialAbilityKind::concentrate_fire) {
+                out.text("concentrate-fire-v1");
+                out.fixed(profile.target_damage_increase);
+                out.fixed(profile.target_speed_decrease);
+                out.u32(profile.concentrate_stacking_category);
+            }
+            if (profile.kind == sim::tactical::SpecialAbilityKind::energy_weapon
+                || profile.kind == sim::tactical::SpecialAbilityKind::tractor_beam) {
+                out.text("hero-beam-v1");
+                out.fixed(profile.beam_min_range);
+                out.fixed(profile.beam_max_range);
+                out.fixed(profile.damage_per_frame);
+                out.fixed(profile.target_speed_decrease);
+                out.u32(profile.concentrate_stacking_category);
+                out.u64(profile.doubled_speed_categories);
+                out.text(profile.beam_owner_particle);
+                out.text(profile.beam_owner_bone);
+            }
+        };
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.each(unit.special_abilities, special);
+            out.each(unit.team_special_abilities, special);
+        });
+    }
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.production.upgrade_object && !unit.production.combat_bonuses.empty();
+        })) {
+        out.text("hero-command-bonuses-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            if (unit.production.upgrade_object) { out.u32(0); return; }
+            out.each(unit.production.combat_bonuses, [&](const CombatBonus& bonus) {
+                out.text(bonus.name); out.flag(bonus.enabled); out.text(bonus.specific_faction);
+                out.each(bonus.excluded_containers, [&](const auto id) { out.u64(id); });
+                out.each(bonus.filter.applicable_types, [&](const auto id) { out.u64(id); });
+                out.u64(bonus.filter.applicable_categories);
+                out.each(bonus.filter.excluded_types, [&](const auto id) { out.u64(id); });
+                out.u64(bonus.filter.excluded_categories);
+            });
+        });
+    }
     return out.take();
 }
 

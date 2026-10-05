@@ -97,6 +97,19 @@ SinCos sin_cos_turn(Fixed angle) noexcept {
     return {Fixed::from_raw(both.sine), Fixed::from_raw(both.cosine)};
 }
 
+SinCos TrigCache::sample(Fixed angle) noexcept {
+    angle = wrap_turn(angle);
+    for (std::size_t index = 0; index < size_; ++index) {
+        if (entries_[index].angle == angle) return entries_[index].value;
+    }
+    const auto value = sin_cos_turn(angle);
+    entries_[next_] = {angle, value};
+    next_ = (next_ + 1) % entries_.size();
+    size_ = std::min(size_ + 1, entries_.size());
+    ++builds_;
+    return value;
+}
+
 core::Result<Fixed> atan2_turn(Fixed y_value, Fixed x_value) noexcept {
     std::int64_t x = x_value.raw();
     std::int64_t y = y_value.raw();

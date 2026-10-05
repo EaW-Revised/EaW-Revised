@@ -24,6 +24,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         "${EAWR_ROOT}/src/presentation/particles/cpu_system.cpp"
         "${EAWR_ROOT}/src/presentation/particles/proxy_binding.cpp"
         "${EAWR_ROOT}/src/presentation/particles/render.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/render_plan.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/render_stream.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/effect_registry.cpp"
     )
     add_executable(
         map_attachment_owner_tests
@@ -35,6 +38,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         "${EAWR_ROOT}/src/presentation/particles/map_effect_plan.cpp"
         "${EAWR_ROOT}/src/presentation/particles/proxy_binding.cpp"
         "${EAWR_ROOT}/src/presentation/particles/render.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/render_plan.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/render_stream.cpp"
+        "${EAWR_ROOT}/src/presentation/particles/effect_registry.cpp"
         "${EAWR_ROOT}/src/sim/math/fixed.cpp"
         "${EAWR_ROOT}/src/sim/math/geometry.cpp"
         "${EAWR_ROOT}/src/sim/math/wide.cpp"

@@ -397,6 +397,10 @@ void Voices::finished(const std::size_t voice) {
     if (voice < voices_.size()) voices_[voice] = {};
 }
 
+void Voices::set_position(const std::size_t voice, const Vec3& position) {
+    if (is_3d_voice(voice) && voices_[voice].event != nullptr) voices_[voice].position = position;
+}
+
 const SfxEvent* Voices::playing(const std::size_t voice) const {
     return voice < voices_.size() ? voices_[voice].event : nullptr;
 }

@@ -1,5 +1,28 @@
 # Production Godot viewer
 
+`--eawr-skirmish-setup --eawr-game-root <install>` opens the space setup screen.
+It lists the effective stock and mod space maps with installed names/previews,
+and lets you choose each slot's faction and authored team. This version has
+one human and one AI opponent. Start enters the ordinary live skirmish path;
+battle completion returns to setup. Unsupported battle options are omitted.
+Mod additions currently follow the CLI's `_mp_space_*.ted` naming policy;
+Header-based custom-map discovery and official/custom eligibility remain tracked work (legacy EAWR-991).
+The packaged `play-demo` launcher opens setup by default; `play-demo --m2`
+retains the fixed M2 battle. Direct `--eawr-live-session m2` also remains valid.
+Pass `--eawr-perf-trace <csv>` and `--eawr-live-replay-out <replay>` directly to
+`play-demo` to record the battle selected in setup; no explicit live-session
+argument is needed. Close the battle to flush the trace and write its replay.
+
+The opt-in `--eawr-setup-test` GPU contract drives the map/faction/Start controls
+with GUI events, runs a short driven battle, returns to setup and exits.
+`--eawr-capture <absolute.png>` captures setup; that contract also writes
+`<stem>.battle.png` and `<stem>.returned.png`. Run
+`tests/presentation/renderer/test_skirmish_setup.py` through the private GPU lane
+with the normal runtime environment variables; `EAWR_SETUP_EYECHECK` optionally
+retains its lit captures and report.
+Set `EAWR_RELEASE_VIEWER_ZIP` to a built viewer archive to also exercise its
+relocated launcher, trace rows and replay output at graceful close.
+
 With a FoC installation, map and effect modes mount `corruption/Data` over
 `GameData/Data` and select the FoC catalog by default. `--eawr-profile eaw`
 selects the base EaW files for regression fixtures; `foc` and `remake` are
@@ -12,7 +35,7 @@ nodes.
 
 The project selects Forward+ on Vulkan (with D3D12 fallback on Windows).
 `rendering/rendering_device/fallback_to_opengl3` keeps Compatibility as an
-unpinned, untested emergency fallback for one milestone (EAWR-153). No viewer
+unpinned, untested emergency fallback for one milestone. No viewer
 capture or qualification result is pinned to Compatibility; the retained code
 and its later deletion point are listed in [rendering.md](../../docs/rendering.md).
 
@@ -20,30 +43,29 @@ and its later deletion point are listed in [rendering.md](../../docs/rendering.m
 
 A populated land or space map plays each animated placement's `Idle_Anim_00`
 clip from its own start frame, a hash of its TED record, at the XML
-`Idle_Anim_00_Rate_Mod` and loop setting (EAWR-145 space, EAWR-157 land,
-`docs/asset-formats.md#idle-clip-playback`). With `--eawr-camera-interactive`
+`Idle_Anim_00_Rate_Mod` and loop setting (`docs/asset-formats.md#idle-clip-playback`). With `--eawr-camera-interactive`
 the clip clock follows real time. A fixed capture holds it at the particle-frame
 count. `--eawr-map-idle-offset <ticks>` adds 30 Hz ticks to the clock, so a
-series of captures at offsets 0, 30, 60, ... shows the Coruscant asteroids and
+series of captures at offsets 0, 30, 60,... shows the Coruscant asteroids and
 junk, or the Naboo comms array dish, turning second by second. It requires
 `--eawr-populate`. The report's `populate.unit_animation` names each animated
 land object type with its clip and playback. Map particles run on the same
-clock, the attached effects on a space map (EAWR-186) and the land map emitters
-(EAWR-196): one 1/30 s sample per frame in a fixed capture
+clock, including the attached effects on a space map and the land map emitters:
+one 1/30 s sample per frame in a fixed capture
 (`--eawr-map-particle-frames` sets the count), real time in the live view.
 `map_particles.clock` reports `held` or `live`. The environment's Planet and Nebula
-effects take their `TIME` from that clock too, at retail's 0.03 s per tick (EAWR-185), so
+effects take their `TIME` from that clock too, at retail's 0.03 s per tick, so
 the Coruscant nebula waves and drifts. `space.effect_clock` reports the clock, its
 tick at capture and the effect time.
 
 ## Bloom
 
 Land and space maps draw the retail `SceneBloom` pass with the selected environment
-record's (default 0, see below) strength, cutoff and size (EAWR-201, `docs/rendering.md#bloom`), like retail at High
+record's (default 0, see below) strength, cutoff and size (`docs/rendering.md#bloom`), like retail at High
 and Highest. `--eawr-bloom off` turns it off for a before/after comparison; the
 report's `scene_bloom` records the status and values. Only a lit scene blooms: without
 `--eawr-lighting` there is no bloom (`scene_bloom.status: lighting_off`) and
-`--eawr-bloom on` is refused (EAWR-307). Unit, effect and model
+`--eawr-bloom on` is refused. Unit, effect and model
 modes and the space evidence harness never bloom. With bloom on, a land capture
 also writes `<capture>.bloom_off.png`, the configured scene without bloom, and
 its comparison captures and pixel evidence are unbloomed.
@@ -64,7 +86,7 @@ composes record 0. The report's `lighting.environment` names the `record` and
 
 With `--eawr-environment map` a populated land map takes the wind of that TED
 environment record (speed `0x2c`, heading `0x2b`), and its `Tree.fx` trees and
-`Grass.fx` ground cover sway in it (EAWR-147, `docs/behaviour/vegetation-effects.md`
+`Grass.fx` ground cover sway in it (`docs/behaviour/vegetation-effects.md`
 W-01..W-09). The scene clock is the idle clips' clock in seconds: held in a fixed
 capture (so `--eawr-map-idle-offset` steps the sway and a capture repeats), real
 time in the live view. Without a map environment there is no wind and nothing
@@ -82,25 +104,25 @@ index is Coruscant's player-one marker record 55, used by
 A FoC StarBase id (`Rebel_Star_Base_1`) takes a `Team_NN_Space_Station`
 marker record instead (Coruscant: 48 for team 0, 54 for team 1). Either stands
 with its marker's own position and orientation, as a skirmish start places it
-(R-ROT-04); the EAWR-199 station eye checks use the station form. No gameplay spawn or
+(R-ROT-04); the hull bump and specular eye checks use the station form. No gameplay spawn or
 simulation state is created. Without the option, the map composition is
 unchanged.
 
-`--eawr-space-place-at <FoC SpaceUnit XML id>@<x>,<y>,<z>,<yaw>` (EAWR-70, repeatable up
+`--eawr-space-place-at <FoC SpaceUnit XML id>@<x>,<y>,<z>,<yaw>` (repeatable up
 to 256 times) places inert units at explicit TED source positions and TED placement yaws (degrees) through
-the same upload. The placement transform applies FoC's fixed +90 degree model turn (EAWR-288), so a
+the same upload. The placement transform applies FoC's fixed +90 degree model turn, so a
 TED yaw is the heading drawn: a trace's facing yaw (0 along +X) is passed unchanged. It serves, for example, the samples of a movement trace
 (`sim_headless --scenario`, [traces.md](../../docs/traces.md)) drawn as a trail. It needs
 `--eawr-populate` on a space map and is not composed with `--eawr-space-place-object`; the
 report's `populate.placed_ships` counts them.
 
-`--eawr-live-session melee` (EAWR-601) plays the melee benchmark on the same map: both sides' ships and
+`--eawr-live-session melee` plays the melee benchmark on the same map: both sides' ships and
 squadrons within weapon range and set on each other, with no station or map object
 ([battle bench](../../docs/performance/battle-bench.md)). The viewer builds the fight exactly as
 `path_bench --melee` does (`skirmish::build_melee`), `--eawr-live-melee s|m|l` (default `s`) and
 `--eawr-live-melee-seed <n>` (default 601) choosing it, and then runs it as a replay session.
 
-`--eawr-live-session skirmish` (EAWR-908)
+`--eawr-live-session skirmish`
 plays any FoC `_mp_space_*.ted` with exactly two players, including maps authored
 for larger lobbies. More than two **players** are refused; map capacity is not a
 restriction. With no options, the map, lobby, SK-22 fleets and seed are M2's
@@ -183,29 +205,29 @@ opens against the viewport background. Map selection does not add shader routes.
 | utapau | 6 | asteroid fields |
 | yavin | 8 | asteroid fields |
 
-`--eawr-live-session m2` (EAWR-80 part A) runs the authoritative tactical session of the M2
+`--eawr-live-session m2` runs the authoritative tactical session of the M2
 skirmish (`plan/phase-2/m2-skirmish.md`) on `_mp_space_coruscant.ted` with `--eawr-populate`.
-The session steps on its own simulation thread with the EAWR-276 worker pool
+The session steps on its own simulation thread with the persistent simulation worker pool
 ([simulation.md](../../docs/simulation.md#game-build)); the viewer draws its units from the
 published snapshots through the placed-ship upload path, interpolated between the two newest
 ticks, and hides the units the local player (`--eawr-live-player`, default the human slot)
 does not see. The map objects the session owns leave the static scene. A squadron's container
 has no model; its craft are drawn, those of the tick-zero squadrons and, from model slots
-composed for every SK-23 launch, the craft launched later (EAWR-79: each takes the first free slot
-of its type when it first shows; the report's `launch_slots` and `launched_drawn`; `populate.live_units` counts the slots apart from the session's units, as `launch_slots_drawn` and `launch_slots_not_drawn`). The units' own particle proxies follow them (EAWR-394, `unit_emitters` in the report): engine
+composed for every SK-23 launch, the craft launched later (each takes the first free slot
+of its type when it first shows; the report's `launch_slots` and `launched_drawn`; `populate.live_units` counts the slots apart from the session's units, as `launch_slots_drawn` and `launch_slots_not_drawn`). The units' own particle proxies follow them (`unit_emitters` in the report): engine
 emitters while their engines are online, a hardpoint's damage emitters once it is destroyed
 ([battle presentation](../../docs/behaviour/battle-presentation.md) BP-40 to BP-46);
-`--eawr-map-effects off` turns them off. The FoC tactical AI (EAWR-79) commands the Empire, the
+`--eawr-map-effects off` turns them off. The FoC tactical AI commands the Empire, the
 non-human lobby player: its retail space freestore script runs beside the world and its orders
 join the replay ([FoC tactical AI](../../docs/behaviour/foc-tactical-ai.md#79-host)); the
 report's `ai` lists its players, Lua load and the engine calls it could not make. Options:
 
-- `--eawr-live-deploy-overlay on|off` (default `off`, EAWR-563): draws the fog plane as FoC's red deployment overlay
+- `--eawr-live-deploy-overlay on|off` (default `off`): draws the fog plane as FoC's red deployment overlay
   (space-fog-presentation.md FW-22, FW-23) instead of the white fog: fogged cells and the map's border in
   `SpaceReinforceFOWColor` on the reinforcement tile. `live_fog.deploy_overlay` records it. FoC shows it only in the
   reinforcement pane; M2 enables it while the pane or a reinforcement drag is active. The switch also exposes it
   (`FogField::set_deployment_overlay`'s blocked-point function).
-- Unit fog fade (EAWR-535, FW-16 to FW-21, always on except with `--eawr-live-reveal on`): the report's
+- Unit fog fade ( FW-16 to FW-21, always on except with `--eawr-live-reveal on`): the report's
   `live_session.fading_units`, `fading` (every drawn unit's opacity now) and `fading_log` (one row a tick a unit is
   below full opacity) read it.
 - `--eawr-live-ai on|off` (default `on`): the FoC AI of `m2` and `skirmish`. A `replay` session never runs it;
@@ -222,16 +244,16 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   of the recorded setup the revealed sensor range before the replay runs, as the fixed-force
   recordings stage fog revealed (a replay only replays recorded commands, so this does not change
   what the recording does). Selection and order input still read each unit's ownership, not
-  reveal, so a revealed enemy cannot be selected or ordered (EAWR-82,
+  reveal, so a revealed enemy cannot be selected or ordered (
   [battle selection](../../docs/behaviour/foc-battle-selection.md)).
 
 - `--eawr-live-order <tick>:<move|face>:<unit>@<x>,<y>,<z>`, `<tick>:stop:<unit>`,
   `<tick>:damage:<unit>@<amount>[,<hardpoint>]`, `<tick>:attack:<unit>@<target unit>` or
-  `<tick>:<attack_move|guard>:<unit>@<x>,<y>,<z>` / `@<unit>` (EAWR-452, a point or the unit to
+  `<tick>:<attack_move|guard>:<unit>@<x>,<y>,<z>` / `@<unit>` (a point or the unit to
   approach or guard) (repeatable): the debug hook injects an order, as the unit's owner, into the next-tick
   command path at that tick. `damage` is the scripted damage of HD-30, to the hull or to
   the hardpoint of that `HardPoints` index; `<unit>` may be `2+3+4`, one command naming several
-  units as a selection's order does (EAWR-552); a capture destroys a unit with it to show its
+  units as a selection's order does; a capture destroys a unit with it to show its
   death clone, or a hardpoint to show its breakoff prop. Unit IDs are those
   `sim_headless --skirmish m2` lists.
 - A destroyed unit whose type lists a `Death_Clone` is replaced by that clone at its last drawn
@@ -241,7 +263,7 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   `Death_Persistence_Duration` leaves after it and its fade, and its resources are released.
   The report's `live_session` lists the clips of every start type (`unit_clips`), the clones set
   up (`death_clones`), shown now (`death_clones_shown`) and gone (`death_clones_retired`).
-- A destroyed hardpoint whose XML names a `Death_Breakoff_Prop` throws that prop off (EAWR-391,
+- A destroyed hardpoint whose XML names a `Death_Breakoff_Prop` throws that prop off (
   [battle presentation](../../docs/behaviour/battle-presentation.md) BP-30 to BP-36): it appears
   at the hardpoint's attachment point with its ship's facing, drifts by `Debris_Movement_Vector`
   and tumbles by `Debris_Facing_Rotate_Vector` every logical frame, carries its
@@ -250,37 +272,39 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   run shows the same) shows its `Death_Explosions` and leaves. The report's `breakoff_props`
   lists the props set up (`prepared`), thrown (`spawned`) and gone (`expired`), the events
   whose ship the player did not see (`not_seen`) or whose tick had left the snapshot history
-  (`unknown`, EAWR-401), and the fires and explosions that ended before a frame reached them
+  (`unknown`), and the fires and explosions that ended before a frame reached them
   (`effects_skipped`).
-- `--eawr-live-purchase-slots <N>` (1 to 64, default 10; EAWR-530 test hook): the model slots composed per
+- `--eawr-live-purchase-slots <N>` (1 to 64, default 10; a purchasing test hook): the model slots composed per
   buyable unit type. A slot whose unit is gone goes to the next unit of its type (the report's
   `slots_released`), so a small N shows the reuse without buying past ten squadrons. An
   `--eawr-live-late-orders on` lets an `--eawr-live-order` name a unit the start does not hold (a
   bought one, with an ID above every start unit's); it is given as the local player.
 - `--eawr-live-death-anim <TYPE>`, `--eawr-live-death-persistence <seconds>`: test hooks that
   give every death clone this `Specific_Death_Anim_Type` or `Death_Persistence_Duration`.
-- `--eawr-live-follow <unit>` (EAWR-447, eye-check clips): every frame the tactical camera looks at
+- `--eawr-live-follow <unit>` (fighter-death eye-check clips): every frame the tactical camera looks at
   where the unit was last drawn, live or spinning away after its death, so a clip tracks it
   smoothly; once it is gone the camera holds its last spot.
 - The report's `live_session.spin_away` lists each spin-away the frames reached (`unit`, the
   ticks of its `started` and `ended` events), `drawn_max`, the most spinning craft one frame
-  placed, and `ships_max`, the most of those with a model (launched craft have none yet) (EAWR-447,
+  placed, and `ships_max`, the most of those with a model (launched craft have none yet) (the fighter death outcomes,
   docs/behaviour/space-fighter-deaths.md).
-- The report's `live_session.ion_shots` (EAWR-862) lists each squadron whose `ION_CANNON_SHOT` the
+- The report's `live_session.ion_shots` lists each squadron whose `ION_CANNON_SHOT` the
   frames saw on (`switched_on`, `first_on`, `last_on`, `on`) and each unit they saw ion-stunned
   (`first`, `max_frames`); `battle_effects.ability_shots_fired` and `ability_shot_frames_drawn`
   count the ion bolts by the projectile type drawn (docs/behaviour/battle-presentation.md BP-66).
+- A replay containing a pad-build command uses the selected map's authored economy and reserves
+  construction and neutral replacement model slots. Select the map the replay was recorded on.
 - `--eawr-live-capture-ticks a,b,...` also captures the frames that show those ticks, as
   `<capture stem>_tNNNN.png`; each must be a multiple of the step, which a frame shows exactly.
   `--eawr-live-ticks n` keeps the run going until tick n.
 - `--eawr-live-follow-group <tick>:<entity>[,<entity>...]` (repeatable, ticks ascending): from that
   tick the camera eases towards the centre of the named units still alive (a 20-tick time
-  constant) and holds when none is left. The EAWR-449 eye-check clips follow a plan's TaskForce with
+  constant) and holds when none is left. The AI-plan eye-check clips follow a plan's TaskForce with
   it; the entity IDs come from the headless plan timeline (`foc_plan_tests`).
 - `--eawr-live-step s` (default 0.5): ticks per frame after the warm-up frames. A capture run
   paces the session from the frame count, so a frame shows the same tick on any host; the
   interactive view (`--eawr-camera-interactive`) runs it in real time.
-- `--eawr-live-audio-pace on|off` (default off, capture runs only, EAWR-474): caps the render rate to
+- `--eawr-live-audio-pace on|off` (default off, capture runs only, the capture audio-pacing fix): caps the render rate to
   `logical_frames_per_second / step`, so a frame's real duration matches the battle's own tick
   rate on every host. Which tick a frame shows is already host-independent (the step above), but
   how much real time that frame takes is not, and Godot's audio engine genuinely mixes in real
@@ -302,13 +326,19 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
 - `--eawr-live-fault-tick n`: a test hook that throws on the simulation thread before tick n.
   The session stops stepping; the view keeps the last poses and shows the error, the report
   carries it in `live_session.error`, and a capture run fails with exit code 2.
-- When the simulation fails (EAWR-615), the viewer writes the session's replay through the failed
+- When the simulation fails, the viewer writes the session's replay through the failed
   tick (the command log, its setup and the failed tick's commands) beside Godot's `godot.log`:
   `user://logs/eawr-live-failure-<unix seconds>-tick<N>.eawr-replay` (on Windows
   `%APPDATA%/Godot/app_userdata/EAWR Viewer/logs/`), always, without `--eawr-live-replay-out`. The
   error panel and `live_session.failure_replay` name the file; `sim_headless --replay <file>
   --game-root <install>` replays it into the same failure.
-- `--eawr-live-particle-workers n` (EAWR-638; default a quarter of the hardware threads, 1 to 4, the
+- `--eawr-live-particle-detail x` (0..1, default 1) selects the global particle draw-slot mask;
+  `--eawr-live-particle-lod x` (0..1, default 1) separately gates local emitters and child births.
+  These presentation controls leave authoritative state and replay hashes unchanged.
+  `--eawr-live-particle-heat on|off` (default on) separately admits the heat phase.
+  The authored graphics presets use detail 0.4/0.6/0.8/1; the first two disable heat.
+  Camera zoom does not set local LOD: a native distance producer remains unverified (PS-41).
+- `--eawr-live-particle-workers n` (default a quarter of the hardware threads, 1 to 4, the
   main thread included): the pool the battle's particle systems (unit emitters, battle effects,
   breakoff props) step and build their streams on; 1 runs them on the main thread alone. The
   streams are the same with any count.
@@ -323,40 +353,44 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   for the quit path.
 - `--eawr-live-input <tick>:<click|dclick|rclick|hover>:<unit=N[+@dx,dy,dz]|@x,y,z|screen=x,y>`,
   `<tick>:<hover|click|dclick|rclick>:icon=N`, `<tick>:box:@x,y,z/@x,y,z`, `<tick>:box:screen=x,y/screen=x,y`
-  or `<tick>:key:<name>`, each with optional `+shift`, `+ctrl`, `+alt` (repeatable, EAWR-82): a player
+  or `<tick>:key:<name>`, each with optional `+shift`, `+ctrl`, `+alt` (repeatable): a player
   gesture replayed through Godot's input queue when the view shows that tick, aimed at a unit's
-  projected centre (a squadron craft's own, EAWR-424), squadron N's icon, a source point or a
-  viewport pixel; `unit=N+@dx,dy,dz` aims at a source-space offset from unit N's position (EAWR-665).
+  projected centre (a squadron craft's own), squadron N's icon, a source point or a
+  viewport pixel; `unit=N+@dx,dy,dz` aims at a source-space offset from unit N's position.
   A plain `unit=N` on a unit with a collision mesh aims at the centroid of the mesh triangle nearest
-  its box centre, not the box centre itself, since that can fall in open space the pick misses (EAWR-665).
+  its box centre, not the box centre itself, since that can fall in open space the pick misses.
   `hover` moves the pointer there and leaves it. The report's `battle_input` says
   what it did and `world_ui` what the frame drew. Run pointer gestures on a GPU host: a window
   manager that resizes the local window (FancyZones) moves the injected window-space events off
   the pinned capture viewport.
-  `<tick>:<click|hover|press|release>:hud=<pause|fast_forward|resume|quit>` aims at a HUD control (EAWR-459, EAWR-453),
+  `<tick>:<click|hover|press|release>:hud=<pause|fast_forward|resume|quit>` aims at a HUD control,
   as do the production panel's `b_reinforcement`, `r_close`, pane slots `r_RRCC` and queue slots
-  `tqueueNN` (EAWR-530). To deploy a completed purchase, open reinforcements, hold the left button on
+  `tqueueNN`. To deploy a completed purchase, open reinforcements, hold the left button on
   its reserve slot, drag the green/red model preview to a clear revealed point, and release. Red
   releases keep the unit in reserve; victory closes the pane and cancels placement (WR-07, WR-13..15).
   Script a drag with `510:press:hud=r_0000`, `515:hover:@x,y,0`, `520:release:@x,y,0`;
   the pointer reaches it one frame before the click. `f<frame>` in place of `<tick>` fires on
   that frame after the warm-up, since a paused battle shows one tick on many frames.
 - `--eawr-live-capture-frames a,b,...`: captures by frame after the warm-up, as
-  `<capture stem>_fNNNN.png` (EAWR-459: what a paused battle shows).
-- `--eawr-perf-trace <csv>` (EAWR-601, [battle bench](../../docs/performance/battle-bench.md)): one row per
+  `<capture stem>_fNNNN.png` (what a paused battle shows).
+- `--eawr-perf-trace <csv>` ([battle bench](../../docs/performance/battle-bench.md)): one row per
   drawn frame of the live session: the frame's wall-clock ms, the engine's process ms (the viewer's own frame work), the root viewport's measured render CPU
   and GPU ms, draw calls, objects and primitives (the renderer's numbers are the previous frame's), and
   the presented tick, the units the local player sees, the projectiles in flight and the particles of
   the battle effects and unit emitters, `particle_ms`, the main thread's ms in the frame's unit
   emitters, battle effects and breakoff props, and `ticks` and `tick_ms`, the simulation ticks
-  completed since the previous row and their summed cost (EAWR-638), and `submit_ms` and `pieces`, the main
-  thread's ms in the space view's snapshot builds and renderer submit and the pieces submitted, and `sent`, the transforms of those that reached the engine (EAWR-888: only
-  the pieces that moved).
+  completed since the previous row and their summed cost, and `submit_ms` and `pieces`, the main
+  thread's ms in the space view's snapshot builds and renderer submit and the pieces submitted, and `sent`, the transforms of those that reached the engine (dirty updates: only
+  the pieces that moved), and `ai_ms`, `ai_worst_ms`, `lua_ms` and `lua_worst_ms`: of those ticks,
+  the summed and the worst single tick's ms in the AI's barrier step and in the Lua service (0 without scripts).
+  Population timers (`pose_ms`, `compose_ms`, `refresh_ms`, `opacity_ms`) isolate exact piece
+  composition, instance-buffer refresh and fog-opacity/light propagation. `pose_ms` includes
+  composition and refresh; it must not be summed with those nested timers.
   Timers and counters only; the hashes do not change.
 - `--eawr-live-speed 0..4` (default 2): the tactical speed setting, 10, 20, 30, 45 or 60 ticks
   a second ([time controls](../../docs/behaviour/tactical-time-controls.md) TM-01).
 
-The time panel's pause and fast-forward buttons work as in FoC (EAWR-459, [time
+The time panel's pause and fast-forward buttons work as in FoC ([time
 controls](../../docs/behaviour/tactical-time-controls.md)): pause stops the simulation while the
 camera and the interface keep going, shows "Game Paused" with a Resume Game button, and queues
 orders for the next tick; fast forward (120 ticks a second) toggles on the press and is disabled
@@ -364,11 +398,11 @@ while paused. No key drives them, as in FoC. A driven capture run advances its p
 the step times the rate over 30. Every change enters `live_session.time.track`, and
 `--eawr-live-replay-out <file>` also writes `<file>.time.csv`; the replay and the hashes are the
 same as without the changes. When the battle is decided the HUD shows "WE ARE VICTORIOUS!" or
-"WE HAVE BEEN DEFEATED!" (EAWR-453, [battle end](../../docs/behaviour/battle-end.md)); at `end_tick`
+"WE HAVE BEEN DEFEATED!" ([battle end](../../docs/behaviour/battle-end.md)); at `end_tick`
 the session halts and an end panel with Quit Game opens (`live_session.battle_end`). A capture
 run then keeps drawing the frames it would have taken to reach `--eawr-live-ticks`.
 
-The player controls the live battle as in FoC (EAWR-82, [battle
+The player controls the live battle as in FoC ([battle
 selection](../../docs/behaviour/foc-battle-selection.md)): left click, Shift+click, Ctrl+click,
 double click and left drag select; right click moves or attacks, Ctrl+right click attack-moves
 and Ctrl+Alt+right click guards an own unit or a point ([space orders](../../docs/behaviour/space-orders.md)
@@ -378,10 +412,10 @@ or Insert, step into the tactical overview and the map overview. The arrows and 
 pan (`space-live-camera-bindings.json`); the middle button and wheel work as on the map camera.
 A fighter or bomber squadron selects and takes orders as one unit, also through its icon, and FoC's
 selection circles, shield and health bars, squadron icons and hovered ships' hardpoint reticles are
-drawn in the world (EAWR-424, [battle UI in the world](../../docs/behaviour/foc-battle-world-ui.md)).
+drawn in the world ([battle UI in the world](../../docs/behaviour/foc-battle-world-ui.md)).
 
-For EAWR-25, `Star_Destroyer` is the shipped FoC Imperial Star Destroyer. Its
-idle bind pose at record 55 takes that marker's yaw (149 degrees; before EAWR-288 it
+For the lighting and shadow work, `Star_Destroyer` is the shipped FoC Imperial Star Destroyer. Its
+idle bind pose at record 55 takes that marker's yaw (149 degrees; before the fixed model-turn correction it
 was forced to 90) and is lit by the TED environment sun. Use `--eawr-populate
 --eawr-map-effects on --eawr-lighting sh --eawr-environment map
 --eawr-shadows on` and the Coruscant camera config for the evidence capture;
@@ -389,7 +423,7 @@ repeat with `--eawr-shadows off` at the same camera. With the debug option,
 the directional light's shadow range fits the selected hull instead of every
 distant placement; the view keeps the space shadow settings of
 [rendering policies](../../docs/rendering.md#shadows) (four blended splits,
-bias 2, normal bias 5, EAWR-150). Godot's directional shadow range is global to
+bias 2, normal bias 5, the Forward+ shadow tuning). Godot's directional shadow range is global to
 this scene, so this evidence view also changes shadows on the other placed
 objects while the option is active. The map-wide range used too few texels on
 the hull. The capture report records the ship, spawn record, shadow range,
@@ -398,10 +432,10 @@ Coruscant view keeps its own range, including after a debug view in the same
 renderer.
 
 The placed unit and every populated space object start with all hardpoints
-intact (EAWR-136, [hardpoint state art](../../docs/asset-formats.md#hardpoint-state-art)).
+intact ([hardpoint state art](../../docs/asset-formats.md#hardpoint-state-art)).
 `--eawr-space-hardpoint-state <HardPoint id>=<intact|damaged|destroyed>`, which
 can be repeated, sets one hardpoint of the placed unit through the same hook
-that EAWR-72 will drive (`SpacePopulation::set_hardpoint_state`). A destroyed
+that the hardpoint simulation will drive (`SpacePopulation::set_hardpoint_state`). A destroyed
 hardpoint drops its `Model_To_Attach`, shows its `Damage_Decal`, and starts its
 `Damage_Particles` emitters. A damaged hardpoint has exactly the same visible
 art as an intact one. A destroyed hardpoint also hides sub-objects below its
@@ -459,7 +493,7 @@ every mode has activated (`tests/presentation/renderer/test_capture_size.py`).
 
 ## Font cache (`--eawr-fonts`)
 
-`--eawr-fonts` is a self-contained check of font provisioning (UI-05 EAWR-191). It mounts the font
+`--eawr-fonts` is a self-contained check of font provisioning (UI-05). It mounts the font
 cache that `tools/fonts/extract_eaw_fonts.py` writes ([game fonts](../../docs/build.md#game-fonts)).
 The cache is `--eawr-font-cache <dir>`, else `EAWR_FONT_CACHE`, else `out/fonts` of the checkout
 that holds this project. The mode loads every cached face into an engine font from memory.
@@ -479,7 +513,7 @@ host and deletes after the run.
 
 ## UI kit gallery (`--eawr-ui-gallery`)
 
-`--eawr-ui-gallery --eawr-game-root <FoC install>` shows the UI kit (UI-06 EAWR-229) skinned from the
+`--eawr-ui-gallery --eawr-game-root <FoC install>` shows the UI kit (UI-06) skinned from the
 FoC data. It builds the theme from the `GUIDialogs.xml` skin, the `MT_CommandBar` atlas and the
 font cache (found as for `--eawr-fonts`). Then it draws each kit control in its normal,
 mouse-over, pressed and disabled states: frame, push button, a per-control button variation,
@@ -499,7 +533,7 @@ kit takes that mod's skin. The `--eawr-report` lists:
 - for a dialog, each gadget's kind, variation and caption.
 
 `--eawr-ui-movie <movies.xml name> --eawr-movie-cache <dir>` plays that HUD movie instead
-(EAWR-237, [docs/ui/hud-movies.md](../../docs/ui/hud-movies.md)): the Theora entry the player made with
+([docs/ui/hud-movies.md](../../docs/ui/hud-movies.md)): the Theora entry the player made with
 `tools/ui/convert_hud_movie.py`, looping, at twice its 200-unit HUD slot over a two-tone
 backdrop. It needs no skin or fonts. The report's `movie` names the source, the cache key, the
 decoded texture size, the distinct frames seen, the loops and whether it plays; a movie that
@@ -513,8 +547,8 @@ a cache the test extracts on the host and deletes afterwards.
 
 ## Tactical HUD shell (`--eawr-hud tactical`)
 
-`--eawr-hud tactical` draws the space tactical HUD shell over a map (P2-20a EAWR-83,
-[docs/ui/ui-layer.md](../../docs/ui/ui-layer.md) §1.3): the faction faceplate and help droid,
+`--eawr-hud tactical` draws the space tactical HUD shell over a map
+([docs/ui/ui-layer.md](../../docs/ui/ui-layer.md) §1.3): the faction faceplate and help droid,
 the radar's scan lines as the (still empty) minimap frame, the options button and the planet
 name. `--eawr-hud-faction <empire|rebel|underworld>` picks the `_ALT` variant (default rebel),
 `--eawr-hud-rules <aspect|retail>` the layout (default aspect, D4). A live session
@@ -522,13 +556,13 @@ name. `--eawr-hud-faction <empire|rebel|underworld>` picks the `_ALT` variant (d
 leaves it out. Fonts come from
 `--eawr-font-cache`, `EAWR_FONT_CACHE` or the checkout's `out/fonts`, as for the gallery. The
 HUD stops the pointer only on component rects and opaque faceplate texels; every other click
-reaches the world. The options button counts presses and opens nothing yet (P2-20e). The map
+reaches the world. The options button counts presses and opens nothing yet (battle dialogs). The map
 report gains a `hud` object: the shell model, the textures and where they came from, the planet
 name and its source, the pixel rects and the diagnostics. `--eawr-hud-probe` pushes left clicks
 at the options button, the sky, the minimap, opaque panel art and a transparent gap through
 Godot's GUI dispatch and reports which reached the world.
 
-In a live session the command bar shows the selection's unit cards (EAWR-425,
+In a live session the command bar shows the selection's unit cards (
 [docs/behaviour/foc-unit-cards.md](../../docs/behaviour/foc-unit-cards.md)): a card per unit or
 squadron, grouped by ability, with health and shield bars, stacked into `x<n>` cards when the
 selection overflows the 24 slots. A left click on a card selects (Shift deselects) as FoC does;
@@ -545,7 +579,7 @@ runs both on a GPU host.
 
 ## Performance overlay (`--eawr-perf-overlay`, F3)
 
-A dev tool (EAWR-558, [docs/ui/perf-overlay.md](../../docs/ui/perf-overlay.md)): FPS, the frame time with a
+A dev tool ([docs/ui/perf-overlay.md](../../docs/ui/perf-overlay.md)): FPS, the frame time with a
 graph of the last five seconds (a hitch is a spike), the simulation's cost per tick with the window's
 worst tick, and the draw calls and units. **F3** toggles it in any map run; `--eawr-perf-overlay on|off`
 (default `off`) starts a run with it shown, for captures. It only reads wall-clock timers, so the tick
@@ -554,9 +588,31 @@ object; shown, it lists `fps`, `frame_ms`, `tick_ms`, their averages and worsts,
 draw calls and the overlay's own cost (`own_cost_ms`). `tests/presentation/renderer/test_live_session.py`
 checks the flag, the key and the report on a GPU host.
 
+The GTX 970 overlay-cost fixture (legacy EAWR-972) uses Coruscant at 1280×720, two simulation workers and 240 ticks,
+with Godot `--max-fps 60`. Text refreshes at 10 Hz and draw commands at 20 Hz; uncapped FPS would
+spread their cost across more frames and hide work in the reported average. `own_cost_ms` measures
+CPU wall time for sample recording and draw-command rebuilding, including initialization, averaged
+over every shown frame. It excludes GPU execution and the surrounding scene update.
+
+The average-cost gate uses `EAWR_GPU_PROFILE`: **0.200 ms for `nvidia-gtx970`**, **0.100 ms for all
+other profiles and when unset**. Five exclusive 60 FPS runs on the GTX 970 gave the following
+distribution of reported run averages (milliseconds; p95 is nearest rank, the maximum of five):
+
+| Revision | Mean | p50 | p95 |
+| --- | ---: | ---: | ---: |
+| `a784a8d2` (before the viewer per-frame cost work) (legacy EAWR-963) | 0.1104 | 0.095 | 0.162 |
+| `e7a96c0c` (viewer per-frame cost work) (legacy EAWR-963) | 0.1270 | 0.131 | 0.140 |
+| `70d01a4b` (including the AI/Lua trace columns) (legacy EAWR-968) | 0.1146 | 0.105 | 0.137 |
+
+The timed overlay implementation is unchanged across these revisions. The current build adds
+AI/Lua phase values (legacy EAWR-957), while the optional AI/Lua trace columns (legacy EAWR-968) are disabled in this fixture.
+The current mean is within the baseline's run-to-run variation and its p95 is lower; the baseline
+itself misses 0.100 ms in two of five runs. The GTX 970 profile budget leaves 0.038 ms above the
+observed baseline p95, without changing production refresh rates or the budget for other profiles.
+
 ## Input routing self-test (`--eawr-input-routing`)
 
-`--eawr-input-routing --eawr-report <path>` checks input routing (UI-07 EAWR-304, rules UI-I1 to
+`--eawr-input-routing --eawr-report <path>` checks input routing (UI-07, rules UI-I1 to
 UI-I3 and UI-C1 in `docs/ui/ui-layer.md`) through Godot's real event dispatch. It builds a
 synthetic HUD, an edit box and a modal layer at a pinned 1280×720, injects scripted pointer and
 key events and records what reached the world layer. It reads no game data and exits 0 when every
@@ -625,13 +681,13 @@ From WSL/Linux use the same command with `--platform linux-x86_64`, the Linux Go
 binary and the Linux output package. `--platform linux-arm64` validates a cross-built
 package but intentionally rejects `--smoke` unless a native ARM64 host is used.
 
-The P1-01 receipts referenced in the qualification report were already produced with
+The production renderer receipts referenced in the qualification report were already produced with
 the pinned binary and are preserved; this hardening adds preflight and output-root
 guards without rerunning those platform exports. The focused synthetic checks cover
 wrong-engine rejection, smoke-version mismatch and out-of-tree output rejection.
 
 The PCK allowlist includes the project-authored, non-retail `config/camera-bindings.json`
-that the presets' `config/*.json` filter has packed since P1-09; without it every export
+that the presets' `config/*.json` filter has packed since the tactical camera work; without it every export
 from this revision failed validation.
 
 ## Packaged runtime qualification

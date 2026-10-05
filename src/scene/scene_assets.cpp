@@ -38,7 +38,34 @@ namespace eawr::scene {
     return {};
 }
 
-[[nodiscard]] ModelFacts model_facts(const AssetAccess& access, const std::string& path) {
+std::vector<AttachedEffect> model_proxy_effects(const AssetAccess& access, const assets::Model& model) {
+    std::vector<AttachedEffect> effects;
+    effects.reserve(model.proxies.size());
+    for (const assets::Proxy& proxy : model.proxies) {
+        AttachedEffect effect;
+        effect.proxy_name = proxy.name;
+        effect.bone = proxy.bone;
+        effect.resolved = probe(access, "data/art/models/", proxy.name, model_suffixes);
+        if (effect.resolved.empty()) {
+            // Proxy names in the corpus carry an `_ALT<digits>` suffix that
+            // distinguishes several proxies of one effect on one model; the
+            // effect file is named without it. Only that exact trailing form
+            // is removed, and only after the literal name failed.
+            const std::string name = canonical(proxy.name);
+            const std::size_t marker = name.rfind("_alt");
+            if (marker != std::string::npos && marker + 4 < name.size()
+                && std::all_of(name.begin() + static_cast<std::ptrdiff_t>(marker + 4), name.end(),
+                               [](const char c) { return c >= '0' && c <= '9'; })) {
+                effect.resolved = probe(access, "data/art/models/", name.substr(0, marker), model_suffixes);
+                if (!effect.resolved.empty()) effect.alternate_suffix_removed = true;
+            }
+        }
+        effects.push_back(std::move(effect));
+    }
+    return effects;
+}
+
+[[nodiscard]] ModelFacts model_facts(const AssetAccess& access, const std::string& path, const bool construction) {
     ModelFacts facts;
     facts.logical_path = path;
     const assets::Model* model = access.model ? access.model(path) : nullptr;
@@ -52,7 +79,7 @@ namespace eawr::scene {
         const assets::Mesh& mesh = model->meshes[mesh_index];
         // The renderer draws visible meshes only, so an invisible mesh (a
         // collision or damage-state mesh) is not a surface of the static scene.
-        if (!static_mesh_visible(*model, mesh)) continue;
+        if (construction ? !mesh.visible : !static_mesh_visible(*model, mesh)) continue;
         for (std::size_t submesh_index = 0; submesh_index < mesh.submeshes.size(); ++submesh_index) {
             const assets::Submesh& submesh = mesh.submeshes[submesh_index];
             Surface surface;
@@ -78,28 +105,18 @@ namespace eawr::scene {
             facts.surfaces.push_back(std::move(surface));
         }
     }
-    for (const assets::Proxy& proxy : model->proxies) {
-        AttachedEffect effect;
-        effect.proxy_name = proxy.name;
-        effect.bone = proxy.bone;
-        effect.resolved = probe(access, "data/art/models/", proxy.name, model_suffixes);
-        if (effect.resolved.empty()) {
-            // Proxy names in the corpus carry an `_ALT<digits>` suffix that
-            // distinguishes several proxies of one effect on one model; the
-            // effect file is named without it. Only that exact trailing form
-            // is removed, and only after the literal name failed.
-            const std::string name = canonical(proxy.name);
-            const std::size_t marker = name.rfind("_alt");
-            if (marker != std::string::npos && marker + 4 < name.size()
-                && std::all_of(name.begin() + static_cast<std::ptrdiff_t>(marker + 4), name.end(),
-                               [](const char c) { return c >= '0' && c <= '9'; })) {
-                effect.resolved = probe(access, "data/art/models/", name.substr(0, marker), model_suffixes);
-                if (!effect.resolved.empty()) effect.alternate_suffix_removed = true;
-            }
-        }
-        facts.effects.push_back(std::move(effect));
-    }
+    facts.effects = model_proxy_effects(access, *model);
     return facts;
+}
+
+std::vector<Surface> construction_surfaces(const AssetAccess& access, const std::string& path) {
+    return model_facts(access, path, true).surfaces;
+}
+
+std::optional<std::uint32_t> mesh_alternate(const std::string_view name) noexcept {
+    if (name.size() >= 5 && ieq(name.substr(name.size() - 5, 4), "_ALT")
+        && name.back() >= '0' && name.back() <= '9') return static_cast<std::uint32_t>(name.back() - '0');
+    return std::nullopt;
 }
 
 bool static_mesh_visible(const assets::Model& model, const assets::Mesh& mesh) noexcept {

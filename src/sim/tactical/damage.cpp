@@ -1,4 +1,5 @@
 #include "eawr/sim/tactical/damage.hpp"
+#include "eawr/sim/tactical/combat.hpp"
 
 #include "tactical_internal.hpp"
 
@@ -99,6 +100,9 @@ core::Result<void> validate_damage(const DurabilityTable& table) {
         return core::Result<void>::success();
     }
     const auto& rules = *table.damage;
+    if (rules.ion_storm_disable_seconds.raw() < 0 || rules.ion_storm_disable_seconds.raw() > 3600 * Fixed::scale) {
+        return invalid("damage rules: ion-storm window must be between zero and one hour");
+    }
     if (rules.shield_recharge_frames == 0) {
         return invalid("damage rules: the shield recharge interval must be at least one frame");
     }
@@ -164,6 +168,11 @@ core::Result<void> validate_damage(const DurabilityTable& table) {
             return invalid(context + ": energy must be in [0, " + std::to_string(max_durability_health) + "]");
         }
     }
+    if (rules.asteroid_damage.raw() < 0 || rules.asteroid_damage.raw() > health_limit_raw
+        || rules.asteroid_rate.raw() < 0 || rules.asteroid_rate.raw() > one_raw
+        || (rules.asteroid_damage_type != no_type_index && rules.asteroid_damage_type >= rules.damage_types)) {
+        return invalid("damage rules: asteroid damage, probability or armor damage type is out of range");
+    }
     if (rules.energy_to_shield.raw() < 0 || rules.energy_to_shield.raw() > multiplier_limit_raw) {
         return invalid("damage rules: the energy-to-shield rate must be in [0, " + std::to_string(max_damage_multiplier) + "]");
     }
@@ -222,11 +231,23 @@ bool shield_depleted(const DamageRules& rules, const DurabilityState& state, con
     return elapsed * Fixed::scale < rules.depleted_disable_seconds.raw() * logical_frames_per_second;
 }
 
+bool in_ion_storm(const DamageRules& rules, const DurabilityState& state, const std::uint64_t frame) noexcept {
+    if (!state.ion_storm_contact || *state.ion_storm_contact > frame) return false;
+    const auto elapsed = std::min<std::uint64_t>(frame - *state.ion_storm_contact, 1ULL << 30);
+    return elapsed * Fixed::scale < static_cast<std::uint64_t>(std::max(rules.ion_storm_disable_seconds.raw(), std::int64_t{})) * logical_frames_per_second;
+}
+
 core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const DamageRules& rules, DurabilityState& state,
     const Hit& hit, const std::uint64_t frame) {
     HitOutcome outcome;
+    outcome.routed_hardpoint = hit.hardpoint;
     Arithmetic q;
     auto amount = std::max(hit.amount, Fixed{});
+    // WHE-51: privileged script damage bypasses arrival protection, but still takes modes.
+    if (!hit.bypass_take_damage_mode && hit.take_damage_multiplier.raw() != one_raw)
+        amount = q.mul(amount, hit.take_damage_multiplier);
+    if (hit.cause_damage_multiplier.raw() != one_raw) amount = q.mul(amount, hit.cause_damage_multiplier);
+    const bool combat_damage = hit.projectile || hit.kind == HitKind::asteroid;
     if (hit.projectile) {
         if (hit.allow_diminishing_firepower && hit.internal_damage_misc) {
             // DG-05: projectile damage shrinks with the time since the target's last diminishing-
@@ -239,9 +260,11 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
             if (!factor) return core::Result<HitOutcome>::failure(factor.error());
             amount = q.mul(amount, factor.value());
         }
-        // DG-26: the target's combat defense modifier (a craft out of combat: -1, twice the
+    }
+    if (combat_damage) {
+        // DG-26/WHZ-14: the target's combat defense modifier (a craft out of combat: -1, twice the
         // damage; #530 PU-38, an arriving unit -3 more). Independent of DG-05's two gates above:
-        // FoC applies it unconditionally to every projectile hit.
+        // It also applies to asteroid hits.
         if (hit.defense.raw() != 0) {
             const auto defense = std::clamp(hit.defense, whole(-4), whole(1));
             amount = std::min(q.mul(amount, q.sub(whole(1), defense)),
@@ -254,12 +277,15 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
     // scaled by the shield armor, on a unit with a pool whether or not it has a shield.
     const bool drains = hit.projectile && hit.energy_damage && has_energy_pool(profile, rules);
     if ((profile.max_shields.raw() > 0 || drains) && amount.raw() > 0) {
-        const auto modifier = hit.projectile ? armor_multiplier(rules, hit.damage_type, profile.shield_armor_type)
+        const auto modifier = combat_damage ? armor_multiplier(rules, hit.damage_type, profile.shield_armor_type)
                                              : Fixed::from_raw(one_raw);
         const auto shield_damage = q.mul(amount, modifier);
         Fixed absorbed{};
         if (profile.max_shields.raw() > 0 && (!hit.projectile || hit.shield_damage)) {
-            if (shield_depleted(rules, state, frame)) {
+            if (in_ion_storm(rules, state, frame)) {
+                // WHZ-32: the effective shield absorbs zero while its stored pool survives.
+                outcome.storm_shield_branch = true;
+            } else if (shield_depleted(rules, state, frame)) {
                 // DG-09: a depleted shield absorbs nothing; each damaging hit may lengthen the effect.
                 const auto increment = q.mul(rules.depleted_increment_seconds, whole(logical_frames_per_second));
                 const auto frames = increment.raw() / Fixed::scale;
@@ -287,7 +313,7 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
         }
     }
     // DG-10: the rest is scaled by the hull armor; a projectile without hitpoint damage stops here.
-    if (hit.projectile) {
+    if (combat_damage) {
         if (hit.hitpoint_damage && amount.raw() > 0) {
             outcome.armor_multiplier = armor_multiplier(rules, hit.damage_type, profile.armor_type);
         }
@@ -302,6 +328,35 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
         shield_generators_lost(profile, rules, state, frame);
     }
     return core::Result<HitOutcome>::success(outcome);
+}
+
+std::uint32_t random_destroyable_hardpoint(const DurabilityProfile& profile, const DurabilityState& state,
+    CombatRandom& random) noexcept {
+    const auto count = static_cast<std::uint32_t>(std::min(profile.hardpoints.size(), state.hardpoints.size()));
+    const auto alive = [&](const std::uint32_t slot) {
+        return profile.hardpoints[slot].destroyable && state.hardpoints[slot].raw() > 0;
+    };
+    bool available = false;
+    for (std::uint32_t slot = 0; slot < count; ++slot) available = available || alive(slot);
+    if (!available) return hull_target;
+    auto slot = random.uniform(0, count - 1);
+    for (std::uint32_t scanned = 0; scanned < count; ++scanned) {
+        if (alive(slot)) return slot;
+        slot = (slot + 1) % count;
+    }
+    return hull_target;
+}
+
+std::uint32_t damage_mesh_route(const std::span<const std::string> selectors, const std::uint32_t selected) noexcept {
+    if (selected >= selectors.size() || selectors[selected].empty()) return hull_target;
+    const auto fold = [](const unsigned char c) { return c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c; };
+    const auto& name = selectors[selected];
+    for (std::uint32_t slot = 0; slot < selectors.size(); ++slot) {
+        const auto& candidate = selectors[slot];
+        if (name.size() == candidate.size() && std::equal(name.begin(), name.end(), candidate.begin(),
+                [&](const unsigned char a, const unsigned char b) { return fold(a) == fold(b); })) return slot;
+    }
+    return hull_target;
 }
 
 core::Result<void> recharge_shields(const DurabilityProfile& profile, const DamageRules& rules,

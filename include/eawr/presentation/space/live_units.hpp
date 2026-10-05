@@ -8,6 +8,7 @@
 
 #include <array>
 #include <span>
+#include <string>
 #include <vector>
 
 // Presentation of a live tactical session's units (#80): where each unit is drawn between the
@@ -15,6 +16,16 @@
 namespace eawr::presentation::particles { class StepExecutor; }
 
 namespace eawr::presentation::space {
+
+// FW-24: only HIDE_WHEN_FOGGED or TEAM makes a map prop fog-bound.
+[[nodiscard]] bool map_prop_fog_bound(std::span<const std::string> behavior,
+                                    std::span<const std::string> space_behavior) noexcept;
+// Ascending, unique IDs for drawing: sensor-visible units plus living map
+// props that cannot be fogged. The sensor list and snapshots remain immutable.
+void map_prop_draw_visibility(std::span<const sim::EntityId> visible,
+                              std::span<const sim::EntityId> alive,
+                              std::span<const sim::EntityId> unfogged_props,
+                              std::vector<sim::EntityId>& output);
 
 // One unit as drawn: source-basis position, the facing yaw in degrees (0 along source +X,
 // counter-clockwise about +Z), the pitch in degrees (#506; positive lowers the nose, space-fighters

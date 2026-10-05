@@ -154,6 +154,89 @@ def check_spawned_attack(program: pathlib.Path, scenarios: pathlib.Path, tool: p
     check(targets == {10: "", 11: "target", 59: "target"}, f"spawned attack: the order takes effect: {targets}")
 
 
+def check_squadron_container_health(program: pathlib.Path, scenarios: pathlib.Path, root: str,
+                                    work: pathlib.Path) -> None:
+    """WSQ-60: all M2 container traces use local hull, independent of crew composition."""
+    scenario = json.loads((scenarios / "S-10-straight-move.json").read_text(encoding="utf-8"))
+    types = ("Rebel_X-Wing_Squadron", "Y-Wing_Squadron", "TIE_Fighter_Squadron",
+             "TIE_Interceptor_Squadron", "TIE_Bomber_Squadron")
+    owner = scenario["units"][0]["owner"]
+    scenario["units"] = [
+        {"label": f"team{i}", "type": kind, "owner": owner, "position": [i * 600, 0, 0],
+         "facing_degrees": 0, "spawn": "start"}
+        for i, kind in enumerate(types)
+    ]
+    scenario["events"] = []
+    scenario["duration_ticks"] = 2
+    scenario["expect"] = []
+    path = work / "container-health.json"
+    path.write_text(json.dumps(scenario), encoding="utf-8")
+    outputs = {}
+    for workers in (1, 2, 4, 8):
+        trace = work / f"container-health.w{workers}.csv"
+        completed = subprocess.run(
+            [str(program), "--scenario", str(path), "--game-root", root, "--workers", str(workers),
+             "--trace-out", str(trace)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False,
+        )
+        check(completed.returncode == 0, f"container health: {completed.stdout}{completed.stderr}")
+        if completed.returncode != 0:
+            continue
+        outputs[workers] = trace.read_bytes()
+        with trace.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        for i, kind in enumerate(types):
+            hull = [int(row["value"]) for row in rows if row["object"] == f"team{i}" and row["field"] == "hull"]
+            check(hull == [150 * ONE] * 2, f"WSQ-60: {kind} container hull is 150 on every tick: {hull}")
+            shields = [int(row["value"]) for row in rows if row["object"] == f"team{i}" and row["field"] == "shield"]
+            check(shields == [0] * 2, f"WSQ-60: {kind} container reports zero shields, not crew shields: {shields}")
+    check(len(outputs) == 4 and len(set(outputs.values())) == 1,
+          "WSQ-60: all five containers produce identical traces with 1/2/4/8 workers")
+
+
+def check_observed_initial_pose(program: pathlib.Path, scenarios: pathlib.Path, root: str,
+                                work: pathlib.Path) -> None:
+    """Recorded tick-zero craft pose overrides placement and survives worker partitioning."""
+    scenario = json.loads((scenarios / "S-97-xwing-vs-tie-dogfight.json").read_text(encoding="utf-8"))
+    scenario["duration_ticks"] = 2
+    scenario["events"] = []
+    craft = next(unit for unit in scenario["units"] if unit["label"] == "xwing.1")
+    craft["position"] = [123.25, -456.5, 7]
+    craft["facing_degrees"] = 67
+    craft["apply_initial_pose"] = True
+    outputs = {}
+    path = work / "observed-initial-pose.json"
+    path.write_text(json.dumps(scenario), encoding="utf-8")
+    for workers in (1, 2, 4, 8):
+        trace = work / f"initial-pose.w{workers}.csv"
+        hashes = work / f"initial-pose.w{workers}.hashes.csv"
+        completed = subprocess.run(
+            [str(program), "--scenario", str(path), "--game-root", root, "--workers", str(workers),
+             "--trace-out", str(trace), "--hash-out", str(hashes)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        check(completed.returncode == 0, f"initial pose: {completed.stdout}{completed.stderr}")
+        if completed.returncode != 0:
+            continue
+        outputs[workers] = (trace.read_bytes(), hashes.read_bytes())
+        with trace.open(newline="", encoding="utf-8") as stream:
+            rows = {row["field"]: int(row["value"]) for row in csv.DictReader(stream)
+                    if row["tick"] == "0" and row["object"] == "xwing.1"}
+        check(tuple(rows[f"pos.{axis}"] for axis in "xyz") == (123.25 * ONE, -456.5 * ONE, 7 * ONE),
+              "initial pose uses recorded world position without adding a layer or formation offset")
+        actual_yaw = math.degrees(math.atan2(rows["fwd.y"], rows["fwd.x"]))
+        check(abs(actual_yaw - 67) < 1e-4, f"initial pose yaw: {actual_yaw}")
+    check(len(outputs) == 4 and len(set(outputs.values())) == 1,
+          "initial pose trace and hashes agree on 1/2/4/8 workers")
+    craft["label"] = "xwing.future"
+    path.write_text(json.dumps(scenario), encoding="utf-8")
+    rejected = subprocess.run([str(program), "--scenario", str(path), "--game-root", root,
+                               "--trace-out", str(work / "invalid-initial-pose.csv")],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    check(rejected.returncode != 0 and "matching tick-zero member" in rejected.stderr,
+          "initial pose rejects an observed member absent from the initial setup")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--program", type=pathlib.Path, required=True)
@@ -186,6 +269,8 @@ def main() -> int:
         if len(traces) == len(SCENARIOS):
             check_rules(traces)
         check_spawned_attack(args.program, args.scenarios, args.tool, root, work)
+        check_squadron_container_health(args.program, args.scenarios, root, work)
+        check_observed_initial_pose(args.program, args.scenarios, root, work)
     for failure in FAILURES:
         print(f"FAIL: {failure}")
     if FAILURES:

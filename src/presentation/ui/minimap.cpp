@@ -120,6 +120,14 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
     const data::XmlNode* space = radar_map != nullptr ? last_child(*radar_map, "RadarMapSettings") : nullptr;
     if (radar_map != nullptr && space == nullptr) fallback(settings, radar_map_path, "RadarMapSettings", "is absent");
     if (space != nullptr) {
+        const auto read_colour = [&](const std::string_view tag, data::ui::Rgba8& destination) {
+            if (const auto* node = last_child(*space, tag)) {
+                if (const auto parsed = colour(node->raw_text)) destination = *parsed;
+                else fallback(settings, radar_map_path, tag, "is not a colour");
+            }
+        };
+        read_colour("Space_Asteroid_Field_Color", settings.field);
+        read_colour("Space_Asteroid_Field_Border_Color", settings.field_border);
         if (const data::XmlNode* node = last_child(*space, "Space_Backdrop_Texture_Name")) {
             if (!trim(node->raw_text).empty()) settings.backdrop = std::string(trim(node->raw_text));
         }
@@ -144,6 +152,10 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
         }
     }
     if (game_constants != nullptr) {
+        if (const auto* node = last_child(*game_constants, "Nebula_Effect_Color")) {
+            if (const auto parsed = colour(node->raw_text)) settings.nebula = *parsed;
+            else fallback(settings, constants_path, "Nebula_Effect_Color", "is not a colour");
+        }
         if (const data::XmlNode* node = last_child(*game_constants, "Radar_Colorize_Selected_Units")) {
             if (const auto parsed = boolean(node->raw_text)) settings.colorize_selected = *parsed;
             else fallback(settings, constants_path, "Radar_Colorize_Selected_Units", "is not Yes or No");
@@ -178,8 +190,8 @@ std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, c
 
 MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Catalog* objects) {
     MinimapTypeLooks looks;
-    if (objects == nullptr || objects->find(type) == nullptr) return looks;
-    auto resolved = objects->resolve(type);
+    if (objects == nullptr || objects->find(type, data::Category::game_object) == nullptr) return looks;
+    auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return looks;
     const auto text = [&](const std::string_view tag) -> std::optional<std::string_view> {
         const data::EffectiveValue* value = resolved.value().value(tag);
@@ -190,8 +202,7 @@ MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Cat
     if (const auto value = text("Is_Visible_On_Enemy_Radar")) {
         looks.visible_to_enemy = boolean(*value).value_or(looks.visible_to_enemy);
     }
-    // An empty Radar_Icon_Name is kept: the engine then plots a blip into its point layer, which the
-    // remake leaves out (fidelity list).
+    // MM-16: an explicit empty name selects the point layer; an omitted name keeps the default icon.
     if (const auto value = text("Radar_Icon_Name")) looks.icon = std::string(*value);
     if (const auto value = text("Radar_Icon_Size")) {
         const std::vector<double> parts = numbers(*value);
@@ -201,6 +212,21 @@ MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Cat
     }
     if (const auto value = text("Radar_Show_Facing")) looks.show_facing = boolean(*value).value_or(looks.show_facing);
     if (const auto value = text("Radar_Rotate_Icon")) looks.rotate_icon = boolean(*value).value_or(looks.rotate_icon);
+    if (const auto value = text("Radar_Blip_Size")) {
+        if (const auto parsed = number(*value); parsed && *parsed >= 0.0 && *parsed < 4294967296.0) {
+            looks.point_size = static_cast<float>(*parsed);
+        }
+    }
+    if (const auto value = text("Radar_Draw_To_Scale")) looks.draw_to_scale = boolean(*value).value_or(looks.draw_to_scale);
+    if (const auto value = text("Radar_Icon_Scale_Space")) looks.space_scale = number(*value).value_or(looks.space_scale);
+    std::uint8_t kind = 1;
+    for (const auto tag : {"Is_Asteroid_Field", "Is_Ion_Storm", "Is_Nebula"}) {
+        if (const auto value = text(tag); value && boolean(*value).value_or(false)) {
+            looks.hazard = true;
+            looks.hazard_kind = static_cast<std::uint8_t>(looks.hazard_kind | kind);
+        }
+        kind = static_cast<std::uint8_t>(kind << 1U);
+    }
     return looks;
 }
 
@@ -232,6 +258,21 @@ std::array<double, 2> minimap_world(const MinimapExtents& extents, const Minimap
     return {extents.min_x + (point.x / 2.0 + 0.5) * width, extents.min_y + (point.y / 2.0 + 0.5) * height};
 }
 
+std::optional<MinimapSquadronPose> minimap_squadron_pose(
+    const std::span<const MinimapSquadronMember> members) noexcept {
+    if (members.empty() || !members.front().visible) return std::nullopt;
+    MinimapSquadronPose pose;
+    for (const auto& member : members) {
+        pose.x += member.x;
+        pose.y += member.y;
+    }
+    const auto count = static_cast<double>(members.size());
+    pose.x /= count;
+    pose.y /= count;
+    pose.yaw_degrees = members.front().yaw_degrees;
+    return pose;
+}
+
 std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
     const std::function<const MinimapTypeLooks&(std::string_view)>& looks, const MinimapExtents& extents,
     const MinimapSettings& settings) {
@@ -240,7 +281,7 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
     for (auto unit = units.rbegin(); unit != units.rend(); ++unit) {
         const MinimapTypeLooks& type = looks(unit->type);
         // MM-12: a type must be visible on the radar; an enemy's also on enemy radars.
-        if (!type.visible || (unit->hostile && !type.visible_to_enemy) || type.icon.empty()) continue;
+        if (!type.visible || type.hazard || (unit->hostile && (!type.visible_to_enemy || unit->in_nebula))) continue;
         const MinimapPoint centre = minimap_point(extents, unit->x, unit->y);
         if (std::abs(centre.x) > 1.0 || std::abs(centre.y) > 1.0) continue;
         MinimapBlip blip;
@@ -248,6 +289,14 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
         blip.icon = type.icon;
         blip.centre = centre;
         blip.half_size = {type.size[0], type.size[1]};
+        // MM-17: fixed icon size wins unless draw-to-scale was explicitly enabled.
+        if (!type.icon.empty() && type.draw_to_scale) {
+            const double x_extent = unit->team ? type.space_scale : unit->world_half_size[0] * type.space_scale;
+            const double y_extent = unit->team ? type.space_scale : unit->world_half_size[1] * type.space_scale;
+            blip.half_size = {x_extent * 2.0 / (extents.max_x - extents.min_x),
+                y_extent * 2.0 / (extents.max_y - extents.min_y)};
+        }
+        blip.point_pixels = type.point_size >= 2.0F && type.point_size < 3.0F ? 2U : 1U;
         // MM-08: a facing icon turns by the facing less a quarter turn; the engine skips the turn for a
         // facing of exactly zero, as it does for a type without Radar_Show_Facing.
         if (type.show_facing && unit->yaw_degrees != 0.0) blip.rotation_degrees = unit->yaw_degrees - 90.0;
@@ -257,6 +306,88 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
         blips.push_back(std::move(blip));
     }
     return blips;
+}
+
+std::optional<MinimapPixelRect> minimap_point_pixels(const MinimapBlip& blip,
+    const std::uint32_t width, const std::uint32_t height) noexcept {
+    if (width == 0 || height == 0 || width > 4096 || height > 4096 || !blip.icon.empty()
+        || !std::isfinite(blip.centre.x) || !std::isfinite(blip.centre.y)) return std::nullopt;
+    const double x = std::trunc((blip.centre.x + 1.0) * 0.5 * width);
+    const double y = std::trunc((1.0 - blip.centre.y) * 0.5 * height);
+    if (x < 0.0 || y < 0.0 || x >= width || y >= height) return std::nullopt;
+    const auto column = static_cast<std::uint32_t>(x), row = static_cast<std::uint32_t>(y);
+    const auto size = blip.point_pixels == 2 ? 2U : 1U;
+    return MinimapPixelRect{column, row, std::min(size, width - column), std::min(size, height - row)};
+}
+
+std::vector<std::uint8_t> minimap_hazards(const std::span<const MinimapHazard> hazards,
+    const MinimapExtents& extents, const MinimapSettings& settings, const std::uint32_t width, const std::uint32_t height) {
+    if (width == 0 || height == 0 || width > 4096 || height > 4096) return {};
+    const auto count = static_cast<std::size_t>(width) * height;
+    std::vector<std::uint8_t> fill(count), edge(count), rgba(count * 4);
+    for (const auto& hazard : hazards) {
+        if (!std::isfinite(hazard.x) || !std::isfinite(hazard.y) || !std::isfinite(hazard.x_extent)
+            || !std::isfinite(hazard.y_extent) || hazard.x_extent <= 0 || hazard.y_extent <= 0) continue;
+        const auto centre = minimap_point(extents, hazard.x, hazard.y);
+        const double cx = std::trunc((centre.x + 1.0) * 0.5 * width);
+        const double cy = std::trunc((1.0 - centre.y) * 0.5 * height);
+        // The registered box extent is projected as a displacement, then halved for the ellipse.
+        const double rx = std::max(1.0, hazard.x_extent * width / (extents.max_x - extents.min_x) * 0.5);
+        const double ry = std::max(1.0, hazard.y_extent * height / (extents.max_y - extents.min_y) * 0.5);
+        for (std::uint32_t y = 0; y < height; ++y) {
+            const double dy = (y - cy) / ry;
+            if (std::abs(dy) > 1.0) continue;
+            const double reach = rx * std::sqrt(std::max(0.0, 1.0 - dy * dy));
+            for (std::uint32_t x = 0; x < width; ++x) {
+                if (std::abs(x - cx) <= reach) fill[static_cast<std::size_t>(y) * width + x] = 255;
+            }
+        }
+    }
+    const auto sample = [&](const std::uint32_t x, const std::uint32_t y) { return fill[static_cast<std::size_t>(y) * width + x]; };
+    // WHZ-72: evaluate the predecessor differences in both vertical orientations, then OR.
+    for (std::uint32_t y = 0; y < height; ++y) for (std::uint32_t x = 0; x < width; ++x) {
+        const int value = sample(x, y);
+        const int horizontal = x > 0 ? std::abs(value - sample(x - 1, y)) : 0;
+        const auto threshold = [&](const int vertical) {
+            const auto difference = static_cast<std::uint8_t>(horizontal + vertical);
+            return difference > (2 * 128 / 3) ? difference : std::uint8_t{};
+        };
+        edge[static_cast<std::size_t>(y) * width + x] = static_cast<std::uint8_t>(
+            threshold(y > 0 ? std::abs(value - sample(x, y - 1)) : 0)
+            | threshold(y + 1 < height ? std::abs(value - sample(x, y + 1)) : 0));
+    }
+    const auto gaussian = [&](std::vector<std::uint8_t>& mask) {
+        std::vector<std::uint8_t> output(count);
+        constexpr std::array<unsigned, 3> weights{1, 2, 1};
+        for (std::uint32_t y = 1; y + 1 < height; ++y) for (std::uint32_t x = 1; x + 1 < width; ++x) {
+            unsigned sum = 0;
+            for (std::uint32_t row = 0; row < 3; ++row) for (std::uint32_t column = 0; column < 3; ++column) {
+                // The image filter's horizontal window starts at x; its centre is x + 1.
+                const auto index = static_cast<std::size_t>(y + row - 1) * width + x + column;
+                if (index < count) sum += mask[index] * weights[row] * weights[column];
+            }
+            output[static_cast<std::size_t>(y) * width + x] = static_cast<std::uint8_t>(sum / 16);
+        }
+        mask = std::move(output);
+    };
+    gaussian(fill);
+    gaussian(edge);
+    const std::array<std::uint8_t, 4> a{settings.field.r, settings.field.g, settings.field.b, settings.field.a};
+    const std::array<std::uint8_t, 4> b{settings.field_border.r, settings.field_border.g, settings.field_border.b, settings.field_border.a};
+    for (std::size_t index = 0; index < count; ++index) {
+        if (fill[index] == 0 && edge[index] == 0) continue;
+        const double coverage = fill[index] / 255.0;
+        for (std::size_t channel = 0; channel < 4; ++channel) {
+            double value;
+            if (fill[index] && edge[index]) value = std::trunc(coverage * a[channel]) + (1.0 - coverage) * b[channel];
+            else {
+                const auto colour = fill[index] ? a[channel] : b[channel];
+                value = channel == 3 ? colour * (fill[index] ? fill[index] : edge[index]) / 255.0 : colour;
+            }
+            rgba[index * 4 + channel] = static_cast<std::uint8_t>(std::clamp(value, 0.0, 255.0));
+        }
+    }
+    return rgba;
 }
 
 std::array<MinimapPoint, 4> minimap_guide(const std::array<std::array<double, 2>, 4>& ground,

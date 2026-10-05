@@ -1,6 +1,7 @@
 #include "eawr/presentation/godot/renderer.hpp"
 
 #include "renderer_internal.hpp"
+#include "particle_culling.hpp"
 
 namespace eawr::presentation::godot_backend {
 
@@ -34,7 +35,19 @@ namespace eawr::presentation::godot_backend {
         Vector4(matrix[12], matrix[13], matrix[14], matrix[15]));
 }
 
-GodotRenderer::Impl::Impl(Node3D& owner) : owner_(owner) {
+CachedShader::~CachedShader() {
+    if (auto* rendering = RenderingServer::get_singleton(); rendering && shader.is_valid())
+        rendering->free_rid(shader);
+}
+
+GodotShaderCache::GodotShaderCache() : impl_(std::make_unique<Impl>()) {}
+GodotShaderCache::~GodotShaderCache() = default;
+GodotShaderCache::Stats GodotShaderCache::stats() const noexcept {
+    return {impl_->entries.size(), impl_->source_bytes};
+}
+
+GodotRenderer::Impl::Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders)
+    : owner_(owner), shader_cache_(std::move(shaders)) {
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (!rendering || owner_.get_world_3d().is_null() || owner_.get_viewport() == nullptr) {
         fail(diagnostic_codes::backend_unavailable,
@@ -74,6 +87,7 @@ GodotRenderer::Impl::Impl(Node3D& owner) : owner_(owner) {
 }
 
 GodotRenderer::Impl::~Impl() {
+    particle_culling::clear_camera(scenario_);
     // Fog bindings go first, while every material RID is still valid.
     disable_fog();
     RenderingServer* rendering = RenderingServer::get_singleton();
@@ -251,6 +265,7 @@ void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
         Vector3(camera.target[0], camera.target[1], camera.target[2]),
         Vector3(camera.up[0], camera.up[1], camera.up[2]));
     rendering->camera_set_transform(camera_, camera_transform);
+    particle_culling::set_camera(scenario_, camera);
     view_transform_ = camera_transform;
     for (auto& [entity, instance] : instances_) {
         const auto resource = resources_.find(instance.asset_id);
@@ -331,7 +346,8 @@ void GodotRenderer::Impl::set_camera(const FixedCamera& camera) {
     return core::Result<void>::failure(std::move(diagnostic));
 }
 
-GodotRenderer::GodotRenderer(Node3D& host) : impl_(std::make_unique<Impl>(host)) {}
+GodotRenderer::GodotRenderer(Node3D& host, std::shared_ptr<GodotShaderCache> shaders)
+    : impl_(std::make_unique<Impl>(host, std::move(shaders))) {}
 GodotRenderer::~GodotRenderer() = default;
 GodotRenderer::GodotRenderer(GodotRenderer&&) noexcept = default;
 GodotRenderer& GodotRenderer::operator=(GodotRenderer&&) noexcept = default;
@@ -397,6 +413,13 @@ GodotRenderer::SubmitWork GodotRenderer::submit_work() const noexcept { return i
 void GodotRenderer::clear_skin_pose(const sim::EntityId entity_id) {
     impl_->clear_skin_pose(entity_id);
 }
+void GodotRenderer::copy_instance_pose(const sim::EntityId source, const sim::EntityId target,
+                                     const float light_factor) {
+    impl_->copy_instance_pose(source, target, light_factor);
+}
+void GodotRenderer::forget_instance_pose(const sim::EntityId entity_id) {
+    impl_->forget_instance_pose(entity_id);
+}
 void GodotRenderer::set_billboard_light(const sim::AssetId asset_id,
                                        const std::array<float, 3>& toward_light) {
     impl_->set_billboard_light(asset_id, toward_light);
@@ -409,6 +432,14 @@ core::Result<void> GodotRenderer::set_material_scalar(const sim::AssetId asset_i
 
 void GodotRenderer::set_light_scale(const sim::EntityId entity_id, const std::array<float, 3>& rgb) {
     impl_->set_light_scale(entity_id, rgb);
+}
+
+core::Result<void> GodotRenderer::set_material_priority(const sim::AssetId asset_id, const std::int32_t priority) {
+    return impl_->set_material_priority(asset_id, priority);
+}
+
+void GodotRenderer::set_unit_colorization(const sim::EntityId entity_id, const std::array<float, 3>& rgb) {
+    impl_->set_unit_colorization(entity_id, rgb);
 }
 
 void GodotRenderer::set_unit_opacity(const sim::EntityId entity_id, const float alpha) {

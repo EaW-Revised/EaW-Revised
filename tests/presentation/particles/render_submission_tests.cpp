@@ -389,6 +389,23 @@ void test_attachment_merge_stats() {
            "bounds widen and the hash chains in order");
 }
 
+void test_attachment_batch_requires_stats() {
+    RecordingBackend backend;
+    particles::EffectRegistry registry(backend);
+    particles::AttachmentLifecycle life(registry, system_spawner(attached_spray(true), 256), 123,
+        particles::ReappearancePolicy::respawn);
+    const particles::EmitterFrame frame{{0, 0, 0}, {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    auto prepared = life.prepare_step(true, frame, nullptr, 1.0F / 30.0F);
+    expect(prepared && prepared.value().handles.size() == 1 && prepared.value().deltas == std::vector<float>{0},
+        "preparing a fresh attachment records its zero delta without advancing");
+    if (!prepared) return;
+    expect(backend.record.empty() && registry.work().steps == 0, "attachment preparation submits no stream");
+    const auto missing = life.complete_step(std::move(prepared.value()), {});
+    expect(!missing && missing.error().code == particles::diagnostic_codes::batch && registry.live_effects() == 1,
+        "missing attachment statistics fail without releasing its instance");
+    expect(bool(life.release_all()) && backend.live.empty(), "failed attachment completion still permits owner cleanup");
+}
+
 void test_heat_pixel_change_bound() {
     // The map pixel check counts a pixel as changed above 0.04 summed RGB.
     constexpr float threshold = 0.04F;

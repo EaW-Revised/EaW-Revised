@@ -1,165 +1,165 @@
 search,mode,tries,expansions,children,queries,windows,leaves,narrow
-"corvette from 0 to (-4500, -4500)",exact,1,2240,3972,2780,8837,43137,248
-"corvette from 0 to (-4500, -4500)",bounded,2,1879,3849,2471,8336,41933,319
-"corvette from 0 to (-4500, 0)",exact,1,33,34,51,170,882,60
-"corvette from 0 to (-4500, 0)",bounded,1,33,34,51,170,882,60
-"corvette from 0 to (0, -4500)",exact,1,40,44,59,207,1109,72
-"corvette from 0 to (0, -4500)",bounded,1,40,44,59,207,1109,72
-"corvette from 0 to (0, 0)",exact,3,8509,17922,11809,52568,294275,2899
-"corvette from 0 to (0, 0)",bounded,3,4329,9815,6414,36122,213615,1962
-"corvette from 0 to (0, 4500)",exact,1,375,674,547,1641,8218,266
-"corvette from 0 to (0, 4500)",bounded,1,375,674,547,1641,8218,266
-"corvette from 0 to (4500, -4500)",exact,2,6924,14854,9269,36511,203062,5694
-"corvette from 0 to (4500, -4500)",bounded,2,3924,9220,5552,23043,130548,3905
-"corvette from 0 to (4500, 0)",exact,1,64,73,85,270,1394,82
-"corvette from 0 to (4500, 0)",bounded,1,64,73,85,270,1394,82
-"corvette from 0 to (4500, 4500)",exact,1,375,676,566,2323,12928,303
-"corvette from 0 to (4500, 4500)",bounded,1,375,676,566,2323,12928,303
-"corvette from 1 to (-4500, -4500)",exact,1,48,59,56,205,1062,2
-"corvette from 1 to (-4500, -4500)",bounded,1,48,59,56,205,1062,2
-"corvette from 1 to (-4500, 0)",exact,1,37,41,42,175,948,6
-"corvette from 1 to (-4500, 0)",bounded,1,37,41,42,175,948,6
-"corvette from 1 to (-4500, 4500)",exact,1,1162,2090,1497,6145,34830,990
-"corvette from 1 to (-4500, 4500)",bounded,2,882,1536,1170,5340,31122,946
-"corvette from 1 to (0, -4500)",exact,1,56,67,63,210,1032,1
-"corvette from 1 to (0, -4500)",bounded,1,56,67,63,210,1032,1
-"corvette from 1 to (0, 0)",exact,2,6642,13179,8836,30935,160306,720
-"corvette from 1 to (0, 0)",bounded,2,3644,8116,5171,20956,114012,518
-"corvette from 1 to (0, 4500)",exact,1,18,19,23,126,738,7
-"corvette from 1 to (0, 4500)",bounded,1,18,19,23,126,738,7
-"corvette from 1 to (4500, 0)",exact,1,13,15,19,97,546,0
-"corvette from 1 to (4500, 0)",bounded,1,13,15,19,97,546,0
-"corvette from 1 to (4500, 4500)",exact,1,13,15,40,1076,7276,23
-"corvette from 1 to (4500, 4500)",bounded,1,13,15,40,1076,7276,23
-"corvette from 2 to (-4500, -4500)",exact,1,714,1173,840,2314,10501,57
-"corvette from 2 to (-4500, -4500)",bounded,2,920,1611,1121,3145,14371,81
-"corvette from 2 to (-4500, 4500)",exact,1,41,47,47,165,829,0
-"corvette from 2 to (-4500, 4500)",bounded,1,41,47,47,165,829,0
-"corvette from 2 to (0, -4500)",exact,1,154,217,173,607,3190,43
-"corvette from 2 to (0, -4500)",bounded,1,154,217,173,607,3190,43
-"corvette from 2 to (0, 0)",exact,2,5216,9915,7059,38585,224884,1463
-"corvette from 2 to (0, 0)",bounded,2,2216,4919,3439,29004,181723,1028
-"corvette from 2 to (0, 4500)",exact,1,20,23,26,128,731,4
-"corvette from 2 to (0, 4500)",bounded,1,20,23,26,128,731,4
-"corvette from 2 to (4500, -4500)",exact,2,6989,14578,9129,31313,163607,1598
-"corvette from 2 to (4500, -4500)",bounded,2,3989,9002,5394,19039,100889,1012
-"corvette from 2 to (4500, 0)",exact,2,6447,13171,8412,29012,152499,1886
-"corvette from 2 to (4500, 0)",bounded,2,3446,7909,4725,17070,91514,1177
-"corvette from 2 to (4500, 4500)",exact,1,17,19,30,493,3268,17
-"corvette from 2 to (4500, 4500)",bounded,1,17,19,30,493,3268,17
-"corvette station or far side (-229, 52)",exact,1,51,57,490,19542,134649,518
-"corvette station or far side (-229, 52)",bounded,1,51,57,490,19542,134649,518
-"corvette station or far side (3685, -4170)",exact,3,8345,17973,11836,51238,293038,7014
-"corvette station or far side (3685, -4170)",bounded,3,4068,9444,6080,29975,176732,4093
-"corvette station or far side (445, -237)",exact,1,2309,4207,3084,14899,85049,760
-"corvette station or far side (445, -237)",bounded,2,1830,3967,2721,14250,83211,886
-"corvette station or far side (-4227, -4861)",exact,2,6244,12752,8285,27030,133134,782
-"corvette station or far side (-4227, -4861)",bounded,2,3245,7186,4459,14740,73125,505
-"corvette station or far side (2000, -2000)",exact,3,8558,18625,11758,40123,212165,6092
-"corvette station or far side (2000, -2000)",bounded,3,4703,10903,6701,23063,122803,3732
-"corvette station or far side (3000, -4000)",exact,2,5838,12055,8142,31394,175383,4980
-"corvette station or far side (3000, -4000)",bounded,2,2839,6453,4181,17320,99201,3064
-"corvette field to (-1000, 0)",exact,1,1042,1852,1325,3757,27614,521
-"corvette field to (-1000, 0)",bounded,2,1014,2172,1397,4188,31293,639
-"corvette field to (-1200, 1000)",exact,1,1294,2344,1764,4830,34700,1425
-"corvette field to (-1200, 1000)",bounded,2,1166,2575,1781,5172,37567,2053
-"corvette field to (-1200, -1000)",exact,1,2552,4217,3239,8502,61232,1917
-"corvette field to (-1200, -1000)",bounded,2,1490,3458,2265,6430,46676,2400
-"corvette field to (3000, 200)",exact,2,6569,13662,9498,30542,217864,6442
-"corvette field to (3000, 200)",bounded,2,3570,8641,5579,18809,134185,4233
-"corvette field to (-4500, -3000)",exact,1,45,51,51,174,861,0
-"corvette field to (-4500, -3000)",bounded,1,45,51,51,174,861,0
-"corvette crowded to (2500, -3000)",exact,1,2344,4318,3038,10675,5302,1484
-"corvette crowded to (2500, -3000)",bounded,2,1848,4044,2608,9950,5550,1649
-"corvette crowded to (-3000, -4500)",exact,1,15,19,21,116,133,6
-"corvette crowded to (-3000, -4500)",bounded,1,15,19,21,116,133,6
-"corvette crowded to (0, -4500)",exact,1,22,23,35,145,208,22
-"corvette crowded to (0, -4500)",bounded,1,22,23,35,145,208,22
-"corvette crowded to (4500, -1000)",exact,1,1013,1751,1259,4414,2181,526
-"corvette crowded to (4500, -1000)",bounded,2,1170,2235,1528,5771,3081,809
-"corvette crowded to (-4200, -3000)",exact,1,52,91,82,264,464,29
-"corvette crowded to (-4200, -3000)",bounded,1,52,91,82,264,464,29
-"corvette crowded to (1000, -5200)",exact,1,21,23,26,139,201,15
-"corvette crowded to (1000, -5200)",bounded,1,21,23,26,139,201,15
-"frigate from 0 to (-4500, -4500)",exact,1,3064,5290,3931,13029,46205,234
-"frigate from 0 to (-4500, -4500)",bounded,2,2216,4915,3122,12244,46441,278
-"frigate from 0 to (-4500, 0)",exact,1,11,13,16,100,420,0
-"frigate from 0 to (-4500, 0)",bounded,1,11,13,16,100,420,0
-"frigate from 0 to (0, -4500)",exact,1,19,23,27,150,632,8
-"frigate from 0 to (0, -4500)",bounded,1,19,23,27,150,632,8
-"frigate from 0 to (0, 0)",exact,2,6745,13644,9342,40110,160150,2063
-"frigate from 0 to (0, 0)",bounded,2,3746,8770,5632,29168,122284,1532
-"frigate from 0 to (0, 4500)",exact,1,54,69,69,231,812,1
-"frigate from 0 to (0, 4500)",bounded,1,54,69,69,231,812,1
-"frigate from 0 to (4500, -4500)",exact,3,8397,18057,11803,48658,201572,6796
-"frigate from 0 to (4500, -4500)",bounded,3,4261,9924,6166,25213,104384,3574
-"frigate from 0 to (4500, 0)",exact,1,36,41,44,202,807,7
-"frigate from 0 to (4500, 0)",bounded,1,36,41,44,202,807,7
-"frigate from 0 to (4500, 4500)",exact,1,51,65,81,1020,4731,20
-"frigate from 0 to (4500, 4500)",bounded,1,51,65,81,1020,4731,20
-"frigate from 1 to (-4500, -4500)",exact,1,50,65,64,237,887,2
-"frigate from 1 to (-4500, -4500)",bounded,1,50,65,64,237,887,2
-"frigate from 1 to (-4500, 0)",exact,1,37,41,44,200,798,6
-"frigate from 1 to (-4500, 0)",bounded,1,37,41,44,200,798,6
-"frigate from 1 to (-4500, 4500)",exact,1,1045,1811,1412,5914,24487,856
-"frigate from 1 to (-4500, 4500)",bounded,2,1207,2443,1728,8615,37450,1463
-"frigate from 1 to (0, -4500)",exact,1,58,71,71,235,825,1
-"frigate from 1 to (0, -4500)",bounded,1,58,71,71,235,825,1
-"frigate from 1 to (0, 0)",exact,1,1124,1864,1533,10000,43740,233
-"frigate from 1 to (0, 0)",bounded,2,1284,2472,1825,11414,49813,275
-"frigate from 1 to (0, 4500)",exact,1,15,17,21,136,592,7
-"frigate from 1 to (0, 4500)",bounded,1,15,17,21,136,592,7
-"frigate from 1 to (4500, 0)",exact,1,11,13,17,100,415,0
-"frigate from 1 to (4500, 0)",bounded,1,11,13,17,100,415,0
-"frigate from 1 to (4500, 4500)",exact,1,11,13,43,1315,6389,29
-"frigate from 1 to (4500, 4500)",bounded,1,11,13,43,1315,6389,29
-"frigate from 2 to (-4500, -4500)",exact,1,563,924,725,2214,7574,44
-"frigate from 2 to (-4500, -4500)",bounded,2,864,1563,1160,3677,12787,77
-"frigate from 2 to (-4500, 4500)",exact,1,40,50,62,199,743,60
-"frigate from 2 to (-4500, 4500)",bounded,1,40,50,62,199,743,60
-"frigate from 2 to (0, -4500)",exact,1,145,201,175,693,2751,46
-"frigate from 2 to (0, -4500)",bounded,1,145,201,175,693,2751,46
-"frigate from 2 to (0, 0)",exact,2,5144,9500,6965,32534,131499,1332
-"frigate from 2 to (0, 0)",bounded,2,2143,4855,3335,22370,97731,984
-"frigate from 2 to (0, 4500)",exact,1,20,23,27,137,567,4
-"frigate from 2 to (0, 4500)",bounded,1,20,23,27,137,567,4
-"frigate from 2 to (4500, -4500)",exact,3,8604,18328,11876,48295,194296,2105
-"frigate from 2 to (4500, -4500)",bounded,3,4114,9292,5724,23477,94880,1109
-"frigate from 2 to (4500, 0)",exact,2,6579,13624,9219,37088,148990,2469
-"frigate from 2 to (4500, 0)",bounded,2,3580,8928,5495,24668,102578,1843
-"frigate from 2 to (4500, 4500)",exact,1,15,17,38,922,4456,26
-"frigate from 2 to (4500, 4500)",bounded,1,15,17,38,922,4456,26
-"frigate station or far side (-229, 52)",exact,1,27,31,227,9031,44723,237
-"frigate station or far side (-229, 52)",bounded,1,27,31,227,9031,44723,237
-"frigate station or far side (3685, -4170)",exact,1,3150,5456,4148,18490,76481,1950
-"frigate station or far side (3685, -4170)",bounded,2,2169,4828,3215,17341,75300,2247
-"frigate station or far side (445, -237)",exact,2,6163,12213,8321,30363,115189,1966
-"frigate station or far side (445, -237)",bounded,2,3164,7274,4580,19198,76350,1312
-"frigate station or far side (-4227, -4861)",exact,2,6203,12328,8354,30521,112713,633
-"frigate station or far side (-4227, -4861)",bounded,2,3203,7143,4471,17456,66124,389
-"frigate station or far side (2000, -2000)",exact,2,6773,14157,9297,35051,140884,4481
-"frigate station or far side (2000, -2000)",bounded,2,3773,8981,5413,21424,87489,2848
-"frigate station or far side (3000, -4000)",exact,1,1971,3492,2602,9966,39489,1127
-"frigate station or far side (3000, -4000)",bounded,2,1624,3420,2299,10230,42535,1376
-"frigate field to (-1000, 0)",exact,1,2272,3899,2919,8610,57562,1576
-"frigate field to (-1000, 0)",bounded,2,1129,2439,1734,5688,38783,1247
-"frigate field to (-1200, 1000)",exact,2,4972,9791,6875,20250,118353,6539
-"frigate field to (-1200, 1000)",bounded,2,1971,4561,3174,9856,58117,3526
-"frigate field to (-1200, -1000)",exact,2,4459,8678,6029,17499,110437,5761
-"frigate field to (-1200, -1000)",bounded,2,1458,3448,2348,7412,46535,2968
-"frigate field to (3000, 200)",exact,2,5506,11586,8142,30009,182586,7323
-"frigate field to (3000, 200)",bounded,2,2506,6290,4292,16673,100462,4514
-"frigate field to (-4500, -3000)",exact,1,40,50,51,183,662,0
-"frigate field to (-4500, -3000)",bounded,1,40,50,51,183,662,0
-"frigate crowded to (2500, -3000)",exact,1,3349,5746,4373,14542,11862,2565
-"frigate crowded to (2500, -3000)",bounded,2,2240,5055,3337,12966,12177,2947
-"frigate crowded to (-3000, -4500)",exact,1,108,157,152,457,1589,166
-"frigate crowded to (-3000, -4500)",bounded,1,108,157,152,457,1589,166
-"frigate crowded to (0, -4500)",exact,1,113,171,153,477,1773,197
-"frigate crowded to (0, -4500)",bounded,1,113,171,153,477,1773,197
-"frigate crowded to (4500, -1000)",exact,1,715,1176,1026,3333,4482,666
-"frigate crowded to (4500, -1000)",bounded,2,1146,2177,1646,5670,8297,1335
-"frigate crowded to (-4200, -3000)",exact,1,174,253,227,614,2018,212
-"frigate crowded to (-4200, -3000)",bounded,1,174,253,227,614,2018,212
-"frigate crowded to (1000, -5200)",exact,1,114,181,165,497,1812,213
-"frigate crowded to (1000, -5200)",bounded,1,114,181,165,497,1812,213
+"corvette from 0 to (-4500, -4500)",exact,1,2240,3972,2782,8839,43139,248
+"corvette from 0 to (-4500, -4500)",bounded,2,1879,3849,2473,8338,41935,319
+"corvette from 0 to (-4500, 0)",exact,1,33,34,53,172,883,60
+"corvette from 0 to (-4500, 0)",bounded,1,33,34,53,172,883,60
+"corvette from 0 to (0, -4500)",exact,1,40,44,61,209,1110,72
+"corvette from 0 to (0, -4500)",bounded,1,40,44,61,209,1110,72
+"corvette from 0 to (0, 0)",exact,3,8509,17922,11811,52570,294278,2900
+"corvette from 0 to (0, 0)",bounded,3,4329,9815,6416,36124,213618,1963
+"corvette from 0 to (0, 4500)",exact,1,375,674,549,1643,8219,266
+"corvette from 0 to (0, 4500)",bounded,1,375,674,549,1643,8219,266
+"corvette from 0 to (4500, -4500)",exact,2,6924,14854,9271,36513,203063,5694
+"corvette from 0 to (4500, -4500)",bounded,2,3924,9220,5554,23045,130549,3905
+"corvette from 0 to (4500, 0)",exact,1,64,73,87,272,1395,82
+"corvette from 0 to (4500, 0)",bounded,1,64,73,87,272,1395,82
+"corvette from 0 to (4500, 4500)",exact,1,375,676,568,2325,12930,304
+"corvette from 0 to (4500, 4500)",bounded,1,375,676,568,2325,12930,304
+"corvette from 1 to (-4500, -4500)",exact,1,48,59,58,207,1063,2
+"corvette from 1 to (-4500, -4500)",bounded,1,48,59,58,207,1063,2
+"corvette from 1 to (-4500, 0)",exact,1,37,41,44,177,948,6
+"corvette from 1 to (-4500, 0)",bounded,1,37,41,44,177,948,6
+"corvette from 1 to (-4500, 4500)",exact,1,1162,2090,1499,6147,34831,990
+"corvette from 1 to (-4500, 4500)",bounded,2,882,1536,1172,5342,31123,946
+"corvette from 1 to (0, -4500)",exact,1,56,67,65,212,1032,1
+"corvette from 1 to (0, -4500)",bounded,1,56,67,65,212,1032,1
+"corvette from 1 to (0, 0)",exact,2,6642,13179,8838,30937,160308,721
+"corvette from 1 to (0, 0)",bounded,2,3644,8116,5173,20958,114014,519
+"corvette from 1 to (0, 4500)",exact,1,18,19,25,128,738,7
+"corvette from 1 to (0, 4500)",bounded,1,18,19,25,128,738,7
+"corvette from 1 to (4500, 0)",exact,1,13,15,21,99,546,0
+"corvette from 1 to (4500, 0)",bounded,1,13,15,21,99,546,0
+"corvette from 1 to (4500, 4500)",exact,1,13,15,42,1078,7277,24
+"corvette from 1 to (4500, 4500)",bounded,1,13,15,42,1078,7277,24
+"corvette from 2 to (-4500, -4500)",exact,1,714,1173,842,2316,10502,57
+"corvette from 2 to (-4500, -4500)",bounded,2,920,1611,1123,3147,14372,81
+"corvette from 2 to (-4500, 4500)",exact,1,41,47,49,167,830,0
+"corvette from 2 to (-4500, 4500)",bounded,1,41,47,49,167,830,0
+"corvette from 2 to (0, -4500)",exact,1,154,217,175,609,3190,43
+"corvette from 2 to (0, -4500)",bounded,1,154,217,175,609,3190,43
+"corvette from 2 to (0, 0)",exact,2,5216,9915,7061,38587,224886,1464
+"corvette from 2 to (0, 0)",bounded,2,2216,4919,3441,29006,181725,1029
+"corvette from 2 to (0, 4500)",exact,1,20,23,28,130,731,4
+"corvette from 2 to (0, 4500)",bounded,1,20,23,28,130,731,4
+"corvette from 2 to (4500, -4500)",exact,2,6989,14578,9131,31315,163607,1598
+"corvette from 2 to (4500, -4500)",bounded,2,3989,9002,5396,19041,100889,1012
+"corvette from 2 to (4500, 0)",exact,2,6447,13171,8414,29014,152499,1886
+"corvette from 2 to (4500, 0)",bounded,2,3446,7909,4727,17072,91514,1177
+"corvette from 2 to (4500, 4500)",exact,1,17,19,32,495,3269,18
+"corvette from 2 to (4500, 4500)",bounded,1,17,19,32,495,3269,18
+"corvette station or far side (-229, 52)",exact,1,51,57,492,19544,134652,519
+"corvette station or far side (-229, 52)",bounded,1,51,57,492,19544,134652,519
+"corvette station or far side (3685, -4170)",exact,3,8345,17973,11838,51240,293040,7015
+"corvette station or far side (3685, -4170)",bounded,3,4068,9444,6082,29977,176734,4094
+"corvette station or far side (445, -237)",exact,1,2309,4207,3086,14901,85053,761
+"corvette station or far side (445, -237)",bounded,2,1830,3967,2723,14252,83215,887
+"corvette station or far side (-4227, -4861)",exact,2,6244,12752,8287,27032,133136,782
+"corvette station or far side (-4227, -4861)",bounded,2,3245,7186,4461,14742,73127,505
+"corvette station or far side (2000, -2000)",exact,3,8558,18625,11760,40125,212166,6092
+"corvette station or far side (2000, -2000)",bounded,3,4703,10903,6703,23065,122804,3732
+"corvette station or far side (3000, -4000)",exact,2,5838,12055,8144,31396,175384,4980
+"corvette station or far side (3000, -4000)",bounded,2,2839,6453,4183,17322,99202,3064
+"corvette field to (-1000, 0)",exact,1,1042,1852,1327,3759,27616,521
+"corvette field to (-1000, 0)",bounded,2,1014,2172,1399,4190,31295,639
+"corvette field to (-1200, 1000)",exact,1,1294,2344,1766,4832,34705,1425
+"corvette field to (-1200, 1000)",bounded,2,1166,2575,1783,5174,37572,2053
+"corvette field to (-1200, -1000)",exact,1,2552,4217,3241,8504,61234,1917
+"corvette field to (-1200, -1000)",bounded,2,1490,3458,2267,6432,46678,2400
+"corvette field to (3000, 200)",exact,2,6569,13662,9500,30544,217864,6442
+"corvette field to (3000, 200)",bounded,2,3570,8641,5581,18811,134185,4233
+"corvette field to (-4500, -3000)",exact,1,45,51,53,176,861,0
+"corvette field to (-4500, -3000)",bounded,1,45,51,53,176,861,0
+"corvette crowded to (2500, -3000)",exact,1,2344,4318,3040,10677,5302,1484
+"corvette crowded to (2500, -3000)",bounded,2,1848,4044,2610,9952,5550,1649
+"corvette crowded to (-3000, -4500)",exact,1,15,19,23,118,133,6
+"corvette crowded to (-3000, -4500)",bounded,1,15,19,23,118,133,6
+"corvette crowded to (0, -4500)",exact,1,22,23,37,147,208,22
+"corvette crowded to (0, -4500)",bounded,1,22,23,37,147,208,22
+"corvette crowded to (4500, -1000)",exact,1,1013,1751,1261,4416,2181,526
+"corvette crowded to (4500, -1000)",bounded,2,1170,2235,1530,5773,3081,809
+"corvette crowded to (-4200, -3000)",exact,1,52,91,84,266,464,29
+"corvette crowded to (-4200, -3000)",bounded,1,52,91,84,266,464,29
+"corvette crowded to (1000, -5200)",exact,1,21,23,28,141,201,15
+"corvette crowded to (1000, -5200)",bounded,1,21,23,28,141,201,15
+"frigate from 0 to (-4500, -4500)",exact,1,3064,5290,3933,13031,46206,234
+"frigate from 0 to (-4500, -4500)",bounded,2,2216,4915,3124,12246,46442,278
+"frigate from 0 to (-4500, 0)",exact,1,11,13,18,102,420,0
+"frigate from 0 to (-4500, 0)",bounded,1,11,13,18,102,420,0
+"frigate from 0 to (0, -4500)",exact,1,19,23,29,152,632,8
+"frigate from 0 to (0, -4500)",bounded,1,19,23,29,152,632,8
+"frigate from 0 to (0, 0)",exact,2,6745,13644,9344,40112,160152,2064
+"frigate from 0 to (0, 0)",bounded,2,3746,8770,5634,29170,122286,1533
+"frigate from 0 to (0, 4500)",exact,1,54,69,71,233,812,1
+"frigate from 0 to (0, 4500)",bounded,1,54,69,71,233,812,1
+"frigate from 0 to (4500, -4500)",exact,3,8397,18057,11805,48660,201572,6796
+"frigate from 0 to (4500, -4500)",bounded,3,4261,9924,6168,25215,104384,3574
+"frigate from 0 to (4500, 0)",exact,1,36,41,46,204,807,7
+"frigate from 0 to (4500, 0)",bounded,1,36,41,46,204,807,7
+"frigate from 0 to (4500, 4500)",exact,1,51,65,83,1022,4732,21
+"frigate from 0 to (4500, 4500)",bounded,1,51,65,83,1022,4732,21
+"frigate from 1 to (-4500, -4500)",exact,1,50,65,66,239,888,2
+"frigate from 1 to (-4500, -4500)",bounded,1,50,65,66,239,888,2
+"frigate from 1 to (-4500, 0)",exact,1,37,41,46,202,798,6
+"frigate from 1 to (-4500, 0)",bounded,1,37,41,46,202,798,6
+"frigate from 1 to (-4500, 4500)",exact,1,1045,1811,1414,5916,24488,856
+"frigate from 1 to (-4500, 4500)",bounded,2,1207,2443,1730,8617,37451,1463
+"frigate from 1 to (0, -4500)",exact,1,58,71,73,237,825,1
+"frigate from 1 to (0, -4500)",bounded,1,58,71,73,237,825,1
+"frigate from 1 to (0, 0)",exact,1,1124,1864,1535,10002,43742,234
+"frigate from 1 to (0, 0)",bounded,2,1284,2472,1827,11416,49815,276
+"frigate from 1 to (0, 4500)",exact,1,15,17,23,138,592,7
+"frigate from 1 to (0, 4500)",bounded,1,15,17,23,138,592,7
+"frigate from 1 to (4500, 0)",exact,1,11,13,19,102,415,0
+"frigate from 1 to (4500, 0)",bounded,1,11,13,19,102,415,0
+"frigate from 1 to (4500, 4500)",exact,1,11,13,45,1317,6390,30
+"frigate from 1 to (4500, 4500)",bounded,1,11,13,45,1317,6390,30
+"frigate from 2 to (-4500, -4500)",exact,1,563,924,727,2216,7575,44
+"frigate from 2 to (-4500, -4500)",bounded,2,864,1563,1162,3679,12788,77
+"frigate from 2 to (-4500, 4500)",exact,1,40,50,64,201,744,60
+"frigate from 2 to (-4500, 4500)",bounded,1,40,50,64,201,744,60
+"frigate from 2 to (0, -4500)",exact,1,145,201,177,695,2751,46
+"frigate from 2 to (0, -4500)",bounded,1,145,201,177,695,2751,46
+"frigate from 2 to (0, 0)",exact,2,5144,9500,6967,32536,131501,1333
+"frigate from 2 to (0, 0)",bounded,2,2143,4855,3337,22372,97733,985
+"frigate from 2 to (0, 4500)",exact,1,20,23,29,139,567,4
+"frigate from 2 to (0, 4500)",bounded,1,20,23,29,139,567,4
+"frigate from 2 to (4500, -4500)",exact,3,8604,18328,11878,48297,194296,2105
+"frigate from 2 to (4500, -4500)",bounded,3,4114,9292,5726,23479,94880,1109
+"frigate from 2 to (4500, 0)",exact,2,6579,13624,9221,37090,148990,2469
+"frigate from 2 to (4500, 0)",bounded,2,3580,8928,5497,24670,102578,1843
+"frigate from 2 to (4500, 4500)",exact,1,15,17,40,924,4457,27
+"frigate from 2 to (4500, 4500)",bounded,1,15,17,40,924,4457,27
+"frigate station or far side (-229, 52)",exact,1,27,31,229,9033,44725,238
+"frigate station or far side (-229, 52)",bounded,1,27,31,229,9033,44725,238
+"frigate station or far side (3685, -4170)",exact,1,3150,5456,4150,18492,76482,1951
+"frigate station or far side (3685, -4170)",bounded,2,2169,4828,3217,17343,75301,2248
+"frigate station or far side (445, -237)",exact,2,6163,12213,8323,30365,115192,1967
+"frigate station or far side (445, -237)",bounded,2,3164,7274,4582,19200,76353,1313
+"frigate station or far side (-4227, -4861)",exact,2,6203,12328,8356,30523,112714,633
+"frigate station or far side (-4227, -4861)",bounded,2,3203,7143,4473,17458,66125,389
+"frigate station or far side (2000, -2000)",exact,2,6773,14157,9299,35053,140884,4481
+"frigate station or far side (2000, -2000)",bounded,2,3773,8981,5415,21426,87489,2848
+"frigate station or far side (3000, -4000)",exact,1,1971,3492,2604,9968,39489,1127
+"frigate station or far side (3000, -4000)",bounded,2,1624,3420,2301,10232,42535,1376
+"frigate field to (-1000, 0)",exact,1,2272,3899,2921,8612,57564,1576
+"frigate field to (-1000, 0)",bounded,2,1129,2439,1736,5690,38785,1247
+"frigate field to (-1200, 1000)",exact,2,4972,9791,6877,20252,118358,6539
+"frigate field to (-1200, 1000)",bounded,2,1971,4561,3176,9858,58122,3526
+"frigate field to (-1200, -1000)",exact,2,4459,8678,6031,17501,110439,5761
+"frigate field to (-1200, -1000)",bounded,2,1458,3448,2350,7414,46537,2968
+"frigate field to (3000, 200)",exact,2,5506,11586,8144,30011,182586,7323
+"frigate field to (3000, 200)",bounded,2,2506,6290,4294,16675,100462,4514
+"frigate field to (-4500, -3000)",exact,1,40,50,53,185,662,0
+"frigate field to (-4500, -3000)",bounded,1,40,50,53,185,662,0
+"frigate crowded to (2500, -3000)",exact,1,3349,5746,4375,14544,11862,2565
+"frigate crowded to (2500, -3000)",bounded,2,2240,5055,3339,12968,12177,2947
+"frigate crowded to (-3000, -4500)",exact,1,108,157,154,459,1589,166
+"frigate crowded to (-3000, -4500)",bounded,1,108,157,154,459,1589,166
+"frigate crowded to (0, -4500)",exact,1,113,171,155,479,1773,197
+"frigate crowded to (0, -4500)",bounded,1,113,171,155,479,1773,197
+"frigate crowded to (4500, -1000)",exact,1,715,1176,1028,3335,4482,666
+"frigate crowded to (4500, -1000)",bounded,2,1146,2177,1648,5672,8297,1335
+"frigate crowded to (-4200, -3000)",exact,1,174,253,229,616,2018,212
+"frigate crowded to (-4200, -3000)",bounded,1,174,253,229,616,2018,212
+"frigate crowded to (1000, -5200)",exact,1,114,181,167,499,1812,213
+"frigate crowded to (1000, -5200)",bounded,1,114,181,167,499,1812,213

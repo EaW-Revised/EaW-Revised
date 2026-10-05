@@ -6,6 +6,34 @@
 
 namespace eawr::presentation::ui {
 
+std::array<std::uint32_t, 2> world_ability_overlays(const WorldOverlayUnit& unit, const AbilityState& state) {
+    std::array<std::uint32_t, 2> result{};
+    if (!unit.ally || !unit.visible || !unit.on_screen || (!unit.squadron && !unit.bracket)) return result;
+    for (std::size_t slot = 0; slot < unit.abilities.size(); ++slot) {
+        const auto ability = unit.abilities[slot];
+        if (ability == ability_none) continue;
+        const auto current = state.state(unit.entity, ability);
+        if (!current || current->status != AbilityStatus::active) continue;
+        result[slot] = ability;
+        if (unit.squadron) break;
+    }
+    return result;
+}
+
+float bracket_ability_y(const float bracket_y, const float bar_height_pixels,
+                       const float icon_height_pixels, const float ui_scale) noexcept {
+    return bracket_y - (bar_height_pixels + icon_height_pixels) * 0.5F - 3.0F * ui_scale;
+}
+
+WorldAbilityRect world_ability_rect(const std::array<float, 2> centre,
+    const std::array<float, 2> native_size, const std::array<float, 2> effect_offset,
+    const float component_scale, const float ui_scale) noexcept {
+    const float width = native_size[0] * component_scale * ui_scale;
+    const float height = native_size[1] * component_scale * ui_scale;
+    return {centre[0] + effect_offset[0] * ui_scale - width * 0.5F,
+            centre[1] - effect_offset[1] * ui_scale - height * 0.5F, width, height};
+}
+
 std::optional<float> selection_circle_side(const float select_box_scale, const float scale_factor) noexcept {
     // WU-02: no blob unless Select_Box_Scale is positive.
     if (!(select_box_scale > 0.0F) || !std::isfinite(select_box_scale) || !std::isfinite(scale_factor)) return std::nullopt;
@@ -54,6 +82,7 @@ Rgb health_bar_colour(const int level) noexcept {
 }
 
 BarVisibility bar_visibility(const BarUnit& unit) noexcept {
+    if (!unit.admitted || unit.neutral) return {}; // WSU-50; WSU-63 owner policy
     // A selected craft of a squadron counts as not selected, and only an unselected unit is shown
     // by the pointer or critical health (below 10 %). #502: hovering the squadron's icon shows
     // only the icon's own bar (WU-22), never its craft's.
@@ -86,6 +115,15 @@ float bar_anchor_lift(const std::array<float, 3>& half_extent, const std::array<
         lift = std::sqrt(half_extent[0] * half_extent[0] + half_extent[1] * half_extent[1] + half_extent[2] * half_extent[2]);
     }
     return lift * gui_bounds_scale;
+}
+
+bool place_squadron_arrival_icon(SquadronIconAnchor& anchor,
+    const std::optional<std::array<float, 3>> landing, const std::array<float, 3> presented) noexcept {
+    if (!landing && !anchor.arriving) return false;
+    anchor.position = landing.value_or(presented);
+    anchor.speed = 0.0F;
+    anchor.arriving = landing.has_value();
+    return true;
 }
 
 float squadron_health(const float health_sum, const float max_health_sum) noexcept {

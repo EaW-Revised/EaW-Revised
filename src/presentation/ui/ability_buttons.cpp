@@ -142,6 +142,7 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
             bool all_disabled = true;
             bool all_autofire = true;
             double recharge = 0.0;
+            bool has_dial = false;
             for (const std::size_t index : group.units) {
                 const CardUnit& unit = units[index];
                 const std::uint32_t own = second ? unit.second_ability : unit.ability;
@@ -156,6 +157,7 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
                 if (!current->autofire) all_autofire = false;
                 // AB-05, AB-11: a timed ability that is on draws its dial too (the share of its duration left).
                 if (current->status == AbilityStatus::recharging || (current->status == AbilityStatus::active && current->recharge < 1.0)) {
+                    has_dial = true;
                     recharge = std::max(recharge, current->recharge);
                 }
                 button.units.push_back(unit.id);
@@ -166,7 +168,7 @@ AbilityBar ability_bar(const CardLayout& layout, const std::span<const CardUnit>
             button.disabled = all_disabled;
             button.autofire = all_autofire;
             // AB-05: no unit recharging counts as complete.
-            button.recharge = recharge > 0.0 ? std::min(recharge, 1.0) : 1.0;
+            button.recharge = has_dial ? std::clamp(recharge, 0.0, 1.0) : 1.0;
             bar.buttons.push_back(std::move(button));
         }
     }

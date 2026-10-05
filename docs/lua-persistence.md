@@ -1,13 +1,13 @@
 # Authoritative Lua persistence and state hash
 
-Contract for EAWR-248,
+Contract for Lua persistence (legacy EAWR-248),
 2026-09-27: the canonical save of the [authoritative script scheduler](lua-sandbox.md) and
 the versioned script state hash built on it. It implements the save/hash prerequisite of
 [multiplayer readiness](multiplayer-readiness.md). This is new-engine persistence for
 checkpoints, resync and hashing; it does not read or write retail save files.
 
 Identities: save format `eawr-script-save-v2` (v2 adds the memory quota and account,
-EAWR-375), state hash `eawr-script-state-v1`, combined
+with Lua pattern metering), state hash `eawr-script-state-v1`, combined
 hash `eawr-authoritative-state-v1`. Any change to a rule below needs a new identity.
 
 Code: `ScriptScheduler::save`, `load` and `state_hash`
@@ -162,14 +162,14 @@ and an allocation failure during a load is one more rejection with `EAWR-SCRIPT-
 The save holds every value that can affect a later tick: the Lua graph, identities,
 scheduler queues and counters, random draw positions and next IDs. Existing replay
 formats and their v1/v2 goldens are unchanged; the tactical tick hash does not include
-scripts until EAWR-79 runs scripts in the tick.
+scripts until the tactical AI host runs scripts in the tick.
 
 `authoritative_state_sha256(tick, world, script)` combines one completed tick's world
 and script state hashes under `eawr-authoritative-state-v1` (identity, u64 tick, both hex
 strings, each length-prefixed): the per-tick hash a scripted session exchanges ([multiplayer
 readiness](multiplayer-readiness.md), tick agreement).
 
-`state_digest()` (EAWR-247) stays a test digest.
+`state_digest()` stays a test digest.
 
 ## Tests
 
@@ -184,7 +184,7 @@ readiness](multiplayer-readiness.md), tick agreement).
   continued: every tick's commands, diagnostics, removals and state hash equal the
   uninterrupted run, and re-saving a loaded state reproduces the bytes. Also fixes the
   final state hash, the same on every target.
-- `workers`: the same with 1, 2, 4 and 8 workers (identical save bytes), and the EAWR-247
+- `workers`: the same with 1, 2, 4 and 8 workers (identical save bytes), and the Lua sandbox
   load scenario (24 instances) saved at tick 45 and continued on four workers.
 - `corruption`: every truncation and 3,000 random byte mutations of a save; each is
   rejected without changing the target scheduler or decodes to another valid state that
@@ -196,6 +196,6 @@ readiness](multiplayer-readiness.md), tick agreement).
 ## Open items
 
 - Wiring the script state hash into the tactical session's per-tick hash and checkpoint
-  format belongs to EAWR-79 (scripts in the tick) and EAWR-250 (checkpoints, resync).
-- The save is uncompressed and unbounded apart from the format bounds; EAWR-252 measures
+  format belongs to the tactical AI host (scripts in the tick) and restorable checkpoints and resync (checkpoints, resync).
+- The save is uncompressed and unbounded apart from the format bounds; galactic checkpoint capacity measures
   checkpoint sizes of real FoC script graphs.

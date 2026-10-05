@@ -17,6 +17,13 @@
 // sim state; no draw here touches the simulation's random streams.
 namespace eawr::presentation::space {
 
+// BP-68: the unit camera-plane axis whose perspective projection follows the flight
+// tangent at `centre`. Eye, centre and direction use the same coordinate basis;
+// `forward` is a unit view direction. Nullopt at/behind the eye or for radial/zero motion.
+[[nodiscard]] std::optional<std::array<double, 3>> projectile_screen_axis(
+    const std::array<double, 3>& eye, const std::array<double, 3>& forward,
+    const std::array<double, 3>& centre, const std::array<double, 3>& direction) noexcept;
+
 // A model projectile as drawn: source-basis position and its facing, yaw in degrees in [0, 360)
 // (0 along source +X, counter-clockwise about +Z) and pitch in degrees, positive downward (the
 // facing triple's y; R-ROT-01 draws it as Rz(yaw) Ry(pitch)).

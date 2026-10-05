@@ -58,6 +58,18 @@ using namespace godot;
 namespace eawr::presentation::godot_backend {
 namespace viewer_host_detail {
 
+[[nodiscard]] sim::math::Mat3x4 runtime_transform(
+    const std::int64_t x, const std::int64_t z = 0);
+[[nodiscard]] assets::Model runtime_model(const float half_extent = 110.0F);
+[[nodiscard]] assets::Texture runtime_texture();
+[[nodiscard]] MaterialDescription runtime_material(
+    const RenderPass pass, const std::string_view source);
+
+
+constexpr std::string_view expected_scene_hash =
+    "de673739583babf0a4541feafc6bd1f0c40da36788a962e7d49b284be7611a18";
+
+
 namespace model_preview = eawr::viewer::model_preview;
 // The MC-50 model, Hangar texture and their SHA-256 pins live with the
 // selection rules in model_preview.hpp.
@@ -66,6 +78,8 @@ constexpr std::string_view default_model_path = model_preview::pinned_model_path
 namespace tactical_camera = eawr::presentation::camera;
 namespace camera_input = eawr::viewer::camera_input;
 
+[[nodiscard]] std::string json(std::string_view value);
+[[nodiscard]] std::optional<std::vector<std::byte>> read_bytes(const ViewerPath& path);
 [[nodiscard]] std::string utf8(const String& value);
 [[nodiscard]] bool ieq(std::string_view left, std::string_view right);
 [[nodiscard]] std::string hash_bytes(std::span<const std::byte> bytes);
@@ -95,6 +109,13 @@ struct ViewerHost::Options final {
     std::string texture_path;
     std::string animation_path;
     std::string map_path;
+    bool skirmish_setup{};
+    bool skirmish_setup_test{};
+    bool skirmish_setup_returned{};
+    bool startup_metrics{};
+    bool cache_content{true};
+    bool cache_shaders{true};
+    std::uint32_t load_bench_starts{1}, load_bench_completed{};
     std::string atlas_path;
     std::string icon_name;
     std::string camera_mode;

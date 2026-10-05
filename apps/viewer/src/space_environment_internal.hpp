@@ -8,6 +8,7 @@
 #include "fog_mode.hpp"
 #include "space_fog_units.hpp"
 #include "space_populate.hpp"
+#include "idle_clips.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/presentation/camera/constants_source.hpp"
@@ -57,13 +58,39 @@ namespace space_environment_detail {
 namespace tactical = presentation::camera;
 namespace camera_input = viewer::camera_input;
 
+// Live create/destroy: each cycle draws the composed sky, releases every sky
+// asset while its instances exist, then uploads again.
+inline constexpr std::size_t lifecycle_cycles = 3;
+
+// Q24 render instance matrix of a source-basis transform; empty when a value
+// is not finite or leaves the Q24 range.
+[[nodiscard]] inline std::optional<sim::math::Mat3x4> instance_matrix(const space::Affine& source) {
+    const space::Affine render = space::render_affine(source);
+    sim::math::Mat3x4 result{};
+    constexpr double scale = static_cast<double>(sim::math::Fixed::scale);
+    constexpr double limit = 1.0e12;
+    for (std::size_t row = 0; row < 3; ++row) {
+        for (std::size_t column = 0; column < 4; ++column) {
+            const double value = static_cast<double>(render[row * 4 + column]) * scale;
+            if (!std::isfinite(value) || std::abs(value) > limit) return std::nullopt;
+            result.rows[row][column] = sim::math::Fixed::from_raw(static_cast<std::int64_t>(std::llround(value)));
+        }
+    }
+    return result;
+}
+
 [[nodiscard]] std::vector<MaterialBinding> meshgloss_bindings(
     const space::MeshGlossMaterial& material, const space::SkyLightPolicy& policy);
 [[nodiscard]] std::vector<MaterialBinding> meshadditive_bindings(
     const space::MeshAdditiveMaterial& material, const space::MeshAdditiveInputs& inputs);
+struct AdditiveControl;
+[[nodiscard]] space::SkyLightPolicy light_probe_policy();
+[[nodiscard]] AdditiveControl parse_additive_control(std::string_view control);
+[[nodiscard]] std::filesystem::path sibling(const std::filesystem::path& capture, const std::string& suffix);
 [[nodiscard]] bool shadow_control(std::string_view control);
 [[nodiscard]] bool caster_control(std::string_view control);
 [[nodiscard]] std::string number(double value, int precision = 6);
+[[nodiscard]] std::string report_strings(const std::vector<std::string>& values);
 [[nodiscard]] std::string json(std::string_view value);
 [[nodiscard]] std::string hash_bytes(std::span<const std::byte> bytes);
 [[nodiscard]] std::optional<std::string> probe_reference(
@@ -249,6 +276,7 @@ public:
     void camera_viewport(float width, float height);
     // #82: see SpaceEnvironment::live_camera_frame and the rest.
     [[nodiscard]] std::optional<tactical::TacticalFrame> drawn_frame() const;
+    [[nodiscard]] std::pair<bool, bool> pointer_mode(bool ctrl) const;
     void focus(float source_x, float source_y);
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> camera_bounds() const;
     void overview_key();
@@ -284,12 +312,21 @@ private:
         float scale{1.0F};
         // World radius of the object's plain surfaces; its glow sits behind it.
         float radius{};
+        std::optional<std::size_t> idle;
+    };
+    struct EnvironmentIdle final {
+        std::string object;
+        std::string clip_path;
+        std::shared_ptr<const animation::Player> player;
+        IdlePlacement playback;
+        std::vector<std::pair<sim::EntityId, sim::AssetId>> instances;
+        animation::IdlePose pose;
     };
 
     void compose_object(const Placed& placed, const std::vector<space::SceneSurface>& surfaces);
     void upload(Item item, const space::SceneSurface& surface, const assets::Model& geometry,
                 const space::Affine& transform, const assets::Model* planned_from,
-                bool sunlight_glow = false);
+                bool sunlight_glow = false, std::optional<std::size_t> idle = std::nullopt);
     [[nodiscard]] std::optional<assets::Texture> texture(const std::string& declared, std::string& logical,
                                                          std::string& failure);
     [[nodiscard]] bool fail(std::string message) {
@@ -306,9 +343,22 @@ private:
             effects_released_ = true;
         }
         if (populate_result_ && populate_result_->release) populate_result_->release(*renderer_);
+        for (auto& idle : environment_idle_) {
+            for (const auto& [entity, asset] : idle.instances) {
+                static_cast<void>(asset);
+                renderer_->clear_skin_pose(entity);
+            }
+            // Keep the clip identity, sampled time and instance count for the
+            // terminal report, which is written after rendering resources release.
+            idle.player.reset();
+        }
         for (const sim::AssetId asset : assets_) static_cast<void>(renderer_->release(asset));
         assets_.clear();
     }
+    [[nodiscard]] bool initialize_idle();
+    [[nodiscard]] bool bind_idle(const scene::Placement& placement, const assets::Model& model,
+                                 const vfs::Vfs& filesystem, Placed& placed);
+    [[nodiscard]] std::optional<int> advance_effects(std::uint32_t tick);
     [[nodiscard]] bool write_report() const;
     // Puts a live source's stop message on screen once and prints it (#316 review 2).
     void show_live_error(const std::string& message);
@@ -341,6 +391,7 @@ private:
     std::vector<std::string> not_rendered_;
     std::vector<std::uint32_t> environment_records_;
     std::vector<sim::AssetId> assets_;
+    std::vector<EnvironmentIdle> environment_idle_;
     std::vector<sim::RenderInstance> instances_;
     std::vector<std::pair<std::size_t, space::Affine>> sky_instances_;
     // Planet and Nebula surfaces: their eawr_effect_time follows the effect
@@ -580,6 +631,9 @@ struct SpaceEnvironment::State final {
     [[nodiscard]] bool compose_receiver();
     [[nodiscard]] std::optional<int> lifecycle_step();
     [[nodiscard]] std::optional<int> finish();
+    void write_plan_report(std::ostream& output) const;
+    void write_surfaces_report(std::ostream& output) const;
+    void write_submission_report(std::ostream& output) const;
     [[nodiscard]] bool write_report() const;
     void write_camera_report(std::ostream& output, int precision) const;
 };

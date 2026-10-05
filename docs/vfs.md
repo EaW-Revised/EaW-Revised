@@ -1,6 +1,6 @@
 # Virtual file system contract
 
-P0-02 supplies the only runtime path from a logical game/mod asset name to bytes. Callers
+The virtual file system supplies the only runtime path from a logical game/mod asset name to bytes. Callers
 do not receive native paths and must not open a game or mod file directly. The public API is
 `include/eawr/vfs/vfs.hpp`; the scanner is `asset_scan`.
 

@@ -38,7 +38,7 @@ constexpr std::array<Cause, 18> cause_order{
 // draws at the Highest shader detail (#199); their fixed-function rows remain
 // renderer selectors, not scene selections. So do BatchMeshGloss,
 // MeshAlphaGloss and BatchMeshAlpha with their DX8 technique (#200).
-constexpr std::array<LegacySelector, 14> selector_table{{
+constexpr std::array<LegacySelector, 15> selector_table{{
     {"MeshGloss.fx", "sph_t0", "sph_t0_p0", false},
     // The laser pads (#80): its GlossTexture is uploaded as its own binding (MULTITEX-01).
     {"MeshGlossColorize.fx", "sph_t0", "sph_t0_p0", false},
@@ -52,6 +52,7 @@ constexpr std::array<LegacySelector, 14> selector_table{{
     {"BatchMeshAlpha.fx", "sph_t0", "sph_t0_p0", true, true},
     {"MeshAdditive.fx", "t0", "t0_p0", true},
     {"MeshAdditiveOffset.fx", "t0", "t0_p0", true},
+    {"MeshAdditiveVColor.fx", "t0", "t0_p0", true},
     {"Tree.fx", "sph_t1", "sph_t1_p0", false},
     {"Grass.fx", "sph_t0", "sph_t0_p0", true},
 }};

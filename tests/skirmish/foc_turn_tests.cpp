@@ -23,10 +23,13 @@
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -155,6 +158,10 @@ std::optional<Content> load(const std::filesystem::path& root) {
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    input.space_map = skirmish::m2_fixture().map;
+    // Keep the production viewer's M2 closure and table order. Victory is
+    // already loaded through station production; seeding it separately changes
+    // the replay content identity despite retaining the same unit values.
     auto tables = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(tables), "FoC unit tables load");
     if (!tables) return std::nullopt;
@@ -260,6 +267,165 @@ std::string text(const std::optional<std::uint64_t>& value) {
     return value ? std::to_string(*value) : std::string("none");
 }
 
+// WMV-20 / AT-10: loaded Victory and Rebel station, isolated from other units.
+// The AI path uses a test freestore through the real Lua object order binding.
+// Fog is off. Profiles, health, weapon frames and cones retain their loaded values.
+void capital_station_test(const Content& content, const std::filesystem::path& output = {}) {
+    const auto victory_type = skirmish::type_id("Victory_Destroyer");
+    const auto station_type = skirmish::type_id("Skirmish_Rebel_Star_Base_1");
+    const auto* profile = content.content.combat.find(victory_type);
+    const auto* target_profile = content.content.combat.find(station_type);
+    expect(profile != nullptr && target_profile != nullptr, "capital facing: loaded Victory and station profiles exist");
+    if (profile == nullptr || target_profile == nullptr) return;
+    if (!output.empty()) std::filesystem::create_directories(output);
+    for (const bool scripted : {false, true}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto setup = skirmish::recording_setup(skirmish::m2_fixture(), content.start);
+            for (auto& slot : setup.skirmish->slots)
+                if (slot.player == 2) slot.fleet.push_back("Victory_Destroyer");
+            tactical::UnitState ship{}, station{};
+            for (const auto& unit : setup.units) {
+                if (unit.entity_id == content.acclamator) ship = unit;
+                if (unit.type_id == station_type) station = unit;
+            }
+            ship.entity_id = 1;
+            ship.type_id = victory_type;
+            ship.owner = 2;
+            ship.position.x = math::Fixed::from_integer(-1000).value();
+            ship.position.y = {};
+            const auto eighth = math::Fixed::from_raw(math::Fixed::scale / 8);
+            ship.rotation = math::normalize(math::Quat{{}, {}, math::sin_turn(eighth), math::cos_turn(eighth)}).value();
+            ship.order = {};
+            station.entity_id = 2;
+            station.type_id = station_type;
+            station.owner = 1;
+            station.position.x = {};
+            station.position.y = {};
+            station.rotation = math::Quat{{}, {}, {}, math::Fixed::from_raw(math::Fixed::scale)};
+            station.order = {};
+            setup.units = {ship, station};
+            setup.squadrons.clear();
+            auto world = tactical::TacticalSession::create(setup, content.content.sensors, content.content.durability,
+                content.content.motion, std::nullopt, content.content.combat, {}, content.content.abilities);
+            expect(static_cast<bool>(world), "capital facing: isolated world builds");
+            if (!world) continue;
+            auto ai = content.ai;
+            ai.bounds.reset();
+            ai.xml.clear();
+            for (auto& player : ai.players) {
+                player.ai = scripted && player.player == 2;
+                player.human = !player.ai && !player.neutral;
+            }
+            ai.freestore_module = "Data/Scripts/Test/CapitalFacing.lua";
+            auto modules = content.modules;
+            modules[ai.freestore_module] =
+                "function Base_Definitions() ServiceRate = 1; UnitServiceRate = 1 end\n"
+                "function main() end\n"
+                "function On_Unit_Service(object)\n"
+                "  if not ordered and object.Get_Type() == Find_Object_Type('Victory_Destroyer') then\n"
+                "    local stations = Find_All_Objects_Of_Type('Skirmish_Rebel_Star_Base_1')\n"
+                "    if table.getn(stations) > 0 then object.Attack_Move(stations[1]); ordered = true end\n"
+                "  end\n"
+                "end\n";
+            auto session = foc::create_session(std::move(world).value(), ai, modules);
+            expect(static_cast<bool>(session), "capital facing: scripted session builds");
+            if (!session) continue;
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::map<std::uint32_t, std::uint64_t> shots;
+            bool ordered = false;
+            std::ofstream trace;
+            const auto label = scripted ? "ai-attack-move" : "human-attack";
+            if (!output.empty() && workers == 1) {
+                trace.open(output / (std::string(label) + ".csv"));
+                trace << "tick,yaw,centre_distance,weapon,aim_distance,cone_yaw,cone_pitch,cone_admitted,raw_range,extended_range,shots\n";
+            }
+            for (std::uint64_t tick = 0; tick < 720; ++tick) {
+                std::vector<tactical::PlayerCommand> input;
+                if (!scripted && tick == 0) input.push_back({{0, 2, 0}, {1}, tactical::AttackPayload{2}});
+                auto stepped = session.value().step(executor, input);
+                expect(static_cast<bool>(stepped), "capital facing: world and Lua step succeed");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto& snapshot = *stepped.value().world.snapshot;
+                for (const auto& event : snapshot.events()) {
+                    ordered = ordered || (event.kind == tactical::EventKind::order_accepted && event.unit == 1
+                        && event.order == (scripted ? tactical::OrderKind::attack_move : tactical::OrderKind::attack));
+                }
+                for (const auto& event : snapshot.combat_events()) {
+                    if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1 && event.target == 2)
+                        ++shots[event.weapon];
+                }
+                const auto units = session.value().world().units();
+                const auto source = std::find_if(units.begin(), units.end(), [](const auto& value) { return value.entity_id == 1; });
+                const auto target = std::find_if(units.begin(), units.end(), [](const auto& value) { return value.entity_id == 2; });
+                if (source == units.end() || target == units.end()) break;
+                if (trace) {
+                    const auto source_matrix = math::to_matrix(source->rotation, source->position).value();
+                    const auto target_matrix = math::to_matrix(target->rotation, target->position).value();
+                    auto aim = target->position;
+                    auto best = std::numeric_limits<double>::infinity();
+                    const auto durability = session.value().world().durability_state(2);
+                    const auto* health = content.content.durability.find(station_type);
+                    for (const auto& hardpoint : target_profile->hardpoints) {
+                        if (!hardpoint.targetable || (durability && health
+                            && tactical::hardpoint_destroyed(*health, *durability, hardpoint.hardpoint))) continue;
+                        const auto point = math::transform_point(target_matrix, hardpoint.position).value();
+                        const auto distance = std::hypot(real(point.x) - real(source->position.x), real(point.y) - real(source->position.y),
+                            real(point.z) - real(source->position.z));
+                        if (distance < best) { best = distance; aim = point; }
+                    }
+                    const auto* footprint = content.content.motion.footprint(station_type);
+                    const auto radius = footprint != nullptr ? real(footprint->radius) : 0.0;
+                    for (const auto& weapon : profile->weapons) {
+                        math::Vec3 middle{math::Fixed::from_raw((weapon.fire_a.x.raw() + weapon.fire_b.x.raw()) / 2),
+                            math::Fixed::from_raw((weapon.fire_a.y.raw() + weapon.fire_b.y.raw()) / 2),
+                            math::Fixed::from_raw((weapon.fire_a.z.raw() + weapon.fire_b.z.raw()) / 2)};
+                        if (!weapon.has_fire_b) middle = weapon.fire_a;
+                        const auto muzzle = math::transform_point(source_matrix, middle).value();
+                        const std::array<double, 3> delta{real(aim.x) - real(muzzle.x), real(aim.y) - real(muzzle.y), real(aim.z) - real(muzzle.z)};
+                        std::array<double, 3> local{};
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            for (std::size_t row = 0; row < 3; ++row) local[axis] += real(source_matrix.rows[row][axis]) * delta[row];
+                        if (weapon.fire_axes) {
+                            const auto prior = local;
+                            for (std::size_t axis = 0; axis < 3; ++axis) {
+                                const auto& basis = (*weapon.fire_axes)[axis];
+                                local[axis] = real(basis.x) * prior[0] + real(basis.y) * prior[1] + real(basis.z) * prior[2];
+                            }
+                        }
+                        const auto yaw = std::atan2(local[1], local[0]) * 180.0 / 3.14159265358979323846;
+                        const auto pitch = std::atan2(local[2], std::hypot(local[0], local[1])) * 180.0 / 3.14159265358979323846;
+                        const auto distance = std::hypot(delta[0], delta[1]);
+                        trace << tick << ',' << yaw_of(source->rotation) << ','
+                            << std::hypot(real(target->position.x) - real(source->position.x), real(target->position.y) - real(source->position.y))
+                            << ',' << weapon.hardpoint << ',' << distance << ',' << yaw << ',' << pitch << ','
+                            << (std::abs(yaw) <= real(weapon.cone_width) / 2 && std::abs(pitch) <= real(weapon.cone_height) / 2)
+                            << ',' << (distance <= real(weapon.range)) << ',' << (distance <= real(weapon.range) + radius)
+                            << ',' << shots[weapon.hardpoint] << '\n';
+                    }
+                }
+            }
+            expect(ordered, "capital facing: the human or real Lua binding issues the expected unit order");
+            expect(shots[0] > 0, "capital facing: the Victory forward ion cannon fires at the station");
+            if (!output.empty() && workers == 1) {
+                auto bytes = tactical::write_replay(session.value().world().record());
+                expect(static_cast<bool>(bytes), "capital facing: observation replay encodes");
+                if (bytes) {
+                    std::ofstream replay(output / (std::string(label) + ".eawr-replay"), std::ios::binary);
+                    replay.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
+                    expect(static_cast<bool>(replay), "capital facing: observation replay writes");
+                }
+            }
+            if (workers == 1) {
+                reference = hashes;
+                std::cout << label << ": ion shots " << shots[0] << ", sampled ticks " << hashes.size() << '\n';
+            } else expect(hashes == reference, "capital facing: every tick matches on 1/2/4/8 workers");
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -268,9 +434,14 @@ int main(int argc, char** argv) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the FoC AI turn staging\n";
         return 0;
     }
-    const std::uint64_t ticks = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1050;
+    const bool capital_only = argc > 1 && std::string(argv[1]) == "--capital-facing";
+    const std::uint64_t ticks = !capital_only && argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1050;
     auto content = load(*root);
     if (!content) return 1;
+    if (capital_only) {
+        capital_station_test(*content, argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{});
+        return failures == 0 ? 0 : 1;
+    }
     double staged = 0;
     for (const auto& unit : content->start.setup.units) {
         if (unit.entity_id == content->acclamator) staged = yaw_of(unit.rotation);
@@ -321,6 +492,7 @@ int main(int argc, char** argv) {
     expect(attack_moved && *attack_moved >= 31 && *attack_moved <= 35, "A-04: the ordered Acclamator starts turning within 5 frames");
     expect(attack_turn && (!order || *attack_turn < *order), "A-04: the ordered turn comes before the idle case's first AI order");
 
+    capital_station_test(*content);
     if (failures != 0) {
         std::cerr << failures << " AI turn check(s) failed\n";
         return 1;

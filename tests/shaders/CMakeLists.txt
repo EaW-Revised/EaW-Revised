@@ -17,4 +17,8 @@ set_tests_properties(
 )
 
 # Tier labels (cmake/EawrTestTiers.cmake).
+# Each file runs its CPU contracts; graphical exercises retain their opt-in gates.
+eawr_add_python_contract(python_shaders_acceptance_p010_acceptance tests.shaders.acceptance.test_p010_acceptance)
+eawr_add_python_contract(python_shaders_acceptance_p010_revalidation tests.shaders.acceptance.test_p010_revalidation)
+
 eawr_label_tests()

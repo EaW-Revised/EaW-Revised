@@ -68,19 +68,20 @@ def summary(log: bytes) -> Dict[str, object]:
         tick = int(row["tick"])
         if row["kind"] == "fired" and row["other"] == "target":
             result["shots"] += 1
+            weapon = f"{row['object']}/{row['part']}"
+            fired = result.setdefault("fired", {})
+            fired[weapon] = fired.get(weapon, 0) + 1
         elif row["kind"] == "hit" and row["object"] == "target":
             result["hits"] += 1
             parts = result["hit_parts"]
             parts[row["part"]] = parts.get(row["part"], 0) + 1
-            weapon = row["other"].split("/", 1)[1] if "/" in row["other"] else row["other"]
+            # Keep the craft label: an Acclamator's launched fighters and bombers both
+            # have an "object" weapon, but their shots belong to different batteries.
+            weapon = row["other"]
             phase = "up" if result["shield"] is None else "down"
             by = result.setdefault("by_weapon", {})
             key = f"{weapon}>{row['part']}@{phase}"
             by[key] = by.get(key, 0) + 1
-        elif row["kind"] == "fired" and row["object"] != "target":
-            weapon = row["part"]
-            fired = result.setdefault("fired", {})
-            fired[weapon] = fired.get(weapon, 0) + 1
         elif row["kind"] == "health" and row["object"] == "target":
             part, value = row["part"], float(row["value"])
             first.setdefault(part, value)

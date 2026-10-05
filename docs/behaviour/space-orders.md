@@ -3,9 +3,9 @@
 ## Applicability
 
 - Product: Star Wars Empire at War: Forces of Corruption, tactical space. P2 gap 1
-  (EAWR-452, EAWR-73's G-W2): a ship
+  (attack approach, attack-move and guard (legacy EAWR-452), target selection and weapon fire, G-W2): a ship
   ordered to attack a target outside its weapon range closes on it; attack-move and guard work as
-  in FoC, for the player and for the AI (EAWR-79's `Attack_Move`, `Guard_Target`, `Attack_Target`).
+  in FoC, for the player and for the AI (the tactical AI host's `Attack_Move`, `Guard_Target`, `Attack_Target`).
 - Bounded question: how a ship given an attack order on a unit, an attack-move or a guard order
   moves; where it stops; how it keeps station against a moving target; how the player gives each
   order. Weapon choice and fire are [space weapon fire](space-weapon-fire.md) and
@@ -16,7 +16,7 @@
   No original-game recording of these orders exists yet (OR-U4).
 - Out of scope: squadron craft, which have no space layer and divert on their own (OR-13; a
   squadron's attack-move and guard are [space fighters](space-fighters.md) FO-05 and FO-06); waypoint queues (Alt), the compass facing
-  of a right drag and abilities. Attacks on one hardpoint are OR-20 to OR-27 (EAWR-531).
+  of a right drag and abilities. Attacks on one hardpoint are OR-20 to OR-27 (specific-hardpoint attack orders).
 
 ## How FoC does it
 
@@ -66,12 +66,15 @@ guard differ from a move only for craft.
   a moving ship given an attack order stops following its old path (OR-05).
 - **OR-03** (research E452-06) The approach distance is the unit's `Targeting_Max_Attack_Distance`
   plus the target's hard extent (the smaller of its X and Y extents, or its soft radius when a
-  hardpoint is aimed at). *Project:* extents and soft radii are not loaded and count as zero, as in
-  A-07 and P-04, so the approach distance is the attack distance. A unit without an attack distance
+  hardpoint is aimed at). The remake uses the loaded, scaled movement footprint; a synthetic
+  profile without one falls back to its collision half extents. A unit without an attack distance
   has approach distance zero.
 - **OR-04** (research E452-07, E452-11, E452-19) The unit is in range when its planar distance to
-  the target's aim point is at most the approach distance, inclusive: A-04's test and aim point
-  (the target's live targetable hardpoint nearest the unit, else its position). FoC also rejects a
+  the target's aim point is at most its attack distance plus the target extent, inclusive: A-04's test and aim point
+  (the target's live targetable hardpoint nearest the unit, else its position). A hardpoint aim
+  adds the soft radius. A centre aim adds the hard X extent when the absolute cosine of the
+  target's facing and incoming bearing exceeds 0.7071, otherwise its hard Y extent (AT-10).
+  FoC also rejects a
   unit closer than `Targeting_Min_Attack_Distance`; no M2 ship authors it and it is not loaded.
 - **OR-05** (research E452-07, E452-08, E452-09) A mapping of a unit: when it is in range it holds,
   dropping its path where it is like a stop (MV-22) and staying at rest if it is (*project:* a turn
@@ -124,7 +127,8 @@ guard differ from a move only for craft.
   move, group moves included (FM-01 to FM-10).
 - **OR-12** (research E452-18, E452-07) An attack-move towards a unit (the AI's `Attack_Move(unit)`)
   approaches it as OR-02 to OR-08 do, with the "attack on path" flag, but without making it the
-  unit's target.
+  unit's target. At rest it turns toward that destination's centre using WMV-20, even when
+  automatic combat targeting has not selected it. Moving ships retain their path heading.
 - **OR-13** (research E452-14, E452-15; data) Craft, which have no space layer, do divert: within
   `Attack_Move_Response_Range` of their path on attack-move, `Guard_Chase_Range` when guarding and
   `Idle_Chase_Range` otherwise, each extended by `Autonomous_Move_Extension_Vs_Attacker` against a
@@ -152,7 +156,9 @@ guard differ from a move only for craft.
   only offers units outside the selection. A named unit that is not live rejects every listed unit
   with `target_not_live`. The guard ends as OR-08 says when the guarded unit dies.
 
-### Attacking one hardpoint (EAWR-531)
+<a id="attacking-one-hardpoint-531"></a>
+
+### Attacking one hardpoint
 
 Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays private.
 
@@ -226,7 +232,7 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
 - **C-05** (OR-11) An attack-move to a point plans exactly the path of a move to that point.
 - **C-06** (OR-17) A guard naming the ordered unit is rejected with `target_is_unit`; one naming a
   dead unit with `target_not_live`.
-- **C-07** (OR-06; EAWR-662) The two Tartans of S-29, ordered to attack a stationary corvette 3000 units
+- **C-07** (OR-06; stable capital-ship attack approach) The two Tartans of S-29, ordered to attack a stationary corvette 3000 units
   away, are each mapped once: their checks find the ends of their paths in range, so they fly the
   paths planned from the order to their slots without re-planning, and their headings swing no
   more than those paths' own detours do (no swing every check).
@@ -262,9 +268,9 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
 - **OR-U6** `MovementReevaluationFrameCount` (10) and `Space_Guard_Range` (750) are the motion
   rules' defaults, FoC's `gameconstants.xml` values; the unit tables read them at the next FoC
   identity re-pin, as `SpacePathfindFrameDelayDelta` (FM-U8), so the pinned content identity and
-  the M2 start stay unchanged. The GameConstants audit (EAWR-626) takes all three in one re-pin (EAWR-663).
+  the M2 start stay unchanged. The GameConstants audit (movement-constant coverage audit) takes all three in one re-pin (data-driven guard range and reevaluation).
 - **OR-U5** FoC aims the approach at its best target hardpoint (G-W3) and adds the target's soft
-  radius; the remake measures to the nearest live hardpoint with no radius, as A-07 (or to the ordered
+  radius; the remake adds the loaded soft radius and measures to the nearest live hardpoint, as A-07 (or to the ordered
   hardpoint, OR-25).
 - **OR-U7** FoC re-picks a hardpoint by the attacker's priorities per hardpoint type (OR-24); the
   remake has no such table and takes the nearest. For a unit on its default priority set this is
@@ -278,9 +284,9 @@ Evidence tags HO-nn are opaque IDs from the FoC debug build; their map stays pri
   whose craft overlap it, and what a left click on a reticle selects, rest on WU-41's project choice.
   The left double click tests the reticle before the icon as the single click does (WSU-18 names the
   reticle, not its order against the icon's WSU-38): unverified.
-- **OR-U11** FoC also passes the reticle's hardpoint to a targeted ability clicked on it (EAWR-561, space
+- **OR-U11** FoC also passes the reticle's hardpoint to a targeted ability clicked on it (ion weapons, energy drain and stun, space
   abilities AB-61); the remake's ability click aims at the unit (no hardpoint) for now.
-- **OR-U12** Resolved by collision-mesh picking (EAWR-841, WSU-10 to WSU-12): a reticle-free click
+- **OR-U12** Resolved by collision-mesh picking (collision-mesh and override-sphere picking, WSU-10 to WSU-12): a reticle-free click
   tests the hull and attached hardpoint meshes and picks their owning unit (OR-20), with the same
   pick for selection, double click, right-click targeting, hover and ability aim. A click inside
   the box but off those meshes misses unless the override sphere covers it; types without mesh

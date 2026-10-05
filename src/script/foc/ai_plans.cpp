@@ -163,8 +163,19 @@ core::Result<PlanDef> build_plan(const Host& host, std::string name, std::string
         for (const Value& value : *required) {
             const auto* text = std::get_if<std::string>(&value.data);
             if (text == nullptr) continue;
-            const auto found = host.setup.content.categories.find(upper_case(*text));
-            if (found != host.setup.content.categories.end()) plan.required_categories.push_back(found->second);
+            // PL-14: each string is one union requirement, not one category name.
+            std::uint64_t bits = 0;
+            bool recognized = true;
+            for (const auto& category : split_names(*text, "| ,\t\n")) {
+                const auto found = host.setup.content.categories.find(upper_case(category));
+                if (found == host.setup.content.categories.end()) {
+                    recognized = false;
+                    break;
+                }
+                bits |= found->second;
+            }
+            if (recognized) plan.required_categories.push_back(bits);
+            else notes.push_back("unknown required category " + *text + " in " + plan.name);
         }
     }
     return PlanResult::success(std::move(plan));

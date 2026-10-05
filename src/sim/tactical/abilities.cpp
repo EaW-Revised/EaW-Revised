@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <functional>
+#include <utility>
+#include <cstdlib>
 #include <string>
 
 namespace eawr::sim::tactical {
@@ -20,12 +23,20 @@ struct KindName {
     std::string_view name;
 };
 
-constexpr std::array<KindName, 5> kind_names{{
+constexpr std::array<KindName, 13> kind_names{{
     {AbilityKind::defend, "DEFEND"},
     {AbilityKind::turbo, "TURBO"},
     {AbilityKind::power_to_weapons, "POWER_TO_WEAPONS"},
     {AbilityKind::spoiler_lock, "SPOILER_LOCK"},
     {AbilityKind::ion_cannon_shot, "ION_CANNON_SHOT"},
+    {AbilityKind::invulnerability, "INVULNERABILITY"},
+    {AbilityKind::concentrate_fire, "CONCENTRATE_FIRE"},
+    {AbilityKind::barrage, "BARRAGE"},
+    {AbilityKind::energy_weapon, "ENERGY_WEAPON"},
+    {AbilityKind::tractor_beam, "TRACTOR_BEAM"},
+    {AbilityKind::harmonic_bomb, "HARMONIC_BOMB"},
+    {AbilityKind::weaken_enemy, "WEAKEN_ENEMY"},
+    {AbilityKind::replenish_wingmen, "REPLENISH_WINGMEN"},
 }};
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
@@ -60,6 +71,10 @@ constexpr std::array<KindName, 5> kind_names{{
     case AbilityModifier::energy_regen: return modifiers.energy_regen;
     case AbilityModifier::energy_regen_interval: return modifiers.energy_regen_interval;
     case AbilityModifier::speed: return modifiers.speed;
+    case AbilityModifier::scatter_radius: return modifiers.scatter_radius;
+    case AbilityModifier::cause_damage: return modifiers.cause_damage;
+    case AbilityModifier::take_damage: return modifiers.take_damage;
+    case AbilityModifier::fire_rate: return modifiers.fire_rate;
     }
     return Fixed::from_raw(one_raw);
 }
@@ -90,6 +105,132 @@ AbilityKind ability_kind(const std::string_view name) noexcept {
     return AbilityKind::none;
 }
 
+SpecialAbilityKind special_ability_kind(const std::string_view name) noexcept {
+    constexpr std::array<std::pair<std::string_view, SpecialAbilityKind>, 11> names{{
+        {"Combat_Bonus_Ability", SpecialAbilityKind::combat_bonus},
+        {"Reduce_Production_Price_Ability", SpecialAbilityKind::production_price},
+        {"Concentrate_Fire_Attack_Ability", SpecialAbilityKind::concentrate_fire},
+        {"Tractor_Beam_Attack_Ability", SpecialAbilityKind::tractor_beam},
+        {"Energy_Weapon_Attack_Ability", SpecialAbilityKind::energy_weapon},
+        {"Sensor_Jamming_Ability", SpecialAbilityKind::sensor_jamming},
+        {"Corrupt_Systems_Ability", SpecialAbilityKind::corrupt_systems},
+        {"Blast_Ability", SpecialAbilityKind::blast},
+        {"Stealth_Ability", SpecialAbilityKind::stealth},
+        {"Find_Weakness_Ability", SpecialAbilityKind::find_weakness},
+        {"Maximum_Firepower_Attack_Ability", SpecialAbilityKind::maximum_firepower},
+    }};
+    for (const auto& [spelling, kind] : names) if (iequals(name, spelling)) return kind;
+    return SpecialAbilityKind::none;
+}
+SpecialActivationStyle special_activation_style(const std::string_view name) noexcept {
+    constexpr std::array<std::pair<std::string_view, SpecialActivationStyle>, 5> names{{
+        {"Space_Automatic", SpecialActivationStyle::space_automatic},
+        {"Ground_Automatic", SpecialActivationStyle::ground_automatic},
+        {"Ground_Activated", SpecialActivationStyle::ground_activated},
+        {"Galactic_Automatic", SpecialActivationStyle::galactic_automatic},
+        {"User_Input", SpecialActivationStyle::user_input},
+    }};
+    for (const auto& [spelling, style] : names) if (iequals(name, spelling)) return style;
+    return SpecialActivationStyle::unspecified;
+}
+std::uint32_t special_service_interval(const SpecialAbilityKind kind) noexcept {
+    // WHE-09: five traced active handlers use one logical frame; the base uses zero.
+    return kind == SpecialAbilityKind::energy_weapon || kind == SpecialAbilityKind::concentrate_fire
+        || kind == SpecialAbilityKind::tractor_beam || kind == SpecialAbilityKind::sensor_jamming
+        || kind == SpecialAbilityKind::blast ? 1U : 0U;
+}
+bool special_type_matches(const SpecialAbilityFilter& filter, const TypeId type, const std::uint64_t categories) noexcept {
+    // WHE-14: explicit inclusion precedes both category admission and exclusions.
+    if (std::binary_search(filter.applicable_types.begin(), filter.applicable_types.end(), type)) return true;
+    return (filter.applicable_categories & categories) != 0 && (filter.excluded_categories & categories) == 0
+        && !std::binary_search(filter.excluded_types.begin(), filter.excluded_types.end(), type);
+}
+SpecialAbilityState initial_special_abilities(const std::span<const SpecialAbilityProfile> profiles, const bool default_enabled) {
+    SpecialAbilityState state;
+    state.slots.resize(profiles.size());
+    for (std::size_t slot = 0; slot < profiles.size(); ++slot)
+        state.slots[slot].enabled = profiles[slot].initially_enabled.value_or(default_enabled);
+    return state;
+}
+std::size_t activate_special_abilities(const std::span<const SpecialAbilityProfile> profiles, SpecialAbilityState& state,
+    const SpecialActivationStyle style, const SpecialActivationContext& context, const bool first_only, SpecialAbilityHandler& handler) {
+    if (state.service_cancelled || profiles.size() != state.slots.size() || !context.owner_exists || !context.type_exists
+        || style == SpecialActivationStyle::unspecified) return 0;
+    std::size_t succeeded = 0;
+    for (std::size_t slot = 0; slot < profiles.size(); ++slot) {
+        const auto& profile = profiles[slot];
+        auto& current = state.slots[slot];
+        // WHE-10: retain declared order and short-circuit the gates in retail order.
+        if (profile.style != style || !handler.ready(slot, context) || !handler.appropriate_mode(slot, context.mode)
+            || !current.enabled || current.cancelled || !handler.appropriate_target(slot, context)
+            || !handler.available(slot, context)) continue;
+        current.context = context;
+        struct ClearContext {
+            SpecialAbilitySlot& slot;
+            ~ClearContext() { slot.context.reset(); }
+        } clear{current};
+        if (!handler.apply(slot, current, context)) continue;
+        ++succeeded;
+        current.despawn_success = profile.causes_despawn;
+        if (first_only) break;
+    }
+    return succeeded;
+}
+std::size_t service_special_abilities(const std::span<const SpecialAbilityProfile> profiles, SpecialAbilityState& state,
+    const SpecialActivationContext& context, const std::uint64_t frame, SpecialAbilityHandler& handler) {
+    // WHE-09: no catch-up loop and no base-interval polling.
+    if (state.service_cancelled || profiles.size() != state.slots.size() || !context.owner_exists || !context.type_exists
+        || context.death_clone || context.map_editor
+        || std::all_of(state.slots.begin(), state.slots.end(), [](const auto& slot) { return slot.cancelled; })) return 0;
+    std::size_t calls = 0;
+    for (std::size_t slot = 0; slot < profiles.size(); ++slot) {
+        const auto interval = profiles[slot].service_interval;
+        auto& current = state.slots[slot];
+        if (interval == 0 || !current.enabled || current.cancelled || current.next_service_frame > frame) continue;
+        current.next_service_frame = frame <= UINT64_MAX - interval ? frame + interval : UINT64_MAX;
+        handler.service(slot, current, frame);
+        ++calls;
+    }
+    return calls;
+}
+void delete_special_owner(const std::span<const SpecialAbilityProfile> profiles, SpecialAbilityState& state,
+    const SpecialAbilityMode mode, SpecialAbilityHandler& handler) {
+    state.service_cancelled = true;
+    if (profiles.size() != state.slots.size()) return;
+    // WHE-12: sparse tracked recipients only, never a scan of the world.
+    for (std::size_t slot = 0; slot < profiles.size(); ++slot) {
+        auto& current = state.slots[slot];
+        if (!current.enabled || !handler.appropriate_mode(slot, mode) || current.despawn_success) continue;
+        for (const auto target : current.targets)
+            if (handler.target_live(target)) handler.remove_effect(slot, target);
+        current.targets.clear();
+        current.context.reset();
+        handler.terminate(slot);
+    }
+}
+void delete_special_target(SpecialAbilityState& state, const EntityId target) {
+    for (auto& slot : state.slots) std::erase(slot.targets, target);
+}
+void append_special_abilities(std::vector<std::uint8_t>& bytes, const SpecialAbilityState& state) {
+    sim::detail::append_u32(bytes, state.service_cancelled ? 1U : 0U);
+    sim::detail::append_u32(bytes, 0);
+    sim::detail::append_u64(bytes, state.slots.size());
+    for (const auto& slot : state.slots) {
+        sim::detail::append_u32(bytes, (slot.enabled ? 1U : 0U) | (slot.cancelled ? 2U : 0U) | (slot.despawn_success ? 4U : 0U));
+        sim::detail::append_u32(bytes, slot.context ? 1U : 0U);
+        sim::detail::append_u64(bytes, slot.next_service_frame);
+        if (slot.context) {
+            const auto& context = *slot.context;
+            sim::detail::append_u64(bytes, context.owner); sim::detail::append_u64(bytes, context.target);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(context.mode));
+            sim::detail::append_u32(bytes, (context.owner_exists ? 1U : 0U) | (context.type_exists ? 2U : 0U)
+                | (context.death_clone ? 4U : 0U) | (context.map_editor ? 8U : 0U));
+        }
+        sim::detail::append_u64(bytes, slot.targets.size());
+        for (const auto target : slot.targets) sim::detail::append_u64(bytes, target);
+    }
+}
+
 const UnitAbilityProfile* AbilityTable::find(const TypeId type_id) const noexcept {
     const auto found = std::lower_bound(profiles.begin(), profiles.end(), type_id,
         [](const UnitAbilityProfile& profile, const TypeId value) { return profile.type_id < value; });
@@ -98,6 +239,10 @@ const UnitAbilityProfile* AbilityTable::find(const TypeId type_id) const noexcep
 
 bool AbilityTable::human(const PlayerId player) const noexcept {
     return std::binary_search(humans.begin(), humans.end(), player);
+}
+
+bool AbilityTable::autofire_default(const PlayerId player) const noexcept {
+    return std::binary_search(autofire_defaults.begin(), autofire_defaults.end(), player);
 }
 
 core::Result<void> validate_abilities(const AbilityTable& table) {
@@ -112,21 +257,81 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
     for (std::size_t index = 1; index < table.humans.size(); ++index) {
         if (table.humans[index - 1] >= table.humans[index]) return invalid("humans must strictly increase");
     }
+    for (std::size_t index = 0; index < table.autofire_defaults.size(); ++index) {
+        if ((index != 0 && table.autofire_defaults[index - 1] >= table.autofire_defaults[index])
+            || !table.human(table.autofire_defaults[index])) {
+            return invalid("autofire defaults must strictly increase and name human owners");
+        }
+    }
     const auto bounded = [](const Fixed value, const bool positive) {
         return value.raw() <= max_ability_multiplier * one_raw && value.raw() >= -max_ability_multiplier * one_raw
             && (!positive || value.raw() > 0);
     };
     for (const auto& profile : table.profiles) {
         const auto type = " (type " + std::to_string(profile.type_id) + ")";
-        if (profile.abilities.empty() || profile.abilities.size() > max_abilities_per_type) {
+        if ((profile.abilities.empty() && profile.special.empty()) || profile.abilities.size() > max_abilities_per_type) {
             return invalid("a type has one or two abilities" + type);
+        }
+        if (profile.special.size() > 256) return invalid("too many nested handlers" + type);
+        for (const auto& special : profile.special) {
+            const auto sorted_unique = [](const auto& ids) {
+                return std::adjacent_find(ids.begin(), ids.end(), std::greater_equal<TypeId>{}) == ids.end()
+                    && (ids.empty() || ids.front() != 0);
+            };
+            if (special.name.empty() || special.kind == SpecialAbilityKind::none
+                || static_cast<unsigned>(special.kind) > static_cast<unsigned>(SpecialAbilityKind::maximum_firepower)
+                || static_cast<unsigned>(special.style) > static_cast<unsigned>(SpecialActivationStyle::user_input)
+                || special.service_interval > max_ability_frames
+                || !sorted_unique(special.filter.applicable_types) || !sorted_unique(special.filter.excluded_types))
+                return invalid("invalid nested handler" + type);
         }
         if (profile.abilities.size() == 2 && profile.abilities[0].kind == profile.abilities[1].kind) {
             return invalid("a type's abilities are of distinct kinds" + type);
         }
         for (const auto& ability : profile.abilities) {
-            if (ability.kind == AbilityKind::none || static_cast<std::uint8_t>(ability.kind) > 5U) {
+            if (ability.kind == AbilityKind::none || to_string(ability.kind) == "NONE") {
                 return invalid("unknown ability kind" + type);
+            }
+            if (ability.kind == AbilityKind::replenish_wingmen && ability.replenish_team == 0)
+                return invalid("wingman replenishment requires an authored team" + type);
+            if (ability.kind == AbilityKind::harmonic_bomb || ability.kind == AbilityKind::weaken_enemy) {
+                if (!ability.spawned || ability.spawned->type == 0 || ability.spawned->damage.raw() < 0
+                    || ability.spawned->countdown_frames > max_ability_frames || ability.spawned->reach.raw() < 0
+                    || ability.spawned->reach.raw() > 65536 * one_raw || ability.spawned->z_offset.raw() != 0)
+                    return invalid("invalid spawned ability profile or unsupported placement offset (U-10)" + type);
+                const auto& weaken = ability.spawned->weaken;
+                if (weaken.on_detonation && (weaken.radius.raw() <= 0 || weaken.radius.raw() > 65536 * one_raw
+                    || weaken.duration_frames == 0 || weaken.duration_frames > max_ability_frames || weaken.categories == 0
+                    || weaken.take_damage_increase.raw() < 0 || weaken.take_damage_increase.raw() > 4 * one_raw
+                    || weaken.cause_damage_reduction.raw() < 0 || weaken.cause_damage_reduction.raw() > one_raw))
+                    return invalid("invalid weaken radius, duration, categories or contribution" + type);
+            }
+            if (ability.kind == AbilityKind::energy_weapon || ability.kind == AbilityKind::tractor_beam) {
+                const auto expected = ability.kind == AbilityKind::energy_weapon
+                    ? SpecialAbilityKind::energy_weapon : SpecialAbilityKind::tractor_beam;
+                const auto handler = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& special) {
+                    return special.name == ability.gui_activated_ability_name && special.kind == expected
+                        && special.style == SpecialActivationStyle::user_input;
+                });
+                if (handler == profile.special.end() || handler->beam_min_range.raw() < 0
+                    || handler->beam_max_range.raw() < 0 || handler->beam_max_range.raw() > 65536 * one_raw
+                    || handler->beam_min_range.raw() > 65536 * one_raw
+                    || handler->damage_per_frame.raw() < 0 || handler->damage_per_frame.raw() > 65536 * one_raw
+                    || handler->target_speed_decrease.raw() < 0 || handler->target_speed_decrease.raw() > one_raw)
+                    return invalid("invalid beam handler, range or target contribution" + type);
+            }
+            if (ability.kind == AbilityKind::concentrate_fire) {
+                const auto handler = std::find_if(profile.special.begin(), profile.special.end(), [&](const auto& special) {
+                    return special.name == ability.gui_activated_ability_name
+                        && special.kind == SpecialAbilityKind::concentrate_fire
+                        && special.style == SpecialActivationStyle::user_input;
+                });
+                if (ability.effective_radius.raw() < 0 || handler == profile.special.end()
+                    || handler->target_damage_increase.raw() < 0 || handler->target_damage_increase.raw() > 4 * one_raw
+                    || handler->target_speed_decrease.raw() != 0) {
+                    // Stock Home One authors zero speed change; nonzero policies remain U-07.
+                    return invalid("invalid concentrate-fire radius, handler or target modifiers" + type);
+                }
             }
             // AB-60: only ION_CANNON_SHOT is a team ability, and it has no time limit.
             if (ability.team != (ability.kind == AbilityKind::ion_cannon_shot && ability.team)
@@ -138,17 +343,31 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
             }
             const auto& m = ability.modifiers;
             if (!bounded(m.weapon_delay, true) || !bounded(m.shield_regen, false) || !bounded(m.shield_regen_interval, true)
-                || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, true) || !bounded(m.speed, true)) {
+                || !bounded(m.energy_regen, false) || !bounded(m.energy_regen_interval, true) || !bounded(m.speed, true)
+                || !bounded(m.scatter_radius, true) || !bounded(m.cause_damage, false) || !bounded(m.take_damage, false)
+                || !bounded(m.fire_rate, false) || m.cause_damage.raw() < 0 || m.take_damage.raw() < 0) {
                 return invalid("a multiplier is out of bounds" + type);
+            }
+            if (ability.kind == AbilityKind::barrage
+                && (ability.barrage_target_type == 0 || ability.expiration_frames == 0
+                    || (ability.fixed_inaccuracy && (ability.fixed_inaccuracy->raw() < 0
+                        || ability.fixed_inaccuracy->raw() > (std::int64_t{1} << 18) * one_raw))
+                    || std::abs(ability.target_z_offset.raw()) > (std::int64_t{1} << 18) * one_raw)) {
+                return invalid("invalid barrage target or accuracy" + type);
             }
         }
     }
     return core::Result<void>::success();
 }
 
-AbilityState initial_abilities(const UnitAbilityProfile& profile) {
+AbilityState initial_abilities(const UnitAbilityProfile& profile, const bool autofire_default) {
     AbilityState state;
     state.slots.resize(profile.abilities.size());
+    // AB-45: the creation preference arms supported abilities without activating them.
+    for (std::size_t index = 0; index < profile.abilities.size(); ++index) {
+        state.slots[index].autofire = autofire_default && profile.abilities[index].supports_autofire;
+    }
+    state.special = initial_special_abilities(profile.special);
     return state;
 }
 
@@ -161,11 +380,12 @@ std::optional<std::size_t> ability_slot(const UnitAbilityProfile& profile, const
 
 bool ability_ready(const AbilityProfile& profile, const AbilitySlot& slot, const AbilityGate& gate,
     const std::uint64_t tick) noexcept {
+    if (gate.in_nebula) return false; // WHZ-25
     // AB-13: a recharging ability is not ready; an active one is (switching it on again does nothing).
     if (!slot.active && tick < slot.ready_tick) return false;
     // AB-14: DEFEND needs a shield that is online and outside its depletion effect.
     if (profile.kind == AbilityKind::defend) {
-        return gate.shielded && gate.shields_online && !gate.shield_depleted && !gate.ion_stunned;
+        return gate.shielded && gate.shields_online && !gate.shield_depleted && !gate.ion_stunned && !gate.in_ion_storm;
     }
     // AB-16: lost engines keep TURBO and SPOILER_LOCK off.
     if (profile.kind == AbilityKind::turbo || profile.kind == AbilityKind::spoiler_lock) {

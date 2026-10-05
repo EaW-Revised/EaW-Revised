@@ -105,6 +105,10 @@ public:
     // zero subdivision count or a position past the end; a clipless player
     // yields the bind pose. sample_tick() is unchanged for its consumers.
     [[nodiscard]] core::Result<Pose> sample_position(std::uint64_t position, std::uint32_t subdivisions) const;
+    // Reuses caller-owned bone storage. Once sized to bone_count(), valid
+    // sampling performs no allocation; errors leave the previous pose intact.
+    [[nodiscard]] core::Result<void> sample_position(std::uint64_t position, std::uint32_t subdivisions,
+        Pose& output) const;
     [[nodiscard]] std::uint32_t playable_frames() const noexcept;
     [[nodiscard]] float frames_per_second() const noexcept;
 
@@ -149,6 +153,8 @@ private:
     struct Track;
     [[nodiscard]] core::Result<Pose> interpolate(std::size_t first, std::size_t second, float fraction, float sampled,
         float blend_to_bind) const;
+    [[nodiscard]] core::Result<void> interpolate(std::size_t first, std::size_t second, float fraction, float sampled,
+        float blend_to_bind, Pose& output) const;
 
     // Allocated once per create(); moved, never shared between players.
     std::shared_ptr<const void> origin_;

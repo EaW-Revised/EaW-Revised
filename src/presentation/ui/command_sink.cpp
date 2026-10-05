@@ -24,7 +24,7 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
     using Payload = core::Result<tactical::CommandPayload>;
     switch (intent.verb) {
     case TacticalVerb::stop: return Payload::success(tactical::StopPayload{});
-    case TacticalVerb::move: return Payload::success(tactical::MovePayload{intent.destination});
+    case TacticalVerb::move: return Payload::success(tactical::MovePayload{intent.destination, intent.through_hazards});
     case TacticalVerb::attack:
         if (intent.target == sim::invalid_entity_id) {
             return Payload::failure(failure(diagnostic_codes::invalid_intent, "an attack needs a target unit"));
@@ -41,19 +41,28 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         // #76: a modelled unit ability becomes an ability command (space-abilities AB-50).
         if (intent.unit_ability != tactical::AbilityKind::none) {
             tactical::AbilityPayload payload{intent.unit_ability, intent.ability_action};
-            // #561 (AB-61): ION_CANNON_SHOT switches on at its target unit.
-            if (intent.unit_ability == tactical::AbilityKind::ion_cannon_shot
+            if (intent.unit_ability == tactical::AbilityKind::weaken_enemy
+                && intent.ability_action == tactical::AbilityAction::activate) payload.position = intent.destination;
+            // AB-61, WHE-24/57: targeted activations carry the world click's object identity.
+            if ((intent.unit_ability == tactical::AbilityKind::ion_cannon_shot
+                || intent.unit_ability == tactical::AbilityKind::concentrate_fire
+                || intent.unit_ability == tactical::AbilityKind::energy_weapon
+                || intent.unit_ability == tactical::AbilityKind::tractor_beam)
                 && intent.ability_action == tactical::AbilityAction::activate) {
                 if (intent.target == sim::invalid_entity_id) {
-                    return Payload::failure(failure(diagnostic_codes::invalid_intent, "an ion cannon shot needs a target unit"));
+                    return Payload::failure(failure(diagnostic_codes::invalid_intent, "this ability needs a target unit"));
                 }
                 payload.target = intent.target;
+                payload.target_hardpoint = intent.hardpoint;
             }
             return Payload::success(payload);
         }
         return Payload::failure(failure(diagnostic_codes::unsupported_intent,
             "targeted special abilities have no tactical command yet"));
     case TacticalVerb::buy: return Payload::success(tactical::BuyPayload{intent.type});
+    case TacticalVerb::pad_build: return Payload::success(tactical::PadBuildPayload{intent.type});
+    case TacticalVerb::intentional_quit: return Payload::success(tactical::QuitPayload{});
+    case TacticalVerb::pad_sell: return Payload::success(tactical::PadSellPayload{});
     case TacticalVerb::cancel:
         return Payload::success(tactical::CancelPayload{static_cast<std::uint32_t>(intent.queue), intent.index});
     case TacticalVerb::reinforce: return Payload::success(tactical::ReinforcePayload{intent.type, intent.destination});
@@ -71,14 +80,19 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
     units.erase(std::unique(units.begin(), units.end()), units.end());
     // #530: a buy names its one station; a cancel or reinforce names no unit.
     const bool economy = intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::cancel
-        || intent.verb == TacticalVerb::reinforce;
-    if (intent.verb == TacticalVerb::buy && units.size() != 1) {
+        || intent.verb == TacticalVerb::reinforce || intent.verb == TacticalVerb::pad_build || intent.verb == TacticalVerb::pad_sell;
+    const bool quitting = intent.verb == TacticalVerb::intentional_quit;
+    if (quitting && !units.empty()) {
+        return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "intentional quit names no unit"));
+    }
+    if ((intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::pad_build || intent.verb == TacticalVerb::pad_sell) && units.size() != 1) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "a buy names one station"));
     }
-    if (economy && intent.verb != TacticalVerb::buy && !units.empty()) {
+    if (economy && intent.verb != TacticalVerb::buy && intent.verb != TacticalVerb::pad_build
+        && intent.verb != TacticalVerb::pad_sell && !units.empty()) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "a cancel or reinforce names no unit"));
     }
-    if (units.empty() && !economy) {
+    if (units.empty() && !economy && !quitting) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "an order needs at least one unit"));
     }
     if (!units.empty() && units.front() == sim::invalid_entity_id) {
@@ -205,6 +219,7 @@ core::Result<bool> OrderInput::world_command(const WorldPick& pick, const Comman
         }
         break;
     }
+    intent.through_hazards = intent.verb == TacticalVerb::move && modifiers.through_hazards;
     if (auto sent = send(std::move(intent)); !sent) return core::Result<bool>::failure(sent.error());
     mode_ = OrderMode::none;
     return core::Result<bool>::success(true);

@@ -11,6 +11,9 @@ add_test(
     COMMAND lua_numeric_tests vectors "${CMAKE_CURRENT_SOURCE_DIR}/vectors.txt"
 )
 add_test(NAME lua_numeric_vm COMMAND lua_numeric_tests vm)
+add_test(NAME lua_reinforce_observer
+    COMMAND lua_numeric_tests script "${PROJECT_SOURCE_DIR}/tools/validation/p1_capture/staging_probe.lua"
+            "${PROJECT_SOURCE_DIR}/tests/validation/p1_capture/reinforce_probe_battles.lua")
 # The #376 rig probe: the retail FoC line recorded in foc-retail-probe.txt.
 add_test(
     NAME lua_numeric_foc_retail_probe

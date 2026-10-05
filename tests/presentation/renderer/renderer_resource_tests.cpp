@@ -1,4 +1,5 @@
 #include "renderer_test_support.hpp"
+#include "upload_identity_pool.hpp"
 
 namespace eawr_renderer_test {
 
@@ -222,6 +223,94 @@ void upload_identity_contracts() {
     const std::array<NamedTexture, 1> recoloured_cloud{{{"CloudTexture", &recolored}}};
     check(upload_identity(model, texture, material, recoloured_cloud) != clouded,
         "a per-binding texture's texels are part of the identity");
+
+    using presentation::godot_backend::detail::UploadIdentity;
+    using presentation::godot_backend::detail::UploadIdentityPool;
+    using presentation::godot_backend::detail::upload_identity_bytes;
+    UploadIdentityPool pool(2, 4096, 8);
+    // The queued job owns the canonical bytes even if decoded assets change
+    // or disappear before its digest is read.
+    auto owned_model = model;
+    auto owned_texture = texture;
+    const auto owned = pool.submit(upload_identity_bytes(owned_model, owned_texture, material, cloud));
+    owned_model.meshes.clear();
+    owned_texture.mips.clear();
+    check(owned.get() == clouded, "pending identity owns model and all texture bytes");
+
+    std::vector<std::shared_future<UploadIdentity>> pending;
+    std::vector<UploadIdentity> expected;
+    for (const std::size_t length : {0U, 1U, 55U, 56U, 63U, 64U, 65U, 127U, 1024U, 4096U}) {
+        std::vector<std::uint8_t> bytes(length);
+        for (std::size_t index = 0; index < length; ++index)
+            bytes[index] = static_cast<std::uint8_t>((index * 37U + length) & 255U);
+        expected.push_back(core::sha256(bytes));
+        pending.push_back(pool.submit(std::move(bytes)));
+    }
+    for (std::size_t index = 0; index < pending.size(); ++index)
+        check(pending[index].get() == expected[index], "pooled SHA matches scalar at padding boundaries");
+    auto state = pool.stats();
+    check(state.input_capacity == 0 && state.pending == 0,
+        "completed futures retain no admitted input capacity");
+    check(state.peak_input_capacity <= 4096 && state.peak_pending <= 8,
+        "queued and running inputs respect capacity and job limits");
+
+    // Spare allocation, rather than byte length, is the queue's memory cost.
+    UploadIdentityPool capacity_pool(2, 4096, 8);
+    pending.clear();
+    for (std::size_t index = 0; index < 32; ++index) {
+        std::vector<std::uint8_t> bytes;
+        bytes.reserve(3072);
+        bytes.push_back(static_cast<std::uint8_t>(index));
+        pending.push_back(capacity_pool.submit(std::move(bytes)));
+    }
+    for (const auto& future : pending) static_cast<void>(future.get());
+    state = capacity_pool.stats();
+    check(state.peak_input_capacity >= 3072 && state.peak_input_capacity <= 4096,
+        "admission accounts spare vector capacity");
+    check(state.pending == 0 && state.input_capacity == 0,
+        "retained futures release spare input allocations");
+
+    UploadIdentityPool oversized_pool(2, 4096, 8);
+    const std::vector<std::uint8_t> large(128U * 1024U, 17);
+    const auto large_expected = core::sha256(large);
+    const auto large_first = oversized_pool.submit(large);
+    const auto large_second = oversized_pool.submit(large);
+    check(large_first.get() == large_expected && large_second.get() == large_expected,
+        "oversized inputs still produce exact identities");
+    state = oversized_pool.stats();
+    check(state.peak_pending == 1 && state.peak_input_capacity == large.capacity(),
+        "an oversized input is admitted alone");
+
+    using PendingResult = std::pair<std::shared_future<UploadIdentity>, UploadIdentity>;
+    std::array<std::vector<PendingResult>, 4> concurrent;
+    std::vector<std::thread> producers;
+    for (std::size_t lane = 0; lane < concurrent.size(); ++lane) {
+        producers.emplace_back([&, lane] {
+            for (std::size_t index = 0; index < 16; ++index) {
+                std::vector<std::uint8_t> bytes(256, static_cast<std::uint8_t>(lane * 16 + index));
+                const auto digest = core::sha256(bytes);
+                concurrent[lane].emplace_back(pool.submit(std::move(bytes)), digest);
+            }
+        });
+    }
+    for (std::thread& producer : producers) producer.join();
+    for (const auto& lane : concurrent) {
+        for (const auto& [future, digest] : lane)
+            check(future.get() == digest, "concurrent admissions keep each input's digest");
+    }
+    state = pool.stats();
+    check(state.pending == 0 && state.input_capacity == 0
+            && state.peak_pending <= 8 && state.peak_input_capacity <= 4096,
+        "concurrent producers preserve admission accounting");
+
+    pending.clear();
+    {
+        UploadIdentityPool draining(1);
+        for (std::size_t index = 0; index < 8; ++index) pending.push_back(draining.submit(large));
+        static_cast<void>(draining.submit(large)); // A failed upload may discard its future.
+    }
+    for (const auto& future : pending)
+        check(future.get() == large_expected, "shutdown drains owned work and leaves valid digest futures");
 }
 
 void instance_resource_contracts() {

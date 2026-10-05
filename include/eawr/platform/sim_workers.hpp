@@ -50,7 +50,11 @@ public:
         std::uint64_t pool_phases{};      // on the pool from the start
     };
 
-    explicit ThreadWorkerAdapter(std::size_t worker_count, Dispatch dispatch = Dispatch::always_pool);
+    // Optional clock for deterministic dispatch tests. It must be monotonic, safe to call
+    // from every worker, and never throw; empty uses the steady clock.
+    using ClockRead = std::function<std::chrono::steady_clock::time_point()>;
+    explicit ThreadWorkerAdapter(std::size_t worker_count, Dispatch dispatch = Dispatch::always_pool,
+        ClockRead clock = {});
     ~ThreadWorkerAdapter() override;
 
     ThreadWorkerAdapter(const ThreadWorkerAdapter&) = delete;

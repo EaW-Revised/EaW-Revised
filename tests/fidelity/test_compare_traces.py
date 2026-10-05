@@ -141,11 +141,26 @@ def test_scenarios(module, scenarios: pathlib.Path) -> dict:
         "unpinned map": lambda s: s["map"].update(path="data/art/maps/other.ted"),
         "boolean format_version": lambda s: s.update(format_version=True),
         "fractional format_version": lambda s: s.update(format_version=1.0),
+        "fractional staging position": lambda s: s["units"][0].update(position=[0.5, 0, 0]),
+        "fractional staging facing": lambda s: s["units"][0].update(facing_degrees=0.5),
+        "initial pose on a start unit": lambda s: s["units"][0].update(apply_initial_pose=True),
         "until_tick past the last recorded tick": lambda s: next(
             e for e in s["expect"] if "until_tick" in e
         ).update(until_tick=s["duration_ticks"]),
     }
     with tempfile.TemporaryDirectory() as temporary:
+        for name, value in (("boolean position", [True, 0, 0]), ("infinite position", [float("inf"), 0, 0]),
+                            ("outside source bounds", [module.MAX_SOURCE_UNITS + 1, 0, 0])):
+            scenario = copy.deepcopy(loaded["S-97"])
+            craft = next(unit for unit in scenario["units"] if unit.get("apply_initial_pose"))
+            craft["position"] = value
+            path = pathlib.Path(temporary) / "initial-pose-invalid.json"
+            path.write_text(json.dumps(scenario), encoding="utf-8")
+            try:
+                module.load_scenario(path)
+                FAILURES.append(f"initial pose with {name} was accepted")
+            except module.InputError:
+                pass
         for name, mutate in mutations.items():
             scenario = copy.deepcopy(base)
             mutate(scenario)

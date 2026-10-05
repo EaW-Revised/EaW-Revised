@@ -72,6 +72,9 @@ public:
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
+    [[nodiscard]] core::Result<void> set_particle_detail(const particles::ParticleDetail detail) {
+        return registry_->set_detail(detail);
+    }
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "breakoff_props" member, followed by ",\n".
