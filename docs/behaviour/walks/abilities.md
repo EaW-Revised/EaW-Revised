@@ -135,7 +135,7 @@ shots have separate projectile flags; the ability's stun does not drain energy.
 | Rule | Behaviour | Source |
 |---|---|---|
 | WAB-50 | `HUNT` has no expiration, no recharge and no autofire. It is on from the player's switch-on until one of two things ends it:<ul><li>the player switches it off;</li><li>an order ends it (WAB-51).</li></ul>While on, the unit's hunt behaviour is serviced every 30 frames, and every frame while the unit is on fire. | data; debug build EAB-07, EAB-10, EAB-11 |
-| WAB-51 | **Orders end it.** Each of these switches an active `HUNT` off:<ul><li>a player's move, plain or queued;</li><li>an attack order;</li><li>an escort or guard order;</li><li>a Lua `Move_To` or `Attack_Target` on a unit.</li></ul>`HUNT`'s own moves (WAB-55) pass a flag that keeps it on. | debug build EAB-06 |
+| WAB-51 | **Orders end it.** Each of these switches an active `HUNT` off:<ul><li>a player's move, plain or queued, including a move with a requested facing;</li><li>an attack order;</li><li>an escort or guard order;</li><li>ordinary Stop, from the command button or its hotkey;</li><li>a Lua `Move_To` or `Attack_Target` on a unit.</li></ul>Stop follows the normal ability-off path (WAB-05), ending the patrol and clearing its attack/chase targets. An order addressed to a squadron member ends Hunt on the whole team; a rejected order leaves it unchanged. `HUNT`'s own moves (WAB-55) pass a flag that keeps it on. Low-level movement stopping is separate from this player order. | debug build EAB-06, EAB-14; project (rejection contract) |
 | WAB-52 | **Who acts.** The service acts only on a squadron's team leader, or on a unit outside a squadron; for a team container it takes the leader. It does nothing when the unit's service is disabled. | debug build EAB-07 |
 | WAB-53 | **When it acts.** The unit is idle when either holds:<ul><li>its locomotor is in the fighter-idle (or walk-stopped) state;</li><li>it is not moving and plays an idle animation.</li></ul>It is then no longer idle if any of these holds:<ul><li>its formation holds more than one queued destination;</li><li>it has an attack target;</li><li>it is on an uninterruptible move.</li></ul>An idle hunter picks a destination (WAB-54) and moves there (WAB-55). A hunter that has a target fights it through the squadron's own targeting and dogfights ([squadrons](squadrons.md)). | debug build EAB-07 |
 | WAB-54 | **The destination.** The area is the map's bounds, or the tactical camera's bounds when there are any. A map without bounds keeps the unit where it is. All draws use the synchronized game random stream, in this order:<ol><li>A float in [0, 1). For a unit that is not force sensitive (every M2 TIE), when the draw is above 1 - 0.5 (0.5, a code constant), it samples up to 99 points.<ul><li>The area is cut into 100 x 100 cells (100, a code constant). The cells are walked along the diagonal, both indices stepping together, and one random point is drawn in each cell, x then y.</li><li>The points fogged for the owner are kept. If any are, one is drawn uniformly and becomes the destination.</li></ul></li><li>Otherwise it looks at up to 128 of the owner's enemy units with a locomotor. It draws uniformly among those fogged for the owner, else among all of them. A force-sensitive hunter would prefer force-sensitive enemies; there are none in M2.</li><li>With no such enemy it draws a point in the area, x then y. When that point is more than 1000 or less than 500 units away, it becomes the unit's position plus the direction to it times a random distance in [500, 1000] (code constants). The result is clamped inside the area, less half the unit's `Space_FOW_Reveal_Range` on every side.</li><li>For a unit that is not force sensitive, the destination then gains a random 30 to 400 units in x and another in y. Its height is the unit's own.</li></ol> | debug build EAB-08, EAB-13 |
@@ -189,7 +189,7 @@ shots have separate projectile flags; the ability's stun does not drain energy.
 | Existing rule | Verdict |
 |---|---|
 | AB-01, AB-02 | same (data re-read: the MC80's 40 s, the Tartan without `TURBO`) |
-| AB-03 (`HUNT` cut) | differs from FoC by design. With squadron scans and dogfights in (walk 1), `HUNT` can now be implemented: WAB-50 to WAB-56, G-1 |
+| AB-03 (`HUNT`) | implemented patrol core; the remaining service and bounds limits are recorded below |
 | AB-04 | same (WAB-03, WAB-11) |
 | AB-10 | same. An order does end `HUNT` and the ion shot (WAB-63); AB-10 is about power modes |
 | AB-11 | same. The expiry frame is at most one frame apart (WAB-12, U-01) |
@@ -216,7 +216,7 @@ WAB-56, WAB-60 to WAB-64: 30 rules):
 |---|---|---|
 | WAB-01, WAB-02 | `session_step.cpp` (the ability command), `abilities.cpp` `activate_ability`, `ability_ready` | same |
 | WAB-03, WAB-11 | `abilities.cpp` `activate_ability` (`expires_tick`), `expire_abilities` | same (R without modifiers: none in M2) |
-| WAB-04 | `activate_ability`, `session_step.cpp` (speed re-plan, AB-43, the ion lock-on) | same for the power modes and the ion shot; the behaviour part is missing with `HUNT` (G-1) |
+| WAB-04 | `activate_ability`, `session_step.cpp` (speed re-plan, AB-43, the ion lock-on) | same for the power modes and the ion shot; the Hunt switch also clears attacks while keeping current movement |
 | WAB-05 | `deactivate_ability` | same |
 | WAB-10, WAB-13 | tick arithmetic (`ready_tick`) | same |
 | WAB-12 | `expires_tick = tick + 450` | same within one frame (U-01) |
@@ -227,18 +227,17 @@ WAB-56, WAB-60 to WAB-64: 30 rules):
 | WAB-33 | FoC's own library through the AI host (`src/script/foc/tactical_ai_bindings.cpp`) | same |
 | WAB-34 | no ability plan events (`unsupported_plan_calls`: "no Unit_Ability_Ready plan event") | **missing** (G-3): `_Ready` and `_Finished`; `_Cancelled` does not arise in M2 |
 | WAB-40 | `session_step.cpp` ion lock (AB-63 re-orders the squadron onto the target whenever its target differs) | **differs** (G-2): a player's move or attack on another target is overridden back onto the ion target instead of ending the shot |
-| WAB-50 to WAB-56 | the loader skips `HUNT` (AB-03); the Lua host reports it as cut | **missing** (G-1) |
+| WAB-50 to WAB-56 | `abilities.cpp` `hunt_destination`, `session_step_commands.cpp` partitioned hunt service, normal squadron and ship planners | patrol core implemented; accelerated service on fire and camera-bound overrides remain (G-1) |
 | WAB-60, WAB-61, WAB-62 | `session_abilities.cpp` `end_depleted_defend`, `ion_stun_unit`, the engine loss | same |
-| WAB-63 | `session_step.cpp` (power modes survive orders) | same for power modes; the ion shot differs (G-2), `HUNT` is missing (G-1) |
+| WAB-63 | `session_step.cpp` (power modes survive orders) | same for power modes; the ion shot differs (G-2), `HUNT` now ends on accepted move, attack, attack-move and guard orders |
 | WAB-64 | not modelled (no nebula or ion storm in M2) | same for M2 |
 
-Counts by rule: **same 22**, **differs 1** (WAB-40), **missing 8** (WAB-34 and the seven `HUNT`
-rules WAB-50 to WAB-56). WAB-04 and WAB-63 count as same; their `HUNT` and ion parts are G-1
-and G-2.
+The patrol core now covers WAB-04 and WAB-50 to WAB-56. Its remaining boundaries are listed in G-1;
+the ion-shot verdict above describes the original audit and is maintained by its own fix.
 
 | Gap | What | Size |
 |---|---|---|
-| G-1 | **Implement `HUNT`** (WAB-04 behaviour part, WAB-50 to WAB-56, WAB-51 cancel) for the TIE fighter and interceptor squadrons: player switch-on and switch-off, the 30-frame idle check on the leader, the destination draws in FoC's order on the sim RNG, the coordinated attack-move of the squadron, and the order cancel. It un-cuts AB-03 and FH-24's `HUNT`; the command bar button stops being disabled (walk 8). | M |
+| G-1 | **Hunt service boundaries.** The patrol core switches ordinary ability holders, services only the living team leader, chooses fog/enemy/fallback destinations, uses coordinated attack-moves, and cancels on accepted external orders. Remaining: the simulation has no on-fire state for the one-frame cadence, no camera-bound input for the override, and no queued-order or uninterruptible-move representation beyond the existing formation/arrival gates. Retail minute-long observation remains U-04. | S |
 | G-2 | **A new order ends the ion shot** (WAB-40): a move, attack, guard or Lua order on a squadron whose ion shot is on switches it off (recharging only when a craft had already fired, AB-65) instead of being overridden by the AB-63 re-order. Bug. | S |
 | G-3 | **Ability plan events** (WAB-34). Send `Unit_Ability_Ready` when a TaskForce member's recharge completes. Send `Unit_Ability_Finished` when a timed ability expires or the ion shot ends, and for each member whose switch fails in a TaskForce `Activate_Ability`. `turboattack`'s `Turbo` re-activation then works. `Unit_Ability_Cancelled` needs no work in M2 (nebulae only). | S |
 | MC80 shield-boost duration verification (legacy EAWR-670) | No code gap in the timer (WAB-12). The update on the MC80 shield-boost investigation asks for the end cause in the trace and the replay of the owner's situation (see the MC80 shield-boost finding above). | duration investigation (legacy EAWR-670) |
@@ -256,11 +255,45 @@ and G-2.
 | `Ability_Recharge_Bonus_Percentage` (combat bonus abilities) | WAB-11 | not listed; no M2 space unit carries one |
 | `GameConstants/Nebula_Ability_Disable_Time` | WAB-64 | **todo**: combat tag support (legacy EAWR-650); not in M2 |
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | **Settled schedule:** ordinary admitted-frame commands precede countdown (WAB-12); later object-script/AI activation has its own caller position | Previously sourced in this walk |
+| U-02 | Which switch-offs the TaskForce reports as `Unit_Ability_Cancelled` | Previously sourced in this walk |
+
 ## Unverified, and what would settle it
 
 | ID | Unknown | Effect | What settles it |
 |---|---|---|---|
-| U-01 | **Settled schedule:** ordinary admitted-frame commands precede countdown (WAB-12); later object-script/AI activation has its own caller position | Command-before-countdown can count the activation frame; normalize clocks before judging the remake endpoint | [WFO-02/17/21/22/31](frame-order.md), debug build; UFO-02's debugger-harness stepping covers endpoint normalization, without a new log-scraping probe |
-| U-02 | Which switch-offs the TaskForce reports as `Unit_Ability_Cancelled` | **Settled** (WAB-34): only a nebula disabling abilities, never in M2 | none |
 | U-03 | Why the owner's MC80 lost `DEFEND` early (legacy EAWR-670) | Which of the four candidates it is | Ours: the end cause in the trace, on the owner's preview situation |
 | U-04 | `HUNT` in retail: no recording yet | The destination draws (WAB-54) are read, not observed | A retail capture of an idle TIE squadron with `HUNT` on, over a minute: destinations in fog, on enemy ships, or 500 to 1000 units off |
+
+### Hunt patrol implementation boundary
+
+The debug build was re-read for WAB-50 to WAB-56. The non-sensitive diagonal search takes exactly
+99 points, with X then Y draws, before choosing one fogged point. The enemy search is capped at
+128 locomotor objects; a force-sensitive hunter prefers force-sensitive enemies and skips the
+positive offsets. The no-enemy fallback clamps only when its 500-to-1000-unit distance adjustment
+ran; the positive offsets follow the clamp. Without map bounds, the base destination is the current
+position, after which an ordinary hunter still receives those offsets. These details clarify WAB-54.
+
+The remake uses the existing deterministic keyed random service, preserving the draw order inside
+each hunter rather than serializing a shared random stream. It services at activation and every
+30 frames from activation while enabled. Decisions run in partitions against immutable staged
+inputs; only accepted moves commit in ascending holder order through the existing path planners.
+No new replay opcode or state block is used: the ordinary ability slot records activation time.
+The current map bounds come from the economy content; camera bounds are still a follow-up.
+The current movement model supplies idle, target, formation and arrival gates; it does not supply
+an on-fire state. No skirmish AI script activates Hunt (WAB-33); Lua activation uses the ordinary
+ability command path. The existing viewer icon, hotkey and ability audio data apply to the newly
+supported kind without a separate presentation implementation.
+
+EAB-14 re-reads the ordinary Stop command: it dispatches the selected units to the movement
+coordinator, whose space-layer stop submits a coordinated move to their current position with
+external-order cancellation enabled. That cancellation switches active Hunt off through the
+normal ability handler. Player moves (including moves with a facing) and attacks pass the same
+flag; Hunt's own coordinated moves leave it clear. Escort uses the existing order ability-clear
+path (EAB-06). The separate flying full-stop action is not the ordinary Stop command examined here.

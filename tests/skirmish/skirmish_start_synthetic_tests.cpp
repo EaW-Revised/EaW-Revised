@@ -111,6 +111,20 @@ void synthetic_roster_gate() {
     expect(allowed && allowed.value().profiles.size() == 1 && allowed.value().profiles[0].abilities.size() == 2
         && skirmish::roster_ability_reason("Admonitor_Star_Destroyer", "POWER_TO_WEAPONS").empty(),
         "RG-03/WHE-22: roster admission retains the supported hero mode and another supported ability");
+    auto hunter = unit_type("TIE_Interceptor", UnitKind::ship, "Empire", 100);
+    eawr::units::Ability hunt;
+    hunt.type = "HUNT";
+    hunter.abilities.push_back(hunt);
+    ability_tables.units.push_back(hunter);
+    const auto live_content = eawr::units::ability_table(ability_tables, {},
+        [](std::string_view unit, std::string_view ability) { return skirmish::roster_ability_reason(unit, ability).empty(); });
+    expect(static_cast<bool>(live_content), "WAB-50: Hunt binds through the skirmish content ability filter");
+    if (live_content) {
+        const auto* profile = live_content.value().find(eawr::assets::object_type_crc("TIE_Interceptor"));
+        expect(profile && eawr::sim::tactical::ability_slot(*profile, eawr::sim::tactical::AbilityKind::hunt)
+                   && skirmish::roster_ability_reason("TIE_Interceptor", "HUNT").empty(),
+            "RG-03/WAB-50: the supported Hunt slot survives the roster gate");
+    }
     auto tables = synthetic_tables();
     auto fixture = synthetic_fixture();
     for (const auto& row : skirmish::roster_disabled_units()) {
@@ -160,6 +174,29 @@ void synthetic_start() {
     }
     const auto& start = built.value();
 
+    auto garrison_inputs = inputs;
+    for (auto& faction : garrison_inputs.faction_forces) faction.garrison_delay_frames = 600;
+    const auto registered = skirmish::build_start(fixture, garrison_inputs);
+    expect(registered && registered.value().setup.free_garrisons.size() == fixture.slots.size(),
+        "FL-14: faction delays bind only lobby players' free starting forces");
+    if (registered) for (const auto& binding : registered.value().setup.free_garrisons) {
+        expect(binding.delay_frames == 600 && !binding.templates.empty() && !binding.registered.empty(),
+            "FL-14: recorded binding retains faction delay, templates and actual objects");
+        for (const auto id : binding.registered) {
+            const auto unit = std::find_if(registered.value().units.begin(), registered.value().units.end(),
+                [id](const auto& value) { return value.state.entity_id == id; });
+            expect(unit != registered.value().units.end() && unit->state.owner == binding.player
+                && (unit->role == skirmish::UnitRole::craft || (unit->role == skirmish::UnitRole::free_unit && unit->craft == 0)),
+                "FL-14: registered objects are free craft/generic companies, never containers or fixture ships");
+        }
+    }
+    auto without_free = fixture;
+    without_free.match = start.match;
+    without_free.match->free_starting_units = false;
+    const auto disabled_free = skirmish::build_start(without_free, garrison_inputs);
+    expect(disabled_free && disabled_free.value().setup.free_garrisons.empty(),
+        "FL-14: free-starting-units off cannot schedule replenishment");
+
     // WSS-35: use content for all factions, including modded names; humans and
     // non-lobby players do not acquire controllers from a faction's Basic_AI.
     auto ai_start = start;
@@ -167,6 +204,20 @@ void synthetic_start() {
     ai_start.players[2].faction = "uNdErWoRlD";
     ai_inputs.factions.push_back({"Underworld", true, false, false, std::nullopt, "AI_Player_Underworld"});
     auto ai = skirmish::ai_setup(ai_start, ai_inputs, tables);
+    // WNO-13: forwarding preserves every independent authored fog-state combination.
+    for (unsigned flags = 0; flags != 4; ++flags) {
+        auto fog_tables = tables;
+        fog_tables.units.front().initial_state_visible_under_fow = (flags & 1U) != 0;
+        fog_tables.units.front().last_state_visible_under_fow = (flags & 2U) != 0;
+        const auto fog_ai = skirmish::ai_setup(ai_start, ai_inputs, fog_tables);
+        const auto fog_type = std::find_if(fog_ai.content.types.begin(), fog_ai.content.types.end(), [&](const auto& type) {
+            return type.type_id == skirmish::type_id(fog_tables.units.front().id);
+        });
+        expect(fog_type != fog_ai.content.types.end()
+            && fog_type->initial_state_visible_under_fow == ((flags & 1U) != 0)
+            && fog_type->last_state_visible_under_fow == ((flags & 2U) != 0),
+            "WNO-13: authored initial/last fog-state flags reach typed AI data unchanged");
+    }
     expect(ai.players[0].player_type.empty() && !ai.players[0].ai, "WSS-35: the human Rebel has no AI controller");
     expect(ai.players[1].player_type == "BasicEmpire", "WSS-35: Empire retains its authored controller");
     expect(ai.players[2].player_type == "AI_Player_Underworld", "WSS-35: Underworld gets its authored controller");
@@ -239,7 +290,7 @@ void synthetic_start() {
                    && start.players[4].owner_index == 3,
                "Neutral (index 3) follows it; playable Empire and player-less Wildlife get none");
         expect(rebel.combat_power_tick_zero == whole(200 + 21 + 50), "team stations, squadron craft sum and cruiser");
-        expect(rebel.combat_power_launches == whole(84), "both team stations launch two squadrons of three 7-power craft");
+        expect(rebel.combat_power_launches == Fixed{}, "FL-13: skirmish stations contribute no authored garrison power");
         expect(start.players[1].combat_power_tick_zero == whole(200 + 21 + 50), "slot 2 power");
         expect(start.players[1].combat_power_launches == Fixed{}, "Station_B has no spawner");
     }
@@ -327,12 +378,10 @@ void synthetic_start() {
         expect(start.units[10].yaw_degrees == whole(30), "the map object keeps its yaw");
     }
 
-    expect(start.launches.size() == 2, "both Station_A units list their SK-23 launch");
-    if (!start.launches.empty()) {
-        const auto& launch = start.launches.front();
-        expect(launch.spawner == 1 && launch.owner == 1 && launch.squadron == "Fighter_Squadron" && launch.count == 2
-                   && launch.delay_seconds == whole(10) && launch.combat_power == whole(42),
-               "launch data");
+    expect(start.launches.empty(), "FL-13: skirmish stations have no authored garrison launches");
+    for (const auto& unit : start.units) {
+        expect(unit.state.garrison_enabled == (unit.role != skirmish::UnitRole::station),
+            "FL-13: only marker-created skirmish stations disable garrison spawning");
     }
 
     std::vector<std::pair<std::uint32_t, skirmish::MarkerUse>> markers;
@@ -353,6 +402,48 @@ void synthetic_start() {
     // craft authors a range but has no REVEAL; the squadron reveals through its container.
     const auto sensors = skirmish::sensor_table(tables);
     expect(sensors.size() == 3 && static_cast<bool>(tactical::validate_sensors(sensors)), "three sensor profiles");
+    auto fog_tables = tables;
+    auto& fog_type = fog_tables.units.front();
+    fog_type.multisample_fow = true;
+    fog_type.dense_fow_multiplier = Fixed::from_raw(Fixed::scale / 5);
+    fog_type.scale_factor = whole(2);
+    fog_type.footprint.custom_hard_x = whole(40);
+    fog_type.footprint.collision_x = whole(100);
+    fog_type.footprint.collision_y = whole(300);
+    fog_type.fog_box_offset = {whole(5), whole(-7), Fixed{}};
+    fog_type.collision = eawr::units::CollisionBounds{{whole(-100), whole(-200), Fixed{}},
+        {whole(100), whole(400), Fixed{}}};
+    const auto fog_sensors = skirmish::sensor_table(fog_tables);
+    const auto fog_sensor = std::find_if(fog_sensors.begin(), fog_sensors.end(), [&](const auto& profile) {
+        return profile.type_id == skirmish::type_id(fog_type.id);
+    });
+    expect(fog_sensor != fog_sensors.end() && fog_sensor->multisample
+        && fog_sensor->dense_multiplier == fog_type.dense_fow_multiplier
+        && fog_sensor->half_extents == eawr::sim::math::Vec2{whole(80), whole(600)}
+        && fog_sensor->box_offset == eawr::sim::math::Vec2{whole(5), whole(-7)}
+        && fog_sensor->flash_offset == Vec3{Fixed{}, whole(100), Fixed{}}
+        && fog_sensor->flash_radius == whole(300), "V-21/V-19: hard sample extents and model flash bounds stay distinct");
+    eawr::units::ObstacleType fog_obstacle;
+    fog_obstacle.id = "Dense_Hazard";
+    fog_obstacle.scale_factor = whole(99);
+    fog_obstacle.footprint.space_obstacle = true;
+    fog_obstacle.footprint.obstacle_radius = whole(400);
+    fog_obstacle.footprint.custom_soft_radius = whole(900);
+    fog_obstacle.footprint.hazard.nebula = true;
+    fog_obstacle.footprint.hazard.obstacle_offset = {whole(100), whole(-200), Fixed{}};
+    fog_tables.obstacles.push_back(fog_obstacle);
+    auto dense_inputs = synthetic_inputs(fog_tables);
+    dense_inputs.placements.clear();
+    dense_inputs.map_extents = std::pair<std::uint32_t, std::uint32_t>{0x464b2000U, 0x464b2000U};
+    skirmish::MapPlacement dense_placement;
+    dense_placement.type = fog_obstacle.id;
+    dense_placement.position = Vec3{whole(300), whole(400), Fixed{}};
+    dense_inputs.placements.push_back(dense_placement);
+    const auto dense_rules = skirmish::fog_rules(dense_inputs);
+    expect(dense_rules && dense_rules.value() && dense_rules.value()->dense_circles.size() == 1
+        && dense_rules.value()->dense_circles.front().centre == Vec3{whole(400), whole(200), Fixed{}}
+        && dense_rules.value()->dense_circles.front().radius == whole(400),
+        "V-22/WHZ-09: dense map circle uses raw offset/radius, ignoring scale and soft radius");
     for (const auto* id : {"Station_A", "Cruiser", "Fighter_Squadron"}) {
         expect(std::any_of(sensors.begin(), sensors.end(),
                    [&](const tactical::SensorProfile& profile) { return profile.type_id == skirmish::type_id(id); }),
@@ -393,7 +484,7 @@ void synthetic_start() {
         expect(bare.value().find("\"source\": \"replay\"") != std::string::npos
                    && named.value().find("\"source\": \"fixture\"") != std::string::npos,
                "census source");
-        expect(named.value().find("\"simulated\": false") != std::string::npos, "launches are listed as not simulated");
+        expect(named.value().find("\"simulated\": false") == std::string::npos, "disabled station garrisons are absent from the census");
         expect(named.value().find("{\"record\": 8, \"type\": \"Box\", \"faction\": \"Empire\", \"reason\": \"playable_faction\"}")
                    != std::string::npos,
                "the census lists the deleted map objects");
@@ -617,7 +708,10 @@ void replay_round_trip() {
         const auto bytes = tactical::write_replay({setup, ticks, {}});
         std::size_t squadron_bytes = 0;
         for (const auto& squadron : setup.squadrons) squadron_bytes += 16U + 8U * squadron.members.size();
-        expect(bytes && bytes.value().size() == tactical::replay_header_size + 24U * setup.players.size()
+        const auto disabled = std::count_if(setup.units.begin(), setup.units.end(),
+            [](const auto& unit) { return !unit.garrison_enabled; });
+        const auto extension_bytes = disabled == 0 ? 0U : 8U + 8U * static_cast<std::size_t>(disabled);
+        expect(bytes && bytes.value().size() == tactical::replay_header_size + extension_bytes + 24U * setup.players.size()
                                                     + 80U * setup.units.size() + squadron_bytes,
                "the replay is the header and setup tables alone");
         if (!bytes) continue;
@@ -1157,6 +1251,14 @@ void setup_contract() {
         auto rules = skirmish::economy_rules(policy_start.value(), policy_inputs, policy_tables);
         expect(static_cast<bool>(rules), "shared policy catalog binds");
         if (!rules) { std::cerr << rules.error().message << '\n'; continue; }
+        expect(std::all_of(rules.value().players.begin(), rules.value().players.end(), [&](const auto& player) {
+            return player.start_tech == static_cast<std::uint32_t>(defaults.start_tech)
+                && player.max_tech == static_cast<std::uint32_t>(defaults.max_tech);
+        }), "WPR-02: selected lobby tech and maximum bind each player independently of default constants");
+        auto missing_difficulty = policy_tables;
+        missing_difficulty.ai_credit_multiplier.reset();
+        expect(!skirmish::economy_rules(policy_start.value(), policy_inputs, missing_difficulty),
+            "WPR-12: missing selected AI credit data cannot silently use a neutral multiplier");
         auto session = tactical::TacticalSession::create(policy_start.value().setup, {}, {}, {}, std::nullopt, {}, {}, {}, rules.value());
         expect(static_cast<bool>(session), "policy admission session starts");
         if (!session) continue;

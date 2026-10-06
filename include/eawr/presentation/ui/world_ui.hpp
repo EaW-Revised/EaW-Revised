@@ -132,13 +132,8 @@ inline constexpr float garrison_flag_offset_x = 15.0F;
 inline constexpr float garrison_flag_offset_y = 15.0F;
 inline constexpr float garrison_flag_width = 12.0F;
 inline constexpr float garrison_flag_height = 14.0F;
-// WU-24 (#500): FoC's gripper placement always asks for this screen offset when it places a
-// team's icon (debug build): after projecting the world point to screen space, FoC adds this
-// share of the screen height to Y (+Y down), so the icon hovers below the squadron's projected
-// centre instead of covering it. A raw pixel offset (a share of the screen height, not a
-// reference-pixel size the UI scale would grow at a close camera). The dogfight grid (WU-25 to
-// WU-27) reads its icon's world point through the same gripper placement (WU-26), so the offset
-// applies there too, on top of the grid's own within-cell layout.
+// WSU-35/36: sliding world anchors add this share of screen height (+Y down).
+// Settled dogfight slots have no offset; their desired world anchors remove it.
 inline constexpr float squadron_icon_screen_offset_fraction = 0.048F;
 
 // WU-49: an arriving squadron's icon waits at its landing point; the craft fly to it.
@@ -150,6 +145,18 @@ struct SquadronIconAnchor final {
 // Returns true while arrival or its first ordinary frame owns the anchor.
 [[nodiscard]] bool place_squadron_arrival_icon(SquadronIconAnchor& anchor,
     std::optional<std::array<float, 3>> landing, std::array<float, 3> presented) noexcept;
+
+// WSU-34: one admitted render frame, using the old speed before acceleration/braking.
+void slide_squadron_icon(SquadronIconAnchor& anchor, std::array<float, 3> desired,
+    float thrust, float fastest, bool in_grid, bool fast_forward) noexcept;
+// WSU-36: render admission is separate from simulation cell occupation.
+[[nodiscard]] bool settle_squadron_icon(SquadronIconAnchor& anchor, std::array<float, 3> desired,
+    float snap_distance, bool already_settled) noexcept;
+
+struct SquadronIconRect final { float x{}, y{}, width{}, height{}; };
+// WSU-60: integral pixel edges in the Godot raster convention; each quad snaps independently.
+[[nodiscard]] SquadronIconRect squadron_icon_rect(std::array<float, 2> centre, float side,
+    bool pixel_align = true) noexcept;
 
 // WU-47: named heroes and explicit heads share the world identity frame.
 [[nodiscard]] constexpr bool hero_world_identity(const bool named_hero, const bool show_hero_head) noexcept {
@@ -225,6 +232,35 @@ private:
     void lift(sim::EntityId squadron);
     std::vector<Occupied> cells_;
     std::vector<std::pair<sim::EntityId, CombatCell>> records_;  // ascending squadron ID
+};
+
+// WSU-36 project policy: four-column icon slots survive membership changes until
+// the held cell empties. Vacancies are recycled; this is presentation state only.
+class CombatIconGrid final {
+public:
+    struct Cell final {
+        CombatCell cell;
+        std::vector<sim::EntityId> squadrons;
+        float height{};
+    };
+    struct Position final {
+        std::array<float, 2> offset{};
+        float height{};
+    };
+    void update(std::span<const Cell> cells);
+    [[nodiscard]] std::optional<Position> position(CombatCell cell, sim::EntityId squadron) const noexcept;
+
+private:
+    struct Owner final {
+        sim::EntityId squadron{};
+        bool active{};
+    };
+    struct Held final {
+        CombatCell cell;
+        float height{};
+        std::vector<Owner> slots;
+    };
+    std::vector<Held> held_;
 };
 
 // --- Hardpoint reticles (WU-30 to WU-36) ---------------------------------------------------------

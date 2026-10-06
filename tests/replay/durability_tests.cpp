@@ -240,7 +240,8 @@ void test_repair() {
     auto ship = tactical::full_durability(nebulon);
     static_cast<void>(tactical::apply_damage(nebulon, ship, 0, units(100)));
     frame = tactical::repair_frame(nebulon, ship, 0, units(10));
-    expect(frame && !frame.value().paid && frame.value().stopped, "ship hardpoints author no repair");
+    expect(frame && frame.value().paid && !frame.value().stopped && frame.value().cost == Fixed{},
+        "WSL-42: the pure service accepts zero authored amount; live command admits only stations");
 
     // HR-04: a hull below the hardpoints' fraction rises with the repair.
     auto hulled = tactical::full_durability(station);

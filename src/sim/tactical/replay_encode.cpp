@@ -52,9 +52,22 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         return core::Result<Bytes>::failure(validated.error());
     }
     const auto metadata = replay.setup.skirmish ? skirmish_body(*replay.setup.skirmish) : std::vector<std::uint8_t>{};
-    const bool extensions = replay.setup.match_policy.has_value() || replay.setup.skirmish.has_value();
+    std::size_t garrison_size = replay.setup.free_garrisons.empty() ? 0U : 8U;
+    for (const auto& binding : replay.setup.free_garrisons)
+        garrison_size += 16U + 8U * (binding.templates.size() + binding.registered.size());
+    std::vector<EntityId> disabled_garrisons;
+    for (const auto& unit : replay.setup.units) {
+        if (!unit.garrison_enabled) disabled_garrisons.push_back(unit.entity_id);
+    }
+    const bool extensions = replay.setup.match_policy.has_value() || replay.setup.skirmish.has_value()
+        || !disabled_garrisons.empty() || replay.setup.queue_identities || garrison_size != 0;
     const auto header_size = replay_header_size + (extensions ? 4U : 0U)
-        + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U);
+        + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
+        + (disabled_garrisons.empty() ? 0U : 4U + 8U * disabled_garrisons.size())
+        + (replay.setup.queue_identities ? 8U : 0U) + (garrison_size == 0 ? 0U : 4U + garrison_size);
+    if (header_size > std::numeric_limits<std::uint16_t>::max()) {
+        return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header exceeds the 65535-byte limit", {});
+    }
     std::size_t size = header_size + replay.setup.players.size() * detail::player_record_size
         + replay.setup.units.size() * detail::unit_record_size;
     const auto& squadrons = replay.setup.squadrons;
@@ -93,7 +106,9 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     sim::detail::append_u64(bytes, replay.commands.size());
     bytes.insert(bytes.end(), replay.setup.content_identity.begin(), replay.setup.content_identity.end());
     if (extensions) {
-        sim::detail::append_u32(bytes, (replay.setup.match_policy ? 1U : 0U) + (replay.setup.skirmish ? 1U : 0U));
+        sim::detail::append_u32(bytes, (replay.setup.match_policy ? 1U : 0U) + (replay.setup.skirmish ? 1U : 0U)
+            + (disabled_garrisons.empty() ? 0U : 1U) + (replay.setup.queue_identities ? 1U : 0U)
+            + (garrison_size == 0 ? 0U : 1U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -104,6 +119,30 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         sim::detail::append_u16(bytes, replay_extension_skirmish_setup);
         sim::detail::append_u16(bytes, static_cast<std::uint16_t>(metadata.size()));
         bytes.insert(bytes.end(), metadata.begin(), metadata.end());
+    }
+    if (!disabled_garrisons.empty()) {
+        sim::detail::append_u16(bytes, replay_extension_garrison_disabled);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(8U * disabled_garrisons.size()));
+        for (const auto id : disabled_garrisons) sim::detail::append_u64(bytes, id);
+    }
+    if (replay.setup.queue_identities) {
+        sim::detail::append_u16(bytes, replay_extension_queue_identities);
+        sim::detail::append_u16(bytes, 4);
+        sim::detail::append_u32(bytes, 1); // QIDS extension version
+    }
+    if (garrison_size != 0) {
+        sim::detail::append_u16(bytes, replay_extension_free_garrison);
+        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(garrison_size));
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.free_garrisons.size()));
+        for (const auto& binding : replay.setup.free_garrisons) {
+            sim::detail::append_u32(bytes, binding.player);
+            sim::detail::append_u32(bytes, binding.delay_frames);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(binding.templates.size()));
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(binding.registered.size()));
+            for (const auto type : binding.templates) sim::detail::append_u64(bytes, type);
+            for (const auto id : binding.registered) sim::detail::append_u64(bytes, id);
+        }
     }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);

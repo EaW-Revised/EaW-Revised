@@ -2,9 +2,21 @@
 
 This implements the simulation interface of [area-damage WAD-38](walks/area-damage.md),
 using the existing [ability timers](space-abilities.md) and ordinary weapon service.
-Broadside and Marauder remain behind their roster gates. This interface supplies no
-HUD targeting control or automatic AI point choice, and U-07 retail captures remain
-an independent acceptance gate.
+Broadside and Marauder expose BARRAGE under RG-03. Their HUD button arms world-point
+targeting (AB-09); a click on the battle plane dispatches the existing area command,
+including clicks on empty space. Automatic AI point choice and U-07 retail captures
+remain separate work.
+
+| Rule | Behaviour | Evidence |
+| --- | --- | --- |
+| BARR-01 | BARRAGE activation takes a world position, not an enemy object. A fogged point rejects activation before applying the authored height offset; an already active target is retained. Cancellation uses the ordinary ability action. | Debug build; WAD-38; ability-button targeting AB-09 |
+
+The production command sink emits the area command for activation and the ordinary
+ability command for cancellation. The simulation remains responsible for point
+visibility and the source's ability readiness. No new range or enemy-object gate is
+imposed by the HUD. Hover and click share the point query described by
+[CU-12](foc-cursors.md), selecting valid/invalid space-position pointers;
+the authored area decal is a separate presentation input.
 
 A point activation uses the existing ability slot. An already active slot accepts
 another activation without moving or replacing its target. A new activation requires
@@ -53,4 +65,5 @@ It is not a replay setup field. The point command uses the additive reserved opc
 ability payloads retain their bytes. Contracts exercise creation, idempotence, fog
 rejection, override retention, expiry/cancellation, playback and workers 1/2/4/8.
 The [rocket contract](rocket-flight.md) states the remaining flight constructions
-and retail presentation work; implementing BARRAGE does not open those gates.
+and retail presentation work. RG-03 admission covers the complete stock handler and
+its authored multiplier, independently of those remaining presentation comparisons.

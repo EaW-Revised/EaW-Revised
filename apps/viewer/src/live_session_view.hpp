@@ -1,5 +1,7 @@
 #pragma once
 
+#include "presentation_constants.hpp"
+
 #include "battle_effects.hpp"
 #include "battle_scoring.hpp"
 #include "debris_props.hpp"
@@ -19,6 +21,7 @@
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
+#include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/skirmish/melee.hpp"
@@ -27,6 +30,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -73,7 +77,7 @@ public:
     // #76 for the command bar (#454, docs/behaviour/foc-ability-buttons.md): the ability state of a
     // card unit from the latest snapshot's ability status (space-abilities AB-50; a squadron's
     // container stands for its craft, AB-15), and requests issued as ability commands through the
-    // order scheduler, so they enter the replay like any order. A cut ability (HUNT, AB-03) shows as
+    // order scheduler, so they enter the replay like any order. An unsupported ability shows as
     // disabled. A targeted request (ION_CANNON_SHOT, #561) goes out once the battle input's
     // targeting gave it a target; without one it is refused.
     // #559: a command bar press of an ability's button or hotkey that reached the simulation (FoC
@@ -82,6 +86,7 @@ public:
         sim::tactical::AbilityKind ability{sim::tactical::AbilityKind::none};
         bool activate{};                   // switched on (false: off)
         std::vector<sim::EntityId> units;  // the group's card units, in card order
+        bool targeted{};                  // BA-53: a confirmed world target, not button arming
     };
     [[nodiscard]] std::vector<AbilityClick> take_ability_clicks() { return std::exchange(ability_clicks_, {}); }
 
@@ -346,6 +351,28 @@ public:
     void quit();
     // The units the last frame drew for the local player (#82 selection and orders).
     [[nodiscard]] const std::vector<VisibleUnit>& visible_units() const noexcept { return visible_; }
+    struct RadarMemory final {
+        sim::tactical::TypeId type{};
+        sim::tactical::PlayerId owner{};
+        std::array<double, 3> position{};
+        double yaw{};
+        std::array<double, 2> world_half_size{};
+        bool capture_point{};
+        bool retained_model{};
+    };
+    [[nodiscard]] const std::map<sim::EntityId, RadarMemory>& radar_memories() const noexcept { return radar_memories_; }
+    [[nodiscard]] presentation::ui::MinimapLiveState radar_state(sim::EntityId entity) const {
+        presentation::ui::MinimapLiveState state;
+        const auto* instance = snapshot_index_.instance(entity);
+        state.alive = instance != nullptr;
+        state.limbo = instance && instance->arrival && *instance->arrival < sim::tactical::arrival_visible_frame;
+        state.model_hidden = !pad_visible(entity);
+        state.radar_faded = !options_.reveal && !fade_.opacity(entity).has_value();
+        state.replay = options_.fixture == "replay";
+        state.locally_visible = options_.reveal || std::binary_search(snapshot_index_.visible().begin(),
+            snapshot_index_.visible().end(), entity);
+        return state;
+    }
     [[nodiscard]] const sim::tactical::PadView* pad_view(sim::EntityId entity) const noexcept;
     [[nodiscard]] bool pad_visible(sim::EntityId entity) const noexcept;
     [[nodiscard]] bool pad_action_allowed(sim::EntityId entity) const;
@@ -434,13 +461,33 @@ public:
     [[nodiscard]] ui::BuildOptionState build_menu_state(const sim::tactical::BuildOption& option) const;
     // The local player's faction ID in the setup (the station menus' key), or nothing.
     [[nodiscard]] std::optional<sim::tactical::FactionId> local_faction_id() const noexcept;
+    [[nodiscard]] bool hardpoint_repair_allowed(sim::EntityId station, std::uint32_t hardpoint) const;
+    bool repair_hardpoint(sim::EntityId station, std::uint32_t hardpoint);
     bool buy(sim::EntityId station, sim::tactical::TypeId type);
     [[nodiscard]] bool pad_sale_allowed(sim::EntityId child, bool single_step = false) const;
     bool sell_pad_structure(sim::EntityId child, bool single_step = false);
-    bool cancel_build(sim::tactical::BuildQueue queue, std::uint32_t index);
+    bool cancel_build(sim::tactical::BuildQueue queue, std::uint64_t entry_id);
     bool reinforce(sim::tactical::TypeId type, const sim::math::Vec3& point);
+    // WR-X01: EAWR extension, wheel up adds 15 degrees; the local player's choice lasts this battle.
+    bool rotate_reinforcement(double detents);
+    [[nodiscard]] sim::math::Fixed reinforcement_facing() const noexcept;
+    struct ReinforcementFeedback final {
+        enum class Kind : std::uint8_t { pane, placement, enroute, cancelled };
+        Kind kind{};
+        sim::tactical::TypeId type{};
+    };
+    void reinforcement_feedback(ReinforcementFeedback::Kind kind, sim::tactical::TypeId type = {});
+    [[nodiscard]] std::vector<ReinforcementFeedback> take_reinforcement_feedback() {
+        return std::exchange(reinforcement_feedback_, {});
+    }
     [[nodiscard]] bool reinforcement_allowed() const noexcept;
     [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const noexcept;
+    // TM-10: a drop made while paused waits for the next tick that runs. Until the snapshot shows
+    // it applied, the reserve pane leaves its unit out and counts its population, so the same
+    // reserve unit cannot be dropped twice.
+    [[nodiscard]] std::vector<sim::tactical::TypeId> reinforcement_pool() const;
+    [[nodiscard]] std::uint32_t pending_reinforcement_population() const;
+    [[nodiscard]] std::size_t pending_reinforcements() const;
     // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
     void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
     [[nodiscard]] bool placement_valid() const noexcept { return preview_valid_ && reinforcement_allowed(); }
@@ -454,6 +501,7 @@ public:
     // The unit and combat tables the session runs with (prepare() loaded them).
     [[nodiscard]] const units::UnitTables* tables() const noexcept { return tables_ ? &*tables_ : nullptr; }
     [[nodiscard]] const sim::tactical::CombatTable* combat() const noexcept { return content_ ? &content_->combat : nullptr; }
+    [[nodiscard]] const sim::tactical::MotionTable* motion() const noexcept { return content_ ? &content_->motion : nullptr; }
     [[nodiscard]] const sim::tactical::DurabilityTable* durability() const noexcept {
         return content_ ? &content_->durability : nullptr;
     }
@@ -511,6 +559,7 @@ private:
     std::vector<sim::EntityId> unfogged_map_props_;
     std::vector<sim::EntityId> draw_visibility_;
     std::uint64_t reinforcement_notifications_{};
+    std::vector<ReinforcementFeedback> reinforcement_feedback_;
     double reinforcement_notification_tick_{};
     std::map<sim::EntityId, std::size_t> ship_of_entity_;
     // #79: model slots for the craft the SK-23 launches bring in after tick zero, composed with
@@ -533,8 +582,16 @@ private:
     };
     std::vector<PlacementClone> placement_clones_;
     std::optional<sim::tactical::TypeId> preview_type_;
+    std::optional<sim::math::Fixed> deployment_facing_;
     std::optional<sim::math::Vec3> preview_point_;
     bool preview_valid_{};
+    struct PendingReinforcement final {
+        std::uint64_t tick{};  // the tick its command was stamped for
+        sim::tactical::TypeId type{};
+    };
+    std::vector<PendingReinforcement> pending_reinforcements_;
+    [[nodiscard]] bool reinforcement_pending(const PendingReinforcement& drop) const noexcept;
+    [[nodiscard]] std::uint32_t population_of(sim::tactical::TypeId type) const noexcept;
     std::array<std::array<float, 3>, 2> preview_colours_{};
     std::uint64_t preview_frames_{};
     std::uint64_t preview_queries_{};
@@ -550,6 +607,9 @@ private:
     std::map<sim::EntityId, BattleEffects::UnitFrame> unit_frames_;
     // #427 BP-21: per unit, the presented tick its last shield colour flash started at, while
     // the flash runs; how many flashes started.
+    presentation_constants::Flash shield_flash_constants_;
+    std::uint64_t shield_flash_samples_{};
+    std::array<float, 3> max_shield_flash_scale_{1.0F, 1.0F, 1.0F};
     std::map<sim::EntityId, double> shield_flash_start_;
     std::uint64_t shield_flashes_{};
     // #862 (space-abilities AB-63 to AB-65, space-damage IS-03): per frame's newest tick, each
@@ -586,6 +646,7 @@ private:
     // while paused).
     space::UnitFade fade_;
     space::FogGhosts fog_ghosts_;
+    std::map<sim::EntityId, RadarMemory> radar_memories_;
     std::vector<sim::EntityId> fog_immediate_;
     std::vector<space::FogGhosts::Observation> fog_observations_;
     std::optional<std::array<float, 3>> neutral_fog_colour_;
@@ -682,7 +743,8 @@ private:
     void register_squadron(const sim::tactical::Squadron& squadron, std::uint64_t tick);
     // The composed ship of a live unit: a start unit's, or a launched craft's slot (bound on
     // first sight); nothing for a unit without a model.
-    [[nodiscard]] std::optional<std::size_t> ship_of(sim::EntityId entity, sim::tactical::TypeId type);
+    [[nodiscard]] std::optional<std::size_t> ship_of(sim::EntityId entity, sim::tactical::TypeId type,
+                                                  sim::tactical::PlayerId owner);
     std::map<sim::EntityId, DeathClone> death_clones_;
     // #76 AB-31 (UA-06): a SPOILER_LOCK craft's S-foil clip. `alternate` is UNDEPLOY (off) rather
     // than DEPLOY (on); it runs from `start_frame` at the presentation tick `since`. Before the
@@ -727,6 +789,7 @@ private:
         std::uint64_t visible_tick{};
         std::uint64_t landed_tick{};
         std::uint32_t last_frame{};
+        double facing_yaw{};
     };
     std::map<sim::EntityId, ArrivalRow> arrivals_;
     // #391: the breakoff props (map mode owns them); null without.

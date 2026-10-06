@@ -1,6 +1,7 @@
 #include "eawr/presentation/ui/production.hpp"
 
 #include <algorithm>
+#include <map>
 #include <sstream>
 #include "eawr/data/tag_trace.hpp"
 
@@ -160,6 +161,7 @@ std::vector<QueueSlot> layout_build_queue(
             slot.queue = kind;
             slot.index = index;
             slot.type = entries[index].type;
+            slot.entry_id = entries[index].entry_id;
             if (index == 0) {
                 // PU-64: the front's fraction of its build frames done; "%d%%" truncates.
                 const auto& front = entries[index];
@@ -184,18 +186,18 @@ std::vector<QueueSlot> layout_build_queue(
 std::vector<PoolSlot> layout_pool(const std::span<const tactical::TypeId> pool, const std::uint32_t population,
     const std::uint32_t population_cap, const std::function<std::uint32_t(tactical::TypeId)>& population_of,
     const std::size_t slots) {
+    // WR-08/EUS-14: group all completed entries before traversing definition keys.
+    // TypeId is our stable identity; exact retail ordering across loads is unverified.
+    std::map<tactical::TypeId, std::uint32_t> groups;
+    for (const auto type : pool) ++groups[type];
     std::vector<PoolSlot> result;
-    for (const auto type : pool) {
-        const auto found = std::find_if(result.begin(), result.end(), [type](const PoolSlot& slot) { return slot.type == type; });
-        if (found != result.end()) {
-            ++found->count;
-            continue;
-        }
-        if (result.size() >= slots) continue;
+    result.reserve(std::min(groups.size(), slots));
+    for (const auto& [type, count] : groups) {
+        if (result.size() >= slots) break;
         PoolSlot slot;
         slot.slot = result.size();
         slot.type = type;
-        slot.count = 1;
+        slot.count = count;
         result.push_back(slot);
     }
     const auto room = population_cap > population ? population_cap - population : 0U;

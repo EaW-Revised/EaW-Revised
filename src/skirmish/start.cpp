@@ -225,6 +225,25 @@ public:
         add_launches();
         for (const auto& player : start_.players) start_.setup.players.push_back(player.player);
         for (const auto& unit : start_.units) start_.setup.units.push_back(unit.state);
+        if (start_.match.free_starting_units) for (const auto& player : start_.players) {
+            if (!player.lobby) continue;
+            const auto forces = std::find_if(inputs_.faction_forces.begin(), inputs_.faction_forces.end(),
+                [&](const auto& value) { return detail::iequals(value.faction, player.faction); });
+            if (forces == inputs_.faction_forces.end() || !forces->garrison_delay_frames) continue;
+            sim::tactical::FreeGarrisonSetup binding;
+            binding.player = player.player.player_id;
+            binding.delay_frames = *forces->garrison_delay_frames;
+            for (const auto& company : start_.units) {
+                if (company.state.owner != binding.player || company.role != UnitRole::free_unit) continue;
+                binding.templates.push_back(company.state.type_id);
+                const auto squadron = std::find_if(start_.setup.squadrons.begin(), start_.setup.squadrons.end(),
+                    [&](const auto& value) { return value.container == company.state.entity_id; });
+                if (squadron == start_.setup.squadrons.end()) binding.registered.push_back(company.state.entity_id);
+                else binding.registered.insert(binding.registered.end(), squadron->members.begin(), squadron->members.end());
+            }
+            std::sort(binding.registered.begin(), binding.registered.end());
+            if (!binding.templates.empty()) start_.setup.free_garrisons.push_back(std::move(binding));
+        }
         std::sort(start_.markers.begin(), start_.markers.end(),
             [](const StartMarker& left, const StartMarker& right) { return left.record < right.record; });
         return Result::success(std::move(start_));
@@ -356,6 +375,8 @@ private:
         unit.state.owner = owner;
         unit.state.position = position.value();
         unit.state.rotation = rotation.value();
+        // FL-13: skirmish station placement disables garrison spawning on this object.
+        unit.state.garrison_enabled = role != UnitRole::station;
         unit.type = type->id;
         unit.role = role;
         unit.record = marker.record;
@@ -631,7 +652,7 @@ private:
     void add_launches() {
         for (const auto& unit : start_.units) {
             const auto* type = unit.role == UnitRole::map_object ? nullptr : inputs_.tables->find(unit.type);
-            if (type == nullptr || !type->spawner) continue;
+            if (type == nullptr || !type->spawner || !unit.state.garrison_enabled) continue;
             for (const auto& entry : type->spawner->starting) {
                 Launch launch;
                 launch.spawner = unit.state.entity_id;
@@ -737,12 +758,46 @@ std::map<sim::tactical::TypeId, std::string> map_object_type_names(const std::ve
 }
 
 std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables) {
-    std::map<sim::tactical::TypeId, Fixed> ranges;
+    std::map<sim::tactical::TypeId, sim::tactical::SensorProfile> profiles;
     for (const auto& type : tables.units) {
-        if (const auto range = units::sensor_range(type)) ranges.emplace(type_id(type.id), *range);
+        const auto range = units::sensor_range(type);
+        if (!range && !type.multisample_fow) continue;
+        sim::tactical::SensorProfile profile;
+        profile.type_id = type_id(type.id);
+        profile.reveals = range.has_value();
+        profile.reveal_range = range.value_or(Fixed{});
+        profile.dense_multiplier = type.kind == units::UnitKind::squadron
+            ? type.team_dense_fow_multiplier : type.dense_fow_multiplier;
+        profile.multisample = type.multisample_fow;
+        profile.box_offset = {type.fog_box_offset.x, type.fog_box_offset.y};
+        const auto scale = type.scale_factor.value_or(Fixed::from_raw(Fixed::scale));
+        const auto extent = [&](const std::optional<Fixed> custom, const std::optional<Fixed> model) {
+            return sim::math::multiply(custom && custom->raw() > 0 ? *custom : model.value_or(Fixed{}), scale).value();
+        };
+        if (type.footprint.collision_x || (type.footprint.custom_hard_x && type.footprint.custom_hard_y
+            && type.footprint.custom_hard_x->raw() > 0 && type.footprint.custom_hard_y->raw() > 0)) {
+            profile.half_extents = {extent(type.footprint.custom_hard_x, type.footprint.collision_x),
+                extent(type.footprint.custom_hard_y, type.footprint.collision_y)};
+        }
+        if (type.collision) {
+            // V-19: the model box's centre is added without unit yaw.
+            const auto midpoint = [](const Fixed low, const Fixed high) {
+                return Fixed::from_raw(low.raw() / 2 + high.raw() / 2);
+            };
+            const auto half = [](const Fixed low, const Fixed high) {
+                return Fixed::from_raw(high.raw() / 2 - low.raw() / 2);
+            };
+            profile.flash_offset = {midpoint(type.collision->min.x, type.collision->max.x),
+                midpoint(type.collision->min.y, type.collision->max.y), Fixed{}};
+            profile.flash_radius = std::max(half(type.collision->min.x, type.collision->max.x),
+                half(type.collision->min.y, type.collision->max.y));
+        } else {
+            profile.flash_radius = Fixed::from_raw((type.model_path.empty() ? 10 : 1) * Fixed::scale); // V-19
+        }
+        profiles.emplace(profile.type_id, profile);
     }
     std::vector<sim::tactical::SensorProfile> sensors;
-    for (const auto& [id, range] : ranges) sensors.push_back({id, range});
+    for (const auto& [id, profile] : profiles) { static_cast<void>(id); sensors.push_back(profile); }
     return sensors;
 }
 

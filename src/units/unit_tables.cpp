@@ -18,10 +18,15 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
             const auto [id, kind] = queue_[loaded];
             load_unit(id, kind);
         }
-        // WBP-01: capture points are live types, retaining their existing map footprints.
+        // WBP-01, WHZ-50/51: capture points and damageable map objects need their authored
+        // combat and durability profiles as well as their existing map footprints.
         for (const auto& id : obstacles) {
-            auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "capture point", report_);
-            if (object && has_behavior(*object, "CAPTURE_POINT")) enqueue(id, UnitKind::ship);
+            auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "map object", report_);
+            if (!object) continue;
+            const auto hull = object->fixed("Tactical_Health", report_, false);
+            const bool damageable = hull && hull->raw() > 0
+                && flag(*object, "Collidable_By_Projectile_Living", false).value_or(false);
+            if (has_behavior(*object, "CAPTURE_POINT") || damageable) enqueue(id, UnitKind::ship);
         }
         // Preserve the pinned fleet/craft and capture-point order before expanding production.
         while (loaded < queue_.size() || !production_ids_.empty()) {
@@ -72,22 +77,37 @@ void Loader::run(const std::vector<std::string>& types, const std::vector<std::s
                 std::unique(tables_.pad_neutral_factions.begin(), tables_.pad_neutral_factions.end()),
                 tables_.pad_neutral_factions.end());
         }
-        if (std::any_of(tables_.units.begin(), tables_.units.end(), [](const UnitType& unit) { return unit.capture_point; })) {
-            // WBP-15: the selected difficulty's authored multiplier, then whole-second truncation.
+        {
+            // WPR-12/WBP-15: read the selected difficulty once for credits and pad construction.
+            const bool needs_pad = std::any_of(tables_.units.begin(), tables_.units.end(),
+                [](const UnitType& unit) { return unit.capture_point; });
             const auto document = data::load_document(*input_.filesystem, "data/xml/difficultyadjustments.xml");
+            bool credits_found = false;
             if (document) {
                 for (const auto& adjustment : document.value().root.children) {
                     const auto name = std::find_if(adjustment.attributes.begin(), adjustment.attributes.end(),
                         [](const data::XmlAttribute& attribute) { return iequals(attribute.name, "Name"); });
                     if (name == adjustment.attributes.end() || !iequals(name->value, input_.difficulty)) continue;
                     for (const auto& node : adjustment.children) {
-                        if (!iequals(node.name, "Space_Build_Time_Multiplier")) continue;
-                        data::tag_trace::used(&node);
-                        tables_.pad_ai_build_multiplier = number(node.raw_text);
+                        if (iequals(node.name, "Credit_Multiplier")) {
+                            data::tag_trace::used(&node);
+                            const auto value = number(node.raw_text);
+                            if (value && value->raw() >= 0) {
+                                tables_.ai_credit_multiplier = *value;
+                                credits_found = true;
+                            }
+                        } else if (needs_pad && iequals(node.name, "Space_Build_Time_Multiplier")) {
+                            data::tag_trace::used(&node);
+                            tables_.pad_ai_build_multiplier = number(node.raw_text);
+                        }
                     }
                 }
             }
-            if (!tables_.pad_ai_build_multiplier || tables_.pad_ai_build_multiplier->raw() <= 0) {
+            if ((document || !iequals(input_.difficulty, "Normal_Default")) && !credits_found) {
+                tables_.ai_credit_multiplier.reset();
+                report_.missing(input_.difficulty, "Credit_Multiplier", {}, "requires nonnegative difficulty credit data");
+            }
+            if (needs_pad && (!tables_.pad_ai_build_multiplier || tables_.pad_ai_build_multiplier->raw() <= 0)) {
                 report_.missing(input_.difficulty, "Space_Build_Time_Multiplier", {}, "pad construction requires positive difficulty data");
             }
         }
@@ -110,6 +130,8 @@ void Loader::link() {
             return no_index;
         };
         for (auto& unit : tables_.units) {
+            for (const auto& projectile : unit.death_projectiles)
+                unit.death_projectile_indices.push_back(projectile_index(projectile));
             for (auto& member : unit.members) member.craft_index = unit_index(member.craft);
             if (unit.spawner) {
                 for (auto& entry : unit.spawner->starting) entry.squadron_index = unit_index(entry.squadron);

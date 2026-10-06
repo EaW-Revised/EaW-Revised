@@ -79,8 +79,12 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         // manual-only guns wait for their dedicated assignment consumer.
         if (weapon.special && !weapon.shot) return false;
         if (weapon.requires_manual_target && (!assignment || assignment->target != target_id)) return false;
-        // #424: a squadron's team container is fired at through its craft nearest this unit.
-        const auto* target = world_.resolve_target(world_.find(target_id), unit_.position);
+        // WWP-49: squadron craft resolve an object weapon's team target from their own team's
+        // centre. Hardpoint weapons retain their separate target-selection route (WWP-19).
+        const auto reference = weapon.hardpoint == object_weapon && unit_.squadron_centre
+            ? *unit_.squadron_centre : unit_.position;
+        const auto* held = world_.find(target_id);
+        const auto* target = world_.resolve_target(held, reference);
         if (target == nullptr || target->profile == nullptr || !visible_to_me(*target) || restricted(weapon, *target)) {
             return false;
         }
@@ -92,19 +96,30 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         // The nearest live targetable hardpoint (spatial distance from the shooter, first on a
         // tie), else the aim-point search.
         std::optional<Aim> aim;
+        // WWP-49: resolving a team for the object weapon clears any aimed hardpoint.
+        if (weapon.hardpoint == object_weapon && target != held) {
+            auto point = target->position;
+            if (target->profile != nullptr) {
+                point.z = take(math::add(point.z, target->profile->ranged_target_z_adjust));
+            }
+            aim = Aim{point, no_hardpoint};
+        }
         // OR-25: the ordered hardpoint of the ordered target, with no fallback to another point.
-        if (target_id == state_.attack_target && state_.direct) {
+        if (!aim && target_id == state_.attack_target && state_.direct) {
             if (const auto* ordered = standing_hardpoint(*target, state_.attack_hardpoint)) {
                 aim = Aim{world_point(*target, ordered->position), ordered->hardpoint};
             }
         }
         if (!aim && target->profile != nullptr) {
+            // WWP-16/72: nearest-hardpoint distance starts at the shooter's adjusted position.
+            auto reference_point = unit_.position;
+            reference_point.z = take(math::add(reference_point.z, profile_.ranged_target_z_adjust));
             const TargetHardpoint* nearest = nullptr;
             math::Vec3 nearest_point{};
             for (const auto& hardpoint : target->profile->hardpoints) {
                 if (!hardpoint.targetable || hardpoint_destroyed_on(*target, hardpoint.hardpoint)) continue;
                 const auto point = world_point(*target, hardpoint.position);
-                if (nearest == nullptr || closer(unit_.position, point, nearest_point)) {
+                if (nearest == nullptr || closer(reference_point, point, nearest_point)) {
                     nearest = &hardpoint;
                     nearest_point = point;
                 }

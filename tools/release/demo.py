@@ -160,9 +160,33 @@ def main(argv=None):
         else:
             print("Starting the skirmish setup. Close the window to quit.", flush=True)
             viewer_args = setup_args(game, cache)
-        return subprocess.call(engine_args + ["--"] + viewer_args + extra, cwd=ROOT)
+        report = ROOT / "out" / ("preview-m2.json" if args.m2 else "preview-setup.json")
+        viewer_args += ["--eawr-report", str(report)]
+        # Extra viewer options can override the report destination just like the look.
+        for index, argument in enumerate(extra[:-1]):
+            if argument == "--eawr-report":
+                report = Path(extra[index + 1])
+                if not report.is_absolute():
+                    report = ROOT / report
+        # Never attribute a previous run's diagnostic to a new startup failure.
+        report.unlink(missing_ok=True)
+        code = subprocess.call(engine_args + ["--"] + viewer_args + extra, cwd=ROOT)
+        if code:
+            try:
+                payload = json.loads(report.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("status") == "failed" and payload.get("failure"):
+                print("play-demo: " + str(payload["failure"]), file=sys.stderr)
+            else:
+                print("play-demo: viewer exited with code " + str(code) + "; see its console output.",
+                      file=sys.stderr)
+        return code
     except (OSError, ValueError, EOFError, fonts.ExtractionError, subprocess.SubprocessError) as error:
-        print("play-demo: " + str(error), file=sys.stderr)
+        message = "play-demo: " + str(error)
+        if isinstance(error, OSError):
+            message += ". Check read permissions for this account and verify or repair the FoC installation."
+        print(message, file=sys.stderr)
         return 2
 
 

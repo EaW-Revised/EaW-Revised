@@ -421,7 +421,8 @@ void test_offscreen_updates_and_bounds() {
     const particles::EmitterFrame away{{100, 0, 0}, {}};
     expect(bool(paced.set_frame(a, away)) && bool(accumulated.set_frame(b, away)), "offscreen frames bind");
     const auto camera = test_camera();
-    expect(bool(paced.advance(a, 0, camera)) && bool(accumulated.advance(b, 0, camera)), "first zero update initializes generations");
+    expect(bool(paced.advance(a, std::numeric_limits<float>::min(), camera)) &&
+        bool(accumulated.advance(b, std::numeric_limits<float>::min(), camera)), "first positive update initializes generations");
     const auto first = paced.advance(a, 0.05F, camera).value();
     expect(close(first.elapsed_seconds, 0) && close(first.deferred_seconds, 0.05F), "unrendered subthreshold update retains elapsed time");
     const auto equality = paced.advance(a, 0.05F, camera).value();

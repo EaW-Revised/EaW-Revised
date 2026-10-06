@@ -101,6 +101,9 @@ std::optional<int> MapMode::process(const double delta) {
         if (!finished && state.battle && state.live_session && state.space_population) {
             FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr, true);
             state.battle->frame(*state.live_session, *state.space_population, *state.space);
+            if (state.hud && state.hud->minimap()) {
+                state.hud->minimap()->order_frame(state.live_session->presented_tick() / 30.0);
+            }
             state.live_session->placement_preview(state.battle->placing(), state.battle->placement_point());
             state.battle->cursor_frame(*state.live_session, *state.space, delta, !state.options.capture_path.empty());
             state.sync_cards();

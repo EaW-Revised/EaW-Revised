@@ -35,6 +35,7 @@ enum class TacticalVerb : std::uint8_t {
     pad_build = 10, // WBP-09/10
     pad_sell = 11, // WBP-30
     intentional_quit = 12, // WBF-43/48
+    repair_hardpoint = 13, // WSL-40: station in units, hardpoint index, local payer
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -66,7 +67,9 @@ struct TacticalIntent {
     sim::tactical::TypeId type{};
     sim::tactical::BuildQueue queue{sim::tactical::BuildQueue::units};
     std::uint32_t index{};
+    std::uint64_t queue_entry_id{}; // PU-17: identity from the displayed queue entry.
     bool through_hazards{}; // WHZ-08a: explicit double-click movement
+    std::optional<sim::math::Fixed> reinforcement_facing{}; // WR-X01: local battle deployment choice
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 

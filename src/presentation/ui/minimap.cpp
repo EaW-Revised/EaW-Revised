@@ -112,9 +112,17 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
             const auto name = std::find_if(faction.attributes.begin(), faction.attributes.end(),
                 [](const data::XmlAttribute& attribute) { return same_name(attribute.name, "Name"); });
             const data::XmlNode* node = last_child(faction, "Color");
-            if (name == faction.attributes.end() || node == nullptr) continue;
+            if (name == faction.attributes.end()) continue;
             data::tag_trace::used_attribute(faction, name->name);
-            if (const auto parsed = colour(node->raw_text)) settings.faction_colours.emplace_back(name->value, *parsed);
+            // MM-07/WNO-40: later faction definitions replace the earlier registry winner.
+            std::erase_if(settings.faction_colours, [&](const auto& entry) { return same_name(entry.first, name->value); });
+            std::erase_if(settings.faction_no_colorization, [&](const auto& entry) { return same_name(entry.first, name->value); });
+            if (node != nullptr) {
+                if (const auto parsed = colour(node->raw_text)) settings.faction_colours.emplace_back(name->value, *parsed);
+            }
+            if (const auto* unassigned = last_child(faction, "No_Colorization_Color")) {
+                if (const auto parsed = colour(unassigned->raw_text)) settings.faction_no_colorization.emplace_back(name->value, *parsed);
+            }
         }
     }
     const data::XmlNode* space = radar_map != nullptr ? last_child(*radar_map, "RadarMapSettings") : nullptr;
@@ -171,18 +179,39 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
 MinimapSettings minimap_settings(const vfs::Vfs& filesystem) {
     auto radar = data::load_document(filesystem, radar_map_path);
     auto constants = data::load_document(filesystem, constants_path);
-    auto factions = data::load_document(filesystem, factions_path);
+    // WNO-40/43: expansion and mod factions share the authored registry, including Hutts.
+    const auto registry = data::load_document(filesystem, "data/xml/factionfiles.xml");
+    data::XmlNode faction_definitions;
+    std::vector<std::pair<std::string, std::string>> missing_factions;
+    if (registry) {
+        for (const auto& entry : registry.value().root.children) {
+            if (!same_name(entry.name, "File")) continue;
+            data::tag_trace::used(&entry);
+            const auto path = data::registry_include_path("data/xml/factionfiles.xml", trim(entry.raw_text));
+            auto document = data::load_document(filesystem, path);
+            if (!document) {
+                missing_factions.emplace_back(path, document.error().message);
+                continue;
+            }
+            for (auto& faction : document.value().root.children) faction_definitions.children.push_back(std::move(faction));
+        }
+    } else {
+        auto factions = data::load_document(filesystem, factions_path);
+        if (factions) faction_definitions = std::move(factions).value().root;
+        else missing_factions.emplace_back(std::string(factions_path), factions.error().message);
+    }
     MinimapSettings settings = minimap_settings(radar ? &radar.value().root : nullptr,
                                                 constants ? &constants.value().root : nullptr,
-                                                factions ? &factions.value().root : nullptr);
+                                                &faction_definitions);
     if (!radar) fallback(settings, radar_map_path, radar_map_path, "cannot be read (" + radar.error().message + ")");
     if (!constants) fallback(settings, constants_path, constants_path, "cannot be read (" + constants.error().message + ")");
-    if (!factions) fallback(settings, factions_path, factions_path, "cannot be read (" + factions.error().message + ")");
+    for (const auto& [path, why] : missing_factions) fallback(settings, path, "Faction", "cannot be read (" + why + ")");
     return settings;
 }
 
-std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, const std::string_view faction) {
-    for (const auto& [name, value] : settings.faction_colours) {
+std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, const std::string_view faction,
+                                            const bool no_colorization) {
+    for (const auto& [name, value] : no_colorization ? settings.faction_no_colorization : settings.faction_colours) {
         if (same_name(name, faction)) return value;
     }
     return std::nullopt;
@@ -199,6 +228,8 @@ MinimapTypeLooks minimap_type_looks(const std::string_view type, const data::Cat
         return trim(value->value.raw_text);
     };
     if (const auto value = text("Is_Visible_On_Radar")) looks.visible = boolean(*value).value_or(looks.visible);
+    if (const auto value = text("Visible_On_Radar_When_Fogged")) looks.visible_when_fogged = boolean(*value).value_or(false);
+    if (const auto value = text("No_Colorization_Color")) looks.no_colorization = colour(*value);
     if (const auto value = text("Is_Visible_On_Enemy_Radar")) {
         looks.visible_to_enemy = boolean(*value).value_or(looks.visible_to_enemy);
     }
@@ -275,15 +306,15 @@ std::optional<MinimapSquadronPose> minimap_squadron_pose(
 
 std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
     const std::function<const MinimapTypeLooks&(std::string_view)>& looks, const MinimapExtents& extents,
-    const MinimapSettings& settings) {
+    const MinimapSettings& settings, const std::span<const MinimapMemory> memories) {
     std::vector<MinimapBlip> blips;
-    blips.reserve(units.size());
-    for (auto unit = units.rbegin(); unit != units.rend(); ++unit) {
+    blips.reserve(units.size() + memories.size());
+    const auto neutral = faction_colour(settings, "Neutral").value_or(data::ui::Rgba8{100, 100, 100, 255});
+    const auto append = [&](const MinimapUnit* unit, const bool remembered) {
         const MinimapTypeLooks& type = looks(unit->type);
-        // MM-12: a type must be visible on the radar; an enemy's also on enemy radars.
-        if (!type.visible || type.hazard || (unit->hostile && (!type.visible_to_enemy || unit->in_nebula))) continue;
         const MinimapPoint centre = minimap_point(extents, unit->x, unit->y);
-        if (std::abs(centre.x) > 1.0 || std::abs(centre.y) > 1.0) continue;
+        if (!std::isfinite(centre.x) || !std::isfinite(centre.y)
+            || std::abs(centre.x) > 1.0 || std::abs(centre.y) > 1.0) return;
         MinimapBlip blip;
         blip.id = unit->id;
         blip.icon = type.icon;
@@ -303,9 +334,67 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
         blip.rotate_icon = type.rotate_icon;
         // MM-07: the owner's colour; the selection's colour for a selected unit.
         blip.colour = unit->selected && settings.colorize_selected ? settings.selected : unit->owner_colour;
+        // WNO-43: capture override follows selected recolouring, even under raw fog.
+        if (unit->capture) blip.colour = minimap_capture_colour(*unit->capture, neutral);
+        blip.remembered = remembered;
         blips.push_back(std::move(blip));
+    };
+    for (auto unit = units.rbegin(); unit != units.rend(); ++unit) {
+        const auto& type = looks(unit->type);
+        const auto& radar = unit->radar;
+        // WNO-41: the authored flag/replay bypass exactly two early presentation gates.
+        if (!type.visible || type.hazard || !radar.alive || radar.limbo) continue;
+        if (!radar.capital_layer && (unit->x < extents.playable_min_x || unit->x > extents.playable_max_x
+            || unit->y < extents.playable_min_y || unit->y > extents.playable_max_y)) continue;
+        if (unit->hostile && (!type.visible_to_enemy || unit->in_nebula || radar.jammed || radar.stealthed
+            || (!radar.display_enemies && !unit->capture))) continue;
+        if (!type.visible_when_fogged && !radar.replay && (radar.model_hidden || radar.radar_faded)) continue;
+        if (!radar.locally_visible && !radar.interdicted) continue;
+        append(&*unit, false);
+    }
+    // WNO-44: separate stored-model pass; live visibility and fogged-radar flags do not apply.
+    for (auto memory = memories.rbegin(); memory != memories.rend(); ++memory) {
+        const auto& type = looks(memory->type);
+        // WNO-44: remembered admission does not repeat the live radar-type switch.
+        if (!memory->previously_revealed || !memory->retained_model || type.hazard
+            || (memory->hostile && (!type.visible_to_enemy || !memory->display_enemies))) continue;
+        if (memory->x < extents.playable_min_x || memory->x > extents.playable_max_x
+            || memory->y < extents.playable_min_y || memory->y > extents.playable_max_y) continue;
+        MinimapUnit stored;
+        stored.id = memory->id;
+        stored.type = memory->type;
+        stored.owner_colour = memory->capture_point ? neutral : memory->owner_colour;
+        stored.x = memory->x;
+        stored.y = memory->y;
+        stored.yaw_degrees = memory->yaw_degrees;
+        stored.world_half_size = memory->world_half_size;
+        append(&stored, true);
     }
     return blips;
+}
+
+data::ui::Rgba8 minimap_capture_colour(const MinimapCaptureColour& capture, const data::ui::Rgba8 neutral) noexcept {
+    if (capture.raw_local_fog) return neutral;
+    const double progress = std::isfinite(capture.progress) ? std::clamp(capture.progress, 0.0, 1.0) : 0.0;
+    const auto channel = [progress](const std::uint8_t old, const std::uint8_t next) {
+        return static_cast<std::uint8_t>(std::lround(old + (static_cast<double>(next) - old) * progress));
+    };
+    return {channel(capture.old_colour.r, capture.new_colour.r), channel(capture.old_colour.g, capture.new_colour.g),
+        channel(capture.old_colour.b, capture.new_colour.b), channel(capture.old_colour.a, capture.new_colour.a)};
+}
+
+data::ui::Rgba8 minimap_community_colour(const std::span<const MinimapPlayerColour> players,
+    const sim::tactical::PlayerId owner, const sim::tactical::PlayerId local, const bool multiplayer,
+    const data::ui::Rgba8 fallback) noexcept {
+    const auto owned = std::find_if(players.begin(), players.end(), [owner](const auto& p) { return p.player == owner; });
+    if (!multiplayer || owned == players.end() || owned->neutral || owned->team == 0xffffffffU) return fallback;
+    const auto own = std::find_if(players.begin(), players.end(), [local](const auto& p) { return p.player == local; });
+    if (own != players.end() && own->team == owned->team) return own->colour;
+    const MinimapPlayerColour* representative = &*owned;
+    for (const auto& player : players) {
+        if (!player.neutral && player.team == owned->team && player.player < representative->player) representative = &player;
+    }
+    return representative->colour;
 }
 
 std::optional<MinimapPixelRect> minimap_point_pixels(const MinimapBlip& blip,

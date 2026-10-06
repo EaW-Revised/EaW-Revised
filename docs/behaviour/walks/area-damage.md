@@ -59,7 +59,7 @@ implemented. Gap groups G1–G9 below identify missing work. Counts include inte
 | ID | Rule, branches and constants | Evidence; remake verdict |
 |---|---|---|
 | WAD-08 | Resolve the projectile owner, then visit the current player list by index. Ordinarily query only players the owner counts as enemies. Own units, allies and non-hostile neutral objects are excluded by this relationship test. Do not replace it with different-owner or different-faction tests. | debug build EAD-01; WHZ-51 interface; **missing**, G1 |
-| WAD-09 | If `Projectile_Blast_Area_Immune_Faction` resolves to a faction, query **every** player, then exclude each recipient whose owner faction equals that faction. This can admit the shooter, allies or neutrals of other factions; immunity is faction-wide, not owner-only. Direct collision remains WWP-66 and is not widened by this area tag. | debug build EAD-01; **missing**, G1 |
+| WAD-09 | If `Projectile_Blast_Area_Immune_Faction` resolves to a faction, query **every** player, then exclude each recipient whose owner faction equals that faction. This can admit the shooter, allies or neutrals of other factions; immunity is faction-wide, not owner-only. Direct collision remains WWP-66 and is not widened by this area tag. | debug build EAD-01; **implemented**, `src/sim/tactical/blast.cpp` faction query and immunity |
 | WAD-10 | For each player query, start with XML R and multiply it by the current scatter-radius mode multiplier of the object that fired the projectile, if that object still resolves. If the source no longer exists, use unmodified R. This is a current source-state lookup at detonation, not a launch snapshot; D is not multiplied by this radius factor. Modifier production belongs to abilities. | debug build EAD-01; **missing**, G1 |
 | WAD-11 | Query that player's collidable spatial tree with no required behaviour, max returned candidates 2147483647 (code), and no distance sorting. Collect a box spanning centre XY +/-R and Z +/-1e18 (code). Exclude objects in limbo. This is a spatial query, not a scan of every ship or every craft each flight frame. | debug build EAD-01/09; **missing**, G1 |
 | WAD-12 | Admit a collected object when its **planar centre distance squared <=R²**. If its centre is outside, admit it when its transformed collision bounds overlap the 3D sphere of radius R; base-shield objects use their special hard extents for that fallback. Consequently a large hull can qualify with its centre outside R, and the centre-distance branch does not reject altitude separation. Bounds service details are a collision interface. | debug build EAD-09; **missing**, G1 |
@@ -76,7 +76,7 @@ implemented. Gap groups G1–G9 below identify missing work. Counts include inte
 | WAD-23 | Deliver immediate secondary damage through the **same ordinary damage service** as a projectile direct hit, retaining source projectile, damage-type override and shield/energy/hitpoint flags, but set the area flag. That flag prevents the projectile's original aimed-hardpoint route from overriding WAD-21's secondary selector and is supplied to take-damage abilities. It does not bypass shields or armor. | debug build EAD-05/10/20; **missing**, G3 |
 | WAD-24 | Shields, energy and hitpoints consume each secondary delivery through WCC-22/46–48 and DG-05–12. The Krayt damage projectile sets shield damage No and hitpoint damage Yes; Diamond Boron sets both Yes. A shield-damaging blast can drain a shield through several hardpoint shares; a shield-bypassing blast retains its bypass. Shield absorption of the primary impact is not the WAD-03 cancellation flag. | debug build EAD-05/10; XML; **same interface**, `damage.cpp::apply_hit` |
 | WAD-25 | Shooter cause-damage, recipient take-damage/combat-defense and diminishing-firepower rules still run per immediate secondary damage call. WAD-21's D*F is a **pre-routing** budget, not a promise of that much total lost health. Repeated hardpoint deliveries can encounter state changes from earlier deliveries, including shield-generator destruction and the last-hit frame. Do not combine deliveries into one hull hit. | debug build EAD-10; WCC-22/44 and DG-05; **same interface**, `apply_hit` / ordered damage commit |
-| WAD-26 | A positive `Projectile_Damage_Delay_Secs` overrides the area distance delay with a synchronized uniform float draw in `[0.25*tag, tag]` per delivery (0.25 is code). Nonpositive final delay routes immediately; positive delay enters ordinary delayed damage instead. The delayed service's retained source/flag lifetime is U-04; do not assume it is identical to immediate projectile routing. | debug build EAD-05; **missing**, G8 |
+| WAD-26 | A positive `Projectile_Damage_Delay_Secs` overrides the area distance delay with a synchronized uniform float draw in `[0.25*tag, tag]` per delivery (0.25 is code). Nonpositive final delay routes immediately. Positive delay stores the raw amount, internal damage kind, collision selector, source owner and projectile XML damage type; remaining frames are `max(1,trunc(delay*logical FPS))`. The service decrements the counter and delivers on zero with no source object or area flag, retaining the owner/type/selector. Projectile damage flags, source modes and original aimed hardpoint are not retained. Ordinary target defense, armor and take-damage modes still apply; projectile diminishing/energy gates do not. | debug build EAD-05, targeted delayed-record read, EFO-04/WFO-14; implemented |
 | WAD-27 | If `Projectile_Damages_Random_Hard_Points` is true, each shared projectile-delivery call draws one synchronized random index across all authored hardpoints, then scans forward with wrap for the first alive, destroyable hardpoint. Targetability is not checked; selection is not uniform over eligible hardpoints. When found, its collision mesh replaces the selected mesh while the original split-share amount is retained, before immediate/delayed delivery. Each share reruns selection and can reach an otherwise direct-excluded mesh. Neither flagship damage projectile nor Diamond Boron sets this flag. | debug build EAD-05; targeted chooser read 2026-10-02; XML; **missing**, G8 |
 | WAD-28 | Secondary area calls return before impact-particle, recipient hit-particle and flinch creation. Do not spawn the main detonation particle or sound once per victim/share. Ordinary damage side effects, such as shield flashing and hardpoint death effects, still belong to damage/presentation services. Particle/sound inputs are enumerated below. | debug build EAD-05; **missing**, G9 |
 | WAD-29 | Count a victim after the direct-object, living-collision and immune-faction gates, before delivery. Even a recipient with no qualifying hardpoints consumes a victim slot. Reset this counter for each queried player; after each accepted recipient, if count >=`Projectile_Blast_Area_Max_Victims`, return from the **entire** blast. Default 5000 is code; no active stock definition overrides it. This is not a query cap, a nearest-N rule or a cap on hardpoint deliveries. Zero/negative values still reach the comparison after the first accepted victim. | debug build EAD-01/16; XML; **missing**, G1 |
@@ -97,9 +97,12 @@ implemented. Gap groups G1–G9 below identify missing work. Counts include inte
 | WAD-39 | Underworld level-3 main cannon is SPECIAL but `Requires_Manual_Target_Assignment` Yes. It requires a nonnull enemy target, no category restriction, pointability, visibility and planar range plus soft radius/minimum range. Assign a manual target only when no manual target is pending; remember the requesting player and frame. No manual target means no shot. Weapon-state validation failure beyond 300 frames (code) drops it with local negative feedback; a successful attempt clears it. A failed later firing attempt, such as cone alignment, does not by itself enter that timeout branch. | debug build EAD-08/18/23; XML; **missing**, G7 |
 | WAD-40 | The manual cannon's weapon recharge is 1 s, distinct from XML `Manual_Hardpoint_Firing_Cooldown_Secs` 120 and the player command-readiness interface. Successful manual firing records that requesting player's last manual-fire frame and `round(120*30)=3600` cooldown frames. Readiness is 1 if the stored cooldown <1 or elapsed frames >=cooldown, otherwise elapsed/cooldown; this is shared player state, not per station. It authors one pulse, pulse delay 0.3 s, range 20000, appearance delay 15 frames, turret yaw/pitch extents 360/30, rotation speed 0.5, firing cone 40/3, and Fighter/Bomber/Transport restrictions. It launches `Proj_Underworld_Station_Main_Cannon`: direct 6000, D=1000, R=300. Ordinary turret service and player readiness must both be preserved; command rejection remains the input consumer's interface, U-08. | XML; debug build EAD-06/08/18/23/27–29; **missing**, G7 |
 
-**40 rules: same interface 3 (WAD-06/24/25), differs 2 (WAD-02/04), missing 35.**
+**Original walk snapshot: 40 rules, same interface 3 (WAD-06/24/25), differs 2
+(WAD-02/04), missing 35.** The implementation boundary below supersedes those
+historical verdicts for the blast service.
 The two differing rules are specific mismatches at the boundary of otherwise missing features;
-the gate currently prevents the four named ships from exposing these features in skirmish.
+the original walk snapshot gated all four named ships. Current RG-02 review enables
+Broadside/Marauder ordinary weapons while retaining the SPECIAL and optional ability gates.
 
 ## Stock data census
 
@@ -116,8 +119,9 @@ this blast's earlier player group removed the source. Later groups are staged ev
 alternative reaches the cap, because only the selected group may exit the whole blast. Both
 queries, including staged groups after that possible cap, count toward the work budget.
 WAD-05 has an explicit projectile-service request; generic deletion
-does not request one. Existing travel expiry uses its updated position; G4 still owns rocket
-flight and target-radius termination.
+does not request one. Existing travel expiry uses its updated position; G4 rocket
+flight and target-radius termination are implemented in `projectiles.cpp` under WAD-04;
+BARRAGE availability remains independently gated under RG-03.
 
 Secondary delivery now implements WAD-14/18–23/30 through the ordinary damage service.
 Recipients without destroyable hardpoints receive one hull delivery, excluding the direct
@@ -126,7 +130,8 @@ including destroyed and untargetable shares. The final direct-routed mesh is exc
 case-insensitively before dividing the object-level budget. Shares are prepared from immutable
 positions in authored order, then committed separately with the area flag, original damage
 type/flags and ordinary modifiers. An empty selected list has no hull fallback. Positive
-hardpoint distance delays retain the secondary route in hashed queued state (U-04 policy).
+hardpoint distance delays retain the selected collision route, owner, amount and damage type
+in hashed queued state (WAD-26).
 The direct damage result carries the routed hardpoint and cancellation handoff; shield
 absorption does not suppress the blast. Take-damage ability production remains ability-owned.
 Secondary calls emit no duplicate impact event.
@@ -138,10 +143,12 @@ boxes support starting intersection; mesh-volume interior classification and bas
 hard-extents profiles remain collision-service interfaces outside currently simulated space
 content. Full representable Z replaces the unrepresentable debug-build query expansion.
 
-**U-04 unverified project policy:** positive area distance delay retains an immutable source
-delivery record after projectile deletion, rounds upward to a logical frame, and delivers in
-due-frame/creation order before new impacts. This does not claim retail delayed-state fidelity.
-G8 still owns positive explicit projectile delay and random hardpoint selection. The U-05
+**U-04 storage and delivery settled by targeted debug-build reads:** positive explicit or
+area-distance delay retains the WAD-26 value record after projectile deletion, with truncated
+frame counts and source-less ordinary delivery. No projectile flags or area context survive
+that handoff. The remake retains its phase ordering in due-frame/creation order before new
+impacts; the original uses the per-object WFO-14 service turn. The exact same-frame ordering
+runtime witness remains open. G8 still owns random hardpoint selection. The U-05
 selector is settled by the targeted debug-build read recorded in WAD-27; its runtime
 share/exclusion witness remains open. U-03 and U-06–08 remain named unverified requests
 below; this implementation changes none of their ability, flight or station-command policies.
@@ -298,7 +305,7 @@ or the player command cooldown. None of those changes is authorized by this docs
 
 ## Gap list against the remake
 
-The code snapshot has no blast fields in `include/eawr/units/unit_tables.hpp::Projectile`,
+The original walk snapshot (before the implementation above) had no blast fields in `include/eawr/units/unit_tables.hpp::Projectile`,
 no blast parsing in `src/units/unit_tables_decode.cpp::load_projectile`, and no secondary-recipient
 stage in `src/sim/tactical/session_step.cpp`'s projectile commit. Expired projectiles are discarded
 without blast delivery. `src/sim/tactical/projectiles.cpp::step_projectile` supplies one direct
@@ -392,10 +399,11 @@ blast service or ordinary SPECIAL shot attempt. They belong to other ability/bea
 the SPECIAL enum alone does not opt into them. `Death_Explosions` is a destruction handoff, not
 an alternative spelling of `Projectile_Blast_Area_Damage`.
 
-### Registry rows still todo/deferred
+### Registry coverage
 
 The relevant [tag registry](../../tag-coverage/statuses.json) rows are listed here without
-changing their application status: this walk parses/applies no new tags in the game.
+introducing new application statuses: the blast rows below reflect the implemented
+service; other historical rows retain their separate owning work.
 
 | Tag / classes | Status / current tracking | Rule |
 |---|---|---|
@@ -412,11 +420,11 @@ changing their application status: this walk parses/applies no new tags in the g
 | `Manual_Hardpoint_Firing_Cooldown_Secs` / HardPoint | todo; tag coverage (legacy EAWR-650) | WAD-31–40 |
 | `Max_Secs_For_AE_Delayed_Damage` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
 | `Projectile_Appearance_Delay_Frames` / HardPoint, HeroUnit, UniqueUnit | todo; tag coverage (legacy EAWR-650) | WAD-31–40 |
-| `Projectile_Blast_Area_Damage` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
-| `Projectile_Blast_Area_Dropoff` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
-| `Projectile_Blast_Area_Dropoff_Tiers` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
-| `Projectile_Blast_Area_Immune_Faction` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
-| `Projectile_Blast_Area_Range` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
+| `Projectile_Blast_Area_Damage` / Projectile | applied; `src/sim/tactical/blast.cpp` | WAD-01–30 |
+| `Projectile_Blast_Area_Dropoff` / Projectile | applied; `src/sim/tactical/blast.cpp` | WAD-01–30 |
+| `Projectile_Blast_Area_Dropoff_Tiers` / Projectile | applied; `src/sim/tactical/blast.cpp` | WAD-01–30 |
+| `Projectile_Blast_Area_Immune_Faction` / Projectile | applied; `src/sim/tactical/blast.cpp` | WAD-01–30 |
+| `Projectile_Blast_Area_Range` / Projectile | applied; `src/sim/tactical/blast.cpp` | WAD-01–30 |
 | `Projectile_Damage_Delay_Secs` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
 | `Projectile_Damages_Random_Hard_Points` / Projectile | todo; tag coverage (legacy EAWR-650) | WAD-01–30 |
 | `Projectile_Lifetime_Detonation_Particle` / Projectile | todo; tag coverage (legacy EAWR-653) | WAD-31–40 |
@@ -428,6 +436,14 @@ changing their application status: this walk parses/applies no new tags in the g
 row in this snapshot; its commented occurrences are not application evidence. Add coverage if
 the loader supports it for modded data. No selected row is deferred. Already applied/partial
 shared weapon/damage tags retain their existing owner rule IDs.
+
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-04 | Positive delayed damage stores amount, damage kind, contacted mesh name, owner attribution and projectile damage-type identifier. Delay is trunc(seconds × logical FPS), clamped to at least one; each object service decrements it and delivers at zero before behaviours. The source object and area-routing flag are not retained: delivery supplies no source object and ordinary routing flags. Implemented by source-less delayed delivery; exact original per-object same-frame ordering remains unverified. | EUS-15 |
 
 ## Unverified and precise capture requests
 
@@ -441,13 +457,15 @@ coordinator-scheduled and do not block publishing this docs-only contract.
 | U-01 | Retail boundary fidelity for mixed planar object admission, 3D hardpoint radius and collision-refined falloff | One Diamond Boron blast against isolated craft at distances 39.99/40/40.01 and 199.99/200/200.01; repeat with a large ship whose centre is outside R but hull crosses R, and with 0/200/201 height separation. Log every recipient/shield/hardpoint delta and actual detonation contact. Use single shots and disable repair/other fire. |
 | U-02 | Exact retail tree/player enumeration and reproducible cap ordering; replacement order decision | A private test payload with max victims 1 and 2, enemies under two owners, deliberately out-of-distance order; repeat identical spawn order, reversed spawn order and different positions. Include a hardpoint ship with no hardpoints within R before a craft to prove victim-slot consumption; record affected IDs. This custom payload is a probe, not stock behaviour data. |
 | U-03 | Retail direct-route exclusion and destroyed-hardpoint dilution, especially shield-generator death during a split | Krayt damage shot aimed at one live station hardpoint; place two other hardpoints inside R and one exactly on R. Repeat with an inside hardpoint already destroyed, then a shielded Diamond Boron hit. Record direct route, per-hardpoint HP, shield delta and same-frame death ordering. |
-| U-04 | Positive delayed-damage storage, due-frame rounding and source/area-flag retention after projectile deletion | Private payload with distance-delay maximum 0.8, then explicit delay 0.5; compare immediate/queued damage with shields up, delete shooter between launch and detonation and between queue/due frame. Log due frame, source attribution and selected hardpoint. Stock positive-area data uses maximum 0, so this is extended compatibility evidence. |
+| U-04 | Storage, truncation and source-less delivery settled by the targeted debug-build read and EFO-04; exact per-object same-frame runtime ordering remains unverified | Private payload with distance-delay maximum 0.8, then explicit delay 0.5; compare immediate/queued damage with shields up, delete shooter between launch and detonation and between queue/due frame. Log due frame, source attribution and selected hardpoint. Stock container deaths provide a positive explicit-delay consumer. |
 | U-05 | Chooser algorithm settled by WAD-R05; custom-payload per-share runtime witness remains unverified | [Targeted debug-build read](../retail-blast-evidence.md): random start across all hardpoints, then forward wrapping scan for living/destroyable; targetability is not checked. Each application can redirect its original share to a new collision mesh, including the direct-excluded mesh. Still capture a private positive-area payload with `Projectile_Damages_Random_Hard_Points` Yes and mixed station hardpoint states. |
-| U-06 | Cross-service timing of charged presentation cleanup and shots when a gun is destroyed after charging | Peacebringer BLAST against a fixed capital: log activation, charge counter/meshes, both projectile creations, first appearance and hit frames, then destroy one SPECIAL during charge and again after charge completion. Repeat with unequal gun readiness. Verify normal 400+300-area shot versus charged 3000+400-area shot; no inferred per-gun shot latch. |
+| U-06 | Cross-service timing of charged presentation cleanup and shots when a gun is destroyed after charging **Sweep:** Still unverified: Per-object behavior/hardpoint order is sourced, but charged presentation cleanup and a gun destroyed between charge and fire have independent callbacks. No specific pending-charge cleanup path was resolved. | Peacebringer BLAST against a fixed capital: log activation, charge counter/meshes, both projectile creations, first appearance and hit frames, then destroy one SPECIAL during charge and again after charge completion. Repeat with unequal gun readiness. Verify normal 400+300-area shot versus charged 3000+400-area shot; no inferred per-gun shot latch. Retained sweep boundary: EUS-04. |
 | U-07 | BARRAGE retail proxy/flight-height and expiry interaction | Broadside and Marauder, normal then BARRAGE at a fixed point; fog on for proxy targeting gate, fixed XY/Z recipients, trace fire-at points, proxy owner/position, rocket terminal frames and area recipients. Confirm speed/flight changes with identical inherited D/R/falloff. Full spline and jamming rules belong to a weapons follow-up. |
 | U-08 | Station manual-command rejection/readiness across multiple retained stations and actual turret alignment | Two Underworld level-3+ stations owned by one player; request the same manual cannon target, then another station before/at/after the 120 s readiness boundary. Log requesting player, per-gun recharge, acceptance/rejection, turret yaw/pitch, 15-frame appearance delay and damage; retain a failing target beyond 300 frames. Command-event ownership gates remain with sensors/UI and player setup. |
 
-The four ship gates should remain until their needed rules are implemented and reviewed. Area
+RG-02 now enables Broadside and Marauder after review of ordinary Diamond Boron
+blast damage and rocket termination. Krayt and Peacebringer retain their separate
+SPECIAL weapon gate. Area
 damage alone does not authorize BARRAGE/BLAST/autofire availability, a new player input, rocket
 flight approximation, or a SPECIAL station weapon. Re-enable through a separate reviewed data
 edit after its prerequisites pass.

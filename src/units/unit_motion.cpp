@@ -311,7 +311,14 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables) {
             spawner.bays.push_back(bay);
         }
         spawner.mobile = unit.kind == UnitKind::ship;
-        if (!spawner.entries.empty()) squadrons.spawners.push_back(std::move(spawner));
+        // WSL-26: the registered station role is DUMMY_STAR_BASE in either
+        // behavior list; STARBASE is not a registered behavior alias.
+        const auto starbase = [](const auto& names) {
+            return std::any_of(names.begin(), names.end(), [](const auto& name) { return detail::iequals(name, "DUMMY_STAR_BASE"); });
+        };
+        spawner.starbase = starbase(unit.footprint.hazard.behavior) || starbase(unit.footprint.hazard.space_behavior);
+        if (!spawner.entries.empty() || (spawner.starbase && !spawner.bays.empty()))
+            squadrons.spawners.push_back(std::move(spawner));
     }
     std::sort(squadrons.spawners.begin(), squadrons.spawners.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });

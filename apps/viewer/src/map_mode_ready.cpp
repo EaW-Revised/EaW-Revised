@@ -23,6 +23,7 @@ bool MapMode::State::fail_ready(std::string message) {
 
         state.failure = std::move(message);
         state.status = "failed";
+        UtilityFunctions::printerr(String::utf8(state.failure.c_str()));
         state.release_particles();
         static_cast<void>(state.write_report());
         return false;

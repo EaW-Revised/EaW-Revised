@@ -128,6 +128,13 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     std::array<std::string, 2> summary_names;
     if (auto document = data::load_document(*filesystem_, "data/xml/audio.xml")) {
         const data::XmlNode& root = document.value().root;
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::attack)] = event(child(root, "SFXEvent_Command_Bar_Attack"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::attack_move)] = event(child(root, "SFXEvent_Command_Bar_Attack_Move"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::guard)] = event(child(root, "SFXEvent_Command_Bar_Guard"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::move)] = event(child(root, "SFXEvent_Command_Bar_Move"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::stop)] = event(child(root, "SFXEvent_Command_Bar_Stop"), "Audio");
+        command_cues_[static_cast<std::size_t>(audio::CommandCue::negative)] = event(child(root, "SFXEvent_GUI_Negative_Feedback"), "Audio");
+        options_.admission.negative_feedback = command_cues_[static_cast<std::size_t>(audio::CommandCue::negative)];
         for (const auto& item : root.children) {
             const int side = same(item.name, "Music_Event_Battle_End_Summary_Screen_Win") ? 0
                 : same(item.name, "Music_Event_Battle_End_Summary_Screen_Lose") ? 1 : -1;
@@ -139,12 +146,21 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         if (const auto value = number(child(root, "Audio_Space_3D_Rolloff_Distance_Mod"))) space_.rolloff_factor = *value;
         if (const auto value = number(child(root, "Audio_Space_3D_Listener_Z_Pullback_Dist"))) space_.listener_z = *value;
         if (const auto value = number(child(root, "Music_Space_Battle_To_Ambient_Peace_Seconds"))) peace_seconds = *value;
+        for (const auto& item : root.children) {
+            if (!same(item.name, "Delay_Between_Space_Base_Attack_Announcement_Seconds")) continue;
+            data::tag_trace::used(item);
+            if (const auto value = number(trim(item.raw_text)); value && *value >= 0.0
+                && *value <= static_cast<double>(std::numeric_limits<int>::max()) / 30.0) {
+                base_warning_delay_frames_ = static_cast<std::uint64_t>(*value * 30.0);
+            }
+        }
     } else {
         problems_.push_back("data/xml/audio.xml: " + core::format_diagnostic(document.error()));
     }
     // BA-20: the command rankings.
     if (auto document = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
         rankings_ = audio::split_list(child(document.value().root, "Unit_Command_Rankings_By_Category"));
+        if (const auto value = number(child(document.value().root, "SpaceIdleMovementSpeed"))) engine_idle_speed_ = *value;
     } else {
         problems_.push_back("data/xml/gameconstants.xml: " + core::format_diagnostic(document.error()));
     }
@@ -168,6 +184,15 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     std::vector<const audio::MusicEvent*> battle;
     // WBF-38: the local faction chooses the space victory/defeat HUD sound.
     if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
+        // SND-40: a faction WAV request, independent of production speech streams.
+        if (const auto* field = faction.value().value("SFXEvent_Space_Base_Under_Attack_Announcement")) {
+            data::tag_trace::used(field->value);
+            base_under_attack_ = event(trim(field->value.raw_text), std::string(local_faction));
+        }
+        constexpr std::array keys{"Reinforcements_Selection_SFXEvent", "Reinforcements_Pick_Landing_Zone_SFXEvent", "Reinforcements_Enroute_SFXEvent", "Reinforcements_Cancelled_SFXEvent"};
+        for (std::size_t index = 0; index < keys.size(); ++index) {
+            reinforcement_sounds_[index] = event(tag(faction.value(), keys[index]), std::string(local_faction));
+        }
         for (std::size_t side = 0; side < outcome_events_.size(); ++side) {
             const std::string_view key = side == 0 ? "SFXEvent_HUD_Won_Space_Battle" : "SFXEvent_HUD_Lost_Space_Battle";
             if (const auto* value = faction.value().value(key)) {
@@ -179,6 +204,13 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     // The lists repeat their tag, which the effective object merges to one value: read the
     // faction's own definition.
     if (const data::Definition* faction = catalog_->find(local_faction, data::Category::faction); faction != nullptr) {
+        // SND-54: retain repeated overrides in source order, including blank event entries.
+        tactical_music_fields_ = fields_of(faction->root);
+        if (const auto resolved = catalog_->resolve(local_faction, data::Category::faction)) {
+            for (const auto key : {"Music_Event_Tactical_Win", "Music_Event_Tactical_Lose"}) {
+                tactical_music_fields_.emplace_back(key, tag(resolved.value(), key));
+            }
+        }
         const auto find_music = [this](const std::string& name) -> const audio::MusicEvent* {
             for (const audio::MusicEvent& music : music_events_) {
                 if (same(music.name, name)) return &music;
@@ -248,6 +280,14 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
     }
 
+    for (const units::Projectile& projectile : tables.projectiles) {
+        if (auto object = catalog_->resolve(projectile.id, data::Category::game_object)) {
+            projectile_detonations_.emplace(skirmish::type_id(projectile.id),
+                event(tag(object.value(), "Death_SFXEvent_Start_Die"), projectile.id));
+            terminal_detonations_.emplace(skirmish::type_id(projectile.id),
+                event(tag(object.value(), "Projectile_SFXEvent_Detonate"), projectile.id));
+        }
+    }
     for (const units::UnitType& type : tables.units) {
         TypeSounds sounds;
         sounds.name = type.id;
@@ -261,6 +301,14 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
         const data::EffectiveObject& value = object.value();
         const std::string where = type.id;
+        // SND-40: base eligibility follows behaviour, never category or station size.
+        const auto base_behavior = [](const std::string& name) {
+            return same(name, "DUMMY_STAR_BASE") || same(name, "DUMMY_ORBITAL_STRUCTURE");
+        };
+        const auto& behavior = type.footprint.hazard;
+        sounds.base = std::any_of(behavior.behavior.begin(), behavior.behavior.end(), base_behavior)
+            || std::any_of(behavior.space_behavior.begin(), behavior.space_behavior.end(), base_behavior);
+        sounds.community_property = type.community_property || type.station_community_property;
         if (const auto* sighting = value.value("Play_SFXEvent_On_Sighting")) {
             data::tag_trace::used(sighting->value);
             sounds.announce_sighting = same(trim(sighting->value.raw_text), "true")
@@ -282,6 +330,15 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         sounds.spin_death = event(tag(value, "Spin_Away_On_Death_SFXEvent_Start_Die"), where);
         sounds.asteroid_damage = event(tag(value, "SFXEvent_Damaged_By_Asteroid"), where);
         sounds.ambient_moving = event(tag(value, "SFXEvent_Ambient_Moving"), where);
+        sounds.engine_idle = event(tag(value, "SFXEvent_Engine_Idle_Loop"), where);
+        sounds.engine_moving = event(tag(value, "SFXEvent_Engine_Moving_Loop"), where);
+        sounds.fleet_move = event(tag(value, "SFXEvent_Command_Fleet_Move"), where);
+        for (auto* sound : {&sounds.engine_idle, &sounds.engine_moving}) {
+            if (*sound && (!(*sound)->is_3d || (*sound)->play_count != -1)) {
+                problems_.push_back(where + ": engine event must be a spatial loop");
+                *sound = nullptr;
+            }
+        }
         // SND-46: integer seconds, positive and ordered; defaults are five and ten seconds.
         const auto ambient_delay = [&value](const std::string_view key, const int fallback) {
             const auto text = tag(value, key);
@@ -310,6 +367,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         sounds.attack = event(tag(value, "SFXEvent_Attack"), where);
         sounds.group_move = event(tag(value, "SFXEvent_Group_Move"), where);
         sounds.group_attack = event(tag(value, "SFXEvent_Group_Attack"), where);
+        sounds.assist_move = event(tag(value, "SFXEvent_Assist_Move"), where);
+        sounds.assist_attack = event(tag(value, "SFXEvent_Assist_Attack"), where);
+        sounds.move_asteroid = event(tag(value, "SFXEvent_Move_Into_Asteroid_Field"), where);
+        sounds.move_nebula = event(tag(value, "SFXEvent_Move_Into_Nebula"), where);
         sounds.stop = event(tag(value, "SFXEvent_Stop"), where);
         sounds.guard = event(tag(value, "SFXEvent_Guard"), where);
         // BA-25: repeated hardpoint-kind/event pairs, with derived entries replacing that kind.
@@ -325,14 +386,17 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
         if (const auto ranking = audio::leading_integer(tag(value, "Ranking_In_Category"))) sounds.ranking = *ranking;
         // BA-52: each modelled ability's voice lines, ION_CANNON_SHOT (#561) included. The ability kinds
-        // the simulation does not have (HUNT, AB-03) play nothing.
+        // the simulation does not have play nothing.
         if (const data::EffectiveValue* abilities = value.value("Unit_Abilities_Data")) {
             for (const data::XmlNode& ability : abilities->value.children) {
                 if (!same(ability.name, "Unit_Ability")) continue;
+                if (same(child(ability, "Type"), "EJECT_VEHICLE_THIEF")) sounds.vehicle_thief = true;
                 const tactical::AbilityKind kind = tactical::ability_kind(child(ability, "Type"));
                 if (kind == tactical::AbilityKind::none) continue;
                 sounds.ability_voices[kind] = {event(child(ability, "SFXEvent_GUI_Unit_Ability_Activated"), where),
                                                event(child(ability, "SFXEvent_GUI_Unit_Ability_Deactivated"), where)};
+                // BA-53/54: targeting acknowledgement and successful spawn use the source object.
+                sounds.ability_targets[kind] = event(child(ability, "SFXEvent_Target_Ability"), where);
             }
         }
         const auto projectile_events = [&](const std::string& projectile, const std::uint32_t slot) {
@@ -374,6 +438,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             sounds.fire[tactical::object_weapon] = unit_fire;
             projectile_events(type.weapon->projectile, tactical::object_weapon);
         }
+        for (std::size_t index = 0; index < type.death_projectiles.size(); ++index)
+            projectile_events(type.death_projectiles[index],
+                tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index));
         sounds.hardpoint_points.assign(type.hardpoints.size(), sim::math::Vec3{});
         if (const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id))) {
             for (const tactical::TargetHardpoint& point : profile->hardpoints) {

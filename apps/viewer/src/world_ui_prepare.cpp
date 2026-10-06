@@ -6,6 +6,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/data/ui/command_bar.hpp"
+#include "eawr/data/ui/text_database.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 
@@ -110,12 +111,41 @@ std::optional<Rect2> WorldUiView::atlas_region(const std::string& name) const {
 }
 
 void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live) {
+    // WU-51/52: resolve text and fonts once; the reticle pass only selects a cached name.
+    std::optional<data::ui::TextDatabase> text_database;
+    if (auto loaded = data::ui::load_language_text_database(filesystem, "ENGLISH")) {
+        text_database.emplace(std::move(loaded.value()));
+    } else {
+        unresolved_.push_back("hardpoint text: " + core::format_diagnostic(loaded.error()));
+    }
+    std::string tooltip_face, tooltip_small_face;
+    // WSU-36: validated VFS XML controls render admission, independently of the sim grid.
+    if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
+        for (const auto& node : constants.value().root.children) {
+            const auto name = lower(node.name);
+            if (name == "tool_tip_font_name") tooltip_face = trim(node.raw_text);
+            if (name == "tool_tip_small_font_name") tooltip_small_face = trim(node.raw_text);
+            if (name == "tool_tip_font_size" || name == "tool_tip_small_font_size") {
+                if (const auto value = number(trim(node.raw_text)); value && *value > 0.0F && *value <= 128.0F) {
+                    (name == "tool_tip_font_size" ? tooltip_points_ : tooltip_small_points_) = static_cast<int>(*value);
+                } else unresolved_.push_back(node.name + ": expected a positive font size");
+            }
+            if (lower(node.name) != "grippercombatgridsnapdistance") continue;
+            if (const auto value = number(trim(node.raw_text)); value && *value >= 0.0F) gripper_snap_distance_ = *value;
+            else unresolved_.push_back("GripperCombatGridSnapDistance: expected a nonnegative finite number");
+        }
+    } else {
+        unresolved_.push_back("gameconstants.xml: " + core::format_diagnostic(constants.error()));
+    }
     // WU-46: compare identical world frames with/without ability art, including
     // the moving background seen through translucent squadron identity pixels.
     const char* ability_art_control = std::getenv("EAWR_WORLD_ABILITY_ART_CONTROL");
     ability_art_enabled_ = ability_art_control == nullptr || std::string_view(ability_art_control) != "off";
     // WU-43..WU-45: validated component data, with the UI's existing missing-font fallback.
     const Ref<Font> fallback_font = ThemeDB::get_singleton()->get_fallback_font();
+    FontProvider tooltip_fonts(ui::load_font_cache(filesystem));
+    tooltip_font_ = tooltip_fonts.font(tooltip_fonts.resolve({tooltip_face, tooltip_points_}, "ENGLISH"));
+    tooltip_small_font_ = tooltip_fonts.font(tooltip_fonts.resolve({tooltip_small_face, tooltip_small_points_}, "ENGLISH"));
     icon_group_.font = fallback_font;
     bracket_group_.font = fallback_font;
     if (auto components = data::ui::load_command_bar(filesystem)) {
@@ -133,6 +163,7 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         read_text("st_grab_bar", icon_group_);
         read_text("st_control_group", bracket_group_);
         if (const auto* component = components.value().catalog.find("st_grab_bar")) {
+            identity_pixel_align_ = component->flag(Field::pixel_align, true);
             // WU-43: active squadron art belongs to the separate lower effect quad.
             if (const auto offset = component->vec2(Field::lower_effect_offset)) squadron_ability_offset_ = {offset->x, offset->y};
         }
@@ -233,6 +264,15 @@ void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catal
         for (std::size_t index = 0; index < type.hardpoints.size(); ++index) {
             const units::Hardpoint& source = type.hardpoints[index];
             HardpointUi hardpoint;
+            if (auto object = catalog.resolve(source.id, data::Category::hardpoint)) {
+                const auto key = trim(tag(object.value(), "Tooltip_Text"));
+                if (const auto* entry = text_database ? text_database->find(key) : nullptr) {
+                    hardpoint.tooltip = data::ui::to_utf8(entry->value);
+                } else {
+                    hardpoint.tooltip = key;
+                    if (!key.empty()) unresolved_.push_back("hardpoint Tooltip_Text unresolved: " + key);
+                }
+            }
             hardpoint.texture = std::string(ui::hardpoint_reticle_texture(trim(source.type_name)));
             hardpoint.targetable = source.targetable;
             if (profile != nullptr) {

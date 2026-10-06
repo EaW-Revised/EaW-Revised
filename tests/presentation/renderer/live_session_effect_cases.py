@@ -2,6 +2,7 @@
 
 import struct
 import zlib
+import math
 
 from live_session_test_support import (
     ACCLAMATOR, CAMERA, CAPTURE_TICKS, CORUSCANT,
@@ -18,6 +19,177 @@ from live_session_test_support import (
 
 
 class LiveSessionEffectCases:
+    def test_config_free_replay_laser_depth_uses_tactical_clips(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-config-free-laser-depth-"))
+        samples = {}
+        # Same fixed drawn pose as the review repro; only the bridge differs.
+        for name, camera in (("no-bridge", None), ("with-bridge", DUEL_CAMERA)):
+            code, result = self._run(directory, name, (*DUEL_ARGS,
+                "--eawr-live-step", "1", "--eawr-live-ticks", "180", "--eawr-live-capture-ticks", "90",
+                "--eawr-space-camera", "0,707.10678,2207.10678,0,0,1500,0,1,0,60,10,7000",
+                "--eawr-shadows", "on"), session=("--eawr-live-session", "replay"), camera=camera)
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+            self.assertEqual(result["live_session"]["rejected"], [])
+            render = result["capture_identity"]["camera"]
+            self.assertEqual((render["near"], render["far"]), (10, 60000))
+            depth = result["battle_effects"]["laser_depth"]
+            self.assertEqual(depth["clips"], [10, 7000])
+            for render_name, scale in (("beam", 8), ("kite", 1.2)):
+                sample = depth[f"first_{render_name}"]
+                self.assertIsNotNone(sample)
+                expected = (sample["view_depth"] - 10) / (7000 - 10)
+                self.assertAlmostEqual(sample["normalized_depth"], expected, delta=0.00001)
+                self.assertAlmostEqual(sample["factor"], 1 + scale * expected, delta=0.00002)
+            samples[name] = depth
+        for render_name in ("beam", "kite"):
+            for field in ("view_depth", "factor", "half_width"):
+                self.assertAlmostEqual(samples["no-bridge"][f"first_{render_name}"][field],
+                                       samples["with-bridge"][f"first_{render_name}"][field], delta=0.00002)
+
+    def test_laser_depth_uses_tactical_clips_at_three_distances(self):
+        from tools.inventory.corpus import Corpus
+        import xml.etree.ElementTree as ET
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-tactical-laser-depth-"))
+        corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+        source = corpus.read_effective("foc", "data/xml/tacticalcameras.xml")
+        self.assertIsNotNone(source)
+        xml = directory / "legacy/Data/XML"
+        xml.mkdir(parents=True)
+        (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+        root = ET.fromstring(source.data)
+        mode = next(node for node in root if node.get("Name", "").lower() == "space_mode")
+        mode.find("Far_Clip").text = "60000"
+        ET.ElementTree(root).write(xml / "TacticalCameras.xml", encoding="utf-8")
+        shutil.copyfile(DUEL_CAMERA.parent / "space-live-camera-bindings.json", directory / "space-live-camera-bindings.json")
+        measurements = []
+        for distance in (1000, 1500, 1900):
+            camera = directory / f"camera-{distance}.xml"
+            root = ET.fromstring(DUEL_CAMERA.read_text(encoding="utf-8"))
+            root.find("initial").set("zoom", str((distance - 200) / 1700))
+            root.remove(root.find("constant_overrides"))
+            ET.ElementTree(root).write(camera, encoding="utf-8")
+            samples = {}
+            for name, far, mod in (("legacy", 60000, ("--eawr-mod-root", str(xml.parent.parent))),
+                                    ("tactical", 7000, ())):
+                code, result = self._run(directory, f"{name}_{distance}", (*DUEL_ARGS, *mod,
+                    "--eawr-live-step", "1", "--eawr-live-ticks", "180", "--eawr-live-capture-ticks", "90",
+                    "--eawr-shadows", "on"), session=("--eawr-live-session", "replay"), camera=camera)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                self.assertEqual(result["live_session"]["rejected"], [])
+                render = result["capture_identity"]["camera"]
+                self.assertEqual((render["near"], render["far"]), (10, 60000))
+                self.assertAlmostEqual(math.dist(render["position"], render["target"]), distance, delta=0.05)
+                depth = result["battle_effects"]["laser_depth"]
+                self.assertEqual(depth["clips"], [10, far])
+                for render_name, scale in (("beam", 8), ("kite", 1.2)):
+                    sample = depth[f"first_{render_name}"]
+                    self.assertIsNotNone(sample)
+                    expected = (sample["view_depth"] - 10) / (far - 10)
+                    self.assertAlmostEqual(sample["normalized_depth"], expected, delta=0.00001)
+                    self.assertAlmostEqual(sample["factor"], 1 + scale * expected, delta=0.00002)
+                samples[name] = depth
+            for render_name in ("beam", "kite"):
+                self.assertAlmostEqual(samples["legacy"][f"first_{render_name}"]["view_depth"],
+                                       samples["tactical"][f"first_{render_name}"]["view_depth"], delta=0.02)
+                self.assertGreater(samples["tactical"][f"first_{render_name}"]["factor"],
+                                   samples["legacy"][f"first_{render_name}"]["factor"])
+            measurements.append({"distance": distance, **samples})
+        (directory / "laser-depth-measurements.json").write_text(json.dumps(measurements, indent=2), encoding="utf-8")
+
+    def test_static_bomb_root_particle_and_countdown_audio(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-static-bomb-"))
+        fleet = ("--eawr-skirmish-slot", "1:Empire:0:human",
+                 "--eawr-skirmish-slot", "2:Rebel:1:human",
+                 "--eawr-skirmish-fleet", "1:Slave_I", "--eawr-skirmish-fleet", "2:none",
+                 "--eawr-live-ai", "off", "--eawr-live-reveal", "on", "--eawr-live-player", "1")
+        code, roster = self._run(directory, "roster", (*fleet, "--eawr-live-ticks", "8"),
+                                  session=("--eawr-live-session", "skirmish"))
+        self.assertEqual(code, 0, roster.get("failure"))
+        source = next(row["entity"] for row in roster["live_session"]["start_fleet"] if row["type"] == "Slave_I")
+        for variant, step in (("paced", 1), ("catch-up", 3), ("death-precedence", 1)):
+            with self.subTest(variant=variant):
+                mod_args = ()
+                if variant == "death-precedence":
+                    import xml.etree.ElementTree as ET
+                    from tools.inventory.corpus import Corpus
+                    xml = directory / "mod/Data/XML"
+                    xml.mkdir(parents=True)
+                    (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+                    authored = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective("foc", "data/xml/projectiles.xml")
+                    tree = ET.fromstring(authored.data)
+                    bomb = next(node for node in tree if node.get("Name") == "Proj_Harmonic_Bomb_Slave_I")
+                    bomb.find("Projectile_SFXEvent_Detonate").text = "SFX_Proton_Torpedo_Detonation"
+                    bomb.find("Projectile_Lifetime_Detonation_Particle").text = "Large_Explosion_Space"
+                    ET.ElementTree(tree).write(xml / "projectiles.xml", encoding="utf-8")
+                    mod_args = ("--eawr-mod-root", str(xml.parent.parent))
+                code, result = self._run(directory, f"bomb-{variant}", (*fleet,
+                    "--eawr-live-step", str(step), "--eawr-live-ticks", "110",
+                    "--eawr-live-order", f"30:ability:{source}@HARMONIC_BOMB,on",
+                    "--eawr-live-follow", str(source), "--eawr-live-audio-pace", "on",
+                    "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                    "--eawr-live-capture-ticks", "24,42,60,72,84", *mod_args),
+                    session=("--eawr-live-session", "skirmish"), camera=None)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertEqual(result["live_session"]["rejected"], [])
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                effects = result["battle_effects"]
+                self.assertEqual(effects["projectile_models"]["Proj_Harmonic_Bomb_Slave_I"]["max_bound"], 1)
+                self.assertNotIn("Proj_Harmonic_Bomb_Slave_I", effects["projectiles_not_drawn"], effects)
+                rows = [row for row in result["unit_emitters"]["start_log"] if row["proxy"] == "p_seismic_bomb00.ALO"]
+                self.assertEqual(len(rows), 1, rows)
+                self.assertIsNotNone(rows[0]["first_age"], rows)
+                self.assertGreater(rows[0]["max_visible_quads"], 0, rows)
+                self.assertEqual(effects["spawned"].get("hero_detonation:Harmonic_Bomb_Explosion_Slave_I"), 1, effects)
+                requested = result["battle_audio"]["requested"]
+                self.assertEqual(requested.get("projectile_detonation:SFX_Sizemic_Detonation"), 1, requested)
+                self.assertNotIn("projectile_detonation:SFX_Proton_Torpedo_Detonation", requested)
+                self.assertNotIn("hero_detonation:Large_Explosion_Space", effects["spawned"])
+
+    def test_home_one_secondary_defend_and_purchase_slots_compose_shells(self):
+        # BP-22: a hero's second ability has the same shell as a primary DEFEND.
+        # Arrival slots must be prepared too, while placement previews stay unshielded.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-home-one-defend-"))
+        fleet = ("--eawr-skirmish-slot", "1:Rebel:0:human",
+                 "--eawr-skirmish-slot", "2:Empire:1:human",
+                 "--eawr-skirmish-fleet", "1:none",
+                 "--eawr-skirmish-fleet", "2:none",
+                 "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                 "--eawr-live-player", "1", "--eawr-live-step", "1",
+                 "--eawr-live-purchase-slots", "1",
+                 "--eawr-environment", "map", "--eawr-lighting", "sh",
+                 "--eawr-shadows", "on")
+        code, reserve = self._run(directory, "reserve", (*fleet, "--eawr-live-ticks", "8"),
+                                  session=("--eawr-live-session", "skirmish"))
+        self.assertEqual(code, 0, reserve.get("failure"))
+        self.assertFalse(any(row["type"] == "Home_One" for row in reserve["live_session"]["start_fleet"]))
+        shells = reserve["populate"]["live_units"]["shield_shells"]
+        self.assertEqual(shells["types"].get("Home_One"), "composed", shells)
+        for ordinary in ("Nebulon_B_Frigate", "Calamari_Cruiser"):
+            self.assertEqual(shells["types"].get(ordinary), "composed", shells)
+        self.assertEqual(shells["max_shown"], 0, shells)
+
+        hero_fleet = (*fleet, "--eawr-skirmish-fleet", "1:Home_One")
+        code, roster = self._run(directory, "roster", (*hero_fleet, "--eawr-live-ticks", "8"),
+                                 session=("--eawr-live-session", "skirmish"))
+        self.assertEqual(code, 0, roster.get("failure"))
+        hero = next(row["entity"] for row in roster["live_session"]["start_fleet"] if row["type"] == "Home_One")
+        frames = {}
+        for name, active in (("before", False), ("after", True)):
+            orders = ("--eawr-live-order", f"20:ability:{hero}@DEFEND,on") if active else ()
+            code, result = self._run(directory, name, (*hero_fleet, *orders,
+                "--eawr-live-follow", str(hero), "--eawr-live-ticks", "45",
+                "--eawr-live-capture-ticks", "30"), session=("--eawr-live-session", "skirmish"), camera=None)
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["live_session"]["rejected"], [])
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+            shells = result["populate"]["live_units"]["shield_shells"]
+            self.assertEqual(shells["types"].get("Home_One"), "composed", shells)
+            self.assertEqual(shells["max_shown"], int(active), shells)
+            frames[name] = decode_png((directory / f"{name}_t0030.png").read_bytes())
+        self.assertNotEqual(frames["before"][2], frames["after"][2])
+
     def test_concentrate_fire_button_target_click_reaches_simulation(self):
         directory = ROOT / "out/godot/hero-targets-ui"
         directory.mkdir(parents=True, exist_ok=True)
@@ -200,11 +372,24 @@ class LiveSessionEffectCases:
                 self.assertTrue(result["live_session"]["headless_hashes_equal"])
                 effects = result["battle_effects"]
                 self.assertIsNone(effects["failure"])
-                self.assertGreater(sum(count for key, count in effects["spawned"].items()
-                                       if key.startswith("hero_detonation:")), 0, effects)
+                self.assertEqual(sum(count for key, count in effects["spawned"].items()
+                                     if key.startswith("hero_detonation:")), 1, effects)
+                self.assertFalse(any(key.startswith("lifetime_detonation:")
+                                     for key in effects["spawned"]), effects)
                 if name == "bomb":
                     self.assertGreater(effects["projectile_models"]["Proj_Harmonic_Bomb_Slave_I"]["max_bound"], 0, effects)
+                    self.assertNotIn("Proj_Harmonic_Bomb_Slave_I", effects["projectiles_not_drawn"], effects)
+                    emitters = result["unit_emitters"]
+                    self.assertEqual(emitters["started"].get("p_seismic_bomb00.ALO"), 1, emitters)
+                    bomb_rows = [row for row in emitters["start_log"] if row["proxy"] == "p_seismic_bomb00.ALO"]
+                    self.assertEqual(len(bomb_rows), 1, bomb_rows)
+                    self.assertIsNotNone(bomb_rows[0]["first_age"], bomb_rows)
+                    self.assertGreater(bomb_rows[0]["max_visible_quads"], 0, bomb_rows)
+                    self.assertEqual(effects["spawned"].get("hero_detonation:Harmonic_Bomb_Explosion_Slave_I"), 1, effects)
+                    requested = result["battle_audio"]["requested"]
+                    self.assertEqual(requested.get("projectile_detonation:SFX_Sizemic_Detonation"), 1, requested)
                 else:
+                    self.assertEqual(effects["spawned"].get("hero_detonation:Weaken_Enemy_Detonation_Effect"), 1, effects)
                     self.assertEqual(result["battle_input"]["ability_bar"]["targeted"], 1)
                     self.assertGreater(effects["spawned"].get("weaken_status:Weaken_Enemy_Particle_Effect", 0), 0, effects)
 
@@ -266,6 +451,69 @@ class LiveSessionEffectCases:
         self.assertGreater(effects["energy_beams_drawn"], 0, effects)
         self.assertGreater(effects["tractor_beams_drawn"], 0, effects)
         self.assertTrue(any(name.startswith("energy_owner:") and count > 0 for name, count in effects["spawned"].items()), effects)
+
+    def test_tractor_line_width_texture_highlights_and_release(self):
+        # TBF-01..03: inspect the mesh actually submitted, with a tractor-only source.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-tractor-line-"))
+        seed = directory / "seed.eawr-replay"
+        fleet = ("--eawr-skirmish-slot", "1:Empire:0:human",
+                 "--eawr-skirmish-slot", "2:Rebel:1:human",
+                 "--eawr-skirmish-fleet", "1:Admonitor_Star_Destroyer",
+                 "--eawr-skirmish-fleet", "2:Nebulon_B_Frigate",
+                 "--eawr-live-ai", "off", "--eawr-live-player", "1",
+                 "--eawr-live-step", "1", "--eawr-live-ticks", "8",
+                 "--eawr-live-replay-out", str(seed))
+        code, roster = self._run(directory, "roster", fleet, session=("--eawr-live-session", "skirmish"))
+        self.assertEqual(code, 0, roster.get("failure"))
+        source = next(row["entity"] for row in roster["live_session"]["start_fleet"] if row["type"] == "Admonitor_Star_Destroyer")
+        target = next(row["entity"] for row in roster["live_session"]["start_fleet"] if row["type"] == "Nebulon_B_Frigate")
+        replay = bytearray(seed.read_bytes())
+        header = struct.unpack_from("<H", replay, 10)[0]
+        players = struct.unpack_from("<I", replay, 48)[0]
+        found = set()
+        for index in range(struct.unpack_from("<Q", replay, 56)[0]):
+            offset = header + players * 24 + index * 80
+            entity = struct.unpack_from("<Q", replay, offset)[0]
+            if entity not in (source, target):
+                continue
+            found.add(entity)
+            struct.pack_into("<7q", replay, offset + 24,
+                             (-400 if entity == source else 400) << 24, -1500 << 24, 0,
+                             0, 0, 0, 1 << 24)
+        self.assertEqual(found, {source, target})
+        struct.pack_into("<Q", replay, 40, 140)
+        staged = directory / "tractor.eawr-replay"
+        staged.write_bytes(replay)
+        # The rig returns text evidence; retain the derived setup for the lit motion eye-check.
+        import base64
+        (directory / "tractor-replay.txt").write_text(base64.b64encode(replay).decode("ascii"), encoding="ascii")
+        camera = ROOT / "apps/viewer/project/config/coruscant-hero-beams-camera.xml"
+        code, result = self._run(directory, "tractor", (
+            "--eawr-live-replay", str(staged), "--eawr-live-reveal", "on", "--eawr-live-ai", "off",
+            "--eawr-live-player", "1", "--eawr-live-step", "1", "--eawr-live-ticks", "125",
+            "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+            "--eawr-live-capture-ticks", "29,50,60,80,120",
+            "--eawr-live-input", f"20:click:unit={source}",
+            "--eawr-live-input", "30:key:T+shift",
+            "--eawr-live-input", f"35:click:unit={target}",
+            "--eawr-live-order", f"100:ability:{source}@TRACTOR_BEAM,off"),
+            session=("--eawr-live-session", "replay"), camera=camera)
+        self.assertEqual(code, 0, result.get("failure"))
+        self.assertEqual(result["live_session"]["rejected"], [])
+        self.assertTrue(result["live_session"]["headless_hashes_equal"])
+        effects = result["battle_effects"]
+        self.assertGreater(effects["tractor_beams_drawn"], 0)
+        self.assertEqual(effects["energy_beams_drawn"], 0)
+        look = effects["hero_beam_looks"][1]
+        self.assertEqual(look["frames"], 10)
+        self.assertAlmostEqual(look["colour"][1], 75 / 255, places=5)
+        self.assertEqual((look["colour"][0], look["colour"][2]), (0, 0))
+        quad = look["last_quad"]
+        self.assertAlmostEqual(math.dist(quad[0][:3], quad[1][:3]), 10, places=3)
+        self.assertEqual([vertex[3:] for vertex in quad], [[0, 1], [1, 1], [0, 0], [1, 0]])
+        self.assertEqual(look["sparks_drawn"], 4 * effects["tractor_beams_drawn"])
+        self.assertGreater(look["moving_samples"], 3)
+        self.assertEqual(look["active_sources"], 0, "release drops the source's highlight clock")
 
     def test_falcon_invulnerability_shows_authored_bubble_and_expires(self):
         # WHE-22/52: the active ordinary mode admits the model's authored pem proxies.
@@ -459,16 +707,21 @@ class LiveSessionEffectCases:
             diamond_pool = effects["projectile_models"]["Proj_Ship_Diamond_Boron_Missile"]
             self.assertEqual((diamond_pool["slots"], diamond_pool["bindings"], diamond_pool["refused"]),
                              (32, 0, 0), diamond_pool)
-            # WBP-01 (896de912, merged #1009): live pad buildables add satellite and turret projectile pools.
+            # The loaded production closure also prepares pad buildables (#1009), Barrage
+            # overrides (#1307), and spawned hero projectiles (#1426), even when dormant.
             self.assertEqual(set(effects["projectile_models"]), {
                 "Proj_Ion_Cannon_Medium_Laser_Blue", "Proj_Plasma_Space_Turret_Blast",
                 "Proj_Ship_Concussion_Missile", "Proj_Ship_Concussion_Missile_Satellite",
-                "Proj_Ship_Diamond_Boron_Missile"})
-            for name in ("Proj_Plasma_Space_Turret_Blast", "Proj_Ship_Concussion_Missile_Satellite"):
+                "Proj_Ship_Diamond_Boron_Missile", "Proj_Ship_Diamond_Boron_Missile_Barrage",
+                "Proj_Harmonic_Bomb_Slave_I"})
+            for name in ("Proj_Plasma_Space_Turret_Blast", "Proj_Ship_Concussion_Missile_Satellite",
+                         "Proj_Ship_Diamond_Boron_Missile_Barrage", "Proj_Harmonic_Bomb_Slave_I"):
                 extra_pool = effects["projectile_models"][name]
                 self.assertEqual((extra_pool["slots"], extra_pool["bindings"], extra_pool["refused"]),
                                  (32, 0, 0), extra_pool)
-            self.assertEqual((units["projectile_slots_drawn"], units["projectile_slots_not_drawn"]), (160, []))
+            self.assertEqual(units["projectile_slots_drawn"], 224)
+            undrawn = units["projectile_slots_not_drawn"]
+            self.assertEqual(undrawn, [])
             self.assertEqual(result["unit_emitters"]["started"].get("p_concussion"), pool["bindings"],
                              result["unit_emitters"]["started"])
 
@@ -779,6 +1032,70 @@ class LiveSessionEffectCases:
             self.assertEqual(rows[0]["first_age"], 200 - rows[0]["tick"] + 2, rows[0])
 
 
+    def test_corvette_glow_spans_nozzle_wall_during_turn(self):
+        # BP-40/PS-10/PS-15: later every-vertex births retain the full nozzle wall.
+        # Compare the glow's principal extent with the independently drawn blue
+        # nozzle rims, allowing foreshortening and the soft sprite perimeter.
+        from test_area_damage_capture import point_height_replay
+        with tempfile.TemporaryDirectory(prefix="eawr-nozzle-wall-") as temporary:
+            directory = pathlib.Path(temporary)
+            data = bytearray(point_height_replay((ROOT / "tests/skirmish/fixtures/m2-start.eawr-replay").read_bytes()))
+            header = struct.unpack_from("<H", data, 10)[0]
+            players = struct.unpack_from("<I", data, 48)[0]
+            start = header + players * 24
+            for index in range(2):
+                offset = start + index * 80
+                entity = struct.unpack_from("<Q", data, offset)[0]
+                self.assertIn(entity, (5, 11))
+                struct.pack_into("<7q", data, offset + 24,
+                                 (0 if entity == 5 else 8000) << 24, 0, 0, 0, 0, 0, 1 << 24)
+            struct.pack_into("<Q", data, 64, 0)
+            replay = directory / "nozzles.eawr-replay"
+            replay.write_bytes(data[:start + 160])
+            camera = directory / "camera.xml"
+            config = CAMERA.read_text(encoding="utf-8")
+            config = re.sub(r"<initial[^>]+/>",
+                '<initial target_x="0" target_y="0" target_height="0" zoom="0.10" yaw_degrees="270"/>', config)
+            config = re.sub(r'(<override tag="Pitch_Min" value=")[^"]+', r'\g<1>10', config)
+            camera.write_text(config, encoding="utf-8")
+            shutil.copyfile(CAMERA.parent / "space-live-camera-bindings.json",
+                            directory / "space-live-camera-bindings.json")
+            images = {}
+            for name, orders in (("rest", ()), ("turn", ("--eawr-live-order", "2:face:5@0,1000,0"))):
+                code, result = self._run(directory, name, (
+                    "--eawr-live-replay", str(replay), "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                    "--eawr-live-step", "1", "--eawr-live-ticks", "100", "--eawr-live-capture-ticks", "60",
+                    "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                    "--eawr-hud", "off", *orders), session=("--eawr-live-session", "replay"),
+                    camera=camera, engine_args=("--fixed-fps", "30"))
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                self.assertEqual(result["unit_emitters"]["start_failed"], {})
+                images[name] = decode_png((directory / f"{name}_t0060.png").read_bytes())
+
+            def points(image, region, predicate):
+                width, height, rows = image
+                return [(x, y) for y in range(int(height * region[1]), int(height * region[3]))
+                        for x in range(int(width * region[0]), int(width * region[2])) if predicate(rows[y][x])]
+
+            def extent(cloud):
+                self.assertGreater(len(cloud), 100, "visible nozzle/glow pixels are required")
+                mx = sum(x for x, _ in cloud) / len(cloud)
+                my = sum(y for _, y in cloud) / len(cloud)
+                xx = sum((x - mx) ** 2 for x, _ in cloud)
+                yy = sum((y - my) ** 2 for _, y in cloud)
+                xy = sum((x - mx) * (y - my) for x, y in cloud)
+                angle = 0.5 * math.atan2(2 * xy, xx - yy)
+                projected = sorted(x * math.cos(angle) + y * math.sin(angle) for x, y in cloud)
+                return projected[int(len(projected) * 0.99)] - projected[int(len(projected) * 0.01)]
+
+            rim = extent(points(images["rest"], (0.44, 0.60, 0.56, 0.70),
+                                lambda p: p[2] > 60 and p[2] > p[0] * 1.08 and p[2] > p[1] * 1.10))
+            for name, image in images.items():
+                glow = extent(points(image, (0.42, 0.53, 0.65, 0.72),
+                                     lambda p: p[0] > 100 and p[0] > p[1] * 1.25 and p[0] > p[2] * 2))
+                self.assertGreater(glow / rim, 0.70, (name, "glow/nozzle extent", glow / rim))
+
     def test_engine_emitters_are_drawn_every_frame_of_a_turn(self):
         # #433: the corvette turns sharply (faced away, then ordered to its left) at the default
         # half-tick step, so every other frame falls between two 30 Hz emitter samples. Those
@@ -934,3 +1251,77 @@ class LiveSessionEffectCases:
                     self.assertGreater(measured["samples"], 100, measured)
                     self.assertLess(measured["max_sine_error"], 0.003, measured)
                     self.assertEqual(measured["reversed"], 0, measured)
+
+
+    def test_effective_constants_change_drawn_width_and_flash(self):
+        from tools.inventory.corpus import Corpus
+        import xml.etree.ElementTree as ET
+        corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+        constants = corpus.read_effective("foc", "data/xml/gameconstants.xml")
+        projectiles = corpus.read_effective("foc", "data/xml/projectiles.xml")
+        self.assertIsNotNone(constants)
+        self.assertIsNotNone(projectiles)
+        with tempfile.TemporaryDirectory(prefix="eawr-presentation-constants-") as temporary:
+            directory = pathlib.Path(temporary)
+            results = {}
+            variants = {
+                "baseline": {},
+                "beam_zero": {"Laser_Beam_Z_Scale_Factor": "0"},
+                "kite_zero": {"Laser_Kite_Z_Scale_Factor": "0"},
+                "flash_scale": {"Shield_Flash_Scale": "3,4,5"},
+                "flash_duration": {"Shield_Flash_Duration": "1"},
+                "flash_zero": {"Shield_Flash_Duration": "0"},
+            }
+            for name, changes in variants.items():
+                xml = directory / name / "Data/XML"
+                xml.mkdir(parents=True)
+                (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+                root = ET.fromstring(constants.data)
+                for tag, value in changes.items():
+                    node = next(child for child in root if child.tag.lower() == tag.lower())
+                    node.text = value
+                ET.ElementTree(root).write(xml / "GameConstants.xml", encoding="utf-8")
+                # Exercise mod integer spellings through the catalog and the production loader.
+                root = ET.fromstring(projectiles.data)
+                for node in root.iter("Projectile_Custom_Render"):
+                    if node.text and node.text.strip() in ("1", "2"):
+                        node.text = "01" if node.text.strip() == "1" else "2.0"
+                ET.ElementTree(root).write(xml / "Projectiles.xml", encoding="utf-8")
+                code, result = self._run(directory, name, (
+                    *DUEL_ARGS, "--eawr-mod-root", str(xml.parent.parent), "--eawr-live-ticks", "750",
+                    "--eawr-live-step", "1", "--eawr-live-shield-flash", "on",
+                    "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on"),
+                    session=("--eawr-live-session", "replay"), camera=DUEL_CAMERA)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                results[name] = result
+            base = results["baseline"]["battle_effects"]
+            for render in ("beam", "kite"):
+                changed = results[f"{render}_zero"]["battle_effects"]
+                self.assertGreater(changed[f"max_{render}_width"], 0)
+                self.assertLess(changed[f"max_{render}_width"], base[f"max_{render}_width"])
+                other = "kite" if render == "beam" else "beam"
+                self.assertEqual(changed[f"max_{other}_width"], base[f"max_{other}_width"])
+            base = results["baseline"]["live_session"]
+            self.assertGreater(base["shield_flash_samples"], 0)
+            changed = results["flash_scale"]["live_session"]
+            for original, modified in zip(base["max_shield_flash_scale"], changed["max_shield_flash_scale"]):
+                self.assertGreater(modified, original)
+            self.assertGreater(results["flash_duration"]["live_session"]["shield_flash_samples"],
+                               base["shield_flash_samples"])
+            self.assertEqual(results["flash_zero"]["live_session"]["shield_flash_samples"], 0)
+
+
+    def test_live_camera_clip_planes_and_default_distance(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-live-camera-depth-") as temporary:
+            directory = pathlib.Path(temporary)
+            for name, extra, distance in (("default", (), 1200.0),
+                                          ("max_out", ("--eawr-camera-zoom", "1"), 1900.0)):
+                code, result = self._run(directory, name, (*extra, "--eawr-live-ticks", "5"), camera=None)
+                self.assertEqual(code, 0, result.get("failure"))
+                camera = result["capture_identity"]["camera"]
+                self.assertEqual(camera["near"], 10)
+                # Sky geometry widens the render clip; the tactical depth fix is separate.
+                self.assertEqual(camera["far"], 60000)
+                measured = math.sqrt(sum((eye - target) ** 2 for eye, target in zip(camera["position"], camera["target"])))
+                self.assertAlmostEqual(measured, distance, delta=0.05)

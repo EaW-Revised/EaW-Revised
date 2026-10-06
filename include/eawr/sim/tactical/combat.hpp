@@ -23,6 +23,10 @@ namespace eawr::sim::tactical {
 inline constexpr std::uint32_t object_weapon = 0xffffffffU;
 // No target hardpoint: the shot aims at the unit itself.
 inline constexpr std::uint32_t no_hardpoint = 0xffffffffU;
+// WNO-29: presentation resolves these slots against the death-projectile list.
+inline constexpr std::uint32_t death_projectile_slot_flag = 0x40000000U;
+inline constexpr std::uint32_t death_projectile_selection_slot = 0xfffe0007U; // coordinator-reserved
+inline constexpr std::uint32_t projectile_damage_delay_slot = 0xfffe0008U; // coordinator-reserved
 
 // WAD-39: authored mechanical turret inputs in the unit frame, only for manual guns.
 struct ManualTurretProfile {
@@ -78,6 +82,7 @@ struct ShotProfile {
     std::optional<std::uint32_t> disable_engines_frames{};
     std::optional<FlightProfile> flight{};
     std::uint32_t appearance_delay_frames{}; // WAD-37/40: no movement before expiry; visible on expiry
+    math::Fixed damage_delay{}; // WAD-26: positive per-delivery override
     friend bool operator==(const ShotProfile&, const ShotProfile&) = default;
 };
 
@@ -176,12 +181,19 @@ struct MeshHit {
     std::size_t mesh{};     // index in the meshes tested
 };
 
+struct MeshCollisionWork {
+    std::uint64_t meshes{};
+    std::uint64_t boxes{};
+    std::uint64_t triangles{};
+};
+
+// Optional caller-owned additive diagnostics, outside canonical state (DG-36a).
 // DG-36: the first triangle the segment from `from` to `to` meets among the meshes `enabled`
 // admits, each placed by `transform` (rotation and position). The test is exact on a grid of
 // 1/32 unit in the unit's frame; both faces of a triangle count.
 [[nodiscard]] core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const CollisionMesh> meshes,
     const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
-    const math::Vec3& to);
+    const math::Vec3& to, MeshCollisionWork* work = nullptr);
 
 // One unit type's combat content (for M2 the #65 unit tables, units::combat_table): neither
 // replay data nor state. A type without a profile (a squadron container, #271) never targets,
@@ -214,6 +226,12 @@ struct CombatProfile {
     bool hero{}; // WHE-60: named or generic identity, independent of CategoryMask
     math::Fixed min_attack_distance{}; // WHE-58: zero nested minimum retains ordinary minimum
     bool redirect_damage_to_teammates{}; // WHE-64
+    math::Fixed passive_missile_shield_radius{}; // WPJ-17: always-on source
+    math::Fixed ranged_target_z_adjust{}; // WWP-72/WPJ-17: world Z aim and defence offset
+    bool valid_target{true}; // WCC-25: Is_Valid_Target defaults true
+    bool special_weapon{}; // WCC-25: SPECIAL_WEAPON targets require the star-base exception
+    bool star_base{}; // DUMMY_STAR_BASE behavior, independent of XML class
+    std::vector<ShotProfile> death_projectiles{}; // WNO-29: one choice per ordinary death
     friend bool operator==(const CombatProfile&, const CombatProfile&) = default;
 };
 
@@ -292,6 +310,7 @@ private:
 inline constexpr std::uint32_t ship_slot = 0xffff0000U;          // ship-level scan
 inline constexpr std::uint32_t shield_phase_slot = 0xffff0001U;  // spawn: the shield recharge phase (DG-13)
 inline constexpr std::uint32_t energy_phase_slot = 0xffff0002U;  // spawn: the energy recharge phase (EN-02)
+inline constexpr std::uint32_t station_upgrade_phase_slot = 0xfffe0009U; // WSL-31, coordinator-reserved
 inline constexpr std::uint32_t spawn_slot_flag = 0x80000000U;    // | weapon index: initial countdown
 
 // --- Hardpoint opportunity service (space-targeting R-01 to R-15) -----------------------------
@@ -407,6 +426,17 @@ enum class CombatEventKind : std::uint8_t {
     target_acquired = 1, // R-12: a weapon's new opportunity target was fired at
     weapon_fired = 2,    // a shot for the projectile system (#74)
     projectile_hit = 3,  // a projectile reached a unit (#74)
+    projectile_expired = 4, // WAD-04/07: presentation-only terminal pose, not canonical state
+};
+
+// Diagnostic terminal reasons, carried only by projectile_expired events.
+enum class ProjectileExpiryReason : std::uint32_t {
+    none = 0,
+    travel_limit = 1,
+    lifetime = 2,
+    target_radius = 3,
+    rocket_path_exhausted = 4,
+    explicit_request = 5,
 };
 
 // weapon is the slot's HardPoints index (object_weapon for the unit's own weapon); a shot's
@@ -435,6 +465,8 @@ struct CombatEvent {
     std::uint32_t outcome{};
     // DG-30 diagnostic: original projectile target, excluded from canonical event encoding.
     EntityId selected_target{};
+    // projectile_expired: target is the projectile ID, aim its terminal pose,
+    // selected_target its original target, and outcome a ProjectileExpiryReason.
     friend constexpr bool operator==(const CombatEvent&, const CombatEvent&) noexcept = default;
 };
 

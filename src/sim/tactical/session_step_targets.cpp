@@ -77,6 +77,7 @@ core::Result<void> session_detail::Tick::targets() {
     auto& projectile_collection = targets_.value().projectile_collection.emplace(impl_->projectile_collection);
     if (!impl_->combat.profiles.empty()) {
         std::vector<std::optional<detail::CollectionTrees::Member>> boxes(moving.size());
+        std::vector<std::optional<detail::CollectionTrees::Member>> projectile_boxes(moving.size());
         std::vector<std::optional<core::Diagnostic>> box_errors(moving.size());
         const auto boxed = executor.execute_phase("collection-boxes", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, moving.size());
@@ -89,6 +90,17 @@ core::Result<void> session_detail::Tick::targets() {
                     continue;
                 }
                 boxes[index] = member.value();
+                const auto* profile = world.value().units[index].profile;
+                if (impl_->durability.damage && profile != nullptr && profile->living_projectile_collision && profile->collision) {
+                    auto projectile_member = impl_->collection_member(moving[index], true);
+                    if (!projectile_member) {
+                        box_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
+                            "tick " + std::to_string(tick) + " unit " + std::to_string(moving[index].state.entity_id) + ": "
+                                + projectile_member.error().message);
+                        continue;
+                    }
+                    projectile_boxes[index] = projectile_member.value();
+                }
             }
         });
         if (!boxed) {
@@ -108,11 +120,9 @@ core::Result<void> session_detail::Tick::targets() {
             const auto& box = boxes[index];
             if (!box) continue;
             members.push_back(*box);
-            // DG-30: share partitioned box preparation, never targeting membership/history.
-            const auto* profile = world.value().units[index].profile;
-            if (impl_->durability.damage && profile != nullptr && profile->living_projectile_collision && profile->collision) {
-                collidables.push_back(*box);
-            }
+            // DG-36b: only projectile candidates enclose attached geometry; the ordinary
+            // targeting/blast collection keeps the parent's authored bounds and history.
+            if (projectile_boxes[index]) collidables.push_back(*projectile_boxes[index]);
         }
         collection.update(members, tick);
         projectile_collection.update(collidables, tick);
@@ -276,6 +286,7 @@ core::Result<void> session_detail::Tick::targets() {
             unit.squadron_idle = squadron != craft_squadron.end() && minds.read(squadron->second).target == invalid_entity_id;
             unit.target_prepared = squadron != craft_squadron.end();
             if (squadron != craft_squadron.end()) {
+                if (const auto* container = view.find(squadron->second)) unit.squadron_centre = container->position;
                 const auto notification = acquired.find(squadron->second);
                 const auto self = crafts.find(unit.id);
                 if (notification != acquired.end() && self != crafts.end() && self->second.chase_until <= tick + 1) {

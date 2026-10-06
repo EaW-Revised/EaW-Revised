@@ -163,6 +163,7 @@ struct EconomyPlayer {
     math::Fixed reinforcement_yaw{}; // degrees: the facing its reinforcements arrive with (PU-34)
     std::uint32_t start_tech{};       // WPR-02
     std::uint32_t max_tech{};
+    math::Fixed credit_multiplier{math::Fixed::from_raw(math::Fixed::scale)}; // WPR-12: positive AI changes only
     friend constexpr bool operator==(const EconomyPlayer&, const EconomyPlayer&) noexcept = default;
 };
 
@@ -172,6 +173,12 @@ struct PreventionProfile {
     math::Fixed radius{};
     friend constexpr bool operator==(const PreventionProfile&, const PreventionProfile&) noexcept = default;
 };
+
+// WR-22/23: shared by authoritative placement and its type-less deployment overlay.
+[[nodiscard]] bool reinforcement_prevention_blocks(const math::Vec3& centre,
+    math::Fixed radius, const math::Vec3& point) noexcept;
+[[nodiscard]] bool reinforcement_inside_bounds(const std::optional<std::array<math::Fixed, 4>>& bounds,
+    const math::Vec3& point) noexcept;
 
 // A type's footprint for a bought unit's arrival: its placement box (space-movement PL-02) and its
 // height (LZ-01). The arrival's free-space search blocks on every live unit that has a box (PL-08).
@@ -247,6 +254,7 @@ struct QueueEntry {
     math::Fixed paid{};
     std::uint32_t frames{};
     std::uint64_t complete_frame{};
+    std::uint64_t entry_id{}; // PU-17: stable across queue shifts, never reused within a player's session.
     friend constexpr bool operator==(const QueueEntry&, const QueueEntry&) noexcept = default;
 };
 
@@ -263,6 +271,7 @@ struct CompletedBuild {
     EntityId station{};
     EntityId object{}; // WPR-22: hidden upgrade object held by its station, stable ID
     std::vector<IncomeModifierState> income_modifiers{};
+    std::optional<std::uint64_t> level_up_service_frame{}; // WSL-31: initialized at held-object creation
     friend constexpr bool operator==(const CompletedBuild&, const CompletedBuild&) noexcept = default;
 };
 
@@ -286,6 +295,7 @@ struct PlayerEconomy {
     // SAE-11: completion-order identities, independent of the logical purchase type.
     std::vector<std::uint64_t> pool_tokens{};
     std::uint64_t next_pool_token{1};
+    std::uint64_t next_queue_entry_id{1};
     friend bool operator==(const PlayerEconomy&, const PlayerEconomy&) = default;
 };
 
@@ -297,6 +307,7 @@ struct ProductionCounts {
     std::uint64_t lifetime_allies{};
     std::uint64_t queued_player{}; // WPR-61: query metadata, outside state/hash
     std::uint64_t queued_allies{};
+    std::uint64_t owned_allies{}; // SAE-12: live/held allied ownership, excluding queues and pools; query metadata.
 };
 // WPR-33: counts include queued entries; buying counts one more, a validity sweep does not.
 template <typename Counts>
@@ -323,23 +334,30 @@ template <typename Counts>
 // PU-15: queues `option` at `station` for `player` at `frame` and pays its price. Returns the
 // reason it was refused (queue full for a human, too few credits), or none.
 [[nodiscard]] RejectReason queue_build(PlayerEconomy& state, const EconomyPlayer& player, const EconomyRules& rules,
-    const BuildOption& option, EntityId station, std::uint64_t frame);
+    const BuildOption& option, EntityId station, std::uint64_t frame, bool prepaid = false);
 
+// WPR-12: positive AI changes scale by difficulty; debits floor at zero. Skirmish is uncapped.
+[[nodiscard]] core::Result<void> change_credits(PlayerEconomy& state, const EconomyPlayer& player, math::Fixed amount);
 // PU-17: removes entry `index` of `queue` at `frame` and refunds its price; the next entry
 // becomes the front when the front was removed. False when there is no such entry.
-[[nodiscard]] bool cancel_build(PlayerEconomy& state, BuildQueue queue, std::uint32_t index, std::uint64_t frame);
+[[nodiscard]] core::Result<bool> cancel_build(PlayerEconomy& state, const EconomyPlayer& player, BuildQueue queue, std::uint32_t index, std::uint64_t frame);
+// PU-17, PU-63, WPR-31: a stale identity is refused, without falling back to its former slot.
+[[nodiscard]] core::Result<bool> cancel_build_entry(PlayerEconomy& state, const EconomyPlayer& player, BuildQueue queue, std::uint64_t entry_id, std::uint64_t frame);
 
 // PU-18, PU-16: one frame's service of both queues. `producible` says whether an entry can still
 // be produced; one that cannot is removed (refunded for an AI player). `kind` says what an
 // entry's type is: a completed unit joins the pool, anything else the completed list, in queue
 // order.
 template <typename Producible, typename Kind, typename Complete>
-void service_production(PlayerEconomy& state, const EconomyPlayer& player, const std::uint64_t frame,
+core::Result<void> service_production(PlayerEconomy& state, const EconomyPlayer& player, const std::uint64_t frame,
     Producible&& producible, Kind&& kind, Complete&& complete) {
     for (auto& queue : state.queues) {
         for (std::size_t index = queue.size(); index-- > 0;) {
             if (producible(queue[index])) continue;
-            if (player.ai) state.credits = math::Fixed::from_raw(state.credits.raw() + queue[index].paid.raw());
+            if (player.ai) {
+                const auto refunded = change_credits(state, player, queue[index].paid);
+                if (!refunded) return refunded;
+            }
             const bool front = index == 0;
             queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(index));
             if (front && !queue.empty()) queue.front().complete_frame = frame + queue.front().frames;
@@ -359,12 +377,13 @@ void service_production(PlayerEconomy& state, const EconomyPlayer& player, const
         queue.erase(queue.begin());
         if (!queue.empty()) queue.front().complete_frame = frame + queue.front().frames;
     }
+    return core::Result<void>::success();
 }
 
 template <typename Producible, typename Kind>
-void service_production(PlayerEconomy& state, const EconomyPlayer& player, const std::uint64_t frame,
+core::Result<void> service_production(PlayerEconomy& state, const EconomyPlayer& player, const std::uint64_t frame,
     Producible&& producible, Kind&& kind) {
-    service_production(state, player, frame, producible, kind, [](const QueueEntry&) {});
+    return service_production(state, player, frame, producible, kind, [](const QueueEntry&) {});
 }
 
 // PU-21: population shares are counted in units of 1/population_share_scale, so a squadron's

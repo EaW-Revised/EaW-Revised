@@ -6,11 +6,13 @@
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/scene/space_population.hpp"
+#include "eawr/sim/math/math.hpp"
 #include "skirmish_internal.hpp"
 
 #include <algorithm>
 #include <charconv>
 #include <cstddef>
+#include <limits>
 #include <span>
 #include <string>
 #include <utility>
@@ -387,6 +389,18 @@ core::Result<StartInputs> read_start_inputs(
             if (detail::iequals(child.name, "Space_Skirmish_AI_Default_Forces")) {
                 data::tag_trace::used(child);
                 forces.space_skirmish_default_forces = detail::tokens(child.raw_text);
+            }
+            if (detail::iequals(child.name, "Garrison_Reinforcement_Delay_Seconds")) {
+                data::tag_trace::used(child);
+                const auto seconds = detail::number(child.raw_text);
+                const auto frames = seconds ? sim::math::multiply(*seconds,
+                    sim::math::Fixed::from_raw(30 * sim::math::Fixed::scale))
+                    : core::Result<sim::math::Fixed>::failure(detail::error(diagnostic_codes::input, "invalid garrison delay"));
+                if (!frames || frames.value().raw() < 0
+                    || frames.value().raw() / sim::math::Fixed::scale > std::numeric_limits<std::uint32_t>::max()) {
+                    return Result::failure(detail::error(diagnostic_codes::input, "invalid faction garrison reinforcement delay"));
+                }
+                forces.garrison_delay_frames = static_cast<std::uint32_t>(frames.value().raw() / sim::math::Fixed::scale);
             }
         }
         inputs.faction_forces.push_back(std::move(forces));

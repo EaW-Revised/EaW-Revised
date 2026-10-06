@@ -105,6 +105,7 @@ public:
     using ProjectilePoseAt = std::function<std::optional<sim::math::Mat3x4>(std::size_t ship, double presented_tick)>;
     // #535: a unit's fog fade opacity (space-fog-presentation.md FW-16), 1 when it is not fading.
     using FadeOpacity = std::function<float(sim::EntityId entity)>;
+    using ProjectileOpacity = std::function<float(std::size_t ship)>;
     // One presentation frame, after SpacePopulation::pose_live. The emitter clock follows
     // `presented_tick` (one 30 Hz sample per session tick), as the battle effects' does, and
     // starts like theirs at the first frame or at the birth of the oldest tick in `reached`.
@@ -121,7 +122,8 @@ public:
                              const sim::tactical::TacticalSnapshot& latest, const ClonePoseAt& clone_pose_at,
                              const ProjectilePoseAt& projectile_pose_at, const FixedCamera& camera,
                              double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {},
-                             std::span<const sim::EntityId> unfogged_props = {});
+                             std::span<const sim::EntityId> unfogged_props = {},
+                             const ProjectileOpacity& projectile_opacity = {});
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
@@ -163,6 +165,7 @@ private:
         bool ion_stun{};  // an ion-stun ("pi") emitter (IS-09)
         bool power_to_weapons{};  // AB-32: drains when the ability hides it (BP-48)
         bool invulnerability{};
+        float size_scale{1.0F}; // root particle model Scale_Factor
     };
     struct Running final {
         std::size_t proxy{};
@@ -191,6 +194,7 @@ private:
         std::optional<std::array<float, 3>> origin;
         std::optional<std::uint64_t> first_age;
         std::uint64_t presented{};
+        std::uint64_t max_visible_quads{};
     };
     static constexpr std::size_t start_log_limit = 256;
     // #421: one proxy of a death clone: the instances its bone's visibility starts and drains.

@@ -519,8 +519,26 @@ void test_rotate_and_pitch_input_mapping() {
     // dragging wraps rather than sticking at the sentinel limit.
     expect_close(camera::apply_rotate(space, 0.0F, 10.0F).value(), 15.0F, "yaw from mouse units");
     auto wrapped = camera::apply_rotate(space, 0.0F, 10000.0F);
-    expect(wrapped && wrapped.value() >= space.yaw_min && wrapped.value() <= space.yaw_max,
-           "a large drag wraps inside the authored yaw range");
+    expect_close(wrapped.value(), -120.0F, "a large drag wraps at a physical turn");
+    for (const float direction : {-1.0F, 1.0F}) {
+        float yaw = 0.0F;
+        for (int drag = 0; drag < 14; ++drag) {
+            const float next = camera::apply_rotate(space, yaw, direction * 100.0F).value();
+            expect(next >= -180.0F && next < 180.0F, "yaw stays in the canonical turn");
+            expect_close(std::remainder(next - yaw, 360.0F), direction * 150.0F,
+                         "full-width drags preserve the view turn across sentinel limits");
+            yaw = next;
+        }
+    }
+    expect_close(camera::apply_rotate(space, 179.0F, 2.0F).value(), -178.0F,
+                 "positive yaw crosses the physical turn");
+    expect_close(camera::apply_rotate(space, -179.0F, -2.0F).value(), 178.0F,
+                 "negative yaw crosses the physical turn");
+    camera::Constants limited = space;
+    limited.yaw_min = -20.0F;
+    limited.yaw_max = 400.0F;
+    expect_close(camera::apply_rotate(limited, 0.0F, 200.0F).value(), -20.0F,
+                 "authored limits apply after the physical wrap");
     camera::Constants narrow = eaw_space();
     narrow.yaw_min = -30.0F;
     narrow.yaw_max = 30.0F;

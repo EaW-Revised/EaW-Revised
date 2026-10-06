@@ -153,11 +153,8 @@ core::Result<ValueList> find_nearest(const Host& host, const ValueList& argument
             const std::uint64_t categories = type != nullptr ? type->category_bits : 0;
             if (property_mask != 0 && (property_mask & properties) == 0) continue;
             if ((category_mask & categories) == 0) continue;
-            // Is_Fogged for the filter player: an AI player sees everything (SK-45).
-            if (player_filter && !host.ai(*player_filter)) {
-                const ViewPlayer* viewer = host.view->player(*player_filter);
-                if (viewer == nullptr || (unit.visible_to & (std::uint64_t{1} << viewer->snapshot_index)) == 0) continue;
-            }
+            // WNO-11: this query forces raw object fog; SK-45 only relaxes unforced planning.
+            if (player_filter && object_fogged(*host.view, unit, *player_filter)) continue;
             const auto length = distance(*origin, unit.position);
             if (!length) continue;
             if (!best || *length < *best) {
@@ -440,7 +437,7 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return one(number(unit->shield));
     });
     // FH-24 (#76): the ability calls read the snapshot's ability status (AB-44); a cut ability
-    // (HUNT; space-abilities.md AB-03) exists but is never ready or active.
+    // (an unsupported kind) exists but is never ready or active.
     const auto ability_query = [host](std::string name, int field) {
         return [host, name = std::move(name), field](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
             const ViewUnit* unit = live_object(*host, arguments[0]);
@@ -561,8 +558,8 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         return none();
     });
     player("Get_Credits", [host](BindingContext&, const ValueList& arguments) {
-        const auto* account = host->economy(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
-        return one(number(account != nullptr ? numeric::from_fixed(account->credits) : LuaNumber{}));
+        return one(number(numeric::from_fixed(host->credits(
+            static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id)))));
     });
     player("Get_Tech_Level", [host](BindingContext&, const ValueList& arguments) {
         const auto* account = host->economy(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));

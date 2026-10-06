@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from live_session_test_support import LiveSessionRunner
 from space_hazard_cases import focused_camera, place_ship
 from test_pad_capture import replay_units
+from capture_replay_cases import canonical_replay_header
 
 
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
@@ -42,7 +43,9 @@ class MerchantPurchaseGraphical(LiveSessionRunner, unittest.TestCase):
             place_ship(replay, ship["entity"], x + 100, y, z)
             # A nondefault policy makes this staged Coruscant recording bind its
             # recorded custom roster, rather than the legacy exact M2 fixture.
-            data = bytearray(replay.read_bytes())
+            recorded = replay.read_bytes()
+            base_header, source_header = canonical_replay_header(recorded, 3)
+            data = bytearray(base_header + recorded[source_header:])
             version, header = struct.unpack_from("<HH", data, 8)
             self.assertIn(version, (2, 3))
             self.assertEqual(header, 104)

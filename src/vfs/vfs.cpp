@@ -149,8 +149,8 @@ core::Result<std::filesystem::path> find_case_insensitive(
             if (ascii_iequals(path_utf8(it->path().filename()), wanted)) matches.push_back(it->path());
         }
         if (ec) {
-            return core::Result<std::filesystem::path>::failure(error(
-                diagnostic_codes::native_io, "cannot enumerate a mounted directory", std::nullopt, source_id));
+            return core::Result<std::filesystem::path>::failure(native_io_error(
+                current, "cannot read directory", std::nullopt, source_id));
         }
         if (matches.empty()) {
             return core::Result<std::filesystem::path>::failure(error(
@@ -161,7 +161,10 @@ core::Result<std::filesystem::path> find_case_insensitive(
                 diagnostic_codes::loose_case_collision, "native path component has a case-insensitive collision", wanted, source_id));
         }
         std::error_code status_error;
-        if (std::filesystem::is_symlink(std::filesystem::symlink_status(matches.front(), status_error)) || status_error) {
+        const auto status = std::filesystem::symlink_status(matches.front(), status_error);
+        if (status_error) return core::Result<std::filesystem::path>::failure(native_io_error(
+            matches.front(), "cannot inspect game path", std::nullopt, source_id));
+        if (std::filesystem::is_symlink(status)) {
             return core::Result<std::filesystem::path>::failure(error(
                 diagnostic_codes::invalid_path,
                 "mounted paths may not traverse a symbolic link",
@@ -255,18 +258,27 @@ core::Result<ManifestResolution> resolve_manifest_mount(
     std::string layer_id,
     const std::filesystem::path& data_root
 ) {
-    if (layer_id.empty() || !std::filesystem::is_directory(data_root)) {
+    std::error_code root_error;
+    const bool directory = std::filesystem::is_directory(data_root, root_error);
+    if (root_error) return core::Result<ManifestResolution>::failure(native_io_error(
+        data_root, "cannot inspect game directory", std::nullopt, layer_id));
+    if (layer_id.empty() || !directory) {
         return core::Result<ManifestResolution>::failure(error(
             diagnostic_codes::mount_invalid, "mount layer id must be non-empty and data root must be a directory", std::nullopt, layer_id));
     }
     auto manifest_path = find_case_insensitive(data_root, "megafiles.xml", layer_id + ":manifest");
     if (!manifest_path) {
+        if (manifest_path.error().code != diagnostic_codes::not_found)
+            return core::Result<ManifestResolution>::failure(manifest_path.error());
         auto diagnostic = manifest_path.error();
         diagnostic.code = std::string(diagnostic_codes::manifest_invalid);
-        diagnostic.message = "MegaFiles.xml is required to establish active archive ordering";
+        diagnostic.message = "MegaFiles.xml is required under '" + path_utf8(data_root) +
+            "' to establish active archive ordering. Verify or repair the FoC installation.";
         return core::Result<ManifestResolution>::failure(std::move(diagnostic));
     }
     std::ifstream manifest(manifest_path.value(), std::ios::binary);
+    if (!manifest) return core::Result<ManifestResolution>::failure(native_io_error(
+        manifest_path.value(), "cannot read manifest", std::nullopt, layer_id + ":manifest"));
     std::ostringstream buffer;
     buffer << manifest.rdbuf();
     if (!manifest || buffer.str().size() > 4ULL * 1024ULL * 1024ULL) {
@@ -294,7 +306,7 @@ core::Result<ManifestResolution> resolve_manifest_mount(
         if (!already.insert(canonical_relative.value()).second) return core::Result<void>::success();
         auto actual = find_case_insensitive(data_root, std::filesystem::path(relative), result.manifest_source_id);
         if (!actual) {
-            if (actual.error().code == diagnostic_codes::loose_case_collision) {
+            if (actual.error().code != diagnostic_codes::not_found) {
                 return core::Result<void>::failure(actual.error());
             }
             if (record_missing) result.missing_archives.push_back("Data/" + relative);
@@ -516,8 +528,12 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
     auto impl = std::make_unique<Impl>();
     std::set<std::string> layer_ids;
     for (const auto& layer : ordered_layers) {
+        std::error_code root_error;
+        const bool directory = std::filesystem::is_directory(layer.data_root, root_error);
+        if (root_error) return core::Result<Vfs>::failure(native_io_error(
+            layer.data_root, "cannot inspect game directory", std::nullopt, layer.layer_id));
         if (layer.layer_id.empty() || !layer_ids.insert(ascii_lower(layer.layer_id)).second ||
-            !std::filesystem::is_directory(layer.data_root)) {
+            !directory) {
             return core::Result<Vfs>::failure(error(
                 diagnostic_codes::mount_invalid,
                 "layer ids must be unique and non-empty and each data root must be a directory",
@@ -529,10 +545,13 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
         std::unordered_map<std::string, std::string> loose_seen;
         std::error_code walk_error;
         for (std::filesystem::recursive_directory_iterator it(
-                 layer.data_root, std::filesystem::directory_options::skip_permission_denied, walk_error), end;
+                 layer.data_root, std::filesystem::directory_options::none, walk_error), end;
              !walk_error && it != end; it.increment(walk_error)) {
             std::error_code link_error;
-            if (std::filesystem::is_symlink(it->symlink_status(link_error)) || link_error) {
+            const auto status = it->symlink_status(link_error);
+            if (link_error) return core::Result<Vfs>::failure(native_io_error(
+                it->path(), "cannot inspect game path", std::nullopt, layer.layer_id));
+            if (std::filesystem::is_symlink(status)) {
                 return core::Result<Vfs>::failure(error(
                     diagnostic_codes::invalid_path,
                     "mounted loose trees may not contain symbolic links",
@@ -541,7 +560,10 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
                 ));
             }
             std::error_code type_error;
-            if (!it->is_regular_file(type_error) || type_error) continue;
+            const bool regular = it->is_regular_file(type_error);
+            if (type_error) return core::Result<Vfs>::failure(native_io_error(
+                it->path(), "cannot inspect game file", std::nullopt, layer.layer_id));
+            if (!regular) continue;
             if (ascii_iequals(path_utf8(it->path().extension()), ".meg")) continue;
             const auto relative = it->path().lexically_relative(layer.data_root);
             std::string original = path_utf8(relative);
@@ -560,8 +582,8 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
             loose_seen.emplace(canonical.value(), original);
             const auto size = std::filesystem::file_size(it->path(), type_error);
             if (type_error) {
-                return core::Result<Vfs>::failure(error(
-                    diagnostic_codes::native_io, "cannot determine loose file size", canonical.value(), layer.layer_id));
+                return core::Result<Vfs>::failure(native_io_error(
+                    it->path(), "cannot determine loose file size", canonical.value(), layer.layer_id));
             }
             Impl::StoredAsset stored{
                 .record = AssetRecord{
@@ -579,8 +601,8 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
             impl->assets.push_back(std::move(stored));
         }
         if (walk_error) {
-            return core::Result<Vfs>::failure(error(
-                diagnostic_codes::native_io, "cannot enumerate loose layer", std::nullopt, layer.layer_id));
+            return core::Result<Vfs>::failure(native_io_error(
+                layer.data_root, "cannot read loose layer", std::nullopt, layer.layer_id));
         }
 
         for (auto archive = layer.active_archives.rbegin(); archive != layer.active_archives.rend(); ++archive) {
@@ -654,8 +676,8 @@ core::Result<std::vector<std::byte>> Vfs::open(const std::string_view logical_pa
             diagnostic_codes::archive_limit, "asset exceeds the bounded read limit", canonical.value(), asset.record.source_id));
     }
     std::ifstream input(asset.native_path, std::ios::binary);
-    if (!input) return core::Result<std::vector<std::byte>>::failure(error(
-        diagnostic_codes::native_io, "cannot open asset source", canonical.value(), asset.record.source_id));
+    if (!input) return core::Result<std::vector<std::byte>>::failure(native_io_error(
+        asset.native_path, "cannot read asset source", canonical.value(), asset.record.source_id));
     input.seekg(static_cast<std::streamoff>(asset.offset), std::ios::beg);
     if (!input) return core::Result<std::vector<std::byte>>::failure(error(
         diagnostic_codes::native_io, "cannot seek asset source", canonical.value(), asset.record.source_id));

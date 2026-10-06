@@ -18,6 +18,12 @@ namespace eawr::sim::tactical {
 // A map's space fog grid and its regrow constants: content the setup's content identity names,
 // like the sensor table, and neither replay data nor state. Column c covers world X from
 // map_left + c * cell_size; row r covers world Y down from map_top - r * cell_size.
+struct DenseFogCircle {
+    math::Vec3 centre{};
+    math::Fixed radius{};
+    friend constexpr bool operator==(const DenseFogCircle&, const DenseFogCircle&) noexcept = default;
+};
+
 struct FogRules {
     math::Fixed map_left{};  // MapLeft
     math::Fixed map_top{};   // MapTop
@@ -28,8 +34,14 @@ struct FogRules {
     // service_period. Each service lowers every cell no revealer holds by ramp_down_step.
     std::uint32_t service_period{16};
     std::uint32_t ramp_down_step{21};
+    std::vector<DenseFogCircle> dense_circles{}; // V-22 / WHZ-09: map-initialized boolean union
     friend constexpr bool operator==(const FogRules&, const FogRules&) noexcept = default;
 };
+
+// V-16/WR-21: the same point query for simulation cells and immutable presentation rows.
+[[nodiscard]] bool fog_point_revealed(const FogRules& rules,
+    std::span<const std::shared_ptr<const std::vector<std::uint8_t>>> rows,
+    const math::Vec3& position) noexcept;
 
 // Retail's ramp-down step for a regrow time (SpaceFOWRegrowTime): floor(238 * 16 / (seconds *
 // 30)), exact. 6 s gives 21. Fails with EAWR-SIM-0305 for a time <= 0 or a step of 0.
@@ -45,6 +57,7 @@ struct FogRevealer {
     PlayerId owner{};
     math::Vec3 position{};
     math::Fixed range{};
+    math::Fixed dense_multiplier{math::Fixed::from_raw(math::Fixed::scale / 2)};
 };
 
 // V-19: a unit that fired this tick while it reveals shows itself to the player it fired at: the
@@ -53,6 +66,7 @@ struct FogRevealer {
 struct FogFlash {
     PlayerId to{};
     math::Vec3 position{};
+    math::Fixed radius{};
 };
 
 // Per-player cell grids, the value copy retail keeps per player, plus each revealer's
@@ -66,7 +80,7 @@ public:
 
     // One tick, in retail order: services the grids whose phase is `tick` (when `service`),
     // then releases the circles of revealers that are gone and re-marks every revealer that
-    // has no circle yet or has moved at least one cell width since its last mark, then applies
+    // has no circle yet, has changed owner, or has moved at least one cell width since its last mark, then applies
     // the tick's flashes (V-19). revealers are in strictly increasing ID. Per-row work is
     // partitioned; the result does not depend on the executor.
     [[nodiscard]] core::Result<void> advance(std::uint64_t tick, bool service,
@@ -80,6 +94,7 @@ public:
     // Whether a unit at `position` is unfogged for the player_index-th player: its cell is in
     // the grid and its value is above zero.
     [[nodiscard]] bool revealed(std::size_t player_index, const math::Vec3& position) const noexcept;
+    [[nodiscard]] bool revealed(std::size_t player_index, std::span<const math::Vec3> samples) const noexcept;
     // The player_index-th player's cell values, row by row (255 held, 0 fogged).
     [[nodiscard]] std::span<const std::uint8_t> values(std::size_t player_index) const;
     // Immutable presentation rows: retaining them never copies cell bytes.
@@ -98,6 +113,7 @@ private:
         math::Fixed x{};
         math::Fixed y{};
         PlayerId owner{};
+        std::int32_t dense_radius{};
         friend constexpr bool operator==(const Anchor&, const Anchor&) noexcept = default;
     };
 
@@ -111,6 +127,7 @@ private:
     mutable std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> flat_values_;
     std::size_t copied_grid_bytes_{};
     std::set<PlayerId> full_reveals_; // V-20; canonical only when nonempty
+    std::shared_ptr<const std::vector<std::uint8_t>> dense_;
 };
 
 } // namespace eawr::sim::tactical

@@ -247,10 +247,11 @@ constexpr float terminal_step_seconds = 0.05F;
 constexpr std::uint32_t settle_frame_count = 3;
 constexpr std::size_t selftest_check_count = 18;
 
-// Space_Mode values for the default camera; the XML layer when it loads,
-// otherwise the struct's own values, reported as such.
+// Validated Space_Mode constants for both the default pose and laser clips.
+// A failed load prevents ready() from admitting the environment view.
 struct TacticalLoad final {
     space::TacticalDefaults values;
+    std::optional<tactical::Constants> constants;
     std::string source{"project fallback (Space_Mode XML did not load)"};
     std::string failure;
 };
@@ -276,6 +277,7 @@ public:
     void camera_viewport(float width, float height);
     // #82: see SpaceEnvironment::live_camera_frame and the rest.
     [[nodiscard]] std::optional<tactical::TacticalFrame> drawn_frame() const;
+    [[nodiscard]] std::optional<tactical::TacticalFrame> effects_frame() const;
     [[nodiscard]] std::pair<bool, bool> pointer_mode(bool ctrl) const;
     void focus(float source_x, float source_y);
     [[nodiscard]] std::optional<presentation::camera::SourceTargetBounds> camera_bounds() const;

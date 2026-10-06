@@ -241,13 +241,17 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
     const Hit& hit, const std::uint64_t frame) {
     HitOutcome outcome;
     outcome.routed_hardpoint = hit.hardpoint;
+    // DG-40: retain collision/aiming and every hardpoint; script damage remains privileged.
+    if (profile.scenario_invulnerable && (hit.projectile || hit.kind != HitKind::ordinary)) {
+        return core::Result<HitOutcome>::success(outcome);
+    }
     Arithmetic q;
     auto amount = std::max(hit.amount, Fixed{});
     // WHE-51: privileged script damage bypasses arrival protection, but still takes modes.
     if (!hit.bypass_take_damage_mode && hit.take_damage_multiplier.raw() != one_raw)
         amount = q.mul(amount, hit.take_damage_multiplier);
     if (hit.cause_damage_multiplier.raw() != one_raw) amount = q.mul(amount, hit.cause_damage_multiplier);
-    const bool combat_damage = hit.projectile || hit.kind == HitKind::asteroid;
+    const bool combat_damage = hit.projectile || hit.kind != HitKind::ordinary;
     if (hit.projectile) {
         if (hit.allow_diminishing_firepower && hit.internal_damage_misc) {
             // DG-05: projectile damage shrinks with the time since the target's last diminishing-

@@ -67,9 +67,12 @@ bool Engine::target_matches(tactical::PlayerId player, const std::set<std::strin
     if (target->object == 0) return flags.contains("TACTICAL_LOCATION");
     const ViewUnit* unit = host_->view->find(target->object);
     if (unit == nullptr) return false;
+    const AiType* type = host_->type(unit->type);
+    // WNO-13: either authored persistent-state flag bypasses this forced object-fog gate.
+    if (!(type != nullptr && (type->initial_state_visible_under_fow || type->last_state_visible_under_fow)) &&
+        detail::object_fogged(*host_->view, *unit, player)) return false;
     const bool allied = unit->owner != 0 && host_->players.contains(unit->owner) && !host_->neutral(unit->owner) &&
         host_->allied(unit->owner, player);
-    const AiType* type = host_->type(unit->type);
     // GS-11: capture ownership alone does not make a target a build pad.
     if (type != nullptr && type->build_pad)
         return flags.contains(allied ? "FRIENDLY_BUILD_PAD" : "ENEMY_BUILD_PAD");
@@ -162,7 +165,15 @@ void Engine::propose(PlayerAi& player) {
             return;
         }
         const GoalFunctionEntry& function = player.functions[player.next_function];
+        const auto decision = [&](std::string event, std::string reason) {
+            if (!host_->setup.journal || (function.goal_name != "PURCHASE_SPACE_UPGRADES_GENERIC"
+                && function.goal_name != "SKIRMISH_UPGRADE_SPACE_STATION"
+                && function.goal_name != "TACTICAL_MULTIPLAYER_BUILD_SPACE_UNITS_GENERIC")) return;
+            host_->setup.journal->plans.push_back(PlanEvent{static_cast<std::uint64_t>(frame_),
+                player.player, {}, function.goal_name, {}, std::move(event), std::move(reason)});
+        };
         if (!proposable(player, function)) {
+            decision("rejected", "proposal blocked or goal category disabled");
             ++player.next_function;
             player.next_target = 0;
             --step;
@@ -199,6 +210,7 @@ void Engine::propose(PlayerAi& player) {
         bool culled = false;
         for (const Goal& active : player.active) culled = culled || like(player, active, goal);
         if (culled) {
+            decision("rejected", "equivalent goal already active");
             advance();
             --step;
             continue;
@@ -217,9 +229,16 @@ void Engine::propose(PlayerAi& player) {
             real(recent_failures(outcomes == player.goal_outcomes.end() ? nullptr : &outcomes->second)));
         desire = desire + to_single(function.goal->per_activation_failure_desire_adjust *
             real(recent_failures(activations == player.activations.end() ? nullptr : &activations->second)));
-        if (!(Real{} < desire)) continue;
+        if (!(Real{} < desire)) {
+            decision("rejected", "nonpositive authored desire");
+            continue;
+        }
         goal.desire = to_single(desire);
-        if (!plan_goal(player, goal)) continue;
+        decision("proposed", "positive authored desire");
+        if (!plan_goal(player, goal)) {
+            decision("rejected", "no feasible plan selection");
+            continue;
+        }
         player.proposed.push_back(std::move(goal));
     }
 }
@@ -277,13 +296,57 @@ void Engine::reserve(PlayerAi& player, Goal& goal) {
                 player.reserved_pool_tokens[goal.potential->pool_tokens[i]] = goal.id;
             }
         }
+    }
+    if (!goal.potential->funded) {
+        // WAS-25: debit the real wallet once and keep only the refundable remainder.
         player.reserved_credits[goal.id] = goal.potential->cost;
+        change_wallet(player.player, -goal.potential->cost);
+        goal.potential->cost = Real{};
+        goal.potential->funded = true;
+    }
+    for (std::size_t i = 0; i < goal.potential->sources.size(); ++i) {
+        if (goal.potential->sources[i] == 2 && host_->world != nullptr
+            && host_->world->pads().contains(goal.potential->producers[i]))
+            pad_reservations_[goal.potential->producers[i]] = {player.player, goal.id, goal.potential->units[i]};
     }
     goal.potential->reserved = true;
 }
 
-void Engine::release(PlayerAi& player, const Goal& goal) {
-    player.reserved_credits.erase(goal.id);
+void Engine::change_wallet(const tactical::PlayerId player, const Real amount) {
+    if (amount == Real{}) return;
+    const auto value = numeric::to_fixed(amount);
+    if (!value) throw std::runtime_error("AI wallet amount: " + value.error().message);
+    auto delta = value.value();
+    if (delta.raw() > 0 && host_->world != nullptr) {
+        if (const auto* account = host_->world->economy().player(player); account != nullptr && account->ai) {
+            const auto adjusted = math::multiply(delta, account->credit_multiplier);
+            if (!adjusted) throw std::runtime_error("AI wallet refund: " + adjusted.error().message);
+            delta = adjusted.value();
+        }
+    }
+    const auto changed = math::add(host_->credit_changes[player], delta);
+    if (!changed) throw std::runtime_error("AI wallet balance: " + changed.error().message);
+    host_->credit_changes[player] = changed.value();
+    authoritative::ScriptCommand order;
+    order.sequence = order_sequence_++;
+    order.verb = std::string(amount < Real{} ? verb_reservation_debit : verb_credit_grant);
+    order.arguments = {Value::number(real(player)), Value{authoritative::Handle{handle_game_object, 0}},
+        Value::number(amount < Real{} ? -amount : amount)};
+    orders_.push_back(std::move(order));
+}
+
+void Engine::refund_funds(PlayerAi& player, const std::uint64_t goal) {
+    const auto funds = player.reserved_credits.find(goal);
+    if (funds == player.reserved_credits.end()) return;
+    change_wallet(player.player, funds->second); // WAS-26: only unused work, once
+    player.reserved_credits.erase(funds);
+}
+
+void Engine::release(PlayerAi& player, const Goal& goal, const bool refund) {
+    if (refund) refund_funds(player, goal.id);
+    std::erase_if(pad_reservations_, [&](const auto& entry) {
+        return entry.second.player == player.player && entry.second.goal == goal.id;
+    });
     if (goal.potential && goal.potential->reserved && goal.plan == 0) {
         for (std::size_t i = 0; i < goal.potential->sources.size(); ++i) {
             if (goal.potential->sources[i] == 1) {
@@ -320,7 +383,7 @@ void Engine::maintain(PlayerAi& player) {
     // Reservations are rebuilt by the pass.
     for (Goal& goal : player.active) {
         if (goal.potential && goal.plan == 0) {
-            release(player, goal);
+            release(player, goal, false); // WAS-25: ignored/restored reservations retain funds
             goal.potential->reserved = false;
         }
     }
@@ -347,7 +410,7 @@ void Engine::maintain(PlayerAi& player) {
         if (goal.plan != 0 || !goal.potential) continue;
         if (staggered()) {
             queue_attach(player, goal);
-        } else if (auto attached = attach_plan(player, goal, *scripts_, *sequence_); !attached) {
+        } else if (auto attached = attach_plan(player, goal, *scripts_, sequence_); !attached) {
             goal.finished = true;
         }
     }
@@ -400,7 +463,10 @@ void Engine::maintain_category(PlayerAi& player, const std::string& category, st
     };
     if (proposed_count == 0) {
         for (Goal& goal : active) {
-            if (goal.finished || (goal.plan != 0 && !running_.contains(goal.plan))) continue;
+            if (goal.finished || (goal.plan != 0 && !running_.contains(goal.plan))) {
+                finish(goal);
+                continue;
+            }
             if (goal.potential && goal.plan == 0) reserve(player, goal);
             kept_all.push_back(goal);
         }
@@ -531,7 +597,7 @@ core::Result<void> Engine::attach_plan(PlayerAi& player, Goal& goal, authoritati
     }
     const auto event = [&](ScriptEvent::Kind kind, std::string name) {
         ScriptEvent out;
-        out.key = authoritative::EventKey{event_tick_, producer_foc_engine, instance, (*sequence_)++};
+        out.key = authoritative::EventKey{event_tick_, producer_foc_engine, instance, sequence_++};
         out.target = instance;
         out.kind = kind;
         out.name = std::move(name);
@@ -643,7 +709,7 @@ core::Result<void> Engine::service_plans(PlayerAi& player, authoritative::Script
             if (auto found = taskforces_.find(tf_id); found != taskforces_.end()) found->second.damaged_pending = false;
         }
         ScriptEvent pump;
-        pump.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, (*sequence_)++};
+        pump.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, sequence_++};
         pump.target = plan.instance;
         pump.kind = ScriptEvent::Kind::pump;
         events_.push_back(std::move(pump));
@@ -715,7 +781,10 @@ void Engine::finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative:
         }
     }
     static_cast<void>(scripts.remove_instance(plan.instance));
-    player.reserved_credits.erase(plan.goal);
+    refund_funds(player, plan.goal);
+    std::erase_if(pad_reservations_, [&](const auto& entry) {
+        return entry.second.player == player.player && entry.second.goal == plan.goal;
+    });
     static_cast<void>(definition);
     plan_of_instance_.erase(plan.instance);
     running_.erase(found);

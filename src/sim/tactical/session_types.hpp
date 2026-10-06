@@ -83,7 +83,7 @@ struct AsteroidScratch {
     SpaceIndex index;
     std::array<std::vector<std::uint32_t>, tick_partition_count> candidates;
     std::vector<std::vector<AsteroidImpact>> impacts;
-    std::vector<std::vector<Hit>> redirected;
+    std::vector<std::vector<Hit>> deliveries;
     std::vector<std::uint64_t> queries;
     std::vector<std::uint64_t> examined;
 };
@@ -140,6 +140,32 @@ struct LiveUnit {
     math::Fixed take_damage_mode{math::Fixed::from_raw(math::Fixed::scale)};
     bool in_tractor_beam{}; // derived from live source/category entries, never hashed
 };
+
+// WNO-23/42: one boundary for capture and conversion. Notifications run with the new
+// owner before target cleanup; callers restore health percentages in the notification.
+template <typename Notify>
+[[nodiscard]] core::Result<void> transfer_owner(LiveUnit& unit, const PlayerId owner, Notify&& notify) {
+    if (unit.state.owner == owner) return core::Result<void>::success();
+    unit.state.order = {};
+    unit.approach.reset();
+    unit.formation.reset();
+    unit.state.owner = owner;
+    if (const auto changed = notify(unit); !changed) return changed;
+    if (unit.combat) {
+        unit.combat->attack_target = invalid_entity_id;
+        unit.combat->attack_hardpoint = no_hardpoint;
+        unit.combat->direct = false;
+        for (auto& weapon : unit.combat->weapons) {
+            weapon.opportunity.target = invalid_entity_id;
+            if (weapon.manual) {
+                weapon.manual->target = invalid_entity_id;
+                weapon.manual->requesting_player = 0;
+                weapon.manual->assigned_frame = 0;
+            }
+        }
+    }
+    return core::Result<void>::success();
+}
 
 // The already sorted unit vector is also the command stage. This small map-shaped view
 // keeps the command code's ID lookups while avoiding one allocated node per live unit.

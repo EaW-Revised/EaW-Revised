@@ -184,6 +184,21 @@ void WorldUiView::update_grid(const Frame& frame) {
         }
     }
     grid_.adopt(records);
+    std::vector<ui::CombatIconGrid::Cell> cells;
+    for (const auto& occupied : grid_.cells()) {
+        float height = 0.0F;
+        const auto members = frame.live->squadron_members().find(occupied.squadrons.front());
+        if (members != frame.live->squadron_members().end()) {
+            for (const auto member : members->second) {
+                const auto* craft = instance_of(snapshot.get(), member);
+                if (craft == nullptr) continue;
+                if (const auto type = types_.find(craft->type_id); type != types_.end()) height = type->second.layer_z;
+                break;
+            }
+        }
+        cells.push_back({occupied.cell, occupied.squadrons, height});
+    }
+    icon_grid_.update(cells);
 }
 
 void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const sim::EntityId entity,
@@ -195,7 +210,10 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     const int level = ui::bar_level(fraction);
     const float side = ui::squadron_frame_side * ui_scale;
     const float x = screen[0], y = screen[1];
-    const Rect2 frame_rect(x - side * 0.5F, y - side * 0.5F, side, side);
+    const auto aligned_frame = ui::squadron_icon_rect(screen, side, identity_pixel_align_);
+    const auto aligned_inner = ui::squadron_icon_rect(screen, 50.0F * 0.6F * ui_scale, identity_pixel_align_);
+    identity_geometry_.push_back({entity, screen, aligned_frame, aligned_inner});
+    const Rect2 frame_rect(aligned_frame.x, aligned_frame.y, aligned_frame.width, aligned_frame.height);
     // WU-21: the gripper frame tinted by the owner's colour, or the yellow select frame while
     // selected or under the pointer; the entity's icon inside it.
     const ui::Rgb tint = frame.live->player_colour(owner).value_or(ui::Rgb{255, 255, 255});
@@ -208,9 +226,8 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
         }
         if (!type.icon.empty()) {
             if (const auto region = atlas_region(type.icon)) {
-                const float icon = 50.0F * 0.6F * ui_scale;
                 rendering->canvas_item_add_texture_rect_region(canvas_item,
-                    Rect2(x - icon * 0.5F, y - icon * 0.5F, icon, icon), atlas_->get_rid(), *region);
+                    Rect2(aligned_inner.x, aligned_inner.y, aligned_inner.width, aligned_inner.height), atlas_->get_rid(), *region);
             }
         }
     }
@@ -219,13 +236,14 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
         ui::bar_height * bar_scale, fraction, ui::health_bar_colour(level));
     icons_.push_back({entity, skirmish::type_id(type.name), owner == frame.live->local_player(), hostile,
                       type.selectable, frame_rect.position.x, frame_rect.position.y,
-                      frame_rect.position.x + side, frame_rect.position.y + side});
+                      frame_rect.position.x + frame_rect.size.x, frame_rect.position.y + frame_rect.size.y});
     icon_rows_.push_back(std::to_string(entity) + ":" + (selected ? "selected" : hovered ? "hovered" : "normal")
                          + ":" + std::to_string(level) + ":y=" + std::to_string(std::lround(y)));
 }
 
 void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const float ui_scale) {
     icons_.clear();
+    identity_geometry_.clear();
     icon_rows_.clear();
     flag_rows_.clear();
     RenderingServer* rendering = RenderingServer::get_singleton();
@@ -234,6 +252,22 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
     std::erase_if(grippers_, [&](const auto& row) { return instance_of(snapshot.get(), row.first) == nullptr; });
     update_grid(frame);
     grid_icons_ = 0;
+    // Retain missing draws too: grid-only samples cannot reveal a one-frame dropout.
+    const auto sample_icon = [&](Gripper& gripper) -> IconSample& {
+        const auto shown = frame.live->shown_frames();
+        auto count = gripper.icon_sample_count;
+        if (count == 0 || gripper.icon_samples[(count - 1) % gripper.icon_samples.size()].frame != shown) {
+            ++gripper.icon_sample_count;
+            ++count;
+        }
+        auto& sample = gripper.icon_samples[(count - 1) % gripper.icon_samples.size()];
+        sample = {shown, frame.live->presented_tick(), {}, false, false};
+        return sample;
+    };
+    for (auto& [squadron, gripper] : grippers_) {
+        static_cast<void>(squadron);
+        sample_icon(gripper);
+    }
     for (const auto& [squadron, members] : frame.live->squadron_members()) {
         // WU-20: every squadron the local player sees has its icon; the pointer can grab it.
         std::vector<const ui::BattleUnit*> seen;
@@ -253,17 +287,53 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
         const auto* container = instance_of(snapshot.get(), squadron);
         auto [anchor, inserted] = grippers_.try_emplace(squadron);
         auto& gripper = anchor->second;
+        auto& icon_sample = sample_icon(gripper);
         if (inserted) gripper.motion.position = at;
-        const bool joined = grid_.cell_of(squadron).has_value();
+        const auto cell = grid_.cell_of(squadron);
+        const bool idle_grid = container != nullptr && container->squadron_idle_anchor.has_value();
+        Vec3 desired = at;
+        if (idle_grid) {
+            const auto& idle = *container->squadron_idle_anchor;
+            desired = {to_float(idle.x), to_float(idle.y), to_float(idle.z)};
+        }
         std::optional<Vec3> landing;
         if (container != nullptr && container->arrival_exit) {
             const auto& exit = *container->arrival_exit;
             landing = Vec3{to_float(exit.x), to_float(exit.y), to_float(exit.z)};
         }
-        // WU-49: wait at the destination during the jump, then hand off at the
-        // presented formation centre before ordinary velocity-capped smoothing.
         const bool arrival_owns_anchor = ui::place_squadron_arrival_icon(gripper.motion, landing, at);
-        if (!arrival_owns_anchor && !inserted && !joined) {
+        std::optional<std::array<float, 2>> grid_screen;
+        std::string gridded;
+        if (!cell || (gripper.settled_cell && *gripper.settled_cell != *cell)) gripper.settled_cell.reset();
+        if (cell && !arrival_owns_anchor) {
+            // WSU-36 project policy: retain this slot and the initial anchor
+            // height until the cell empties; a leave/rejoin never repacks it.
+            const auto place = icon_grid_.position(*cell, squadron).value();
+            const auto point = ui::combat_cell_point(*cell, {0.0F, 0.0F});
+            if (const auto base = frame.project({point[0], point[1], place.height})) {
+                const auto slot = place.offset;
+                // WSU-36: truncate the cell projection before laying out the reference-pixel slots.
+                const std::array<float, 2> target{std::trunc((*base)[0]) + slot[0] * ui_scale,
+                                                 std::trunc((*base)[1]) + slot[1] * ui_scale};
+                const std::array<float, 2> anchor_screen{std::trunc(target[0]),
+                    std::trunc(target[1] - ui::squadron_icon_screen_offset(frame.viewport[1]))};
+                if (frame.world_at_height) {
+                    if (const auto world = frame.world_at_height(anchor_screen, at[2])) {
+                        desired = *world;
+                        if (ui::settle_squadron_icon(gripper.motion, desired, gripper_snap_distance_,
+                                                    gripper.settled_cell.has_value())) {
+                            gripper.settled_cell = cell;
+                            grid_screen = target;
+                            gridded = ":grid" + std::to_string(cell->x) + "," + std::to_string(cell->y);
+                            ++grid_icons_;
+                        }
+                    }
+                }
+            }
+        }
+        gripper.desired = desired;
+        gripper.idle = idle_grid;
+        if (!arrival_owns_anchor && !inserted) {
             float fastest = 0.0F;
             float thrust = 0.0F;
             bool leader = true;
@@ -280,26 +350,8 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                     fastest = std::max(fastest, static_cast<float>(vector.length()));
                 }
             }
-            const Vector3 current(gripper.motion.position[0], gripper.motion.position[1], gripper.motion.position[2]);
-            const Vector3 desired(at[0], at[1], at[2]);
-            const Vector3 delta = desired - current;
-            const float distance = static_cast<float>(delta.length());
-            const bool idle_grid = container != nullptr && container->squadron_in_idle_grid.value_or(false);
-            // WSU-34: move with the old speed, then accelerate or brake and cap it
-            // to the fastest member. This service runs once per drawn frame.
-            if (distance == 0.0F) {
-                if (idle_grid) gripper.motion.speed = 0.0F;
-            } else if (distance < gripper.motion.speed || frame.live->time().state() == ui::TimeState::fast_forward) {
-                gripper.motion.position = at;
-            } else {
-                const Vector3 moved = current + delta * (gripper.motion.speed / distance);
-                gripper.motion.position = {moved.x, moved.y, moved.z};
-                const bool braking = idle_grid && thrust > 0.0F
-                    && gripper.motion.speed * gripper.motion.speed / (2.0F * thrust) >= distance;
-                gripper.motion.speed = std::clamp(gripper.motion.speed + (braking ? -thrust : thrust), 0.0F, fastest);
-            }
-        } else if (!arrival_owns_anchor && joined) {
-            gripper.motion.position = at;
+            ui::slide_squadron_icon(gripper.motion, desired, thrust, fastest, idle_grid || cell.has_value(),
+                                   frame.live->time().state() == ui::TimeState::fast_forward);
         }
         const bool arriving = container != nullptr && container->arrival.has_value();
         ArrivalIconSample* arrival_sample = nullptr;
@@ -318,42 +370,21 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                 ++gripper.arrival_samples_dropped;
             }
         }
-        auto screen = frame.project(gripper.motion.position);
-        // WU-26: a dogfighting squadron's icon takes its slot in its combat cell's grid, laid out
-        // from the cell point's screen position (the point at the squadron's height).
-        std::string gridded;
-        if (const auto cell = grid_.cell_of(squadron)) {
-            const auto point = ui::combat_cell_point(*cell, {0.0F, 0.0F});
-            const auto occupied = std::find_if(grid_.cells().begin(), grid_.cells().end(),
-                [&](const ui::CombatGrid::Occupied& entry) { return entry.cell == *cell; });
-            const auto place = std::find(occupied->squadrons.begin(), occupied->squadrons.end(), squadron);
-            // WU-26: one point per cell, at the Layer_Z_Adjust of the craft type of the cell's first
-            // squadron: a constant, so the grid holds still while the fighters pitch (#564). The type
-            // is its first live craft's (#635), so a dead first craft doesn't drop the grid to 0.
-            float height = 0.0F;
-            const auto first_members = frame.live->squadron_members().find(occupied->squadrons.front());
-            if (first_members != frame.live->squadron_members().end()) {
-                for (const sim::EntityId member : first_members->second) {
-                    const auto* craft = instance_of(snapshot.get(), member);
-                    if (craft == nullptr) continue;
-                    if (const auto type = types_.find(craft->type_id); type != types_.end()) height = type->second.layer_z;
-                    break;
-                }
-            }
-            if (const auto base = frame.project({point[0], point[1], height})) {
-                const auto slot = ui::combat_grid_slot(static_cast<std::size_t>(place - occupied->squadrons.begin()),
-                                                       occupied->squadrons.size());
-                screen = std::array<float, 2>{(*base)[0] + slot[0] * ui_scale, (*base)[1] + slot[1] * ui_scale};
-                gridded = ":grid" + std::to_string(cell->x) + "," + std::to_string(cell->y);
-                ++grid_icons_;
-            }
-        }
+        auto screen = grid_screen ? grid_screen : frame.project(gripper.motion.position);
         if (!screen) continue;
         // WSU-35/36: the sliding world anchor has the screen offset; a joined
         // dogfight icon is placed exactly at its fixed grid slot.
         if (gridded.empty()) (*screen)[1] += ui::squadron_icon_screen_offset(frame.viewport[1]);
         if ((*screen)[0] < -64.0F || (*screen)[0] > frame.viewport[0] + 64.0F
             || (*screen)[1] < -64.0F || (*screen)[1] > frame.viewport[1] + 64.0F) continue;
+        if (grid_screen) {
+            const double tick = frame.live->presented_tick();
+            const auto count = gripper.grid_sample_count;
+            if (count == 0 || gripper.grid_samples[(count - 1) % gripper.grid_samples.size()].tick != tick) {
+                gripper.grid_samples[count % gripper.grid_samples.size()] = {tick, *cell, *screen};
+                ++gripper.grid_sample_count;
+            }
+        }
         // WU-22: the squadron's health over its craft's (lost craft count as empty).
         float health = 0.0F;
         float max_health = 0.0F;
@@ -397,6 +428,9 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                 draw_identity(frame, canvas_item, squadron, identity->second, owner, seen.front()->hostile,
                               {x, y}, fraction, ui_scale);
                 icon_rows_.back() += gridded;
+                icon_sample.screen = *screen;
+                icon_sample.drawn = true;
+                icon_sample.grid = grid_screen.has_value();
                 if (arrival_sample != nullptr) arrival_sample->drawn = true;
             }
         }

@@ -94,6 +94,9 @@ struct DurabilityProfile {
     math::Fixed energy_refresh{};
     // IS-02: the ION_STUN_EFFECT behaviour; a type without it is never ion stunned (#561).
     bool ion_stun_effect{};
+    // DG-40: scenario staging only; ordinary unit loaders leave this false.
+    // Blocks ordinary hits before shields/hardpoints; privileged scripted damage bypasses it.
+    bool scenario_invulnerable{};
     friend bool operator==(const DurabilityProfile&, const DurabilityProfile&) = default;
 };
 
@@ -214,7 +217,7 @@ struct ServiceOutcome {
 
 // One frame of one player's repair of hardpoint `index` (HR-01 to HR-05). The caller holds the
 // player's credits and deducts `cost` when `paid`. `stopped` ends the repair: the hardpoint is
-// destroyed, not repairable, unaffordable or back at full health.
+// destroyed, not destroyable, unaffordable or already back at full health.
 struct RepairOutcome {
     bool paid{};
     bool stopped{};
@@ -222,6 +225,15 @@ struct RepairOutcome {
 };
 [[nodiscard]] core::Result<RepairOutcome> repair_frame(
     const DurabilityProfile& profile, DurabilityState& state, std::size_t index, math::Fixed credits);
+
+// WSL-41: bounded player-budget arbitration over a staged repair request, in registration order.
+// Missing/insolvent payers are omitted. A completion reserves no payment from later payers.
+struct RepairBudget {
+    PlayerId player{};
+    math::Fixed credits{};
+};
+[[nodiscard]] std::vector<std::vector<PlayerId>> reserve_hardpoint_repairs(
+    const DurabilityProfile& profile, const DurabilityState& state, std::span<RepairBudget> budgets);
 
 [[nodiscard]] std::string_view to_string(HardpointRole role) noexcept;
 [[nodiscard]] std::string_view to_string(HardpointState state) noexcept;

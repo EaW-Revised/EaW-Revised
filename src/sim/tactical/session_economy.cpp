@@ -238,8 +238,9 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
 
 CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, const CommandLedger& ledger,
     const std::vector<PlayerEconomy>& accounts, const std::map<EntityId, TypeId>& containers,
-    const std::span<CombatBonuses> categories, const UnitStage* effect_world, const bool targeted_effects) const {
-    static_cast<void>(profile_bonuses({unit.state.owner, unit.state.type_id}, accounts, containers, categories, false));
+    const std::span<CombatBonuses> categories, const UnitStage* effect_world, const bool targeted_effects,
+    const std::optional<PlayerId> owner) const {
+    static_cast<void>(profile_bonuses({owner.value_or(unit.state.owner), unit.state.type_id}, accounts, containers, categories, false));
     // WHE-55: zero is no contribution; a negative category starts at its first actual value.
     const auto found = ledger.recipients.find(unit.state.entity_id);
     if (found != ledger.recipients.end()) for (const auto source : found->second) {
@@ -313,6 +314,13 @@ bool TacticalSession::Impl::prune_upgrade_holders(std::vector<PlayerEconomy>& ac
         return changed;
     }
 
+core::Result<void> TacticalSession::Impl::transfer_owner(LiveUnit& unit, const PlayerId owner,
+    const CombatBonuses& bonuses) const {
+    return session_detail::transfer_owner(unit, owner, [&](LiveUnit& changed) {
+        return apply_bonuses(changed, bonuses, BonusAdjustment::ownership);
+    });
+}
+
 core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses, const BonusAdjustment adjustment) const {
         using Void = core::Result<void>;
         if (unit.upgrade_bonuses == bonuses) return Void::success();
@@ -338,6 +346,20 @@ core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const Co
             auto state = *unit.durability;
             state.hull = adjust(state.hull, old.max_hull, changed.max_hull);
             state.shields = adjust(state.shields, old.max_shields, changed.max_shields);
+            if (adjustment == BonusAdjustment::ownership) {
+                // WNO-23/42: owner notifications update maxima before restoring percentages.
+                // Use one rounded ratio, including the zero-shield case.
+                const auto restore = [](const math::Fixed current, const math::Fixed before, const math::Fixed after) {
+                    if (before.raw() <= 0 || after.raw() <= 0) return math::Fixed{};
+                    std::int64_t raw{};
+                    static_cast<void>(math::detail::rounded_divide_to_raw(math::detail::SignedWide::product(
+                        std::clamp(current.raw(), std::int64_t{0}, before.raw()), after.raw()),
+                        math::detail::from_u64(static_cast<std::uint64_t>(before.raw())), raw));
+                    return math::Fixed::from_raw(raw);
+                };
+                state.hull = restore(unit.durability->hull, old.max_hull, changed.max_hull);
+                state.shields = restore(unit.durability->shields, old.max_shields, changed.max_shields);
+            }
             state.energy = adjust(state.energy, old.max_energy, changed.max_energy);
             const auto ratio = math::divide(math::Fixed::from_raw(math::Fixed::scale + bonuses[0].raw()),
                 math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[0].raw()));
@@ -347,8 +369,10 @@ core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const Co
                 const auto current = math::multiply(state.hardpoints[index], ratio.value());
                 if (!maximum || !current) return Void::failure(!maximum ? maximum.error() : current.error());
                 changed.hardpoints[index].max_health = maximum.value();
+                // WNO-42 restores object hull/shields; hardpoints keep notification arithmetic.
                 state.hardpoints[index] = adjustment == BonusAdjustment::gain
-                    || (adjustment == BonusAdjustment::legacy && bonuses[0] >= unit.upgrade_bonuses[0]) ? current.value()
+                    || ((adjustment == BonusAdjustment::legacy || adjustment == BonusAdjustment::ownership)
+                        && bonuses[0] >= unit.upgrade_bonuses[0]) ? current.value()
                     : std::min(state.hardpoints[index], maximum.value());
             }
             unit.upgraded_durability = std::move(changed);
@@ -362,6 +386,8 @@ core::Result<void> TacticalSession::Impl::apply_bonuses(LiveUnit& unit, const Co
 ProductionCounts TacticalSession::Impl::production_counts(const PlayerId buyer, const TypeId type,
     const std::vector<PlayerEconomy>& accounts, const bool committed) const {
         ProductionCounts result;
+        const auto buyer_binding = std::lower_bound(snapshot_players.begin(), snapshot_players.end(), buyer,
+            [](const auto& player, const auto id) { return player.player_id < id; });
         for (const auto& player : setup.players) {
             if (!allied(player.player_id, buyer)) continue;
             const auto slot = ownership_slot(player.player_id, type);
@@ -384,6 +410,11 @@ ProductionCounts TacticalSession::Impl::production_counts(const PlayerId buyer, 
                 if (const auto built = account->lifetime.find(type); built != account->lifetime.end()) lifetime = built->second;
             }
             result.current_allies += current; result.lifetime_allies += lifetime;
+            const auto owner_binding = std::lower_bound(snapshot_players.begin(), snapshot_players.end(), player.player_id,
+                [](const auto& bound, const auto id) { return bound.player_id < id; });
+            if (buyer_binding != snapshot_players.end() && buyer_binding->player_id == buyer && !buyer_binding->neutral
+                && owner_binding != snapshot_players.end() && owner_binding->player_id == player.player_id
+                && !owner_binding->neutral && owner_binding->team_id == buyer_binding->team_id) result.owned_allies += has;
             if (player.player_id == buyer) {
                 result.owned_player = has; result.current_player = current; result.lifetime_player = lifetime;
             }
@@ -411,7 +442,7 @@ std::vector<EconomyView> TacticalSession::Impl::economy_views(
     }
 
 bool TacticalSession::Impl::allied(const PlayerId left, const PlayerId right) const {
-        return teams.at(left) == teams.at(right);
+        return players_allied(snapshot_players, left, right);
     }
 
 const Player* TacticalSession::Impl::player_of(const PlayerId id) const noexcept {
@@ -540,7 +571,7 @@ std::uint32_t TacticalSession::Impl::population_of(const TypeId type) const noex
 core::Result<bool> TacticalSession::Impl::placement_valid(const PlayerId player, const TypeId type, const math::Vec3& point,
     const UnitStage& staged, const std::uint64_t tick,
     const CollisionWorld* collisions, TacticalSession::PlacementWork* work,
-    const std::vector<UnitState>* prevention_units) const {
+    const std::vector<UnitState>* prevention_units, const std::optional<math::Fixed> facing_yaw) const {
         using Valid = core::Result<bool>;
         const auto* issuer = player_of(player);
         if (issuer == nullptr) return Valid::success(false);
@@ -549,18 +580,10 @@ core::Result<bool> TacticalSession::Impl::placement_valid(const PlayerId player,
             if (work != nullptr) ++work->rejections[0];
             return Valid::success(false);
         }
-        const auto planar_within = [&](const math::Vec3& at, const std::int64_t reach) {
-            const auto dx = math::detail::unsigned_magnitude(at.x.raw() - point.x.raw());
-            const auto dy = math::detail::unsigned_magnitude(at.y.raw() - point.y.raw());
-            auto across = math::detail::multiply_u64(dx, dx);
-            static_cast<void>(math::detail::add_magnitude(across, math::detail::multiply_u64(dy, dy)));
-            const auto limit = static_cast<std::uint64_t>(reach < 0 ? 0 : reach);
-            return math::detail::compare(across, math::detail::multiply_u64(limit, limit)) < 0;
-        };
         const auto prevents = [&](const UnitState& unit) {
             const auto* prevention = economy.prevention_of(unit.type_id);
             return !allied(unit.owner, player) && prevention != nullptr
-                && planar_within(unit.position, prevention->radius.raw());
+                && reinforcement_prevention_blocks(unit.position, prevention->radius, point);
         };
         bool prevented = false;
         if (prevention_units != nullptr) {
@@ -576,12 +599,9 @@ core::Result<bool> TacticalSession::Impl::placement_valid(const PlayerId player,
             return Valid::success(false);
         }
         // WR-21..24: fog, prevention, bounds, then the type/layer bypasses.
-        if (economy.bounds) {
-            const auto& box = *economy.bounds;
-            if (point.x < box[0] || point.y < box[1] || point.x > box[2] || point.y > box[3]) {
-                if (work != nullptr) ++work->rejections[2];
-                return Valid::success(false);
-            }
+        if (!reinforcement_inside_bounds(economy.bounds, point)) {
+            if (work != nullptr) ++work->rejections[2];
+            return Valid::success(false);
         }
         if (type == 0) return Valid::success(true);
         const auto* hero = economy.hero(type);
@@ -645,7 +665,7 @@ core::Result<bool> TacticalSession::Impl::placement_valid(const PlayerId player,
         if (collisions->layers[*selected] == nullptr) return Valid::success(true); // WR-24
         const auto* player_rules = economy.player(player);
         if (player_rules == nullptr) return Valid::success(false);
-        auto direction = planar_direction(player_rules->reinforcement_yaw);
+        auto direction = planar_direction(facing_yaw.value_or(player_rules->reinforcement_yaw));
         if (!direction) return Valid::failure(direction.error());
         auto dx = math::multiply(direction.value().x, economy.collision_distance);
         auto dy = math::multiply(direction.value().y, economy.collision_distance);
@@ -784,9 +804,8 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
                     }
                 }
             }
-            const auto balance = math::add(ledger->credits, refund);
+            const auto balance = change_credits(*ledger, *player, refund);
             if (!balance) return Void::failure(balance.error());
-            ledger->credits = balance.value(); // AI positive-credit adjustment remains its interface.
             // WBP-32: detach before removal, without the killed-child route or respawn.
             if (parent != stage.pads.end()) {
                 stage.pad_stage.touch(parent_id);
@@ -801,11 +820,17 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
             events.push_back(Event{tick, EventKind::pad_structure_sold, issuer, parent_id, id});
             return finish(RejectReason::none);
         }
+        if (const auto* debit = std::get_if<AiReservationDebitPayload>(&command.payload)) {
+            if (!player->ai || debit->amount.raw() <= 0) return finish(RejectReason::cannot_produce);
+            if (ledger->credits < debit->amount) return finish(RejectReason::insufficient_credits);
+            const auto balance = change_credits(*ledger, *player, math::Fixed::from_raw(-debit->amount.raw()));
+            if (!balance) return Void::failure(balance.error());
+            return finish(RejectReason::none);
+        }
         if (const auto* grant = std::get_if<CreditGrantPayload>(&command.payload)) {
             if (grant->amount.raw() <= 0) return finish(RejectReason::cannot_produce);
-            const auto balance = math::add(ledger->credits, grant->amount);
+            const auto balance = change_credits(*ledger, *player, grant->amount);
             if (!balance) return Void::failure(balance.error());
-            ledger->credits = balance.value();
             return finish(RejectReason::none);
         }
         if (const auto* build = std::get_if<PadBuildPayload>(&command.payload)) {
@@ -868,16 +893,22 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
                 [&](const TypeId type) { return production_counts(issuer, type, stage.ledgers); })) {
                 return finish(RejectReason::cannot_produce);
             }
-            const auto result = queue_build(*ledger, *player, economy, *option, station->first, tick);
+            const auto result = queue_build(*ledger, *player, economy, *option, station->first, tick, buy->prepaid);
             if (result == RejectReason::none) stage.cues.push_back({issuer, buy->type, tick, BattleEconomyCue::Kind::started});
             return finish(result);
         }
         if (const auto* cancel = std::get_if<CancelPayload>(&command.payload)) {
             const auto& queue = ledger->queues[cancel->queue];
-            const auto type = cancel->index < queue.size() ? queue[cancel->index].type : TypeId{};
-            const bool removed = cancel_build(*ledger, static_cast<BuildQueue>(cancel->queue), cancel->index, tick);
-            if (removed) stage.cues.push_back({issuer, type, tick, BattleEconomyCue::Kind::cancelled});
-            return finish(removed ? RejectReason::none : RejectReason::no_queue_entry);
+            const auto found = cancel->entry_id != 0
+                ? std::find_if(queue.begin(), queue.end(), [&](const QueueEntry& entry) { return entry.entry_id == cancel->entry_id; })
+                : (cancel->index < queue.size() ? queue.begin() + cancel->index : queue.end());
+            const auto type = found != queue.end() ? found->type : TypeId{};
+            const auto removed = cancel->entry_id != 0
+                ? cancel_build_entry(*ledger, *player, static_cast<BuildQueue>(cancel->queue), cancel->entry_id, tick)
+                : cancel_build(*ledger, *player, static_cast<BuildQueue>(cancel->queue), cancel->index, tick);
+            if (!removed) return Void::failure(removed.error());
+            if (removed.value()) stage.cues.push_back({issuer, type, tick, BattleEconomyCue::Kind::cancelled});
+            return finish(removed.value() ? RejectReason::none : RejectReason::no_queue_entry);
         }
         const auto& reinforce = std::get<ReinforcePayload>(command.payload);
         if (economy.disabled_types.contains(reinforce.type)) {
@@ -910,7 +941,7 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
         // WR-25: tracking, including a layer rebuilt by an earlier command, starts at the staged frame.
         const auto placement_begin = std::chrono::steady_clock::now();
         auto valid = placement_valid(issuer, reinforce.type, reinforce.position, staged, tick + 1, collisions,
-            stage.placement_work);
+            stage.placement_work, nullptr, reinforce.facing_yaw);
         if (stage.placement_work != nullptr) {
             stage.placement_work->nanoseconds += static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -919,8 +950,9 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
         if (!valid) return Void::failure(valid.error());
         if (!valid.value()) return finish(RejectReason::invalid_position);
         const auto context = command_context(command.key) + ": ";
-        const auto direction = planar_direction(player->reinforcement_yaw);
-        const auto rotation = yaw_rotation(player->reinforcement_yaw);
+        const auto arrival_yaw = reinforce.facing_yaw.value_or(player->reinforcement_yaw);
+        const auto direction = planar_direction(arrival_yaw);
+        const auto rotation = yaw_rotation(arrival_yaw);
         if (!direction || !rotation) {
             return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "reinforcement facing"));
         }
@@ -1003,7 +1035,7 @@ core::Result<void> TacticalSession::Impl::execute_economy(const PlayerCommand& c
                     auto found = find_free_space(search, blockers);
                     if (!found) return Void::failure(found.error());
                     if (found.value()) at = *found.value();
-                    auto bounds = blocker_bounds(*footprint->box, at, player->reinforcement_yaw);
+                    auto bounds = blocker_bounds(*footprint->box, at, arrival_yaw);
                     if (!bounds) return Void::failure(bounds.error());
                     blockers.push_back(bounds.value());
                 }

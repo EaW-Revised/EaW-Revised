@@ -13,8 +13,99 @@ from live_session_test_support import (
     tempfile, time, unittest,
 )
 
+sys.path.insert(0, str(ROOT / "tools"))
+from native_cpp_fixture import compile_fixture, select_toolchain
+
 
 class LiveSessionSourceCases:
+    def test_station_upgrade_controlled_relationship_fixture(self):
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest("requires a C++ compiler for the isolated announcement fixture")
+        source = read("apps/viewer/src/battle_audio_events.cpp")
+        branch = source.split("if (event.kind == tactical::EventKind::station_replaced) {", 1)[1]
+        branch = branch.split("if (event.kind == tactical::EventKind::pad_structure_sold)", 1)[0]
+        # Execute the consumer's actual branch with a controlled mixed-faction ally,
+        # which the stock lobby and replay loader intentionally cannot construct.
+        fixture = r'''
+#include <cassert>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+namespace data { enum class Category { faction }; }
+struct Event { int player; };
+struct Live {
+    int relation;
+    int local_player() const { return 2; }
+    bool battle_participant(int) const { return relation != 3; }
+    bool is_ally_of_local(int) const { return relation == 1; }
+    std::string player_faction(int player) const { return player == 2 ? "Empire" : "Rebel"; }
+    std::string local_faction() const { return "Empire"; }
+};
+struct Catalog {
+    std::optional<std::string> resolve(const std::string& name, data::Category) { return name; }
+};
+struct Probe {
+    Catalog catalog;
+    Catalog* catalog_ = &catalog;
+    bool empty = false;
+    std::vector<std::string> heard;
+    std::string tag(const std::string& faction, const std::string& field) {
+        return empty ? "" : faction + ":" + field;
+    }
+    std::string event(const std::string& name, const std::string&) { return name; }
+    void play(const std::string& sound, std::nullopt_t, bool, const char*) {
+        if (!sound.empty()) heard.push_back(sound);
+    }
+    void update(const Live& live, const std::vector<Event>& events) {
+        for (const auto& event : events) {
+__BRANCH__
+    }
+};
+int main() {
+    for (int relation = 0; relation != 4; ++relation) {
+        Probe probe;
+        probe.update(Live{relation}, {{relation == 0 ? 2 : 1}});
+        if (relation == 3) { assert(probe.heard.empty()); continue; }
+        const std::string expected = relation == 0 ? "Empire:SFXEvent_Starbase_Upgraded"
+            : relation == 1 ? "Rebel:SFXEvent_Starbase_Ally_Upgraded"
+                            : "Rebel:SFXEvent_Starbase_Enemy_Upgraded";
+        assert(probe.heard == std::vector<std::string>{expected});
+        probe.empty = true;
+        probe.update(Live{relation}, {{relation == 0 ? 2 : 1}});
+        assert(probe.heard.size() == 1);
+    }
+}
+'''.replace("__BRANCH__", branch)
+        with tempfile.TemporaryDirectory(prefix="eawr-upgrade-contract-") as temporary:
+            directory = pathlib.Path(temporary)
+            cpp = directory / "fixture.cpp"
+            executable = directory / ("fixture.exe" if os.name == "nt" else "fixture")
+            cpp.write_text(fixture, encoding="utf-8")
+            compile_fixture(toolchain, cpp, executable)
+            checked = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
+    def test_station_upgrade_uses_owner_faction_and_excludes_neutral(self):
+        source = read("apps/viewer/src/battle_audio_events.cpp")
+        branch = source.split("if (event.kind == tactical::EventKind::station_replaced) {", 1)[1]
+        branch = branch.split("if (event.kind == tactical::EventKind::pad_structure_sold)", 1)[0]
+        self.assertIn("if (!live.battle_participant(event.player)) continue;", branch)
+        self.assertIn("owner_faction = live.player_faction(event.player)", branch)
+        self.assertIn("catalog_->resolve(owner_faction, data::Category::faction)", branch)
+        self.assertIn("tag(faction.value(), field), owner_faction", branch)
+        self.assertNotIn("live.local_faction()", branch)
+        self.assertIn("event.player == live.local_player()", branch)
+        self.assertIn("live.is_ally_of_local(event.player)", branch)
+        for field in ("SFXEvent_Starbase_Upgraded", "SFXEvent_Starbase_Ally_Upgraded",
+                      "SFXEvent_Starbase_Enemy_Upgraded"):
+            self.assertIn(field, branch)
+        self.assertEqual(branch.count("play("), 1)
+        resolver = read("apps/viewer/src/battle_audio_prepare.cpp")
+        self.assertIn("if (text.empty()) return nullptr;", resolver)
+        self.assertIn("if (!sfx || released_) return std::nullopt;", source)
+
     def test_presentation_never_names_the_session(self):
         # UI-07: the viewer reads snapshots and submits command values only.
         completed = subprocess.run([sys.executable, str(ROOT / "tools/check_presentation_boundary.py"),

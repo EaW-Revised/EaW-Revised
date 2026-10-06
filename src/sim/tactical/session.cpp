@@ -44,6 +44,11 @@ core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
     if (!shape) {
         return shape;
     }
+    if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+        cancel != nullptr && cancel->entry_id != 0 && !impl_->setup.queue_identities) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            context + ": cancel entry requires QIDS extension"));
+    }
     if (command.key.tick >= max_ticks) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::resource_limit,
             context + ": tick exceeds the tactical tick limit"));
@@ -175,12 +180,12 @@ core::Result<bool> TacticalSession::pad_build_allowed(const PlayerId player, con
 }
 const std::map<EntityId, ArrivalState>& TacticalSession::arrivals() const noexcept { return impl_->arrivals; }
 core::Result<bool> TacticalSession::reinforcement_point(const PlayerId player, const TypeId type, const math::Vec3& point,
-    PlacementWork* work) const {
+    PlacementWork* work, const std::optional<math::Fixed> facing_yaw) const {
     if (impl_->outcome || impl_->economy.disabled_types.contains(type)) {
         return core::Result<bool>::success(false);
     }
     UnitStage staged(impl_->sorted_live());
-    return impl_->placement_valid(player, type, point, staged, impl_->completed_tick, nullptr, work);
+    return impl_->placement_valid(player, type, point, staged, impl_->completed_tick, nullptr, work, nullptr, facing_yaw);
 }
 const std::optional<BattleOutcome>& TacticalSession::outcome() const noexcept { return impl_->outcome; }
 std::vector<UnitState> TacticalSession::units() const { return impl_->sorted_units(); }

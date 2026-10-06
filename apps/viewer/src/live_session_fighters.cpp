@@ -253,11 +253,13 @@ void LiveSessionView::release_dead_slots(const tactical::TacticalSnapshot& lates
     }
 }
 
-std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, const tactical::TypeId type) {
+std::optional<std::size_t> LiveSessionView::ship_of(const sim::EntityId entity, const tactical::TypeId type,
+                                                const tactical::PlayerId owner) {
     if (const auto found = ship_of_entity_.find(entity); found != ship_of_entity_.end()) return found->second;
     if (const auto found = launched_ship_of_entity_.find(entity); found != launched_ship_of_entity_.end()) return found->second;
     for (LaunchSlot& slot : launch_slots_) {
-        if (slot.bound || slot.type != type || slot.required_station != 0) continue;
+        // The model and its death clone were composed with this owner's lobby colour.
+        if (slot.bound || slot.type != type || slot.station_owner != owner || slot.required_station != 0) continue;
         slot.bound = true;
         launched_ship_of_entity_.emplace(entity, slot.ship);
         if (slot.clone) death_clones_.emplace(entity, launch_clones_[*slot.clone]);

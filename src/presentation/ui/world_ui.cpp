@@ -126,6 +126,47 @@ bool place_squadron_arrival_icon(SquadronIconAnchor& anchor,
     return true;
 }
 
+void slide_squadron_icon(SquadronIconAnchor& anchor, const std::array<float, 3> desired,
+    const float thrust, const float fastest, const bool in_grid, const bool fast_forward) noexcept {
+    std::array<float, 3> delta{};
+    float squared = 0.0F;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        delta[axis] = desired[axis] - anchor.position[axis];
+        squared += delta[axis] * delta[axis];
+    }
+    const float distance = std::sqrt(squared);
+    if (distance == 0.0F) {
+        if (in_grid) anchor.speed = 0.0F;
+    } else if (distance < anchor.speed || fast_forward) {
+        anchor.position = desired;
+    } else {
+        for (std::size_t axis = 0; axis < 3; ++axis) anchor.position[axis] += delta[axis] * anchor.speed / distance;
+        const bool braking = in_grid && thrust > 0.0F && anchor.speed * anchor.speed / (2.0F * thrust) >= distance;
+        anchor.speed = std::clamp(anchor.speed + (braking ? -thrust : thrust), 0.0F, std::max(0.0F, fastest));
+    }
+}
+
+bool settle_squadron_icon(SquadronIconAnchor& anchor, const std::array<float, 3> desired,
+    const float snap_distance, const bool already_settled) noexcept {
+    float squared = 0.0F;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const float delta = desired[axis] - anchor.position[axis];
+        squared += delta * delta;
+    }
+    if (!already_settled && std::sqrt(squared) > snap_distance) return false;
+    anchor.position = desired;
+    return true;
+}
+
+SquadronIconRect squadron_icon_rect(const std::array<float, 2> centre, const float side,
+    const bool pixel_align) noexcept {
+    const float left = centre[0] - side * 0.5F, top = centre[1] - side * 0.5F;
+    if (!pixel_align) return {left, top, side, side};
+    // WSU-60: source UI +Y is up; snapping its upper edge downward in that
+    // coordinate system becomes ceil(top) in screen +Y-down. Keep the scaled size.
+    return {std::floor(left), std::ceil(top), side, side};
+}
+
 float squadron_health(const float health_sum, const float max_health_sum) noexcept {
     if (!(max_health_sum > 0.0F) || !std::isfinite(health_sum)) return 0.0F;
     return std::clamp(health_sum / max_health_sum, 0.0F, 1.0F);
@@ -267,6 +308,52 @@ void CombatGrid::adopt(const std::span<const Record> records) {
             cells_.push_back({entry.cell, {entry.squadron}});
         }
     }
+}
+
+void CombatIconGrid::update(const std::span<const Cell> cells) {
+    std::erase_if(held_, [&](const Held& held) {
+        return std::none_of(cells.begin(), cells.end(), [&](const Cell& cell) {
+            return cell.cell == held.cell && !cell.squadrons.empty();
+        });
+    });
+    for (const auto& cell : cells) {
+        if (cell.squadrons.empty()) continue;
+        auto found = std::find_if(held_.begin(), held_.end(), [&](const Held& held) { return held.cell == cell.cell; });
+        if (found == held_.end()) {
+            held_.push_back({cell.cell, cell.height, {}});
+            found = held_.end() - 1;
+        }
+        auto& held = *found;
+        // Reserve all current owners before assigning newcomers: an earlier-ID
+        // newcomer must never take a still-held slot from a later-ID squadron.
+        for (auto& slot : held.slots) {
+            slot.active = std::find(cell.squadrons.begin(), cell.squadrons.end(), slot.squadron) != cell.squadrons.end();
+        }
+        for (const auto squadron : cell.squadrons) {
+            if (std::any_of(held.slots.begin(), held.slots.end(),
+                [&](const Owner& slot) { return slot.squadron == squadron; })) continue;
+            const auto vacant = std::find_if(held.slots.begin(), held.slots.end(), [](const Owner& slot) { return !slot.active; });
+            if (vacant != held.slots.end()) *vacant = {squadron, true};
+            else held.slots.push_back({squadron, true});
+        }
+    }
+}
+
+std::optional<CombatIconGrid::Position> CombatIconGrid::position(const CombatCell cell,
+    const sim::EntityId squadron) const noexcept {
+    const auto held = std::find_if(held_.begin(), held_.end(), [&](const Held& entry) { return entry.cell == cell; });
+    if (held == held_.end()) return std::nullopt;
+    const auto slot = std::find_if(held->slots.begin(), held->slots.end(), [&](const Owner& owner) {
+        return owner.active && owner.squadron == squadron;
+    });
+    if (slot == held->slots.end()) return std::nullopt;
+    const auto index = static_cast<std::size_t>(slot - held->slots.begin());
+    // WSU-36 deliberate deviation: a fixed width prevents both re-packing and
+    // first-join growth from moving existing icons. Keep the retail 30px pitch.
+    constexpr std::size_t columns = 4;
+    return Position{{-static_cast<float>(columns) * combat_grid_step * 0.5F
+        + static_cast<float>(index % columns) * combat_grid_step,
+        static_cast<float>(index / columns) * combat_grid_step}, held->height};
 }
 
 Rgb hardpoint_reticle_tint(const float health_fraction, const bool disabled) noexcept {

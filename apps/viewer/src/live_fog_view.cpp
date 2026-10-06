@@ -7,6 +7,7 @@
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/xml.hpp"
+#include "eawr/scene/scene.hpp"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -118,6 +119,7 @@ void LiveFogView::prepare(const vfs::Vfs& filesystem, const bool revealed, const
     prepared_ = true;
     revealed_ = revealed;
     deploy_overlay_ = deploy_overlay && !revealed;
+    force_deploy_overlay_ = deploy_overlay_;
     if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
         looks_ = space::fog_looks(constants.value().root);
     } else {
@@ -154,11 +156,9 @@ void LiveFogView::prepare(const vfs::Vfs& filesystem, const bool revealed, const
         }
     };
     load_grid({"data/art/textures/w_space_fow_grid.tga", "data/art/textures/w_space_fow_grid.dds"}, grid_, grid_source_);
-    if (deploy_overlay_) {
-        load_grid({"data/art/textures/w_space_reinforce_fow_grid.tga", "data/art/textures/w_space_reinforce_fow_grid.dds"},
-                  reinforce_grid_, reinforce_grid_source_);
-        if (reinforce_grid_.is_null()) notes_.push_back("no reinforcement grid texture; the overlay is not drawn");
-    }
+    load_grid({"data/art/textures/w_space_reinforce_fow_grid.tga", "data/art/textures/w_space_reinforce_fow_grid.dds"},
+              reinforce_grid_, reinforce_grid_source_);
+    if (reinforce_grid_.is_null()) notes_.push_back("no reinforcement grid texture; the overlay is not drawn");
     status_ = grid_.is_valid() && (!deploy_overlay_ || reinforce_grid_.is_valid()) ? "awaiting bounds" : "no grid texture";
 }
 
@@ -197,7 +197,8 @@ bool LiveFogView::create_plane(const space::FogFieldLayout& layout) {
     return true;
 }
 
-void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera::SourceTargetBounds>& bounds) {
+void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera::SourceTargetBounds>& bounds,
+    const bool pane_open, const bool dragging) {
     if (!prepared_ || revealed_ || grid_.is_null() || status_ == "failed") return;
     const auto& battle = live.battle_frame();
     if (!battle.latest) return;
@@ -222,8 +223,6 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
             return;
         }
         field_.emplace(*layout, looks_);
-        // FW-22 (#563): nothing in M2 blocks a deployment point, so only the fog and the border draw red.
-        if (deploy_overlay_) field_->set_deployment_overlay(true);
         cells_ = ImageTexture::create_from_image(cells_image(*field_));
         if (!create_plane(*layout)) {
             field_.reset();
@@ -247,6 +246,56 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
         field_->advance_rows(fog->values, static_cast<double>(since), frames);
         cell_tick_ = fog->tick;
     }
+    // FW-23/WR-17: the pane normally owns the mode; data can restrict it to a drag.
+    const bool overlay = reinforce_grid_.is_valid() && (force_deploy_overlay_
+        || (live.reinforcement_allowed() && (looks_.reinforce_only_while_dragging ? dragging : pane_open || dragging)));
+    const bool mode_changed = overlay != deploy_overlay_;
+    if (mode_changed || (overlay && (overlay_snapshot_ != battle.latest || overlay_fog_ != fog))) {
+        deploy_overlay_ = overlay;
+        overlay_snapshot_ = battle.latest;
+        overlay_fog_ = fog;
+        prevention_circles_ = 0;
+        blocked_points_ = 0;
+        space::FogBlockedPoint blocked;
+        if (overlay) {
+            struct Circle { sim::math::Vec3 centre; sim::math::Fixed radius; };
+            std::vector<Circle> circles;
+            // Read every living blocker, including enemies outside local sensor contact.
+            // Filter once per snapshot, never rebuild a simulation tracking view per texel.
+            for (const auto& instance : battle.latest->instances()) {
+                const auto* profile = live.economy().prevention_of(instance.type_id);
+                if (profile && profile->radius.raw() > 0
+                    && !sim::tactical::players_allied(battle.latest->players(), instance.owner, live.local_player())) {
+                    circles.push_back({{instance.fixed_transform.rows[0][3], instance.fixed_transform.rows[1][3],
+                        instance.fixed_transform.rows[2][3]}, profile->radius});
+                }
+            }
+            prevention_circles_ = circles.size();
+            blocked = [this, circles = std::move(circles), fog, playable = live.economy().bounds](const double x, const double y) {
+                const auto px = scene::fixed_from_binary32(static_cast<float>(x));
+                const auto py = scene::fixed_from_binary32(static_cast<float>(y));
+                if (!px || !py) return true;
+                const sim::math::Vec3 point{px.value(), py.value(), {}};
+                const bool refused = (fog && !sim::tactical::fog_point_revealed(fog->rules, fog->values, point))
+                    || !sim::tactical::reinforcement_inside_bounds(playable, point)
+                    || std::any_of(circles.begin(), circles.end(), [&](const Circle& circle) {
+                        return sim::tactical::reinforcement_prevention_blocks(circle.centre, circle.radius, point);
+                    });
+                if (refused) ++blocked_points_;
+                return refused;
+            };
+        }
+        field_->set_deployment_overlay(overlay, std::move(blocked));
+        material_->set_shader_parameter(StringName("eawr_fog_grid"), overlay ? reinforce_grid_ : grid_);
+        if (mode_changed || (overlay_samples_.size() < 256 && battle.latest->completed_tick() % 30 == 0)) {
+            if (overlay_samples_.size() == 256) overlay_samples_.pop_back();
+            std::ostringstream sample;
+            sample << "{\"tick\": " << battle.latest->completed_tick() << ", \"overlay\": " << (overlay ? "true" : "false")
+                   << ", \"pane_open\": " << (pane_open ? "true" : "false") << ", \"dragging\": " << (dragging ? "true" : "false")
+                   << ", \"prevention_circles\": " << prevention_circles_ << ", \"blocked_points\": " << blocked_points_ << "}";
+            overlay_samples_.push_back(sample.str());
+        }
+    }
     if (field_->changed()) {
         cells_->update(cells_image(*field_));
         ++uploads_;
@@ -269,6 +318,8 @@ void LiveFogView::release() {
     cells_.unref();
     grid_.unref();
     reinforce_grid_.unref();
+    overlay_snapshot_.reset();
+    overlay_fog_.reset();
 }
 
 void LiveFogView::write_report(std::ostream& output) const {
@@ -280,6 +331,10 @@ void LiveFogView::write_report(std::ostream& output) const {
            << ", \"fade_step_per_frame\": " << space::fog_fade_step_per_frame(looks_.regrow_seconds)
            << ", \"grid_texture\": " << json(deploy_overlay_ ? reinforce_grid_source_ : grid_source_)
            << ", \"deploy_overlay\": " << (deploy_overlay_ ? "true" : "false")
+           << ", \"only_while_dragging\": " << (looks_.reinforce_only_while_dragging ? "true" : "false")
+           << ", \"prevention_circles\": " << prevention_circles_ << ", \"overlay_samples\": [";
+    for (std::size_t i = 0; i < overlay_samples_.size(); ++i) output << (i ? ", " : "") << overlay_samples_[i];
+    output << "]"
            << ", \"overlay_colour\": [" << static_cast<int>(looks_.reinforce_colour[0]) << ", "
            << static_cast<int>(looks_.reinforce_colour[1]) << ", " << static_cast<int>(looks_.reinforce_colour[2]) << ", "
            << static_cast<int>(looks_.reinforce_colour[3]) << "]"

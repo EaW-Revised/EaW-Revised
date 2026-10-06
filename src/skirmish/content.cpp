@@ -74,6 +74,25 @@ core::Result<std::optional<sim::tactical::FogRules>> fog_rules(const StartInputs
     rules.cells_wide = cells(*width);
     rules.cells_tall = cells(*height);
     rules.ramp_down_step = step.value();
+    // V-22 / WHZ-09: fog initialization uses raw, unrotated obstacle circles.
+    if (inputs.tables != nullptr) for (const auto& placement : inputs.placements) {
+        if (!placement.position) continue;
+        const units::SpaceFootprint* footprint = nullptr;
+        for (const auto& type : inputs.tables->obstacles) if (type.id == placement.type) footprint = &type.footprint;
+        for (const auto& type : inputs.tables->units) if (type.id == placement.type) footprint = &type.footprint;
+        if (footprint == nullptr || !footprint->space_obstacle || !footprint->obstacle_radius
+            || !(footprint->hazard.nebula || footprint->hazard.asteroid_field
+                || footprint->hazard.impassable_asteroid || footprint->hazard.ion_storm)) continue;
+        const auto x = sim::math::add(placement.position->x, footprint->hazard.obstacle_offset.x);
+        const auto y = sim::math::add(placement.position->y, footprint->hazard.obstacle_offset.y);
+        if (!x || !y) {
+            core::Diagnostic diagnostic;
+            diagnostic.code = std::string(diagnostic_codes::input);
+            diagnostic.message = "dense fog obstacle offset exceeds the coordinate range";
+            return FogResult::failure(std::move(diagnostic));
+        }
+        rules.dense_circles.push_back({{x.value(), y.value(), Fixed{}}, *footprint->obstacle_radius});
+    }
     if (auto valid = sim::tactical::validate_fog_rules(rules); !valid) return FogResult::failure(valid.error());
     return FogResult::success(rules);
 }

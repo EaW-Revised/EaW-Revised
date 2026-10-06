@@ -12,6 +12,12 @@
 
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/presentation/ui/selection.hpp"
+#include <godot_cpp/classes/canvas_item_material.hpp>
+#include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <godot_cpp/variant/packed_color_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_float32_array.hpp>
 
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
@@ -38,12 +44,16 @@ public:
         data::ui::ReferenceRect rect; // the radar mesh, shell units
         std::string backdrop;
         data::ui::Rgba8 background{12, 30, 51, 255}; // MM-14
+        std::string warning_icon;
+        float warning_scale{1.0F};
         // A command bar texture (MT_CommandBar, then files) at texel size; null when missing.
         std::function<godot::Ref<godot::Texture2D>(const std::string& texture)> texture;
         std::function<presentation::ui::ShellPlacement()> placement;
     };
     struct Frame final {
+        struct Warning final { presentation::ui::MinimapPoint centre; double age{}; };
         std::vector<presentation::ui::MinimapBlip> blips;
+        std::vector<Warning> warnings;
         std::optional<std::array<presentation::ui::MinimapPoint, 4>> guide;
     };
 
@@ -51,12 +61,15 @@ public:
     ~EawrMinimap() override;
     void setup(Setup setup);
     void show(Frame frame);
+    void prepare_orders(const vfs::Vfs& filesystem);
+    void move_feedback(presentation::ui::MinimapPoint centre, presentation::ui::OrderMode mode, bool double_click);
+    void order_frame(double seconds);
     // The fog layer's shown texels (MinimapFog::texels); re-uploaded when a pass completed.
     void set_fog(std::span<const std::uint8_t> texels, std::uint32_t width, std::uint32_t height, std::uint64_t pass);
     void set_hazards(std::span<const presentation::ui::MinimapHazard> hazards,
         const presentation::ui::MinimapExtents& extents, const presentation::ui::MinimapSettings& settings);
     void set_look(std::function<void(presentation::ui::MinimapPoint)> look) { look_ = std::move(look); }
-    void set_move(std::function<void(presentation::ui::MinimapPoint)> move) { move_ = std::move(move); }
+    void set_move(std::function<void(presentation::ui::MinimapPoint, bool)> move) { move_ = std::move(move); }
 
     // The radar mesh on the screen, in viewport pixels.
     [[nodiscard]] godot::Rect2 minimap_rect() const;
@@ -77,6 +90,34 @@ protected:
 
 private:
     void look_at(const godot::Vector2& at, const char* why);
+    struct OrderArt final {
+        struct Sample final {
+            godot::PackedVector2Array points, uvs;
+            godot::PackedColorArray colours;
+            godot::PackedInt32Array indices;
+        };
+        std::string name, model;
+        double duration{}, scale{};
+        bool singleton{};
+        godot::Ref<godot::Texture2D> texture;
+        std::vector<Sample> samples; // OF-04: baked at load, never allocated while drawing
+    };
+    struct OrderMarker final {
+        godot::RID item;
+        presentation::ui::MinimapPoint centre;
+        double born{};
+        std::size_t art{}, sample{};
+        bool active{};
+    };
+    std::array<OrderArt, 3> order_art_;
+    std::array<OrderMarker, 32> order_markers_;
+    godot::Ref<godot::CanvasItemMaterial> order_material_;
+    godot::PackedInt32Array order_empty_bones_;
+    godot::PackedFloat32Array order_empty_weights_;
+    godot::RID order_layer_;
+    double order_seconds_{};
+    bool order_events_enabled_{};
+    std::uint64_t orders_shown_{}, orders_expired_{}, orders_replaced_{};
 
     Setup setup_;
     Frame frame_;
@@ -95,10 +136,11 @@ private:
     std::uint32_t fog_width_{};
     std::uint32_t fog_height_{};
     std::function<void(presentation::ui::MinimapPoint)> look_;
-    std::function<void(presentation::ui::MinimapPoint)> move_;
+    std::function<void(presentation::ui::MinimapPoint, bool)> move_;
     std::optional<godot::Vector2> left_press_;
     bool dragged_{};
     bool right_down_{};
+    bool right_double_click_{};
     godot::Vector2 laid_out_{-1.0F, -1.0F};
     std::uint64_t frames_{};
     std::uint64_t looks_{};

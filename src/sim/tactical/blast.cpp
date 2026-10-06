@@ -127,6 +127,12 @@ core::Result<BlastStep> prepare_blast(const CombatWorld& world, const Projectile
     const std::string_view direct_mesh) {
     using Result = core::Result<BlastStep>;
     BlastStep result;
+    CombatRandom delay_random(world.seed, world.frame, projectile.id, projectile_damage_delay_slot);
+    if (direct != invalid_entity_id && projectile.damage_delay.raw() > 0)
+        static_cast<void>(delay_random.uniform(0, static_cast<std::uint32_t>(Fixed::scale)));
+    const auto delivery_delay = [&](const Fixed area_delay) -> core::Result<Fixed> {
+        return projectile_delivery_delay(projectile, area_delay, delay_random);
+    };
     if (!projectile.blast.enabled()) return Result::success(std::move(result));
     const auto owner = std::lower_bound(world.players.begin(), world.players.end(), projectile.owner,
         [](const Player& player, const PlayerId id) { return player.player_id < id; });
@@ -189,7 +195,9 @@ core::Result<BlastStep> prepare_blast(const CombatWorld& world, const Projectile
                 auto delay = d.raw() < Fixed::scale ? core::Result<Fixed>::success(Fixed{})
                     : distance_delay(projectile.blast, d, radius);
                 if (!delay) return Result::failure(delay.error());
-                group.recipients.push_back({id, amount.value(), delay.value()});
+                auto effective_delay = delivery_delay(delay.value());
+                if (!effective_delay) return Result::failure(effective_delay.error());
+                group.recipients.push_back({id, amount.value(), effective_delay.value()});
             } else {
                 // WAD-19/20: eligibility ignores health/targetability; destroyed shares dilute
                 // the budget. Exclude the final direct mesh before dividing, not its aimed index.
@@ -225,7 +233,9 @@ core::Result<BlastStep> prepare_blast(const CombatWorld& world, const Projectile
                     for (const auto& [index, delay] : selected) {
                         auto route = mesh_route(*unit->profile, index);
                         if (!damage_target_valid(*unit->durability_profile, route)) route = hull_target;
-                        group.recipients.push_back({id, share.value(), delay, route});
+                        auto effective_delay = delivery_delay(delay);
+                        if (!effective_delay) return Result::failure(effective_delay.error());
+                        group.recipients.push_back({id, share.value(), effective_delay.value(), route});
                     }
                 }
             }
@@ -246,13 +256,25 @@ std::string_view direct_blast_mesh(const CombatWorld& world, const ProjectileSte
     return index < names.size() ? std::string_view(names[index]) : std::string_view{};
 }
 
-core::Result<Hit> area_hit(const Projectile& projectile, const BlastRecipient& recipient, const Fixed defense) {
-    auto caused = math::multiply(recipient.amount, projectile.source_damage_factor);
+core::Result<Fixed> projectile_delivery_delay(const Projectile& projectile, const Fixed area_delay,
+    CombatRandom& random) {
+    if (projectile.damage_delay.raw() <= 0) return core::Result<Fixed>::success(area_delay);
+    // WAD-26: one synchronized draw for each hull/hardpoint delivery.
+    const auto fraction = Fixed::from_raw(static_cast<std::int64_t>(random.uniform(0,
+        static_cast<std::uint32_t>(Fixed::scale))) * 3 / 4 + Fixed::scale / 4);
+    return math::multiply(projectile.damage_delay, fraction);
+}
+
+core::Result<Hit> area_hit(const Projectile& projectile, const BlastRecipient& recipient, const Fixed defense,
+                          const std::optional<Fixed> source_damage_factor) {
+    auto caused = math::multiply(recipient.amount, source_damage_factor.value_or(projectile.source_damage_factor));
     if (!caused) return core::Result<Hit>::failure(caused.error());
     // WAD-23/24/25: preserve projectile routing inputs, with the secondary selector and area
     // context. The projectile's original aim and direct instance damage do not enter this hit.
-    return core::Result<Hit>::success(Hit{caused.value(), projectile.damage_type, true, projectile.shield_damage,
+    Hit hit{caused.value(), projectile.damage_type, true, projectile.shield_damage,
         projectile.hitpoint_damage, recipient.hardpoint, projectile.allow_diminishing_firepower,
-        projectile.internal_damage_misc, defense, projectile.energy_damage, true});
+        projectile.internal_damage_misc, defense, projectile.energy_damage, true};
+    hit.source = projectile.shooter;
+    return core::Result<Hit>::success(hit);
 }
 } // namespace eawr::sim::tactical::detail

@@ -79,6 +79,9 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
         else ++idle_sample_failures_;
     }
     sample_timer.finish();
+    for (const auto& [idle, ship] : idle_live_ships_) {
+        if (poses[idle]) contact_bones_[ship] = poses[idle]->bones;
+    }
     FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
     for (const AnimatedInstance& instance : animated_instances_) {
         if (!poses[instance.idle]) continue;
@@ -110,6 +113,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
         // breaks off); the palette has no visibility, so a hidden bone's
         // geometry collapses to the bone's origin.
         std::vector<animation::BonePose> bones = std::move(pose.value().bones);
+        contact_bones_[request.ship] = bones;
         for (animation::BonePose& bone : bones) {
             if (bone.visible) continue;
             ++live_clip_hidden_bones_;
@@ -162,6 +166,22 @@ std::optional<sim::math::Mat3x4> SpacePopulation::live_transform(const LivePose&
     return transform.value();
 }
 
+std::optional<SpacePopulation::LiveBoneFrame> SpacePopulation::live_bone_frame(
+    const sim::EntityId entity, const std::uint32_t bone) const {
+    const auto found = contact_live_ships_.find(entity);
+    if (found == contact_live_ships_.end()) return std::nullopt;
+    const std::size_t ship = found->second;
+    if (!live_ship_drawn(ship) || live_retired_[ship] || !live_transforms_[ship]
+        || options_.placed_ships[ship].live_entity != entity
+        || bone >= contact_bones_[ship].size()) return std::nullopt;
+    const auto& posed = contact_bones_[ship][bone];
+    const auto local = particles::fixed_model_frame(posed.model_asset, scene::fixed_from_binary32);
+    if (!local) return std::nullopt;
+    const auto world = sim::math::compose(*live_transforms_[ship], *local);
+    if (!world) return std::nullopt;
+    return LiveBoneFrame{world.value(), posed.visible};
+}
+
 bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const particles::StepExecutor* workers) {
     std::fill(live_shown_.begin(), live_shown_.end(), false);
     std::fill(live_defend_.begin(), live_defend_.end(), false);
@@ -179,6 +199,7 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
             return false;
         }
         live_transforms_[pose.ship] = *transform;
+        contact_live_ships_.insert_or_assign(pose.entity, pose.ship);
         live_shown_[pose.ship] = true;
         live_defend_[pose.ship] = pose.defend_active;
         if (pose.construction_hull) {

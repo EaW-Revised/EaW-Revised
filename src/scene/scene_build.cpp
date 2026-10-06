@@ -295,6 +295,13 @@ void resolve_object(Placement& placement, const assets::Placement& source,
     if (found == models.end()) found = models.emplace(path, model_facts(access, path)).first;
     const ModelFacts& facts = found->second;
     if (!facts.loaded) {
+        // BP-70: a projectile may author a particle system as its root model.
+        // Keep it on the effect-only projectile route, with the ordinary authored transform.
+        if (facts.particle_system && ieq(object.type_name, "Projectile")) {
+            placement.effects.push_back({placement.model_declared, path, 0, false});
+            add_issue(placement, Cause::model_has_no_surface, path);
+            return;
+        }
         add_issue(placement, facts.particle_system ? Cause::model_particle_system
                                                    : Cause::model_failed_to_load, path);
         return;
@@ -421,7 +428,8 @@ Scene finish(PreparedScene prepared) {
     for (const Placement& placement : scene.placements) {
         if (placement.model_path.empty()) continue;
         const auto found = models.find(placement.model_path);
-        if (found != models.end() && found->second.loaded) paths.insert(placement.model_path);
+        if (found != models.end() && (found->second.loaded
+            || (found->second.particle_system && !placement.effects.empty()))) paths.insert(placement.model_path);
     }
     std::map<std::string, sim::AssetId> ids;
     for (const std::string& path : paths) {

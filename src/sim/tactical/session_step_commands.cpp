@@ -40,6 +40,20 @@
 
 namespace eawr::sim::tactical {
 
+void session_detail::Tick::register_jammer(const EntityId source, const bool active) {
+    const auto& static_sources = targets_.value().world.value().value().static_projectile_defences;
+    if (std::binary_search(static_sources.begin(), static_sources.end(), source)
+        || std::find(created_static_defences_.begin(), created_static_defences_.end(), source) != created_static_defences_.end()) return;
+    if (!active) { std::erase(projectile_defence_order_, source); return; }
+    if (projectile_defence_order_.empty()) {
+        projectile_defence_order_ = static_sources;
+        for (const auto id : created_static_defences_)
+            if (!std::binary_search(static_sources.begin(), static_sources.end(), id)) projectile_defence_order_.push_back(id);
+    }
+    if (std::find(projectile_defence_order_.begin(), projectile_defence_order_.end(), source) == projectile_defence_order_.end())
+        projectile_defence_order_.push_back(source);
+}
+
 core::Result<void> session_detail::Tick::abilities_tracking() {
     auto& moving = gather_.value().moving.value();
     const auto& arrivals = staging_.value().arrivals.value();
@@ -56,11 +70,18 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
     });
     if (!impl_->abilities.profiles.empty() || timed_effect) {
         std::vector<std::uint8_t> speed_changed(moving.size());
+        std::vector<std::uint8_t> jammer_ended(moving.size());
         const auto serviced_abilities = executor.execute_phase("abilities", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, moving.size());
             for (auto index = range.begin; index < range.end; ++index) {
                 bool speed = moving[index].engines_recovered;
-                if (moving[index].abilities) speed = impl_->service_abilities(moving[index], tick) || speed;
+                if (moving[index].abilities) {
+                    const auto& profile = *impl_->abilities.find(moving[index].state.type_id);
+                    const auto jammer = ability_slot(profile, AbilityKind::sensor_jamming);
+                    const bool active = jammer && moving[index].abilities->slots[*jammer].active;
+                    speed = impl_->service_abilities(moving[index], tick) || speed;
+                    jammer_ended[index] = active && !moving[index].abilities->slots[*jammer].active ? 1U : 0U;
+                }
                 if (moving[index].ion_stun) Impl::service_ion_stun(moving[index], tick);
                 speed_changed[index] = speed ? 1U : 0U;
             }
@@ -70,6 +91,7 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
         }
         for (std::size_t index = 0; index < moving.size(); ++index) {
             const auto& unit = moving[index];
+            if (jammer_ended[index]) register_jammer(unit.state.entity_id, false);
             if (speed_changed[index] != 0U && unit.motion && unit.motion->kind == MotionKind::path && !unit.formation) {
                 replans.push_back(unit.state.entity_id);
             }
@@ -783,6 +805,7 @@ core::Result<void> session_detail::Tick::commands() {
             projectile.shield_damage = spawn.shield_damage;
             projectile.hitpoint_damage = spawn.hitpoint_damage;
             projectile.blast = spawn.blast;
+            // EUS-15: retained delayed-area input only; EUS-16 immediate hits resolve shooter.
             projectile.source_damage_factor = math::Fixed::from_raw(math::Fixed::scale + source.upgrade_bonuses[1].raw());
             impl_->ability_spawns.push_back({projectile.id, spawn.type, payload.ability, source.state.owner, unit_id,
                 position, source.state.rotation, tick + std::max<std::uint32_t>(1, spawn.countdown_frames), false, {}});
@@ -1059,6 +1082,7 @@ core::Result<void> session_detail::Tick::commands() {
         };
         const auto slot_of = [&](LiveUnit& live) -> AbilitySlot& { return live.abilities->slots[*holds(live)]; };
         std::vector<EntityId> changed_speed;
+        bool hunt_stopped = false;
         switch (payload.action) {
         case AbilityAction::activate:
             for (auto* live : holders) {
@@ -1069,14 +1093,42 @@ core::Result<void> session_detail::Tick::commands() {
             }
             for (auto* live : holders) {
                 const auto switched = activate_ability(profile_of(*live), slot_of(*live), impl_->ability_gate(*live, tick), tick);
+                if (switched.changed && payload.ability == AbilityKind::sensor_jamming) register_jammer(live->state.entity_id, true);
                 if (switched.changed && payload.ability == AbilityKind::defend) impl_->defend_switched_on(*live, tick);
+                if (switched.changed && payload.ability == AbilityKind::hunt) {
+                    // WAB-04: clear attack targets, preserving the movement already under way.
+                    if (live->combat) {
+                        live->combat->attack_target = invalid_entity_id;
+                        live->combat->attack_hardpoint = no_hardpoint;
+                        live->combat->direct = false;
+                    }
+                    if (live->state.order.target != invalid_entity_id) live->state.order = {};
+                    if (crafts.find(live->state.entity_id) != crafts.end()) {
+                        crafts.at(live->state.entity_id).chase = invalid_entity_id;
+                        crafts.at(live->state.entity_id).chase_until = 0;
+                    }
+                }
                 if (switched.speed) changed_speed.push_back(live->state.entity_id);
             }
             break;
         case AbilityAction::deactivate:
             for (auto* live : holders) {
                 auto& slot = slot_of(*live);
-                if (deactivate_ability(profile_of(*live), slot, tick).speed) changed_speed.push_back(live->state.entity_id);
+                const auto switched = deactivate_ability(profile_of(*live), slot, tick);
+                if (switched.changed && payload.ability == AbilityKind::sensor_jamming) register_jammer(live->state.entity_id, false);
+                if (switched.speed) changed_speed.push_back(live->state.entity_id);
+                hunt_stopped = hunt_stopped || (switched.changed && payload.ability == AbilityKind::hunt);
+                if (switched.changed && payload.ability == AbilityKind::hunt) {
+                    if (live->combat) {
+                        live->combat->attack_target = invalid_entity_id;
+                        live->combat->attack_hardpoint = no_hardpoint;
+                        live->combat->direct = false;
+                    }
+                    if (crafts.find(live->state.entity_id) != crafts.end()) {
+                        crafts.at(live->state.entity_id).chase = invalid_entity_id;
+                        crafts.at(live->state.entity_id).chase_until = 0;
+                    }
+                }
                 if (payload.ability == AbilityKind::barrage) {
                     if (const auto proxy = staged.find(slot.target); proxy != staged.end()
                         && proxy->second.state.barrage_source == live->state.entity_id) {
@@ -1099,6 +1151,41 @@ core::Result<void> session_detail::Tick::commands() {
             }
             for (auto* live : holders) slot_of(*live).autofire = payload.action == AbilityAction::autofire_on;
             break;
+        }
+        if (payload.ability == AbilityKind::hunt && payload.action == AbilityAction::activate) {
+            const auto& membership = craft_prep_->craft_squadron.value();
+            const auto member = membership.find(unit_id);
+            const auto container_id = member != membership.end() ? member->second : unit_id;
+            if (const auto mind = minds.find(container_id); mind != minds.end()) {
+                minds.at(container_id).target = invalid_entity_id;
+                minds.at(container_id).target_hardpoint = attack_hull;
+                minds.at(container_id).approach = false;
+            }
+            auto& container = staged.at(container_id);
+            if (container.combat) {
+                container.combat->attack_target = invalid_entity_id;
+                container.combat->direct = false;
+            }
+            if (container.state.order.target != invalid_entity_id) container.state.order = {};
+        }
+        if (hunt_stopped) {
+            // WAB-05: disabling the behaviour also stops its current movement.
+            const auto& membership = craft_prep_->craft_squadron.value();
+            const auto member = membership.find(unit_id);
+            const auto container_id = member != membership.end() ? member->second : unit_id;
+            auto& live = staged.at(container_id);
+            live.state.order = order_for(StopPayload{}, tick);
+            if (minds.find(container_id) != minds.end()) {
+                apply_squadron_order(minds.at(container_id), StopPayload{}, live.state.position, squadron_table);
+            } else {
+                if (auto stopped = impl_->plan_order(live, StopPayload{}, frame); !stopped) return core::Result<RejectReason>::failure(stopped.error());
+                const auto* footprint = table.avoidance ? tracked_footprint(table, live.state.type_id) : nullptr;
+                if (footprint && live.motion) {
+                    if (const auto layer = dynamic_layer_index(footprint->layer)) {
+                        if (auto submitted = submit(container_id, live, *layer, std::nullopt); !submitted) return core::Result<RejectReason>::failure(submitted.error());
+                    }
+                }
+            }
         }
         for (const auto id : changed_speed) {
             if (auto planned = replan(id); !planned) return core::Result<RejectReason>::failure(planned.error());
@@ -1204,9 +1291,14 @@ core::Result<void> session_detail::Tick::commands() {
         own.position = live.state.position;
         own.transform = math::to_matrix(live.state.rotation, live.state.position).value();
         own.combat = &*live.combat;
+        own.durability = live.durability ? &*live.durability : nullptr;
+        own.durability_profile = impl_->health_profile(live);
         enemy.position = target->second.state.position;
         enemy.transform = math::to_matrix(target->second.state.rotation, enemy.position).value();
+        // The view's health pointers predate this phase's reinforcements, whose insertion can move
+        // the staged units; an upgraded unit's profile lives in the unit itself.
         enemy.durability = target->second.durability ? &*target->second.durability : nullptr;
+        enemy.durability_profile = impl_->health_profile(target->second);
         auto admitted = detail::manual_target_admissible(view, own, enemy, payload.hardpoint);
         if (!admitted) return core::Result<RejectReason>::failure(admitted.error());
         if (!admitted.value()) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
@@ -1303,12 +1395,12 @@ core::Result<void> session_detail::Tick::commands() {
                     search.result.position = payload.position;
                     for (std::uint32_t angle = 0; angle < count; ++angle) {
                         const auto candidate = reinforcement_search_candidate(payload.position, attempt + angle,
-                            account != nullptr ? account->reinforcement_yaw : math::Fixed{}, impl_->economy.bounds);
+                            payload.facing_yaw.value_or(account != nullptr ? account->reinforcement_yaw : math::Fixed{}), impl_->economy.bounds);
                         if (!candidate) break;
                         ++search.result.candidates;
                         search.result.position = *candidate;
                         const auto valid = impl_->placement_valid(player, payload.type, *candidate, staged, tick + 1,
-                            collisions, &search.work, &prevention_units);
+                            collisions, &search.work, &prevention_units, payload.facing_yaw);
                         if (!valid) { search.error = valid.error(); break; }
                         if (valid.value()) {
                             search.result.valid = true;
@@ -1348,6 +1440,8 @@ core::Result<void> session_detail::Tick::commands() {
         const auto search = std::lower_bound(searches.begin(), searches.end(), current.key,
             [](const Commands::Search& entry, const CommandKey& key) { return entry.key < key; });
         if (search != searches.end() && search->key == current.key) {
+            // SAE-10: a failed ring advances the live search without issuing a placement.
+            if (!search->result.valid) continue;
             resolved = current;
             std::get<ReinforcePayload>(resolved->payload).position = search->result.position;
         }
@@ -1380,6 +1474,35 @@ core::Result<void> session_detail::Tick::commands() {
             pending_reveals_.push_back(reveal->player);
             events.push_back(Event{tick, EventKind::order_accepted, issuer, command.key.sequence,
                 invalid_entity_id, OrderKind::reveal_all});
+            continue;
+        }
+        if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload)) {
+            auto reason = RejectReason::none;
+            const auto found = staged.find(command.units.front());
+            if (found == staged.end()) reason = RejectReason::unit_not_live;
+            else if (impl_->ledger_of(ledgers, issuer) == nullptr) reason = RejectReason::no_economy;
+            else {
+                auto& unit = found->second;
+                const auto* profile = unit.durability ? impl_->health_profile(unit) : nullptr;
+                const bool station = std::any_of(impl_->economy.menus.begin(), impl_->economy.menus.end(),
+                    [&](const StationMenu& menu) { return menu.station == unit.state.type_id; })
+                    || std::binary_search(impl_->victory.starbase_types.begin(), impl_->victory.starbase_types.end(), unit.state.type_id);
+                if (!station || !profile) reason = RejectReason::not_damageable;
+                else if (repair->hardpoint >= profile->hardpoints.size()
+                    || !profile->hardpoints[repair->hardpoint].destroyable
+                    || unit.durability->hardpoints[repair->hardpoint].raw() <= 0
+                    || unit.durability->hardpoints[repair->hardpoint] >= profile->hardpoints[repair->hardpoint].max_health) {
+                    reason = RejectReason::hardpoint_invalid;
+                } else if (arrivals.contains(unit.state.entity_id)) reason = RejectReason::arriving;
+                else {
+                    // WSL-40/41: service admission has no ownership gate; each payer registers once.
+                    unit.durability->repairing_players.resize(profile->hardpoints.size());
+                    auto& payers = unit.durability->repairing_players[repair->hardpoint];
+                    if (std::find(payers.begin(), payers.end(), issuer) == payers.end()) payers.push_back(issuer);
+                }
+            }
+            events.push_back(Event{tick, reason == RejectReason::none ? EventKind::order_accepted : EventKind::order_rejected,
+                issuer, command.key.sequence, command.units.front(), OrderKind::repair_hardpoint, reason, static_cast<std::uint8_t>(repair->hardpoint)});
             continue;
         }
         if (economy_command(command.payload)) {
@@ -1439,6 +1562,7 @@ core::Result<void> session_detail::Tick::commands() {
         }
         const auto* damage = std::get_if<DamagePayload>(&command.payload);
         auto command_reason = RejectReason::none;
+        bool attack_assignment_allowed = true;
         // The unit an attack, attack-move or guard sends its units towards (#452).
         const auto approach = approach_target_of(command.payload);
         if (const auto* attack = std::get_if<AttackPayload>(&command.payload)) {
@@ -1450,6 +1574,17 @@ core::Result<void> session_detail::Tick::commands() {
             } else if (attack->hardpoint != attack_hull
                 && !impl_->target_hardpoint_standing(target->second, attack->hardpoint)) {
                 command_reason = RejectReason::hardpoint_invalid;
+            }
+            if (target != staged.end()) {
+                // WCC-25: direct assignment promotes a craft to its team, then refuses an
+                // invalid type without replacing the held target. The outer order still
+                // proceeds; collision and special-weapon admission belong to scans only.
+                const auto& membership = craft_prep_.value().craft_squadron.value();
+                const auto member = membership.find(attack->target);
+                const auto container = member != membership.end() ? staged.find(member->second) : target;
+                const auto* target_profile = impl_->combat.find(
+                    container != staged.end() ? container->second.state.type_id : target->second.state.type_id);
+                attack_assignment_allowed = target_profile == nullptr || target_profile->valid_target;
             }
         } else if (approach != invalid_entity_id && staged.find(approach) == staged.end()) {
             command_reason = RejectReason::target_not_live;
@@ -1525,10 +1660,60 @@ core::Result<void> session_detail::Tick::commands() {
                 || std::holds_alternative<ManualTargetPayload>(command.payload)) continue;
             if (damage == nullptr) {
                 auto& live = unit->second;
+                if (std::holds_alternative<StopPayload>(command.payload)) {
+                    // WAB-51: Stop switches Hunt off through the same path as its button,
+                    // including clearing chase targets and stopping the whole squadron.
+                    const auto& membership = craft_prep_->craft_squadron.value();
+                    const auto member = membership.find(unit_id);
+                    const auto holder = member == membership.end() ? unit_id : member->second;
+                    const auto stopped = apply_ability(holder, AbilityPayload{AbilityKind::hunt, AbilityAction::deactivate});
+                    if (!stopped) return core::Result<void>::failure(stopped.error());
+                }
                 live.state.order = order_for(command.payload, tick);
+                // WAB-40, AB-65: accepted move, attack and guard orders also cancel the
+                // parent shot when addressed to a member. Ability/internal orders stay separate.
+                if (std::holds_alternative<MovePayload>(command.payload)
+                    || std::holds_alternative<AttackPayload>(command.payload)
+                    || std::holds_alternative<AttackMovePayload>(command.payload)
+                    || std::holds_alternative<GuardPayload>(command.payload)) {
+                    const auto& membership = craft_prep_->craft_squadron.value();
+                    const auto member = membership.find(unit_id);
+                    const auto parent_id = member == membership.end() ? unit_id : member->second;
+                    const auto parent = staged.find(parent_id);
+                    // WAB-51: an accepted external order cancels every holder in the team.
+                    const auto cancel_hunt = [&](LiveUnit& holder) {
+                        if (!holder.abilities) return;
+                        const auto* profile = impl_->abilities.find(holder.state.type_id);
+                        const auto index = ability_slot(*profile, AbilityKind::hunt);
+                        if (index) static_cast<void>(deactivate_ability(profile->abilities[*index], holder.abilities->slots[*index], tick));
+                    };
+                    cancel_hunt(live);
+                    if (parent != staged.end()) cancel_hunt(parent->second);
+                    if (const auto mind = minds.find(parent_id); mind != minds.end()) {
+                        for (const auto member_id : mind->second.roster) {
+                            if (const auto holder = staged.find(member_id); holder != staged.end()) cancel_hunt(holder->second);
+                        }
+                    }
+                    auto* team = parent != staged.end() ? impl_->ion_slot(parent->second) : nullptr;
+                    if (team != nullptr && team->active && minds.find(parent_id) != minds.end()) {
+                        const auto squadron = std::find_if(impl_->squadrons.begin(), impl_->squadrons.end(),
+                            [parent_id](const Squadron& entry) { return entry.container == parent_id; });
+                        if (squadron != impl_->squadrons.end()) {
+                            std::vector<AbilitySlot*> craft;
+                            for (const auto craft_id : squadron->members) {
+                                const auto found = staged.find(craft_id);
+                                if (auto* slot = found != staged.end() ? impl_->ion_slot(found->second) : nullptr) {
+                                    craft.push_back(slot);
+                                }
+                            }
+                            impl_->finish_ion_shot(*team, craft, parent->second.state.type_id, tick);
+                        }
+                    }
+                }
                 // FO-01, FO-03 (#424): a squadron takes the order as one unit through its team
                 // container; its craft fly it in the next craft phase. Serial, in command order.
                 if (const auto mind = minds.find(unit_id); mind != minds.end()) {
+                    if (std::holds_alternative<AttackPayload>(command.payload) && !attack_assignment_allowed) continue;
                     auto squadron_payload = command.payload;
                     const auto team_target = [&](const EntityId target) {
                         const auto& membership = craft_prep_.value().craft_squadron.value();
@@ -1550,9 +1735,11 @@ core::Result<void> session_detail::Tick::commands() {
                 // order ends a previous attack order.
                 if (live.combat) {
                     if (const auto* attack = std::get_if<AttackPayload>(&command.payload)) {
-                        live.combat->attack_target = attack->target;
-                        live.combat->attack_hardpoint = attack->hardpoint;
-                        live.combat->direct = true;
+                        if (attack_assignment_allowed) {
+                            live.combat->attack_target = attack->target;
+                            live.combat->attack_hardpoint = attack->hardpoint;
+                            live.combat->direct = true;
+                        }
                     } else if (live.combat->direct) {
                         live.combat->attack_target = invalid_entity_id;
                         live.combat->attack_hardpoint = no_hardpoint;
@@ -1588,11 +1775,13 @@ core::Result<void> session_detail::Tick::commands() {
                     const auto& target = staged.at(approach);
                     const bool guard = std::holds_alternative<GuardPayload>(command.payload);
                     // The targeting view's health and combat pointers name the units before
-                    // staging moved them; point the target's entry at its staged health.
+                    // staging moved them; point the target's entry at its staged health and that
+                    // health's profile (an upgraded unit keeps its profile in the unit itself).
                     std::optional<detail::CombatUnit> target_view;
                     if (const auto* entry = view.find(approach)) {
                         target_view = *entry;
                         target_view->durability = target.durability ? &*target.durability : nullptr;
+                        target_view->durability_profile = impl_->health_profile(target);
                         target_view->combat = target.combat ? &*target.combat : nullptr;
                     }
                     const auto* ordered_attack = std::get_if<AttackPayload>(&command.payload);
@@ -1641,11 +1830,13 @@ core::Result<void> session_detail::Tick::commands() {
                 }
                 continue;
             }
+            if (damage_blocked()) continue;
             // With damage rules the shield absorbs scripted damage first (DG-20); without, it is raw.
             // WR-33/WHE-51: privileged Lua damage bypasses arrival immunity, but keeps the take mode.
             // WHE-64: LuaDebugDamage distributes raw shares first, then also damages the leader.
             Hit routed_hit{damage->amount, no_type_index, false, true, true, hull_target};
             const auto routed = redirect_damage(unit_id, routed_hit, [&](const EntityId recipient_id, Hit hit) -> core::Result<void> {
+                if (damage_blocked()) return core::Result<void>::success();
                 const auto recipient = staged.find(recipient_id);
                 if (recipient == staged.end() || !recipient->second.durability) return core::Result<void>::success();
                 const auto* recipient_profile = impl_->durability.find(recipient->second.state.type_id);
@@ -1682,6 +1873,7 @@ core::Result<void> session_detail::Tick::commands() {
                 return core::Result<void>::success();
             });
             if (!routed) return core::Result<void>::failure(routed.error());
+            if (damage_blocked()) continue;
             auto outcome = DamageOutcome{};
             if (damage_rules != nullptr) {
                 Hit hit{damage->amount, no_type_index, false, true, true, damage->hardpoint};
@@ -1743,6 +1935,98 @@ core::Result<void> session_detail::Tick::commands() {
                     + std::to_string(command.units.size()) + " unit orders rejected (first: "
                     + std::string(to_string(first_reason)) + ")",
                 {}, core::Severity::warning));
+        }
+    }
+
+    const bool has_hunt = std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(),
+        [](const UnitAbilityProfile& profile) { return ability_slot(profile, AbilityKind::hunt).has_value(); });
+    if (has_hunt) {
+        // WAB-50..56: immutable inputs, partitioned destination decisions, ordered move commit.
+        // The serial pass captures pointers only; all per-hunter service work runs in the workers.
+        std::vector<const LiveUnit*> hunt_inputs;
+        hunt_inputs.reserve(staged.size());
+        for (const auto& [id, live] : staged) { static_cast<void>(id); hunt_inputs.push_back(&live); }
+        struct HuntMove { EntityId unit{}; math::Vec3 destination{}; };
+        std::vector<std::optional<HuntMove>> hunt_moves(hunt_inputs.size());
+        std::vector<std::optional<core::Diagnostic>> hunt_errors(hunt_inputs.size());
+        const auto& membership = craft_prep_->craft_squadron.value();
+        const auto selected = executor.execute_phase("hunt", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, hunt_inputs.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto& hunter = *hunt_inputs[index];
+                if (!hunter.abilities) continue;
+                const auto* profile = impl_->abilities.find(hunter.state.type_id);
+                const auto slot = ability_slot(*profile, AbilityKind::hunt);
+                if (!slot || !hunter.abilities->slots[*slot].active) continue;
+                const auto& active = hunter.abilities->slots[*slot];
+                if ((tick - active.started_tick) % 30 != 0) continue;
+                EntityId mover = hunter.state.entity_id;
+                const auto member = membership.find(mover);
+                const auto container = member != membership.end() ? member->second : mover;
+                const auto mind = minds.find(container);
+                if (mind != minds.end()) {
+                    EntityId leader{};
+                    for (const auto id : mind->second.roster) {
+                        if (staged.find(id) != staged.end()) { leader = id; break; }
+                    }
+                    if (mover != leader) continue;
+                    if (mind->second.mode != SquadronMode::idle || mind->second.target != invalid_entity_id) continue;
+                    mover = container;
+                } else if (!hunter.motion || hunter.motion->kind != MotionKind::none || hunter.formation) continue;
+                const auto flight = crafts.find(hunter.state.entity_id);
+                if (flight != crafts.end() && (flight->second.chase != invalid_entity_id || flight->second.flipping)) continue;
+                if ((hunter.combat && hunter.combat->attack_target != invalid_entity_id)
+                    || impl_->ability_gate(hunter, tick).in_nebula || std::any_of(arrived_squadrons.begin(), arrived_squadrons.end(), [&](const Squadron& value) { return value.container == container; })
+                    || arrivals.contains(container)) continue;
+                const auto player = std::find_if(impl_->setup.players.begin(), impl_->setup.players.end(),
+                    [&](const Player& value) { return value.player_id == hunter.state.owner; });
+                const auto player_index = static_cast<std::size_t>(player - impl_->setup.players.begin());
+                const auto fogged = [&](const math::Vec3 point) {
+                    return impl_->fog && !impl_->fog->revealed(player_index, point);
+                };
+                std::vector<HuntEnemy> enemies;
+                for (const auto* candidate : hunt_inputs) {
+                    if (!players_hostile(impl_->snapshot_players, hunter.state.owner, candidate->state.owner)) continue;
+                    const auto* footprint = impl_->motion.footprint(candidate->state.type_id);
+                    if (!candidate->motion && crafts.find(candidate->state.entity_id) == crafts.end()
+                        && !(footprint && footprint->locomotor)) continue;
+                    const auto* enemy_profile = impl_->abilities.find(candidate->state.type_id);
+                    enemies.push_back({candidate->state.position, fogged(candidate->state.position), enemy_profile && enemy_profile->force_sensitive});
+                    if (enemies.size() == 128) break;
+                }
+                // WAB-54: a craft's authored range applies even when it has no REVEAL service.
+                const auto reveal_range = profile->hunt_reveal_range;
+                CombatRandom random(impl_->setup.seed, tick, hunter.state.entity_id, 0xfffe0006U); // coordinator-reserved, WAB-54
+                auto destination = hunt_destination(hunter.state.position, impl_->economy.bounds, reveal_range,
+                    profile->force_sensitive, enemies, fogged, random);
+                if (!destination) hunt_errors[index] = destination.error();
+                else hunt_moves[index] = HuntMove{mover, destination.value()};
+            }
+        });
+        if (!selected) return selected;
+        for (std::size_t index = 0; index < hunt_moves.size(); ++index) {
+            if (hunt_errors[index]) return unit_failure(hunt_inputs[index]->state.entity_id, *hunt_errors[index]);
+            if (!hunt_moves[index]) continue;
+            const auto& move = *hunt_moves[index];
+            auto& live = staged.at(move.unit);
+            const CommandPayload payload = AttackMovePayload{move.destination};
+            live.state.order = order_for(payload, tick);
+            if (minds.find(move.unit) != minds.end()) {
+                apply_squadron_order(minds.at(move.unit), payload, live.state.position, squadron_table);
+                if (auto spread = spread_squadrons({move.unit}); !spread) return spread;
+            } else {
+                const auto* footprint = table.avoidance ? tracked_footprint(table, live.state.type_id) : nullptr;
+                std::optional<std::size_t> layer;
+                if (footprint) layer = dynamic_layer_index(footprint->layer);
+                if (tracking && layer) {
+                    pending.push_back({move.unit, move.destination, std::nullopt, *layer, CommandKey{}, 0, false});
+                } else {
+                    if (auto planned = impl_->plan_order(live, MovePayload{move.destination}, frame); !planned) return planned;
+                    if (layer && live.motion) {
+                        if (auto submitted = submit(move.unit, live, *layer, std::nullopt); !submitted) return submitted;
+                    }
+                }
+            }
         }
     }
 

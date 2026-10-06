@@ -7,8 +7,8 @@ policy, not a claim about the original game's availability rules.
 | Rule | Policy | Evidence |
 | --- | --- | --- |
 | RG-01 | Gate an obtainable ship only for an unsupported primary weapon, locomotor, deployment lifecycle, or required launched/spawned object. Minor tag registry gaps never gate ships. | Owner release policy; unit census UC-01..06 |
-| RG-02 | Each primary weapon must fire its authored projectile with its damage and guidance. Unsupported hardpoint families and blast-area damage gate the ship. | Reviewed `src/units/unit_combat.cpp` and `src/units/unit_tables.cpp`; mass-driver weapons are supported under MD-01..06, while special hardpoints and blast-area damage remain unsupported. |
-| RG-03 | Disable an unsupported optional ability with a reason, retaining its ship. A projectile spawned only by that disabled ability does not gate the ship. Required craft, containers and carrier launches propagate gates recursively. | Owner policy; `ability_table` and the five-kind simulation dispatch; squadron and carrier services FL-03 and AB-60. |
+| RG-02 | Each primary weapon must fire its authored projectile with its damage and guidance. Unsupported hardpoint families or unreviewed projectile capabilities gate the ship. | Reviewed `src/units/unit_combat.cpp` and `src/units/unit_tables.cpp`; mass-driver weapons are supported under MD-01..06 and blast-area damage under WAD-01..30 (`src/sim/tactical/blast.cpp`), with Diamond Boron rocket termination under WAD-04. Special hardpoints remain gated. |
+| RG-03 | Disable an unsupported optional ability with a reason, retaining its ship. A projectile spawned only by that disabled ability does not gate the ship. Required craft, containers and carrier launches propagate gates recursively. | Owner policy; `ability_table` and the supported simulation dispatch; BARRAGE point activation BARR-01/WAD-38; squadron and carrier services FL-03 and AB-60. |
 | RG-04 | Keep gated entries visible and disabled in the station's authored list, with their reason as a tooltip. Reject human/AI purchases and reinforcement commands, and omit gated types from AI discovery. Station upgrade purchases and level replacements also check the disabled type flags, including the replacement destination. | Owner policy; existing purchasing button layers PU-61. |
 | RG-05 | Skip gated default forces and authored fleet entries at skirmish creation. Retain required station infrastructure and record its weapon gaps separately. | Coordinator's accepted infrastructure exception to owner release policy. |
 
@@ -30,8 +30,13 @@ sorted type-ID list; no simulation entity pass is added.
 
 After implementing a capability, update the reviewed data and regenerate the
 policy. Adding `mass-driver` to `supported_capabilities` re-enables ships whose
-only blocker is mass drivers and clears station mass-driver gaps. Blast-area and
-special weapon failures remain independent. Unsupported abilities and modifiers
+only blocker is mass drivers and clears station mass-driver gaps. Adding
+`blast-damage` re-enables Broadside and Marauder with their ordinary
+Diamond Boron missiles. Krayt and Peacebringer remain gated by their SPECIAL
+hardpoints. Broadside and Marauder BARRAGE is admitted under RG-03: the proxy and
+projectile override, authored timers, fixed scatter, height offset and
+`FIRE_RATE_MULTIPLIER` are applied under WAD-38. Its button targets a visible world
+point through BARR-01. Unsupported abilities and modifiers
 are excluded from skirmish ability profiles while their authored buttons remain
 disabled with explanations.
 

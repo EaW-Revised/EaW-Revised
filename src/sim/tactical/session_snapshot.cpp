@@ -363,9 +363,13 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
     // A snapshot with combat events (#73) appends them, and one with projectiles in flight (#80)
     // the (possibly empty) combat events and then the projectiles; any other encodes exactly as
     // before.
-    if (!combat_events_.empty() || !projectiles_.empty()) {
-        sim::detail::append_u64(bytes, combat_events_.size());
+    // WAD-07: expiry poses are presentation events; they add no canonical bytes.
+    const auto canonical_combat_events = std::count_if(combat_events_.begin(), combat_events_.end(),
+        [](const CombatEvent& event) { return event.kind != CombatEventKind::projectile_expired; });
+    if (canonical_combat_events != 0 || !projectiles_.empty()) {
+        sim::detail::append_u64(bytes, static_cast<std::uint64_t>(canonical_combat_events));
         for (const auto& event : combat_events_) {
+            if (event.kind == CombatEventKind::projectile_expired) continue;
             detail::append_combat_event(bytes, event);
         }
     }

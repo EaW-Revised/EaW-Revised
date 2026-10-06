@@ -577,6 +577,76 @@ void test_membership_index() {
     }
 }
 
+void test_squadron_object_weapon_reference() {
+    tactical::detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners;
+    world.relationships = relationships;
+    tactical::CombatProfile profile;
+    auto weapon = ion();
+    weapon.hardpoint = tactical::object_weapon;
+    weapon.cone_width = weapon.cone_height = units(360);
+    weapon.has_fire_b = false;
+    profile.weapons = {weapon};
+    // Target craft can have targetable hardpoints: a team-targeted object shot still aims at hull.
+    profile.hardpoints = {{0, at(0, 0), true}};
+    tactical::CombatState state;
+    state.attack_target = 20;
+    state.direct = true;
+    state.attack_hardpoint = 0;
+    state.weapons.resize(1);
+    state.weapons.front().pulses_left = 2;
+    tactical::detail::CombatUnit self;
+    self.id = 11;
+    self.owner = 1;
+    self.team = 1;
+    self.profile = &profile;
+    self.combat = &state;
+    self.transform = math::identity_matrix();
+    self.squadron_centre = at(0, 200);
+    tactical::detail::CombatUnit team;
+    team.id = 20;
+    team.owner = 2;
+    team.team = 2;
+    team.visible_to = 1;
+    auto near_shooter = team;
+    near_shooter.id = 21;
+    near_shooter.position = at(200, 0);
+    near_shooter.profile = &profile;
+    near_shooter.transform = math::to_matrix(math::identity_quat(), near_shooter.position).value();
+    auto near_centre = near_shooter;
+    near_centre.id = 22;
+    near_centre.position = at(200, 200);
+    near_centre.transform = math::to_matrix(math::identity_quat(), near_centre.position).value();
+    world.units = {self, team, near_shooter, near_centre};
+    world.teams = {{20, {21, 22}}};
+    const auto fired = [&](const eawr::sim::EntityId expected, const bool hull) {
+        const auto step = tactical::detail::step_combat(world, world.units.front());
+        expect(static_cast<bool>(step), "WWP-49: object team-target firing succeeds");
+        if (!step) return;
+        expect(step.value().events.size() == 1 && step.value().events.front().target == expected,
+            "WWP-49: the reference point chooses the expected live enemy craft");
+        if (hull && !step.value().events.empty()) expect(step.value().events.front().target_hardpoint == tactical::no_hardpoint,
+            "WWP-49: a team-targeted object weapon clears the aimed hardpoint");
+    };
+    fired(22, true);
+    world.units.front().squadron_centre.reset();
+    fired(21, true); // No squadron centre: retain the existing ungrouped reference.
+    world.units.front().squadron_centre = at(0, 200);
+    profile.weapons.front().hardpoint = 0;
+    fired(21, false); // WWP-19 is a separate route; this change does not alter it.
+    profile.weapons.front().hardpoint = tactical::object_weapon;
+    world.units.pop_back();
+    fired(21, true); // The selected craft dies; the held team still resolves a live survivor.
+    world.units.back().profile = nullptr;
+    const auto profileless = tactical::detail::step_combat(world, world.units.front());
+    expect(static_cast<bool>(profileless), "WWP-49: a profile-less team member is handled safely");
+    if (profileless) expect(profileless.value().events.empty(),
+        "WWP-49: a profile-less team member does not admit an object shot");
+}
+
 void test_member_held_identity() {
     tactical::detail::CombatWorld world;
     const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
@@ -678,6 +748,7 @@ int main(int argc, char** argv) {
     test_validation();
     test_membership_index();
     test_member_held_identity();
+    test_squadron_object_weapon_reference();
     test_note_cases(argv[2]);
     test_priority_beats_distance();
     test_fire_reveal();
@@ -686,7 +757,9 @@ int main(int argc, char** argv) {
     test_attack_order();
     test_neutral_relationships();
     test_ship_level_choice();
+    test_ship_level_suitability();
     test_restrictions_and_fog();
+    test_noncollidable_opportunity_target();
     test_special_weapon_service();
     test_zero_cone();
     test_fire_bone_cone();

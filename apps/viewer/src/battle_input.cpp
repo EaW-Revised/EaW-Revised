@@ -1,10 +1,12 @@
 #include "battle_input.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/tactical/space.hpp"
 
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -16,7 +18,6 @@
 #include <godot_cpp/classes/world2d.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cmath>
 #include <limits>
@@ -63,14 +64,9 @@ void BattleInput::note(std::string text) {
 
 ui::ScreenRect BattleInput::viewport_rect() const { return {0.0F, 0.0F, viewport_[0], viewport_[1]}; }
 
-double BattleInput::now(const LiveSessionView& live) const {
-    if (live.options().real_time) {
-        using clock = std::chrono::steady_clock;
-        static const clock::time_point start = clock::now();
-        return std::chrono::duration<double>(clock::now() - start).count();
-    }
-    // A driven run times the control-group double tap on the presented tick, so it repeats.
-    return live.presented_tick() / static_cast<double>(sim::tactical::logical_frames_per_second);
+double BattleInput::logical_frame(const LiveSessionView& live) const {
+    // G-3: pause and speed changes affect the control-group focus window.
+    return live.presented_tick();
 }
 
 void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& population, const SpaceEnvironment& space) {
@@ -115,6 +111,20 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
             pick_shapes_.insert_or_assign(skirmish::type_id(type.id), std::move(shape));
         }
         pick_shapes_loaded_ = true;
+    }
+    // WNO-23/42, WPR-52: consume reached ownership/replacement events before
+    // deriving selection flags from the current frame's units.
+    for (const auto& tick : live.battle_frame().reached) {
+        if (tick.tick <= replacement_tick_) continue;
+        for (const auto& event : tick.events) {
+            if (event.kind == sim::tactical::EventKind::pad_captured) {
+                selection_.owner_changed(event.unit, static_cast<sim::tactical::PlayerId>(event.sequence),
+                    event.player, live.local_player());
+            }
+            if (event.kind == sim::tactical::EventKind::station_replaced)
+                selection_.replace_entity(event.unit, event.sequence);
+        }
+        replacement_tick_ = tick.tick;
     }
     units_.clear();
     own_selection_ = false;
@@ -185,15 +195,6 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
         for (auto& id : selected) id = live.pad_selection_target(id);
         std::erase(selected, sim::invalid_entity_id);
         selection_.replace(selected);
-    }
-    // WPR-52: process all reached ticks before retaining the surviving selection.
-    for (const auto& tick : live.battle_frame().reached) {
-        if (tick.tick <= replacement_tick_) continue;
-        for (const auto& event : tick.events) {
-            if (event.kind != sim::tactical::EventKind::station_replaced) continue;
-            selection_.replace_entity(event.unit, event.sequence);
-        }
-        replacement_tick_ = tick.tick;
     }
     selection_.retain(live.alive_units());
 }
@@ -295,10 +296,19 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironme
     input.camera_rotate = camera.second;
     if (const auto* orders = live.order_input()) input.mode = orders->mode();
     if (ability_target_) {
-        input.ability = ui::CursorTarget::enemy;
-        // CU-09 limitation: input currently classifies hostile contacts only; the
+        const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
+        const bool point_target = kind == sim::tactical::AbilityKind::barrage
+            || kind == sim::tactical::AbilityKind::weaken_enemy;
+        input.ability = point_target ? ui::CursorTarget::space_position : ui::CursorTarget::enemy;
+        // CU-09 limitation: object abilities currently classify hostile contacts only; the
         // full ability admission query remains unwired (foc-cursors.md, Scope).
-        input.ability_valid = hovered_hostile_;
+        input.ability_valid = point_target ? pointer_ && ability_point(*pointer_, live).has_value() : hovered_hostile_;
+        // CU-12: movement passability must not replace the point ability's invalid pointer.
+        if (point_target) input.passable = true;
+    }
+    if (pointer_ && !ability_target_ && !placing_ && input.mode == ui::OrderMode::none && !input.ctrl && !input.alt) {
+        if (const auto reticle = world_ui_->reticle_at(*pointer_))
+            input.repair = live.hardpoint_repair_allowed(reticle->entity, reticle->hardpoint);
     }
     input.placing = placing_.has_value();
     input.placement_valid = live.placement_valid();
@@ -307,6 +317,72 @@ void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironme
     cursor_history_.record(live.shown_frames(), id, hover);
     cursor_.update(id, delta);
     if (pointer_) cursor_.capture_overlay(*host_, Vector2((*pointer_)[0], (*pointer_)[1]), capture);
+}
+
+std::optional<sim::math::Vec3> BattleInput::ability_point(
+    const std::array<float, 2> at, const LiveSessionView& live) const {
+    if (!ability_target_) return std::nullopt;
+    const auto aim_ray = ray(at[0], at[1]);
+    const auto plane = aim_ray ? ui::battle_plane_point(*aim_ray) : std::nullopt;
+    if (!plane) return std::nullopt;
+    const auto x = scene::fixed_from_binary32((*plane)[0]);
+    const auto y = scene::fixed_from_binary32((*plane)[1]);
+    if (!x || !y) return std::nullopt;
+    const sim::math::Vec3 point{x.value(), y.value(), sim::math::Fixed{}};
+    const auto& frame = live.battle_frame();
+    if (!frame.latest) return std::nullopt;
+    const auto instances = frame.latest->instances();
+    const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
+    if (kind == sim::tactical::AbilityKind::barrage) {
+        // BARR-01, CU-12: logical visibility, independent of the presentation reveal switch.
+        if (frame.fog) {
+            const auto& rules = frame.fog->rules;
+            const auto as_double = [](const sim::math::Fixed value) {
+                return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
+            };
+            ui::MinimapFogCells cells;
+            cells.left = as_double(rules.map_left);
+            cells.top = as_double(rules.map_top);
+            cells.cell = as_double(rules.cell_size);
+            cells.wide = rules.cells_wide;
+            cells.tall = rules.cells_tall;
+            cells.rows = std::shared_ptr<const std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>>(
+                frame.fog, &frame.fog->values);
+            return cells.revealed(as_double(point.x), as_double(point.y)) ? std::optional{point} : std::nullopt;
+        }
+        const auto players = frame.latest->players();
+        const auto own = std::find_if(players.begin(), players.end(),
+            [&](const auto& player) { return player.player_id == live.local_player(); });
+        if (own == players.end()) return std::nullopt;
+        for (const auto& observer : instances) {
+            if (observer.team != own->team_id || !observer.reveal_range) continue;
+            const sim::math::Vec3 position{observer.fixed_transform.rows[0][3],
+                observer.fixed_transform.rows[1][3], observer.fixed_transform.rows[2][3]};
+            if (sim::tactical::within_range(position, point, *observer.reveal_range, sim::tactical::RangeMetric::planar))
+                return point;
+        }
+        return std::nullopt;
+    }
+    if (kind != sim::tactical::AbilityKind::weaken_enemy || live.tables() == nullptr) return std::nullopt;
+    // U-10: retain the simulation's authored-radius gate and zero-point owner fallback.
+    for (const auto entity : ability_target_->units) {
+        const auto source = std::find_if(instances.begin(), instances.end(),
+            [&](const auto& instance) { return instance.entity_id == entity; });
+        if (source == instances.end()) continue;
+        const auto& types = live.tables()->units;
+        const auto type = std::find_if(types.begin(), types.end(),
+            [&](const auto& unit) { return skirmish::type_id(unit.id) == source->type_id; });
+        if (type == types.end()) continue;
+        const auto ability = std::find_if(type->abilities.begin(), type->abilities.end(),
+            [](const auto& entry) { return entry.type == "WEAKEN_ENEMY"; });
+        if (ability == type->abilities.end()) continue;
+        const auto reach = ability->effective_radius.value_or(sim::math::Fixed{});
+        const sim::math::Vec3 position{source->fixed_transform.rows[0][3],
+            source->fixed_transform.rows[1][3], source->fixed_transform.rows[2][3]};
+        if (point == sim::math::Vec3{} || reach.raw() <= 0
+            || sim::tactical::within_range(position, point, reach, sim::tactical::RangeMetric::planar)) return point;
+    }
+    return std::nullopt;
 }
 
 void BattleInput::follow(const LiveSessionView& live, SpaceEnvironment& space) {

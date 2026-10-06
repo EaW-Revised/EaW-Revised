@@ -214,6 +214,9 @@ public:
     [[nodiscard]] std::optional<sim::math::Mat3x4> live_transform(const LivePose& pose) const;
     [[nodiscard]] std::size_t live_ship_count() const noexcept { return live_decisions_.size(); }
     [[nodiscard]] std::optional<LiveShipEmitterView> live_ship_emitter_view(std::size_t ship) const;
+    struct LiveBoneFrame final { sim::math::Mat3x4 transform; bool visible{}; };
+    // PS-02: the same posed bone and model transform as the drawn hull.
+    [[nodiscard]] std::optional<LiveBoneFrame> live_bone_frame(sim::EntityId entity, std::uint32_t bone) const;
     // #427: the entities of a live ship's own model surfaces (hull, engine and damage-decal
     // surfaces), without its hardpoints' attached models and its shield shell: what its
     // light scale reaches (BP-21).
@@ -367,6 +370,9 @@ private:
     struct AnimatedInstance final { sim::EntityId entity{}; sim::AssetId asset{}; std::size_t idle{}; };
     std::vector<std::shared_ptr<const animation::Player>> clips_;
     std::vector<IdlePlacement> idle_placements_;
+    std::map<std::size_t, std::size_t> idle_live_ships_;
+    std::map<sim::EntityId, std::size_t> contact_live_ships_;
+    std::vector<std::vector<animation::BonePose>> contact_bones_;
     std::vector<AnimatedInstance> animated_instances_;
     std::map<std::string, animation::IdlePlayback> idle_playbacks_;
     // Object id -> the Idle_Anim_00_Rate_Mod text that did not parse (rate 1 kept).

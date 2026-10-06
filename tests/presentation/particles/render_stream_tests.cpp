@@ -82,7 +82,7 @@ void test_legacy_sort_triangles_and_atlas() {
     emitter.renderer_id = 22;
     emitter.primitive_mode = 1; emitter.texture_size = 10; emitter.uv_index = constant(8);
     particles::SystemDefinition system; system.emitters = {emitter};
-    particles::CpuSystem cpu(system, 4, 32); static_cast<void>(cpu.advance(0));
+    particles::CpuSystem cpu(system, 4, 32); static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(cpu.particles().size() == 1 && close(cpu.particles()[0].texcoords.x, 2.0F / 3)
         && close(cpu.particles()[0].texcoords.y, 2.0F / 3)
         && close(cpu.particles()[0].texcoords.z, 1.0F / 3), "PS-30 nonsquare atlas uses floor square root");
@@ -96,13 +96,23 @@ void test_cpu_steady_state_allocates_nothing() {
     death.bursting = true; death.particles_per_interval = 3; death.spawn_interval = 2;
     particles::SystemDefinition system; system.emitters = {root, trail, death};
     particles::CpuSystem cpu(system, 9, 128);
-    static_cast<void>(cpu.advance(0));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     const auto* storage = cpu.particles().data();
     const auto before = global_allocations.load(std::memory_order_relaxed);
     for (int tick = 0; tick < 300; ++tick) static_cast<void>(cpu.advance(1.0F / 30));
     const auto after = global_allocations.load(std::memory_order_relaxed);
     expect(before == after && storage == cpu.particles().data(),
         "root/trail/death steady state allocates nothing after spawn reserves");
+    auto mesh = mesh_system(particles::MeshSpawnMode::every_vertex);
+    mesh.emitters[0].stop_time = 0; mesh.emitters[0].lifetime = 0.1F;
+    particles::CpuSystem shuffled(mesh, 9, 16, test_mesh_binding());
+    static_cast<void>(shuffled.advance(std::numeric_limits<float>::min()));
+    const auto mesh_before = global_allocations.load(std::memory_order_relaxed);
+    std::size_t admitted{};
+    for (int tick = 0; tick < 300; ++tick) admitted += shuffled.advance(1.0F / 30).spawned;
+    const auto mesh_after = global_allocations.load(std::memory_order_relaxed);
+    expect(admitted > 0 && mesh_before == mesh_after,
+        "PS-14 repeated full vertex shuffles and slot recycling allocate nothing");
 }
 
 void test_particle_detail_gates() {
@@ -114,7 +124,7 @@ void test_particle_detail_gates() {
     emitter.particles_per_interval = 17;
     system.emitters = {emitter};
     CpuSystem full(system, 43, 17);
-    expect(full.advance(0).spawned == 17, "detail fixture fills fixed slots");
+    expect(full.advance(std::numeric_limits<float>::min()).spawned == 17, "detail fixture fills fixed slots");
     for (const float detail : {0.0F, 0.4F, 0.6F, 0.8F, 1.0F}) {
         expect(bool(full.set_detail({detail, 1})), "global detail accepted independently");
         const std::size_t k = static_cast<std::size_t>(std::ceil(17.0F * detail));
@@ -139,12 +149,12 @@ void test_particle_detail_gates() {
         CpuSystem cpu(system, 51, 64);
         expect(bool(cpu.set_detail({1, lod})), "boundary local LOD accepted");
         const std::size_t count = lod <= 0.5F ? 5U : lod <= 0.7F ? 7U : 9U;
-        expect(cpu.advance(0).spawned == count, "PS-36 exact first ceil(N * band) emitters");
+        expect(cpu.advance(std::numeric_limits<float>::min()).spawned == count, "PS-36 exact first ceil(N * band) emitters");
         for (std::size_t index = 0; index < 9; ++index)
             expect(cpu.emitter_enabled(index) == (index < count), "local emitter admission independent of global detail");
     }
     CpuSystem live(system, 52, 64);
-    expect(live.advance(0).spawned == 9, "all emitters start at full LOD");
+    expect(live.advance(std::numeric_limits<float>::min()).spawned == 9, "all emitters start at full LOD");
     expect(bool(live.set_detail({1, 0.5F})), "lower local LOD on existing particles");
     expect(live.advance(0.5F).killed == 0 && live.particles().size() == 9,
         "PS-37 disabled emitters keep their live particles");
@@ -158,7 +168,7 @@ void test_particle_detail_gates() {
     CpuSystem linked(system, 53, 64);
     expect(bool(linked.set_detail({1, 0.5F})) && !linked.emitter_enabled(0),
         "PS-36 disabled parent propagates across forward child links");
-    expect(linked.advance(0).spawned == 1, "disabled parent and propagated child reject births");
+    expect(linked.advance(std::numeric_limits<float>::min()).spawned == 1, "disabled parent and propagated child reject births");
 
     child.parent_emitter = 0; child.spawn_interval = 1; child.particles_per_interval = 30; child.stop_time = 0;
     auto death = drawable_emitter(); death.creator_id = 40; death.parent_emitter = 0; death.bursting = true;
@@ -168,20 +178,20 @@ void test_particle_detail_gates() {
         // this contract isolates child permissions from the independent mask.
         CpuSystem cpu(system, 54, 17);
         expect(bool(cpu.set_detail({1, lod})), "child permissions configured");
-        const auto born = cpu.advance(0);
+        const auto born = cpu.advance(std::numeric_limits<float>::min());
         expect(born.spawned == (lod > 0.7F ? 2U : 1U), "trail births allowed only above 0.7");
         const auto retired = cpu.advance(0.11F);
         expect(retired.death_bursts == (lod > 0.5F ? 1U : 0U), "PS-22 death burst permission above 0.5");
     }
     CpuSystem invisible_parent(system, 55, 64);
     expect(bool(invisible_parent.set_detail({0, 1})), "hide parent by global draw mask");
-    const auto hidden = invisible_parent.advance(0);
+    const auto hidden = invisible_parent.advance(std::numeric_limits<float>::min());
     expect(hidden.spawned == 1,
         "PS-37 draw-ineligible parent rejects continuous trail births while root still spawns");
     expect(invisible_parent.advance(0.11F).death_bursts == 1,
         "draw mask does not replace independent death-spawn permission");
     CpuSystem running_trail(system, 56, 64);
-    expect(running_trail.advance(0).child_instances_started == 1, "trail starts before lowering detail");
+    expect(running_trail.advance(std::numeric_limits<float>::min()).child_instances_started == 1, "trail starts before lowering detail");
     expect(bool(running_trail.set_detail({0, 1})), "mask existing parent");
     expect(running_trail.advance(0.05F).spawned == 0, "existing continuous child observes current parent mask");
     expect(bool(running_trail.set_detail({1, 1})), "restore existing parent draw eligibility");
@@ -193,7 +203,7 @@ void test_particle_detail_gates() {
     for (const float lod : {0.5F, 0.7F, 0.7001F}) {
         CpuSystem cpu(system, 57, 4);
         expect(bool(cpu.set_detail({1, lod})), "terrain permission configured");
-        static_cast<void>(cpu.advance(0));
+        static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
         expect(cpu.advance(0.01F).killed == (lod > 0.7F ? 1U : 0U), "terrain collision disabled through 0.7");
     }
     auto mesh = mesh_system(particles::MeshSpawnMode::every_vertex);
@@ -201,7 +211,7 @@ void test_particle_detail_gates() {
         mesh.emitters[0].weather = weather;
         CpuSystem cpu(mesh, 58, 17, test_mesh_binding());
         expect(bool(cpu.set_detail({0, 0})), "zero detail on every-vertex emitter");
-        expect(cpu.advance(0).spawned == 2, "every-vertex birth count unchanged at zero detail");
+        expect(cpu.advance(std::numeric_limits<float>::min()).spawned == 2, "every-vertex birth count unchanged at zero detail");
         for (const auto& particle : cpu.particles())
             expect(particle.draw_eligible == !weather, "PS-35 every-vertex exemption is nonweather only");
     }
@@ -209,7 +219,8 @@ void test_particle_detail_gates() {
     system.emitters = {drawable_emitter()}; system.emitters[0].spawn_interval = 1;
     system.emitters[0].stop_time = 0; system.emitters[0].lifetime = 1.5F;
     CpuSystem slots(system, 59, 3);
-    static_cast<void>(slots.advance(0)); static_cast<void>(slots.advance(1));
+    // PS-10: cross each subsequent boundary to exercise slot retirement/reuse.
+    static_cast<void>(slots.advance(std::numeric_limits<float>::min())); static_cast<void>(slots.advance(std::nextafter(1.0F,2.0F)));
     static_cast<void>(slots.advance(0.6F));
     expect(slots.particles().size() == 1 && slots.particles()[0].draw_slot == 1,
         "draw slot remains stable through packed storage compaction");
@@ -225,7 +236,7 @@ void test_particle_detail_gates() {
     const auto handle = registry.spawn(system, 60, 17);
     expect(bool(handle), "heat fixture spawns with heat disabled");
     if (handle) {
-        const auto hidden_heat = registry.advance(handle.value(), 0, test_camera());
+        const auto hidden_heat = registry.advance(handle.value(), std::numeric_limits<float>::min(), test_camera());
         expect(bool(hidden_heat) && hidden_heat.value().particles == 17 && hidden_heat.value().emitters[0].quads == 0,
             "disabled heat phase preserves particle aging and births");
         expect(bool(registry.set_detail({1, 1, true})), "heat can be enabled without changing LOD");
@@ -275,7 +286,7 @@ void test_death_burst_ignores_parent_velocity(){
     expect(bool(loaded),"V1 death velocity fixture parses");
     if(!loaded)return;
     particles::CpuSystem cpu(loaded.value(),17,128);
-    static_cast<void>(cpu.advance(0));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     const auto death=cpu.advance(2.0F);
     const auto found=std::find_if(cpu.particles().begin(),cpu.particles().end(),
         [](const particles::Particle& particle){return particle.emitter_index==0;});
@@ -297,7 +308,7 @@ void test_legacy_moving_kite() {
            "MD-07: legacy inheritance and kite path are applied");
     particles::CpuSystem cpu(loaded.value(), 17, 128);
     cpu.set_origin({100, 0, 0});
-    static_cast<void>(cpu.advance(0));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     cpu.set_origin({110, 0, 0});
     static_cast<void>(cpu.advance(0.1F));
     expect(!cpu.particles().empty() && close(cpu.particles().front().motion_velocity.x, 100),
@@ -332,7 +343,7 @@ void test_legacy_moving_kite() {
     expect(close(stream.bounds_min.x, 109) && close(stream.bounds_max.x, 111),
            "MD-07: zero movement draws an unstretched quad");
     particles::CpuSystem repeated(loaded.value(), 17, 128);
-    repeated.set_origin({100, 0, 0}); static_cast<void>(repeated.advance(0));
+    repeated.set_origin({100, 0, 0}); static_cast<void>(repeated.advance(std::numeric_limits<float>::min()));
     repeated.set_origin({110, 0, 0}); static_cast<void>(repeated.advance(0.1F));
     particles::VertexStream repeat_stream;
     particles::build_stream(plan, repeated.particles().first(1), camera, repeat_stream);
@@ -656,8 +667,9 @@ void test_effect_brightness() {
         const auto& q = bright_stream->second.vertices;
         scaled = p.size() == q.size();
         for (std::size_t index = 0; scaled && index < p.size(); ++index) {
-            scaled = close(q[index].color.x, p[index].color.x * 0.2F) && close(q[index].color.y, p[index].color.y * 0.2F)
-                && close(q[index].color.z, p[index].color.z * 0.2F) && close(q[index].color.w, p[index].color.w * 0.2F)
+            const auto byte_dim=[](const float value){return std::trunc(value*255*0.2F)/255;};
+            scaled = close(q[index].color.x, byte_dim(p[index].color.x)) && close(q[index].color.y, byte_dim(p[index].color.y))
+                && close(q[index].color.z, byte_dim(p[index].color.z)) && close(q[index].color.w, byte_dim(p[index].color.w))
                 && q[index].position.x == p[index].position.x;
         }
     }
@@ -844,7 +856,9 @@ void test_camera_and_attachment_frames() {
         const auto attachment = player.value().attachment(pose.value(), "socket", playback::AttachmentSpace::model);
         expect(bool(attachment), "named attachment resolves");
         expect(bool(registry.set_frame(handle.value(), particles::emitter_frame_from_render(attachment.value().column_major))), "attachment frame applies");
-        const auto stats = registry.advance(handle.value(), step == 0 ? 0.0F : dt, test_camera());
+        // PS-10/PS-42: admit a positive first update and cross later intervals strictly.
+        const auto stats = registry.advance(handle.value(), step == 0 ? std::numeric_limits<float>::min() :
+            dt + 0.0001F, test_camera());
         expect(bool(stats), "attached effect advances");
         // The newest particle was born at the socket on this frame's clock.
         const float expected_x = 10.0F * time;

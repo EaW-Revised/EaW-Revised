@@ -274,7 +274,10 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
                 }
             }
         }
-        if (acceptable(target.position, true)) return Aim{target.position, no_hardpoint};
+        // WWP-19/50/72: fallback raises the aim in world Z, without moving the target model.
+        auto fallback = target.position;
+        if (target.profile != nullptr) fallback.z = take(math::add(fallback.z, target.profile->ranged_target_z_adjust));
+        if (acceptable(fallback, true)) return Aim{fallback, no_hardpoint};
         return std::nullopt;
     }
 

@@ -306,6 +306,7 @@ void capital_station_test(const Content& content, const std::filesystem::path& o
             station.order = {};
             setup.units = {ship, station};
             setup.squadrons.clear();
+            setup.free_garrisons.clear(); // the isolated world has no starting-force roster
             auto world = tactical::TacticalSession::create(setup, content.content.sensors, content.content.durability,
                 content.content.motion, std::nullopt, content.content.combat, {}, content.content.abilities);
             expect(static_cast<bool>(world), "capital facing: isolated world builds");
@@ -426,6 +427,105 @@ void capital_station_test(const Content& content, const std::filesystem::path& o
     }
 }
 
+// R-08 / R-02: an enemy mining pad cannot acquire and retain a capital's weapons.
+// Introduce the corvette after the pad has been visible through the initial recharge,
+// matching the case where a later enemy arrives directly ahead of an idle/guarding ship.
+void victory_pad_test(const Content& content, const std::filesystem::path& output = {}) {
+    const auto victory_type = skirmish::type_id("Victory_Destroyer");
+    const auto corvette_type = skirmish::type_id("Corellian_Corvette");
+    const auto pad_type = skirmish::type_id("Mineral_Extractor_Pad");
+    const auto* pad_profile = content.content.combat.find(pad_type);
+    expect(pad_profile != nullptr && !pad_profile->living_projectile_collision,
+        "Victory pad: loaded mining pad rejects living projectile collision");
+    if (pad_profile == nullptr) return;
+    if (!output.empty()) std::filesystem::create_directories(output);
+    for (const bool guarding : {false, true}) {
+        const std::string label = guarding ? "guard" : "idle";
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto setup = skirmish::recording_setup(skirmish::m2_fixture(), content.start);
+            for (auto& slot : setup.skirmish->slots)
+                if (slot.player == 2) slot.fleet.push_back("Victory_Destroyer");
+            const auto point = [](const std::int64_t x, const std::int64_t y, const std::int64_t z) {
+                return math::Vec3{math::Fixed::from_integer(x).value(), math::Fixed::from_integer(y).value(),
+                    math::Fixed::from_integer(z).value()};
+            };
+            tactical::UnitState ship{}, pad{}, corvette{};
+            ship.entity_id = 1;
+            ship.type_id = victory_type;
+            ship.owner = 2;
+            ship.position = point(0, 0, -150);
+            pad.entity_id = 2;
+            pad.type_id = pad_type;
+            pad.owner = 1;
+            pad.position = point(600, 180, 0);
+            corvette.entity_id = 3;
+            corvette.type_id = corvette_type;
+            corvette.owner = 1;
+            corvette.position = point(2500, 0, -20);
+            setup.units = {ship, pad, corvette};
+            setup.squadrons.clear();
+            setup.free_garrisons.clear(); // the isolated world has no starting-force roster
+            auto world = tactical::TacticalSession::create(setup, content.content.sensors, content.content.durability,
+                content.content.motion, std::nullopt, content.content.combat, {}, content.content.abilities);
+            expect(static_cast<bool>(world), "Victory pad: isolated loaded world builds");
+            if (!world) continue;
+            auto& session = world.value();
+            if (guarding) expect(static_cast<bool>(session.submit(tactical::PlayerCommand{
+                {0, 2, 1}, {1}, tactical::GuardPayload{ship.position, 0}})), "Victory pad: guard point accepted");
+            expect(static_cast<bool>(session.submit(tactical::PlayerCommand{
+                {180, 1, 1}, {3}, tactical::MovePayload{point(428, 0, -20)}})),
+                "Victory pad: corvette moves into the forward cone");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::optional<std::uint64_t> first_shot;
+            std::uint64_t pad_shots = 0;
+            std::uint64_t corvette_shots = 0;
+            std::uint64_t pad_targets = 0;
+            std::uint64_t corvette_targets = 0;
+            for (std::uint64_t tick = 0; tick < 900; ++tick) {
+                auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "Victory pad: staged tick succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto combat = session.combat_state(1);
+                if (combat && combat->attack_target == 2) ++pad_targets;
+                if (combat && combat->attack_target == 3) ++corvette_targets;
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::weapon_fired || event.shooter != 1) continue;
+                    if (event.target == 2) ++pad_shots;
+                    if (event.target == 3) {
+                        ++corvette_shots;
+                        if (!first_shot) first_shot = stepped.value().completed_tick;
+                    }
+                }
+            }
+            expect(pad_shots == 0, "R-08: Victory never fires at the noncollidable mining pad");
+            expect(pad_targets == 0, "WCC-25: Victory never acquires the noncollidable pad as its ship target");
+            expect(corvette_targets > 0, "WCC-25: Victory acquires the valid arriving corvette as its ship target");
+            expect(first_shot && *first_shot <= 900,
+                "R-08: idle/guarding Victory fires at the arriving forward corvette within 900 ticks");
+            if (workers == 1) {
+                reference = hashes;
+                std::cout << "Victory pad " << label << ": first corvette shot " << text(first_shot)
+                    << ", corvette shots " << corvette_shots << ", pad shots " << pad_shots << '\n';
+                std::cout << "WCC-25 " << label << ": pad-target ticks " << pad_targets
+                    << ", corvette-target ticks " << corvette_targets << '\n';
+                if (!output.empty()) {
+                    const auto bytes = tactical::write_replay(session.record());
+                    expect(static_cast<bool>(bytes), "Victory pad: observation replay writes");
+                    if (bytes) {
+                        std::ofstream replay(output / ("victory-pad-" + label + ".eawr-replay"), std::ios::binary);
+                        replay.write(reinterpret_cast<const char*>(bytes.value().data()),
+                            static_cast<std::streamsize>(bytes.value().size()));
+                        expect(static_cast<bool>(replay), "Victory pad: observation replay saves");
+                    }
+                }
+            } else expect(hashes == reference, "Victory pad: every tick matches on 1/2/4/8 workers");
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -435,9 +535,13 @@ int main(int argc, char** argv) {
         return 0;
     }
     const bool capital_only = argc > 1 && std::string(argv[1]) == "--capital-facing";
-    const std::uint64_t ticks = !capital_only && argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1050;
+    const bool pad_only = argc > 1 && std::string(argv[1]) == "--victory-pad";
+    const std::uint64_t ticks = !capital_only && !pad_only && argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 1050;
     auto content = load(*root);
     if (!content) return 1;
+    if (!capital_only) victory_pad_test(*content,
+        pad_only && argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{});
+    if (pad_only) return failures == 0 ? 0 : 1;
     if (capital_only) {
         capital_station_test(*content, argc > 2 ? std::filesystem::path(argv[2]) : std::filesystem::path{});
         return failures == 0 ? 0 : 1;

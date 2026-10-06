@@ -222,12 +222,17 @@ Presentation tag coverage (legacy EAWR-653). `deferred` movement-constant covera
 `Rotate_Formation_Facing_Moves`, `Short_Range_Attack_Formation_Coefficient`. The two side errors
 matter only to formations of several members (land, squadron escorts, WMV-12).
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | In the unpaused logic path, synchronized objects are serviced first, then unsynchronized objects, then the collision system, then the movement coordinator system. This is after object behaviour/hardpoint service and before mode income/player service. | EUS-08 |
+| U-02 | Settled by the debug build's constant initializers: `Should_Use_Space_Idle_Movement` defaults to false and `Idle_Movement_Frames` to 5 (WMV-14). | Previously sourced in this walk |
+
 ## Unverified, and what would settle it
 
-- **U-01** The order of the coordinator system's service against the objects' services within a
-  frame (Scope). Ghidra: the space mode's per-frame service.
-- **U-02** Settled by the debug build's constant initializers: `Should_Use_Space_Idle_Movement`
-  defaults to false and `Idle_Movement_Frames` to 5 (WMV-14).
 - **U-03** A retail capture of a ship ordered to attack a unit that then goes into fog
   (WMV-13): the ship should fly to the last seen point and stop there.
 - **U-04** A retail capture of a Nebulon-B ordered through a held MC80 (WMV-04) would show the

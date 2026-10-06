@@ -162,6 +162,7 @@ void EawrProductionPanel::set_pane_open(const bool open) {
     pane_open_ = open;
     hovered_close_ = false;
     if (open) flash_start_.reset();
+    if (open && open_) open_(); // WR-07: closing and idempotent opens add no cue.
     ++toggles_;
     update_text();
     queue_redraw();
@@ -220,7 +221,7 @@ std::optional<EawrProductionPanel::Target> EawrProductionPanel::target_at(const 
     }
     for (const QueueView& queued : view_.queue) {
         if (queued.component < setup_.queue.size() && screen(setup_.queue[queued.component].button.rect).has_point(point)) {
-            return Target{Hit::queue, queued.component};
+            return Target{Hit::queue, queued.component, queued.entry_id};
         }
     }
     if (setup_.reinforce && screen(setup_.reinforce->rect).has_point(point)) return Target{Hit::reinforce, 0};
@@ -244,10 +245,27 @@ void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
         return;
     }
     const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr());
+    // WR-X01: Godot retains pool drags in this GUI, including wheel events.
+    // Claim the release too, so this gesture cannot also reach camera zoom.
+    if (button && dragging_pool_ && (button->get_button_index() == MOUSE_BUTTON_WHEEL_UP ||
+                                    button->get_button_index() == MOUSE_BUTTON_WHEEL_DOWN)) {
+        accept_event();
+        if (button->is_pressed() && drag_wheel_) {
+            const double direction = button->get_button_index() == MOUSE_BUTTON_WHEEL_UP ? 1.0 : -1.0;
+            drag_wheel_(direction * button->get_factor());
+        }
+        return;
+    }
     if (button == nullptr || (button->get_button_index() != MOUSE_BUTTON_LEFT && button->get_button_index() != MOUSE_BUTTON_RIGHT)) return;
     accept_event();
     const auto target = target_at(button->get_position());
     const bool right = button->get_button_index() == MOUSE_BUTTON_RIGHT;
+    if (right && dragging_pool_) {
+        dragging_pool_ = false;
+        pressed_.reset();
+        if (drag_cancel_) drag_cancel_();
+        return;
+    }
     if (button->is_pressed()) {
         pressed_ = target;
         pressed_right_ = right;
@@ -282,7 +300,7 @@ void EawrProductionPanel::_gui_input(const Ref<InputEvent>& event) {
     switch (target->kind) {
     case Hit::queue:
         // PU-63: left click leaves the queue alone; right release cancels and refunds.
-        if (right) { ++cancels_; if (cancel_) cancel_(target->index); }
+        if (right) { ++cancels_; if (cancel_) cancel_(pressed->index, pressed->entry_id); }
         break;
     case Hit::reinforce: if (!right && reinforce_enabled()) set_pane_open(!pane_open_); break;
     case Hit::close: if (!right) set_pane_open(false); break;

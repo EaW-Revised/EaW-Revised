@@ -125,7 +125,8 @@ class SelectedFactionReplay(BattleInputRunner, unittest.TestCase):
                 "--eawr-skirmish-slot", "2:Rebel:1:ai", "--eawr-skirmish-seed", "67"), ticks=4200, ai=True)
             self.assertEqual(original["live_session"]["ai"]["players"], [1, 2])
             opcodes = self._opcodes(replay)
-            self.assertIn(9, opcodes)
+            # WAS-26 records AI purchases with prepaid opcode 24.
+            self.assertTrue(any(opcode in (9, 24) for opcode in opcodes))
             self.assertTrue(any(opcode in (11, 19) for opcode in opcodes))
 
     def test_three_faction_recording_replays_and_rejects_a_changed_identity(self):

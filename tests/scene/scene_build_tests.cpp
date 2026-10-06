@@ -1,4 +1,5 @@
 #include "scene_test_support.hpp"
+#include "eawr/scene/space_population.hpp"
 
 namespace eawr::tests::scene_tests {
 
@@ -172,6 +173,44 @@ void scene_contracts() {
     input.map_sha256 = "synthetic-map-sha";
     input.catalog = &catalog;
     input.access = assets.access();
+    {
+        // BP-70: an invented root particle projectile follows the effect-only route.
+        const std::vector<Record> rounds{
+            {"EAWR_SCENE_PARTICLE_ROUND", std::array<float, 3>{11, 22, 33}},
+            {"EAWR_SCENE_PARTICLE_BAD_SCALE", std::array<float, 3>{11, 22, 33}},
+            {"EAWR_SCENE_PARTICLE_PROP", std::array<float, 3>{11, 22, 33}},
+        };
+        const auto round_bytes = ted(rounds);
+        auto round_source = source;
+        round_source.stored_size = round_bytes.size();
+        auto round_map = eawr::assets::load_map(round_bytes, round_source, types);
+        expect(static_cast<bool>(round_map), "root particle fixture map loads");
+        if (round_map) {
+            round_map.value().kind = eawr::assets::MapKind::space;
+            auto round_input = input;
+            round_input.map = &round_map.value();
+            const auto path = std::string("data/art/models/eawr_scene_particle.alo");
+            round_input.access.exists = [&](const std::string_view name) { return name == path; };
+            round_input.access.particle_system = [&](const std::string_view name) { return name == path; };
+            const auto round_scene = eawr::scene::build(round_input);
+            expect(round_scene.placements.size() == 3, "root particle fixtures compose");
+            if (round_scene.placements.size() == 3) {
+                const auto& round = round_scene.placements[0];
+                expect(eawr::scene::drawable_projectile_effects(round) && round_scene.assets.size() == 1
+                       && round_scene.assets[0].sha256 == "sha-of:" + path,
+                       "root particle projectile has a stable asset identity and drawable effect route");
+                expect(round.transform && round.scale_raw == 3 * Fixed::scale,
+                       "root particle projectile retains authored pose and scale");
+                expect(round.effects.size() == 1 && round.effects[0].resolved == path
+                       && has(round, Cause::model_has_no_surface) && !has(round, Cause::model_particle_system),
+                       "root particle projectile carries its own effect instead of a model rejection");
+                expect(!round_scene.placements[1].transform && has(round_scene.placements[1], Cause::scale_invalid),
+                       "invalid root particle scale still blocks drawing");
+                expect(has(round_scene.placements[2], Cause::model_particle_system),
+                       "other object types retain particle model rejection");
+            }
+        }
+    }
     const eawr::scene::Scene scene = eawr::scene::build(input);
     const std::string serial_bytes = eawr::scene::canonical_text(scene);
     eawr::assets::Map reversed_source = map.value();

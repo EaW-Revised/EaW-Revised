@@ -33,6 +33,14 @@ int TacticalHud::options_presses() const noexcept {
 EawrTacticalHud* TacticalHud::hud() const noexcept { return state_->hud; }
 
 void TacticalHud::set_time_handlers(TimeHandlers handlers) { state_->time_handlers = std::move(handlers); }
+void TacticalHud::set_order_handler(std::function<void(std::string_view)> handler) {
+    state_->order_handler = std::move(handler);
+}
+void TacticalHud::set_order_mode(const std::string_view active) {
+    for (const auto& [name, button] : state_->order_buttons) {
+        button->set_order_selected(name == active);
+    }
+}
 
 void TacticalHud::set_time_view(const TimeView& view) {
     State& state = *state_;
@@ -92,6 +100,7 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
         return centre(Rect2(button->get_global_position() + button->hit_rect().position, button->hit_rect().size));
     };
     if (name == "pause") return button_centre(state.pause_button);
+    if (const auto found = state.order_buttons.find(name); found != state.order_buttons.end()) return button_centre(found->second);
     if (state.production != nullptr) {
         if (const auto rect = state.production->control_rect(name)) return centre(*rect);
     }
@@ -135,12 +144,15 @@ void TacticalHud::set_minimap(const MinimapView& view) {
                                state.minimap_fog.passes());
     }
     EawrMinimap::Frame frame;
-    frame.blips = model::minimap_blips(view.units, looks, view.extents, state.minimap_settings);
+    for (const auto& warning : view.warnings) {
+        frame.warnings.push_back({model::minimap_point(view.extents, warning.x, warning.y), warning.age});
+    }
+    frame.blips = model::minimap_blips(view.units, looks, view.extents, state.minimap_settings, view.memories);
     if (view.ground) frame.guide = model::minimap_guide(*view.ground, view.extents, state.minimap_settings.guide_rectangle);
     state.minimap->show(std::move(frame));
 }
 
-void TacticalHud::set_minimap_handlers(std::function<void(double, double)> look, std::function<void(double, double)> move) {
+void TacticalHud::set_minimap_handlers(std::function<void(double, double)> look, std::function<void(double, double, bool)> move) {
     state_->minimap_look = std::move(look);
     state_->minimap_move = std::move(move);
 }

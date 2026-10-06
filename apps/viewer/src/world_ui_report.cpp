@@ -1,4 +1,5 @@
 #include "world_ui_view.hpp"
+#include "camera_input.hpp"
 
 #include "ui/theme_builder.hpp"
 
@@ -104,18 +105,43 @@ void WorldUiView::write_report(std::ostream& output) const {
            << ", \"reticle_flashes\": " << flashes_started_
            << ", \"tracked_reticles\": " << tracked_reticles_ << ", \"max_reticles\": " << max_reticles_
            << ", \"reticle_size\": [" << reticle_size_[0] << ", " << reticle_size_[1] << "]"
+           << ", \"hardpoint_tooltip\": ";
+    if (tooltip_hit_) {
+        output << "{\"entity\": " << tooltip_hit_->entity << ", \"hardpoint\": " << tooltip_hit_->hardpoint
+               << ", \"text\": " << eawr::viewer::camera_input::json_string_literal(tooltip_text_)
+               << ", \"health\": " << tooltip_health_ << ", \"rect\": [" << tooltip_rect_[0] << ", "
+               << tooltip_rect_[1] << ", " << tooltip_rect_[2] << ", " << tooltip_rect_[3] << "]}";
+    } else output << "null";
+    output
            << ", \"icons\": " << icons_.size() << ", \"grid_icons\": " << grid_icons_
            << ", \"max_grid_icons\": " << max_grid_icons_ << ", \"combat_cells\": " << grid_.cells().size()
            << ", \"bar_rows\": ";
     list(bar_rows_);
     output << ", \"icon_rows\": ";
     list(icon_rows_);
+    output << ", \"identity_geometry\": [";
+    for (std::size_t index = 0; index < identity_geometry_.size(); ++index) {
+        const auto& geometry = identity_geometry_[index];
+        output << (index ? ", " : "") << "{\"entity\": " << geometry.entity
+               << ", \"centre\": [" << geometry.centre[0] << ", " << geometry.centre[1] << "]";
+        const auto rect = [&](const char* name, const ui::SquadronIconRect& value) {
+            output << ", \"" << name << "\": [" << value.x << ", " << value.y << ", "
+                   << value.width << ", " << value.height << "]";
+        };
+        rect("frame", geometry.frame);
+        rect("inner", geometry.inner);
+        output << "}";
+    }
+    output << "]";
     output << ", \"gripper_points\": [";
     bool first_gripper = true;
     for (const auto& [squadron, gripper] : grippers_) {
         output << (first_gripper ? "" : ", ") << "{\"squadron\": " << squadron
                << ", \"position\": [" << gripper.motion.position[0] << ", " << gripper.motion.position[1]
                << ", " << gripper.motion.position[2] << "], \"speed\": " << gripper.motion.speed
+               << ", \"idle\": " << (gripper.idle ? "true" : "false")
+               << ", \"idle_grid\": " << (gripper.idle ? "true" : "false")
+               << ", \"desired\": [" << gripper.desired[0] << ", " << gripper.desired[1] << ", " << gripper.desired[2] << "]"
                << ", \"arrival_samples_dropped\": " << gripper.arrival_samples_dropped << ", \"arrival_samples\": [";
         for (std::size_t index = 0; index < gripper.arrival_sample_count; ++index) {
             const auto& sample = gripper.arrival_samples[index];
@@ -129,6 +155,25 @@ void WorldUiView::write_report(std::ostream& output) const {
             position("craft_centre", sample.craft_centre);
             position("anchor", sample.anchor);
             output << "}";
+        }
+        output << "], \"grid_samples\": [";
+        const auto first = gripper.grid_sample_count > gripper.grid_samples.size()
+            ? gripper.grid_sample_count - gripper.grid_samples.size() : 0;
+        for (auto index = first; index < gripper.grid_sample_count; ++index) {
+            const auto& sample = gripper.grid_samples[index % gripper.grid_samples.size()];
+            output << (index == first ? "" : ", ") << "{\"tick\": " << sample.tick
+                   << ", \"cell\": [" << sample.cell.x << ", " << sample.cell.y
+                   << "], \"screen\": [" << sample.screen[0] << ", " << sample.screen[1] << "]}";
+        }
+        output << "], \"icon_samples\": [";
+        const auto first_icon = gripper.icon_sample_count > gripper.icon_samples.size()
+            ? gripper.icon_sample_count - gripper.icon_samples.size() : 0;
+        for (auto index = first_icon; index < gripper.icon_sample_count; ++index) {
+            const auto& sample = gripper.icon_samples[index % gripper.icon_samples.size()];
+            output << (index == first_icon ? "" : ", ") << "{\"frame\": " << sample.frame
+                   << ", \"tick\": " << sample.tick << ", \"drawn\": " << (sample.drawn ? "true" : "false")
+                   << ", \"grid\": " << (sample.grid ? "true" : "false")
+                   << ", \"screen\": [" << sample.screen[0] << ", " << sample.screen[1] << "]}";
         }
         output << "]}";
         first_gripper = false;

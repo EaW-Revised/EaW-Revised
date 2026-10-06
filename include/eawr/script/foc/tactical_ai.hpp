@@ -44,6 +44,7 @@ inline constexpr std::string_view verb_guard = "foc.guard";
 inline constexpr std::string_view verb_buy = "foc.buy";
 inline constexpr std::string_view verb_pad_build = "foc.pad_build";
 inline constexpr std::string_view verb_credit_grant = "foc.credit_grant";
+inline constexpr std::string_view verb_reservation_debit = "foc.reservation_debit";
 inline constexpr std::string_view verb_reinforce = "foc.reinforce";
 inline constexpr std::string_view verb_ability = "foc.ability"; // issuer, unit, AbilityKind, AbilityAction (#76)
 inline constexpr std::string_view verb_reveal_all = "foc.reveal_all"; // issuer, player (V-20)
@@ -87,6 +88,9 @@ struct AiType {
     sim::tactical::TypeId squadron_unit{};    // its first craft type
     bool capture_point{};                    // CAPTURE_POINT ownership behavior
     bool build_pad{};                        // GS-11: type identity, independent of enabled economy
+    bool initial_state_visible_under_fow{};  // WNO-13: authored object-goal fog exception
+    bool last_state_visible_under_fow{};
+    std::optional<sim::math::Fixed> tactical_cost; // WAS-26: generic cost, distinct from selected effective price
 };
 
 struct AiContent {

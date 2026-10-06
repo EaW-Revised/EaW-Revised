@@ -194,7 +194,13 @@
   The desired point is the squadron formation's centre while the squadron is in neither grid, and
   the idle point while it idles in the idle grid (squadrons WSQ rules). WSQ-48 identifies the
   formation centre as the world bounds centre; our published centre of craft positions remains
-  the documented negligible approximation.
+  the documented negligible approximation. The idle point is published separately from that
+  centre, so the craft's idle orbit cannot carry the icon around with it.
+  An initial squadron and a squadron given a stop own no idle cell (FM-25), so their
+  icons still follow the formation centre. The viewer report's `idle_grid` flag
+  (also exposed as the legacy `idle` flag) describes cell ownership, not the
+  fighter-idle locomotor state used by WAB-53. An idle-grid hold check must first
+  finish a move or combat to establish that cell (WSQ-09).
 - **WSU-35** (debug build, ESU-15; WU-24) Placing an icon at a world point projects it and adds
   0.048 of the screen height to Y. The icon is shown only while that point is in front of the
   camera and within 64 pixels of the screen's edges.
@@ -202,15 +208,34 @@
   [WFO-34](frame-order.md)) **The dogfight grid's layout.** Each admitted
   render frame, the fighter cell manager lays out each held cell. The cell point is projected, and
   the layout is done in the command-bar camera's units, whose +Y is up:
+  - The horizontal anchor is the held combat cell's centre, including the half-cell shift on odd
+    rows; its height is the first live craft type's `Layer_Z_Adjust`. It does not follow the
+    fighters' current positions or retain a screen point captured at fight start. The projected
+    cell point is truncated to integral pixels before the slots are laid out (debug build,
+    DGB-01 to DGB-03). A camera change, cell change, occupancy change or leading-type height
+    change can therefore move the layout; craft flight within a held cell cannot.
   - The first column starts at x - min(n, ceil(sqrt n)) x 30 / 2, with columns 30 apart.
   - The rows are 30 apart **downward on screen** (this settles WU-26's direction).
   - Each squadron's desired gripper point is the world point, at its own height, under its slot
-    less 0.048 of the screen height.
+    less 0.048 of the screen height. The screen ray uses truncated pixel coordinates.
   - While the gripper is still more than `GripperCombatGridSnapDistance` (35) from it and the
     squadron has not yet joined the grid, the icon keeps sliding (WSU-34). Otherwise the icon is
     placed **exactly at its slot, with no 0.048 offset**, and the squadron is marked as in the grid.
   This supersedes the earlier WU-24 statement that joined slots retain the offset; the icon work (legacy EAWR-661) corrects
   that statement and the renderer while retaining the retail grid pitch.
+
+  **Deliberate deviation, owner 2026-10-06** (legacy EAWR-1733): the remake keeps icon
+  slots stable while a combat cell has any joined squadron. It uses four columns
+  at the retail 30-reference-pixel pitch, starting 60 pixels left of the cell
+  projection; small fights use the same coordinates. New squadrons take the first
+  vacant slot, or append a row, without shifting occupied slots. A returning
+  squadron recovers its previous slot if nobody reused it. The initial first-live-
+  craft height stays fixed for that lifetime too, so the first squadron leaving
+  cannot move every other icon. Camera movement still projects the world anchor
+  anew. Slots and height reset only when a rendered snapshot has no joined
+  squadron in the cell; there is no timer or sparse-grid compaction. This simple
+  lifetime prevents visible leave/rejoin jumps and bounds storage by the cell's
+  peak occupancy, with no change to simulation cells, membership or state.
 - **WSU-37** (debug build, ESU-17; data) Geometry at the reference scale:
   - The frame is 36 units square (60 x 0.6), and its art is visible from 2.4 to 31.2 units down
     the quad.
@@ -306,6 +331,11 @@
   bars (`st_health*`, `st_shields*`) and the squadron icon's bar (`st_health_bar`) set it False.
   The unit cards' bars (`s_health_NN`, `s_shield_NN`) keep the default and **are snapped**. A
   bar's black outline is always exactly one screen pixel wide.
+  The squadron identity frame and inner image also keep the default. Each quad snaps its origin
+  independently and preserves its scaled extent (debug build, DGB-04). In Godot's pixel-edge
+  convention the left edge is floored and the top edge is ceiled, reflecting source UI +Y up.
+  Snapping the frame also supplies the drawn hit rectangle. Its health bar retains fractional
+  placement, as its component explicitly disables `Pixel_Align`.
 - **WSU-61** (debug build, ESU-24) UI quads are queued into 13 layers and drawn layer by layer;
   within a layer, in submission order per blend mode list. The icons are submitted in the icon
   list's order, each icon's frame and inner icon and then its bar. So within one dogfight cell, a
@@ -319,7 +349,7 @@
 - **WSU-65** (debug build, ESU-27; data) **Hover highlight.** A unit's model light scale (RGB) is
   multiplied by 1 + h x (`Mouse_Over_Highlight_Scale` - 1), where h is a smoothed 0-to-1
   mouse-over value and the constant is 1.5. So the unit under the pointer brightens by up to half.
-  **Unverified**: h's smoothing rate and which units set it (read only at its use).
+  **Sourced by EUS-07:** zero initial value/velocity, 0.075-second damping; target one sets the value immediately, target zero eases out in logical select service. Team-member hover applies to selectable members of the parent team.
 - **WSU-66** (debug build, ESU-27; WU-01 to WU-03) `Select_Box_Z_Adjust` moves only the select
   billboard model, not the space selection blob; M2's ships set -30 and their rings stay at the
   unit's position (WU-02). A team container's billboard takes the team's own select box scale
@@ -382,7 +412,7 @@ box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui
 | WSU-33 | group digit and allied active-ability overlay (world ability icons and control-group numbers, WU-43, WU-45) | same |
 | WSU-34 | persistent anchor slides with leader thrust, member velocity cap and idle-grid braking | same in effect; formation centre approximation as WSQ-48 |
 | WSU-35 | 0.048 offset; icons drawn while the point is in front | same |
-| WSU-36 | joined grid icons use their fixed slots without the sliding anchor offset | same joined layout; pre-join snap-distance admission remains as the existing sim grid |
+| WSU-36 | joined grid icons use their fixed slots without the sliding anchor offset | same; render admission uses the XML snap distance independently of simulation occupation |
 | WSU-37 | same geometry and sizes | same: the health-bar overlap is in FoC's geometry too (legacy EAWR-672) |
 | WSU-38 | left click selects (WU-23); squadron icon selection and dogfight grid adds the double click by the squadron type, icons on screen, and the right click | the double click **differs** (the leader's craft type, craft on screen) once squadron icon selection and dogfight grid merges |
 | WSU-39 | an icon when any craft is seen | same |
@@ -429,7 +459,7 @@ Marked `todo` in `docs/tag-coverage/statuses.json`: `SpaceUnit/Mouse_Collide_Ove
 (WSU-12), `StarBase/Last_State_Visible_Under_FOW` and `Initial_State_Visible_Under_FOW` (WSU-06),
 `SpaceUnit`/`StarBase` `Multisample_FOW_Check` (G-V1), `SpaceUnit/Dense_FOW_Reveal_Range_Multiplier`
 (G-V2), `SpaceUnit`/`StarBase` `Select_Box_Z_Adjust` (WSU-66: no effect on the space ring),
-`StarBase/GUI_Bounds_Scale`, `GameConstants/GripperCombatGridSnapDistance` (WSU-36),
+`StarBase/GUI_Bounds_Scale`,
 `Mouse_Over_Highlight_Scale` (WSU-65), `Health_Bar_Scale`, `Min_Health_Bar_Scale`,
 `Health_Bar_Spacing` and `Team_Healthbar_Offset` (read by the world UI, the table is stale), and the
 `SpaceFOW*` constants (read by the fog, stale).
@@ -448,19 +478,19 @@ Marked `todo` in `docs/tag-coverage/statuses.json`: `SpaceUnit/Mouse_Collide_Ove
   FoC gives every craft a 50-unit pick sphere (WSU-12), so the fighter wins the re-pick where our
   small craft box loses to the capital ship's large box.
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | Retained ghost entries require Last_State_Visible_Under_FOW. Initial-state visibility can mark an eligible entry revealed before normal sighting. The clone snapshots transform, colour and alternate model, disables collision, and uses half lighting. After the real object is gone, its memory is removed when at least one stored fog sample becomes revealed; otherwise destruction in fog remains unknown to that observer. | EUS-17 |
+| U-02 | The hover smoother starts at zero with a 0.075-second damping time and zero velocity. Setting target one also immediately sets value one; clearing target eases out using inverse logical FPS in select service. Hovering a team member applies the setter to selectable members of its parent team; ordinary selectable objects receive it directly. | EUS-07 |
+| U-03 | **Settled:** the gripper follows the formation's world bounds centre (WSU-34, [WSQ-48](squadrons.md)); the published craft-position centre remains the documented negligible approximation. | Previously sourced in this walk |
+| U-04 | **Settled with correction:** fighter-cell layout runs in render service after space camera setup and before shared object rendering, not in a logic frame ([WFO-34](frame-order.md), debug build EFO-08/EFO-13). | Previously sourced in this walk |
+| U-05 | The first hostile sighting latches only when the owner is the attacking or defending participant. The latch is set before resolving the local faction enemy-spotted event, so an empty event does not allow a later retry. A hostile nonparticipant does not consume the latch. | EUS-24 |
+
 ## Unverified, and what would settle it
 
-- **U-01** Which types keep a fogged ghost, and when the ghost leaves (WSU-06). Ghidra: the
-  fogged-model manager's entry creation and service. A retail capture of the enemy station
-  leaving sight would show the ghost.
-- **U-02** The hover highlight's smoothing rate and who sets it (WSU-65). Ghidra: the select
-  behaviour's service.
-- **U-03** **Settled:** the gripper follows the formation's world bounds centre (WSU-34,
-  [WSQ-48](squadrons.md)); the published craft-position centre remains the documented negligible
-  approximation.
-- **U-04** **Settled with correction:** fighter-cell layout runs in render service after space
-  camera setup and before shared object rendering, not in a logic frame ([WFO-34](frame-order.md),
-  debug build EFO-08/EFO-13).
-- **U-05** What the game mode does with a sighted enemy (WSU-07).
 - **U-06** A retail check that a fogged enemy's hull takes a click (WSU-14).
 - **U-07** A retail two-row dogfight grid at 1920 x 1080 WSU-37, dogfight-grid health-bar overlap (legacy EAWR-672).

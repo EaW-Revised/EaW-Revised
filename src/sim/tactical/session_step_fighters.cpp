@@ -49,6 +49,31 @@ core::Result<void> session_detail::Tick::fighters() {
     auto& instances = systems_.value().instances.value();
     auto& survivors = surviving_.value().survivors.value();
     const auto& squadron_table = impl_->motion.squadrons;
+    // WNO-29/WCC-70: visit the ordinary-death journal once, in destruction order.
+    // Replacements and generic removal never enter this journal.
+    if (impl_->durability.damage) for (const auto& dead : killed) {
+        const auto* profile = impl_->combat.find(dead.type_id);
+        if (profile == nullptr || profile->death_projectiles.empty()) continue;
+        CombatRandom random(impl_->setup.seed, tick, dead.entity_id, death_projectile_selection_slot);
+        const auto choice = random.uniform(0, static_cast<std::uint32_t>(profile->death_projectiles.size() - 1));
+        auto origin = dead.position;
+        auto height = math::add(origin.z, profile->ranged_target_z_adjust);
+        if (!height) return core::Result<void>::failure(height.error());
+        origin.z = height.value();
+        auto matrix = math::to_matrix(dead.rotation, origin);
+        if (!matrix) return core::Result<void>::failure(matrix.error());
+        auto aim = math::transform_point(matrix.value(), {math::Fixed::from_raw(math::Fixed::scale), {}, {}});
+        if (!aim) return core::Result<void>::failure(aim.error());
+        CombatEvent shot;
+        shot.tick = tick; shot.shooter = dead.entity_id;
+        shot.weapon = death_projectile_slot_flag | choice;
+        shot.target_hardpoint = no_hardpoint; shot.origin = origin; shot.aim = aim.value();
+        auto& next = flights_.value().next_projectile.value();
+        auto projectile = detail::launch_projectile(shot, profile->death_projectiles[choice], dead.owner,
+            true, next++, {}, {});
+        if (!projectile) return core::Result<void>::failure(projectile.error());
+        impacts_.value().projectiles.value().push_back(std::move(projectile).value());
+    }
     // Spin phase (#447, space-fighter-deaths SP-04 to SP-08): workers service each spinning
     // craft's copy in its own slot; the serial commit in ascending ID drops those that ended and
     // publishes their spin_away_ended. The craft killed this tick then draw whether they spin away
@@ -258,6 +283,34 @@ core::Result<void> session_detail::Tick::fighters() {
         return true;
     });
     spawners.erase_if([&](const auto& entry) { return survivor(entry.first) == nullptr; });
+    auto& garrisons = fighters_.value().free_garrisons.emplace(impl_->free_garrisons);
+    if (!garrisons.empty()) {
+        const auto serviced = executor.execute_phase("free-garrisons", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, garrisons.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                auto& state = garrisons[index];
+                const auto player = state.setup.player;
+                const bool quit = std::any_of(impl_->quits.begin(), impl_->quits.end(),
+                    [player](const auto& value) { return value.player == player; })
+                    || std::any_of(pending_quits_.begin(), pending_quits_.end(),
+                        [player](const auto& value) { return value.player == player; });
+                const bool held = !state.registered.empty();
+                std::erase_if(state.registered, [&](const auto id) {
+                    const auto* unit = survivor(id);
+                    return unit == nullptr || unit->state.owner != player;
+                });
+                if (quit) {
+                    state.pending.clear();
+                    state.due_frame.reset();
+                    continue;
+                }
+                // FL-14: only the loss of the last registered actual object starts a delay.
+                if (held && state.registered.empty() && state.pending.empty() && !state.due_frame)
+                    state.due_frame = frame + state.setup.delay_frames;
+            }
+        });
+        if (!serviced) return core::Result<void>::failure(serviced.error());
+    }
 
     mark("minds_cleanup", false);
     return core::Result<void>::success();
@@ -277,12 +330,25 @@ core::Result<void> session_detail::Tick::hangars() {
     const auto& squadron_table = impl_->motion.squadrons;
     auto& pads = impl_->pad_stage.values;
     const auto& arrivals = staging_.value().arrivals.value();
+    auto& garrisons = fighters_.value().free_garrisons.value();
+    const auto allied_pending = [&](const PlayerId owner) {
+        const auto station_player = std::lower_bound(impl_->snapshot_players.begin(), impl_->snapshot_players.end(), owner,
+            [](const auto& player, const auto id) { return player.player_id < id; });
+        return std::find_if(garrisons.begin(), garrisons.end(), [&](const auto& state) {
+            if (state.pending.empty() || station_player == impl_->snapshot_players.end()
+                || station_player->player_id != owner || station_player->neutral) return false;
+            const auto player = std::lower_bound(impl_->snapshot_players.begin(), impl_->snapshot_players.end(), state.setup.player,
+                [](const auto& value, const auto id) { return value.player_id < id; });
+            return player != impl_->snapshot_players.end() && !player->neutral && player->team_id == station_player->team_id;
+        });
+    };
     // Hangar phase (#75, FL-01 to FL-06): workers service each spawner's hangar copy in its own
     // slot; the serial commit launches the squadrons in ascending spawner ID with the next stable
     // IDs, craft first and their team container last (FL-06).
     if (!spawners.empty()) {
         std::vector<std::pair<EntityId, SpawnerState>> hangars(spawners.begin(), spawners.end());
         std::vector<std::optional<SpawnDecision>> decisions(hangars.size());
+        std::vector<std::optional<std::uint32_t>> free_bays(hangars.size());
         const auto serviced_hangars = executor.execute_phase("hangars", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, hangars.size());
             for (auto index = range.begin; index < range.end; ++index) {
@@ -291,12 +357,19 @@ core::Result<void> session_detail::Tick::hangars() {
                 std::vector<bool> intact;
                 const auto* hull = impl_->health_profile(unit);
                 for (const auto& bay : profile.bays) {
+                    // FL-03: space hangar admission checks destruction only;
+                    // a disabled bay restored by an upgrade can still launch.
                     intact.push_back(!unit.durability || hull == nullptr || bay.hardpoint >= hull->hardpoints.size()
-                        || (!hardpoint_destroyed(*hull, *unit.durability, bay.hardpoint)
-                            && !hardpoint_disabled(*unit.durability, bay.hardpoint)));
+                        || !hardpoint_destroyed(*hull, *unit.durability, bay.hardpoint));
                 }
+                const bool service_due = frame == hangars[index].second.next_service_frame;
                 decisions[index] = service_spawner(profile, hangars[index].second, impl_->setup.seed, frame,
-                    hangars[index].first, intact, arrivals.contains(hangars[index].first));
+                    hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled);
+                if (!decisions[index] && service_due && profile.starbase
+                    && !arrivals.contains(hangars[index].first) && hangars[index].second.next_spawn_frame <= frame
+                    && allied_pending(unit.state.owner) != garrisons.end()) {
+                    free_bays[index] = free_garrison_bay(profile, impl_->setup.seed, frame, hangars[index].first, intact);
+                }
             }
         });
         if (!serviced_hangars) {
@@ -304,17 +377,36 @@ core::Result<void> session_detail::Tick::hangars() {
         }
         for (std::size_t index = 0; index < hangars.size(); ++index) {
             spawners.assign(hangars[index].first, std::move(hangars[index].second));
-            if (!decisions[index]) continue;
+            if (!decisions[index] && !free_bays[index]) continue;
             const auto spawner = *survivor(hangars[index].first); // copied: launches grow `survivors`
             const auto& profile = *squadron_table.find_spawner(spawner.state.type_id);
             const auto first_added = survivors.size();
-            const auto flown_out = impl_->launch(spawner, profile, *decisions[index], frame, next_id, survivors, instances,
-                squadrons, crafts, minds);
+            auto pending = garrisons.end();
+            if (!decisions[index]) {
+                pending = allied_pending(spawner.state.owner);
+                if (pending == garrisons.end()) continue; // an earlier station claimed the pending front
+            }
+            const auto decision = decisions[index].value_or(SpawnDecision{0, free_bays[index].value_or(0)});
+            const auto flown_out = impl_->launch(spawner, profile, decision, frame, next_id, survivors, instances,
+                squadrons, crafts, minds, pending != garrisons.end() ? pending->pending.front() : 0,
+                pending != garrisons.end() ? pending->setup.player : 0,
+                pending != garrisons.end() ? &pending->registered : nullptr);
             if (!flown_out) {
                 return core::Result<void>::failure(flown_out.error());
             }
+            if (pending != garrisons.end()) {
+                pending->pending.erase(pending->pending.begin());
+                spawners.at(hangars[index].first).next_spawn_frame = frame + profile.delay_frames;
+            }
             for (auto added = first_added; added < survivors.size(); ++added) {
                 track_victory_change(nullptr, &survivors[added].state, false);
+                if (pending != garrisons.end()) {
+                    const auto& born = survivors[added].state;
+                    if (const auto* born_profile = squadron_table.find_spawner(born.type_id);
+                        born_profile != nullptr && (!born_profile->entries.empty() || born_profile->starbase))
+                        spawners.emplace(born.entity_id, initial_spawner(impl_->setup.seed, frame + 1, born.entity_id));
+                    if (impl_->economy.stream(born.type_id) != nullptr) earners.emplace_back(born.entity_id, born.owner);
+                }
             }
         }
     }
@@ -340,6 +432,22 @@ core::Result<void> session_detail::Tick::hangars() {
         respawns.erase(respawns.begin());
     }
 
+    // FL-14: player timers mature after object/hangar service. A queue made
+    // ready this frame is available only to a subsequent due hangar pass.
+    if (!garrisons.empty()) {
+        const auto matured = executor.execute_phase("free-garrison-timers", tick_partition_count,
+            [&](const std::size_t partition) {
+                const auto range = partition_range(partition, garrisons.size());
+                for (auto index = range.begin; index < range.end; ++index) {
+                    auto& state = garrisons[index];
+                    if (state.due_frame && *state.due_frame <= frame) {
+                        state.pending = state.setup.templates;
+                        state.due_frame.reset();
+                    }
+                }
+            });
+        if (!matured) return core::Result<void>::failure(matured.error());
+    }
     return core::Result<void>::success();
 }
 

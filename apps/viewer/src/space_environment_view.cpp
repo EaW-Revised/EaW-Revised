@@ -37,6 +37,7 @@ constexpr std::string_view effect_clock_rule =
         return result;
     }
     const presentation::camera::Constants& constants = loaded.value().constants;
+    result.constants = constants;
     result.values.distance = constants.distance_default;
     result.values.pitch_degrees = constants.pitch_default;
     result.values.fov_degrees = constants.fov_default;
@@ -77,6 +78,7 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     // explicit fixed camera was supplied for a capture.
     const FixedCamera defaults;
     tactical_ = load_space_tactical(filesystem);
+    if (!tactical_.constants) return fail("Space_Mode camera: " + tactical_.failure);
     default_camera_ = space::default_space_camera(map, tactical_.values, defaults.width, defaults.height);
     if (!options_.camera.empty()) {
         const space::CameraParse parsed = space::parse_camera(options_.camera, defaults.width, defaults.height);
@@ -449,6 +451,14 @@ std::optional<tactical::TacticalFrame> EnvironmentView::drawn_frame() const {
     return tactical_frame(camera_);
 }
 
+std::optional<tactical::TacticalFrame> EnvironmentView::effects_frame() const {
+    if (!drawn_frame() || !tactical_.constants) return std::nullopt;
+    // BP-04/BP-07: a config-free replay still uses Space_Mode's laser depth
+    // range. The bridge can override it, but does not establish its authority.
+    const auto& constants = bridge_ && bridge_->active() ? bridge_->constants() : *tactical_.constants;
+    return tactical_frame(space::environment_laser_camera(camera_, constants));
+}
+
 void EnvironmentView::focus(const float source_x, const float source_y) {
     // Source (x, y) is render (x, -y) on the battle plane.
     if (!bridge_ || completed_) return;
@@ -652,6 +662,10 @@ void SpaceEnvironment::close() {
 
 std::optional<presentation::camera::TacticalFrame> SpaceEnvironment::live_camera_frame() const {
     return state_->view ? state_->view->drawn_frame() : std::nullopt;
+}
+
+std::optional<presentation::camera::TacticalFrame> SpaceEnvironment::live_effects_camera_frame() const {
+    return state_->view ? state_->view->effects_frame() : std::nullopt;
 }
 
 std::pair<bool, bool> space_environment_detail::EnvironmentView::pointer_mode(const bool ctrl) const {

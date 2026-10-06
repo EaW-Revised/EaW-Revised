@@ -47,11 +47,11 @@ Bytes scalar_track_header(Bytes first,Bytes last){
     append(data,mini(4,integer(0)));return chunk(0,std::move(data));
 }
 
-Bytes legacy_fixture(Bytes lifetime=scalar(2.0F),Bytes size_first=scalar(4.0F),Bytes acceleration=vector3(1,0,0),Bytes mesh_props={},Bytes age_group={}){
+Bytes legacy_fixture(Bytes lifetime=scalar(2.0F),Bytes size_first=scalar(4.0F),Bytes acceleration=vector3(1,0,0),Bytes mesh_props={},Bytes age_group={},Bytes velocity_group={}){
     Bytes properties;append(properties,mini(0x0f,std::move(lifetime)));append(properties,mini(0x13,scalar(0.25F)));append(properties,mini(0x12,scalar(0.2F)));append(properties,mini(0x2a,integer(2)));append(properties,mini(0x10,integer(16)));
     append(properties,mini(0x0a,std::move(acceleration)));append(properties,mini(0x31,Bytes{std::byte{1}}));
     append(properties,mesh_props);
-    Bytes groups;append(groups,old_group(0,0,0,0));append(groups,age_group.empty()?old_group(0,2,0,0):age_group);append(groups,old_group(0,2,0,0));
+    Bytes groups;append(groups,velocity_group.empty()?old_group(0,0,0,0):velocity_group);append(groups,age_group.empty()?old_group(0,2,0,0):age_group);append(groups,old_group(0,2,0,0));
     Bytes tracks;for(int i=0;i<4;++i){append(tracks,track_header(1,1,true));append(tracks,chunk(1,{}));}
     append(tracks,scalar_track_header(std::move(size_first),scalar(8)));append(tracks,chunk(1,{}));append(tracks,track_header(0,3));append(tracks,chunk(1,{}));append(tracks,track_header(1,1));append(tracks,chunk(1,{}));
     Bytes emitter;append(emitter,chunk(2,std::move(properties)));Bytes name;text(name,"fixture");append(emitter,chunk(0x16,std::move(name)));append(emitter,chunk(0x29,std::move(groups),true));append(emitter,chunk(1,std::move(tracks),true));
@@ -151,7 +151,7 @@ void test_mesh_cpu_sampling(){
     particles::SystemDefinition definition;definition.emitters.push_back(emitter);
     particles::CpuSystem cpu(definition,123,64,binding);
     cpu.set_origin({500,0,0});
-    expect(cpu.advance(0).spawned==8,"random vertex burst emits requested count");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==8,"random vertex burst emits requested count");
     std::uint32_t state=123;
     for(const auto& particle:cpu.particles()){
         const auto submesh=bounded(state,2);
@@ -167,7 +167,7 @@ void test_mesh_cpu_sampling(){
     binding.geometry.submeshes[0].triangle_indices={0,1,0};
     binding.geometry.submeshes[1].triangle_indices={0,1,2,0,2,1};
     cpu=particles::CpuSystem(definition,0,64,binding);
-    expect(cpu.advance(0).spawned==5,"seed zero maps to one for surface sampling");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==5,"seed zero maps to one for surface sampling");
     state=1;
     for(const auto& particle:cpu.particles()){
         const auto submesh=bounded(state,2);
@@ -185,7 +185,7 @@ void test_mesh_cpu_sampling(){
     emitter.velocity.range_min={1,2,3};emitter.velocity.range_max={2,3,4};
     definition.emitters[0]=emitter;
     cpu=particles::CpuSystem(definition,123,4,binding);
-    expect(cpu.advance(0).spawned==1,"mesh emission with random velocity spawns");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==1,"mesh emission with random velocity spawns");
     state=123;
     static_cast<void>(unit(state));static_cast<void>(unit(state));static_cast<void>(unit(state));
     const auto selected_submesh=bounded(state,2);
@@ -199,17 +199,17 @@ void test_mesh_cpu_sampling(){
     emitter.bursting=true;emitter.particles_per_interval=2;
     definition.emitters[0]=emitter;
     cpu=particles::CpuSystem(definition,7,8,binding);
-    const auto first=cpu.advance(0);
+    const auto first=cpu.advance(std::numeric_limits<float>::min());
     expect(first.spawned==8&&first.dropped_at_capacity==2,
         "every-vertex burst multiplies total vertices by truncated Shape count and drops at capacity");
-    const float expected_x[]{1,2,10,20,30,1,2,10};
+    const float expected_x[]{20,2,10,30,1,20,2,10};
     for(std::size_t i=0;i<cpu.particles().size();++i)
-        expect(close(cpu.particles()[i].position.x,expected_x[i]),"every-vertex cursor crosses submeshes and wraps");
+        expect(close(cpu.particles()[i].position.x,expected_x[i]),"shuffled every-vertex batch spans submeshes and cycles");
     emitter.bursting=false;emitter.particles_per_interval=4;emitter.spawn_interval=1;
     emitter.stop_time=0;definition.emitters[0]=emitter;
     cpu=particles::CpuSystem(definition,7,10,binding);
-    expect(cpu.advance(0).spawned==5,"continuous every-vertex event emits one mesh traversal");
-    const auto second=cpu.advance(0.25F);
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==5,"continuous every-vertex event emits one mesh traversal");
+    const auto second=cpu.advance(std::nextafter(0.25F,1.0F));
     expect(second.spawned==5&&cpu.particles().size()==10,
         "continuous interval divides by particles_per_interval and cursor restarts at first vertex");
 }
@@ -226,7 +226,7 @@ void test_mesh_frames_and_capacity(){
     cpu.set_origin({100,100,100});
     cpu.set_basis({{1,0,0},{0,2,0},{0,0,1}});
     binding.geometry.submeshes[0].vertices[0].position={999,999,999};
-    expect(cpu.advance(0).spawned==1,"mesh emission owns caller geometry after mutation");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==1,"mesh emission owns caller geometry after mutation");
     const auto particle=cpu.particles().front();
     expect(close(particle.position.x,11)&&close(particle.position.y,20)&&close(particle.position.z,29),
         "every-vertex emission uses the affine vertex without a surface offset");
@@ -247,10 +247,10 @@ void test_mesh_frames_and_capacity(){
     binding.geometry.submeshes[0].vertices[0].position={2,3,4};
     cpu=particles::CpuSystem(definition,7,4,binding);
     cpu.set_origin({900,0,0});
-    expect(cpu.advance(0).spawned==1&&close(cpu.particles().front().position.x,11),
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==1&&close(cpu.particles().front().position.x,11),
         "mesh frame position is separate from emitter origin");
     expect(bool(cpu.set_mesh_frame({{17,11,13},binding.frame.basis})),"finite mesh frame update succeeds");
-    const auto changed=cpu.advance(1);
+    const auto changed=cpu.advance(std::nextafter(1.0F,2.0F));
     expect(changed.killed==1&&changed.spawned==1&&close(cpu.particles().front().position.x,21),
         "mesh frame update affects future emission");
     const auto invalid=cpu.set_mesh_frame({{std::numeric_limits<float>::quiet_NaN(),0,0},{}});
@@ -261,23 +261,23 @@ void test_mesh_frames_and_capacity(){
     emitter.spawn_interval=1;emitter.stop_time=0;emitter.lifetime=0.5F;
     definition.emitters[0]=emitter;
     cpu=particles::CpuSystem(definition,7,2,binding);
-    expect(cpu.advance(0).spawned==2,"first every-vertex event fills capacity");
-    expect(cpu.advance(1).spawned==2&&close(cpu.particles()[0].position.x,10)&&
-        close(cpu.particles()[1].position.x,20),
-        "capacity drops leave cursor at next unspawned vertex");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==2,"first every-vertex event fills capacity");
+    expect(cpu.advance(std::nextafter(1.0F,2.0F)).spawned==2&&close(cpu.particles()[0].position.x,30)&&
+        close(cpu.particles()[1].position.x,10),
+        "new capacity-limited batch reshuffles the complete vertex set");
 
     definition.emitters.push_back(emitter);
     cpu=particles::CpuSystem(definition,7,16,binding);
-    expect(cpu.advance(0).spawned==10&&close(cpu.particles()[0].position.x,1)&&
-        close(cpu.particles()[5].position.x,1),
-        "two mesh emitters in one effect start independent vertex cursors");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==10&&close(cpu.particles()[0].position.x,20)&&
+        close(cpu.particles()[5].position.x,30),
+        "two mesh emitters in one effect shuffle independent batches");
 
     definition.emitters.resize(1);
     emitter=mesh_emitter(particles::MeshSpawnMode::random_vertex);
     emitter.spawn_interval=1;emitter.stop_time=0;emitter.lifetime=1.5F;
     definition.emitters[0]=emitter;
     cpu=particles::CpuSystem(definition,123,1,binding);
-    expect(cpu.advance(0).spawned==1&&cpu.advance(1).dropped_at_capacity==1,
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==1&&cpu.advance(std::nextafter(1.0F,2.0F)).dropped_at_capacity==1,
         "capacity drop occurs without creating a random mesh particle");
     std::uint32_t state=123;
     for(int i=0;i<1;++i){
@@ -288,7 +288,7 @@ void test_mesh_frames_and_capacity(){
     const auto next_submesh=bounded(state,2);
     const auto next_vertex=bounded(state,static_cast<std::uint32_t>(
         binding.geometry.submeshes[next_submesh].vertices.size()));
-    const auto resumed=cpu.advance(1);
+    const auto resumed=cpu.advance(std::nextafter(1.0F,2.0F));
     expect(resumed.spawned==1&&close(cpu.particles().front().position.x,
         binding.geometry.submeshes[next_submesh].vertices[next_vertex].position.x),
         "dropped event consumes no mesh RNG before later emission");
@@ -308,7 +308,7 @@ void test_mesh_surface_size_offset() {
         particles::CpuSystem shifted(definition,123,16,binding);
         definition.emitters[0].mesh_surface_offset=0;
         particles::CpuSystem control(definition,123,16,binding);
-        expect(shifted.advance(0).spawned==8&&control.advance(0).spawned==8,
+        expect(shifted.advance(std::numeric_limits<float>::min()).spawned==8&&control.advance(std::numeric_limits<float>::min()).spawned==8,
             "random mesh controls emit the same authored burst");
         const std::vector<particles::Particle> before(shifted.particles().begin(),shifted.particles().end());
         for(std::size_t i=0;i<before.size();++i){
@@ -327,12 +327,12 @@ void test_mesh_surface_size_offset() {
 
         definition.emitters[0].mesh_surface_offset=-2;
         particles::CpuSystem inward(definition,123,16,binding);
-        static_cast<void>(inward.advance(0));
+        static_cast<void>(inward.advance(std::numeric_limits<float>::min()));
         for(const auto& a:inward.particles())
             expect(close(a.position.z,13-a.size),"signed mesh offset remains authored");
         definition.emitters[0].size=constant(0);
         particles::CpuSystem zero_size(definition,123,16,binding);
-        static_cast<void>(zero_size.advance(0));
+        static_cast<void>(zero_size.advance(std::numeric_limits<float>::min()));
         for(const auto& a:zero_size.particles())
             expect(a.position.z==13,"zero half-extent has zero surface displacement");
     }
@@ -342,14 +342,14 @@ void test_mesh_surface_size_offset() {
     binding.geometry.submeshes[0].triangle_indices.clear();
     particles::SystemDefinition definition;definition.emitters.push_back(emitter);
     particles::CpuSystem skewed(definition,123,4,binding);
-    static_cast<void>(skewed.advance(0));
+    static_cast<void>(skewed.advance(std::numeric_limits<float>::min()));
     const auto point=skewed.particles().front().position;
     const float magnitude=std::sqrt(184.0F);
     expect(close(point.x,7+6/magnitude)&&close(point.y,11+18/magnitude)&&close(point.z,13+36/magnitude),
         "world-normal normalization follows the nonuniform mesh frame");
     binding.geometry.submeshes[0].vertices[0].normal={};
     particles::CpuSystem degenerate(definition,123,4,binding);
-    static_cast<void>(degenerate.advance(0));
+    static_cast<void>(degenerate.advance(std::numeric_limits<float>::min()));
     const auto zero=degenerate.particles().front().position;
     expect(zero.x==7&&zero.y==11&&zero.z==13,"zero normal yields a finite zero surface offset");
 }
@@ -367,7 +367,7 @@ void test_lifetime_variation() {
     emitter.bursting = true; emitter.particles_per_interval = 512;
     emitter.spawn_interval = 100; emitter.lifetime = 8; emitter.lifetime_variation = 0.82F;
     auto cpu = system_with(emitter, 123, 512);
-    expect(cpu.advance(0).spawned == 512, "lifetime probe fills one seeded birth batch");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned == 512, "lifetime probe fills one seeded birth batch");
     float sum = 0, minimum = 8, maximum = 0;
     for (const auto& particle : cpu.particles()) {
         const float age = particle.death_time - particle.spawn_time;
@@ -383,23 +383,23 @@ void test_lifetime_variation() {
 
     emitter.lifetime_range = particles::EmitterDefinition::LifetimeRange{3,3};
     emitter.lifetime_variation = 0;
-    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
         [](const auto& particle) { return particle.death_time - particle.spawn_time == 8; }),
         "equal range-mode bounds are rebuilt, and zero variation yields the authored maximum");
     emitter.lifetime_variation = 1.5F;
-    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
         [](const auto& particle) { return particle.death_time>=0 && particle.death_time<=8; }),
         "wide variation clamps the post-load lower age bound to zero");
     emitter.lifetime_variation = -0.5F;
-    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(0));
+    cpu = system_with(emitter, 123, 512); static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(std::all_of(cpu.particles().begin(), cpu.particles().end(),
         [](const auto& particle) { return particle.death_time>=8 && particle.death_time<=12; }),
         "negative variation sorts the rebuilt age bounds");
     emitter.lifetime_variation = -std::numeric_limits<float>::max();
     cpu = system_with(emitter, 123, 512);
-    expect(cpu.advance(0).spawned==0, "overflowing rebuilt age bounds fail closed");
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==0, "overflowing rebuilt age bounds fail closed");
     const auto point = particles::load_alo(legacy_fixture(scalar(8)), "age-point.alo");
     expect(point && point.value().emitters.front().lifetime_range
         && point.value().emitters.front().lifetime_range->minimum==2
@@ -407,7 +407,7 @@ void test_lifetime_variation() {
         && point.value().emitters.front().lifetime_range->constant_mode,
         "constant-mode age loading uses its saved default");
     if(point){
-        particles::CpuSystem constant(point.value(),123,512);static_cast<void>(constant.advance(0));
+        particles::CpuSystem constant(point.value(),123,512);static_cast<void>(constant.advance(std::numeric_limits<float>::min()));
         expect(!constant.particles().empty() && std::all_of(constant.particles().begin(),constant.particles().end(),
             [](const auto& particle){return particle.death_time-particle.spawn_time==2;}),
             "post-load preserves a true constant sampler's mode and saved default");
@@ -416,14 +416,14 @@ void test_lifetime_variation() {
 
 void test_creator_killers_and_translation(){
     auto emitter=base_emitter();emitter.position.shape=particles::Shape::range;emitter.position.range_min={1,2,3};emitter.position.range_max={2,3,4};
-    emitter.velocity.shape=particles::Shape::sphere;emitter.velocity.radius_min=2;emitter.velocity.radius_max=2;auto cpu=system_with(emitter,123);expect(cpu.advance(0).spawned==1,"shape creator spawns");
+    emitter.velocity.shape=particles::Shape::sphere;emitter.velocity.radius_min=2;emitter.velocity.radius_max=2;auto cpu=system_with(emitter,123);expect(cpu.advance(std::numeric_limits<float>::min()).spawned==1,"shape creator spawns");
     const auto particle=cpu.particles().front();expect(particle.position.x>=1&&particle.position.x<=2&&close(std::sqrt(particle.velocity.x*particle.velocity.x+particle.velocity.y*particle.velocity.y+particle.velocity.z*particle.velocity.z),2),"range/sphere sampling stays bounded");
 
-    emitter=base_emitter();emitter.lifetime=0.5F;cpu=system_with(emitter);static_cast<void>(cpu.advance(0));expect(cpu.advance(0.5F).killed==1&&cpu.particles().empty(),"age killer uses presentation time");
-    emitter=base_emitter();emitter.killer_id=21;emitter.position.point.z=-1;cpu=system_with(emitter);static_cast<void>(cpu.advance(0));expect(cpu.advance(0.01F).killed==1,"terrain killer uses legacy z=0 presentation plane");
-    emitter=base_emitter();emitter.translater_id=26;cpu=system_with(emitter);cpu.set_origin({1,0,0});static_cast<void>(cpu.advance(0));cpu.set_origin({4,0,0});static_cast<void>(cpu.advance(0.01F));expect(close(cpu.particles().front().position.x,4),"emitter translater follows origin delta");
-    emitter=base_emitter();emitter.position.point={2,0,0};emitter.inward_speed=-2;cpu=system_with(emitter);static_cast<void>(cpu.advance(0));expect(close(cpu.particles().front().velocity.x,-2),"legacy conversion-only inward-speed modifier");
-    emitter=base_emitter();emitter.position.point={1,0,0};emitter.velocity.point={1,0,0};cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(0));expect(close(cpu.particles().front().position.y,1)&&close(cpu.particles().front().velocity.y,1),"portable basis replaces DirectX local transform");
+    emitter=base_emitter();emitter.lifetime=0.5F;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(cpu.advance(0.5F).killed==1&&cpu.particles().empty(),"age killer uses presentation time");
+    emitter=base_emitter();emitter.killer_id=21;emitter.position.point.z=-1;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(cpu.advance(0.01F).killed==1,"terrain killer uses legacy z=0 presentation plane");
+    emitter=base_emitter();emitter.translater_id=26;cpu=system_with(emitter);cpu.set_origin({1,0,0});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));cpu.set_origin({4,0,0});static_cast<void>(cpu.advance(0.01F));expect(close(cpu.particles().front().position.x,4),"emitter translater follows origin delta");
+    emitter=base_emitter();emitter.position.point={2,0,0};emitter.inward_speed=-2;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(close(cpu.particles().front().motion_velocity.x,-2)&&cpu.particles().front().velocity.x==0,"radial motion remains separate from sampled velocity");
+    emitter=base_emitter();emitter.position.point={1,0,0};emitter.velocity.point={1,0,0};cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(close(cpu.particles().front().position.y,1)&&close(cpu.particles().front().velocity.y,1),"portable basis replaces DirectX local transform");
 }
 
 // #433: a particle of the Emitter translater (FoC's linked particles, BP-40) keeps its position in its
@@ -434,9 +434,9 @@ void test_emitter_translater_follows_rotation(){
     const particles::Basis3 quarter{{0,1,0},{-1,0,0},{0,0,1}};
     const particles::Basis3 half{{-1,0,0},{0,-1,0},{0,0,1}};
     auto emitter=base_emitter();emitter.translater_id=26;emitter.position.point={2,0,0};emitter.velocity.point={1,0,0};
-    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(0));
+    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(close(cpu.particles().front().position.x,2),"emitter-linked particle starts at its local offset");
-    cpu.set_origin({5,0,0});cpu.set_basis(quarter);static_cast<void>(cpu.advance(0));
+    cpu.set_origin({5,0,0});cpu.set_basis(quarter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     auto particle=cpu.particles().front();
     expect(close(particle.position.x,5)&&close(particle.position.y,2),"emitter-linked particle turns with its emitter");
     expect(close(particle.velocity.x,1)&&close(particle.velocity.y,0),"emitter-linked particle velocity stays a world vector");
@@ -445,10 +445,10 @@ void test_emitter_translater_follows_rotation(){
     particle=cpu.particles().front();
     expect(close(particle.position.x,-2)&&close(particle.position.y,0),"a follow between advances places it at its emitter now");
     expect(cpu.presentation_time()==time,"a follow does not advance the clock");
-    static_cast<void>(cpu.advance(0));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(close(cpu.particles().front().position.x,-2)&&close(cpu.particles().front().position.y,0),"the next advance does not apply the follow again");
-    emitter.translater_id=27;cpu=system_with(emitter);static_cast<void>(cpu.advance(0));
-    cpu.set_origin({5,0,0});cpu.set_basis(quarter);cpu.follow_emitter();static_cast<void>(cpu.advance(0));
+    emitter.translater_id=27;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    cpu.set_origin({5,0,0});cpu.set_basis(quarter);cpu.follow_emitter();static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     expect(close(cpu.particles().front().position.x,2)&&close(cpu.particles().front().position.y,0),"a world particle stays where it was born");
 }
 
@@ -459,7 +459,7 @@ void test_emitter_translater_local_acceleration(){
     const particles::Basis3 quarter{{0,1,0},{-1,0,0},{0,0,1}};
     const particles::Basis3 half{{-1,0,0},{0,-1,0},{0,0,1}};
     auto emitter=base_emitter();emitter.translater_id=26;emitter.modifier_ids={10};emitter.acceleration={1,0,0};emitter.acceleration_local=true;
-    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(0));
+    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     cpu.set_basis(quarter);static_cast<void>(cpu.advance(1));
     auto particle=cpu.particles().front();
     expect(close(particle.acceleration.x,0)&&close(particle.acceleration.y,1),"a turning sample takes the local acceleration in the emitter's current frame");
@@ -473,39 +473,342 @@ void test_emitter_translater_local_acceleration(){
     expect(close(particle.velocity.x,-1)&&close(particle.velocity.y,1),"the next sample adds it once to the world velocity");
 }
 
-void test_modifier_families(){
-    auto emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration={2,0,0};auto cpu=system_with(emitter);static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"acceleration modifier");
-    emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration={2,0,0};emitter.acceleration_local=true;cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.y,2),"local acceleration uses portable basis");
-    emitter=base_emitter();emitter.position.point={2,0,0};emitter.modifier_ids={11};emitter.inward_acceleration=-3;cpu=system_with(emitter);static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,-3),"attract acceleration modifier");
-    emitter=base_emitter();emitter.modifier_ids={54};emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"wind acceleration modifier");
+void test_walk_trails(){
+    // PS-16: simultaneous parents visit the same shared schedule along separate segments.
+    auto root=base_emitter();root.bursting=true;root.particles_per_interval=2;root.velocity.point={4,0,0};
+    auto trail=base_emitter();trail.creator_id=39;trail.parent_emitter=0;trail.spawn_interval=0.25F;
+    trail.stop_time=0;trail.lifetime=5;auto death=base_emitter();death.creator_id=40;death.parent_emitter=0;
+    death.bursting=true;death.particles_per_interval=1;
+    particles::SystemDefinition definition;definition.emitters={root,trail,death};
+    particles::CpuSystem cpu(definition,7,64);
+    expect(cpu.advance(0.125F).spawned==4,"each simultaneous parent supplies an initial dependent segment");
+    const auto initial_children=std::vector<particles::Particle>(cpu.particles().begin()+2,cpu.particles().end());
+    expect(cpu.advance(0.5F).spawned==4,"shared dependent phase repeats both scheduled events for each parent");
+    const float positions[]{1,2,1,2};const float birth_times[]{0.25F,0.5F,0.25F,0.5F};
+    for(std::size_t i=0;i<4;++i){const auto& p=cpu.particles()[i+4];
+        expect(close(p.position.x,positions[i])&&p.spawn_time==birth_times[i],"trail births lie at their event fraction along the parent segment");
+    }
+    for(const auto& old:initial_children){const auto found=std::find_if(cpu.particles().begin(),cpu.particles().end(),
+        [&](const auto& p){return p.id==old.id;});expect(found!=cpu.particles().end()&&found->spawn_time==old.spawn_time,
+        "dependent start phase ages existing children once before new emission");}
+    expect(bool(cpu.set_detail({0,1})),"mask simultaneous parents");
+    expect(cpu.advance(0.5F).spawned==0,"masked parents supply no trail segment");
+    root.lifetime=0.5F;definition.emitters[0]=root;cpu=particles::CpuSystem(definition,7,64);
+    static_cast<void>(cpu.advance(0.125F));const auto retired=cpu.advance(0.5F);
+    expect(retired.killed==2&&retired.death_bursts==2&&retired.spawned==2&&cpu.live_child_instances()==0,
+        "parents retiring in an accumulated update emit death bursts once and no postmortem trail");
+    expect(close(cpu.particles()[cpu.particles().size()-1].position.x,0.5F),"death uses the final retained parent position before retirement motion");
+}
 
-    emitter=base_emitter();emitter.lifetime=2;emitter.modifier_ids={7,18,49};emitter.size={particles::Interpolation::linear,{{0,2},{1,6}}};emitter.uv_index={particles::Interpolation::step,{{0,0},{0.4F,3},{1,3}}};emitter.texture_size=4;emitter.rotation_rate=constant(2);emitter.red={particles::Interpolation::linear,{{0,0},{1,1}}};cpu=system_with(emitter);static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));const auto& p=cpu.particles().front();expect(close(p.size,4),"linear/keyed size modifier");expect(close(p.texcoords.x,0.5F)&&close(p.texcoords.y,0.5F),"constant/keyed UV modifier");expect(close(p.rotation,2),"keyed rotation-rate modifier");expect(close(p.color.x,0.5F),"legacy conversion-only keyed-channel color modifier");
+void test_walk_births(){
+    // PS-10/PS-42: equality and residuals are intentional observables.
+    auto emitter=base_emitter();emitter.start_delay=0.5F;emitter.spawn_interval=0.25F;
+    emitter.stop_time=0;emitter.velocity.point={2,0,0};auto cpu=system_with(emitter);
+    expect(cpu.advance(0).spawned==0&&cpu.presentation_time()==0&&cpu.particles().empty(),"zero delta is a complete no-op");
+    expect(cpu.advance(0.75F).spawned==1&&close(cpu.particles()[0].position.x,0.5F)&&
+        cpu.particles()[0].spawn_time==0.5F,"first delayed birth uses residual age and one initial event");
+    expect(cpu.advance(0).spawned==0&&cpu.presentation_time()==0.75F,"zero delta leaves an existing generation untouched");
+    expect(cpu.advance(0.01F).spawned==1&&close(cpu.particles().back().position.x,0.02F),
+        "strict later interval entry catches the inclusive delayed event with residual motion");
+    emitter.start_delay=0;emitter.spawn_interval=0.5F;emitter.velocity.point={};cpu=system_with(emitter);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    expect(cpu.advance(0.5F).spawned==0,"later exact interval equality does not enter scheduling");
+    expect(cpu.advance(0.001F).spawned==1&&close(cpu.particles().back().spawn_time,0.5F),
+        "later scheduling visits the equality event once after strict entry");
+    emitter.lifetime=1;emitter.spawn_interval=0.25F;cpu=system_with(emitter,7,64);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));const auto catchup=cpu.advance(10);
+    expect(catchup.killed==1&&catchup.spawned==4&&cpu.particles().size()==4&&cpu.particles()[0].spawn_time==9.25F,
+        "long catch-up skips events already at maximum age without consuming capacity");
+    emitter.lifetime=10;emitter.spawn_interval=0.25F;cpu=system_with(emitter);cpu.set_origin({});
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));cpu.set_origin({10,0,0});
+    const auto moved=cpu.advance(1);expect(moved.spawned==4,"moving-emitter update schedules four retained events");
+    for(std::size_t i=1;i<cpu.particles().size();++i)
+        expect(close(cpu.particles()[i].position.x,2.5F*static_cast<float>(i)),"births interpolate the host translation within an update");
+    cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});emitter.position.point={1,0,0};
+    auto rotating=system_with(emitter);static_cast<void>(rotating.advance(std::numeric_limits<float>::min()));
+    rotating.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(rotating.advance(1));
+    const auto midpoint=rotating.particles()[2].position;
+    expect(close(midpoint.x,std::sqrt(0.5F))&&close(midpoint.y,std::sqrt(0.5F)),
+        "birth frame uses normalized quaternion interpolation at the half-turn fraction");
+
+    // BP-40/PS-15: births during a moving update keep their local host offset.
+    emitter.translater_id=26;emitter.velocity.point={};cpu=system_with(emitter);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));cpu.set_origin({10,0,0});
+    expect(cpu.advance(1).spawned==4,"linked moving update admits four historical birth events");
+    for(const auto& particle:cpu.particles())
+        expect(close(particle.position.x,11)&&close(particle.position.y,0),
+            "new and existing linked particles render at the current translated host offset");
+    cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    cpu.set_origin({10,0,0});cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(1));
+    for(const auto& particle:cpu.particles())
+        expect(close(particle.position.x,10)&&close(particle.position.y,1),
+            "births within a turning update carry their local offset into the current rigid frame");
+    emitter.velocity.point={1,0,0};emitter.local_velocity=false;cpu=system_with(emitter);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(1));
+    const auto& linked_midpoint=cpu.particles()[2];
+    const float residual_component=std::sqrt(0.5F)*0.5F;
+    expect(close(linked_midpoint.position.x,residual_component)&&close(linked_midpoint.position.y,1+residual_component),
+        "linked residual movement uses the inverse sampled frame then the current host frame");
+    expect(close(linked_midpoint.velocity.x,1)&&close(linked_midpoint.velocity.y,0)&&
+        close(linked_midpoint.previous_position.x,0)&&close(linked_midpoint.previous_position.y,1),
+        "linked birth velocity remains world-oriented and retained segment starts use the current host");
+}
+
+void test_mesh_birth_frames(){
+    // PS-10/PS-15: every nozzle retains its mesh-bone offset at historical births.
+    for(const float scale:{0.25F,0.5F,1.0F}){
+        const particles::Basis3 initial{{scale,0,0},{0,scale,0},{0,0,scale}};
+        const particles::Basis3 quarter{{0,scale,0},{-scale,0,0},{0,0,scale}};
+        particles::MeshBinding binding;
+        binding.geometry.submeshes={{{{{-30,0,0},{0,0,1}},{{0,0,0},{0,0,1}},
+                                       {{30,0,0},{0,0,1}}},{}}};
+        binding.frame={{3,0,0},initial};
+        auto emitter=mesh_emitter(particles::MeshSpawnMode::every_vertex);
+        emitter.translater_id=26;emitter.stop_time=0;emitter.spawn_interval=0.25F;
+        particles::SystemDefinition definition;definition.emitters={emitter};
+        particles::CpuSystem cpu(definition,123,64,binding);
+        cpu.set_origin({});cpu.set_basis(initial);
+        expect(cpu.advance(std::numeric_limits<float>::min()).spawned==3,"initial nozzle cloud emits");
+        cpu.set_origin({10,0,0});cpu.set_basis(quarter);
+        expect(bool(cpu.set_mesh_frame({{10,3,0},quarter})),"nozzle bone turns with scaled host");
+        expect(cpu.advance(1).spawned==12,"turn admits four complete nozzle clouds");
+        for(std::size_t batch=0;batch<5;++batch){
+            float minimum=100,maximum=-100;
+            for(std::size_t vertex=0;vertex<3;++vertex){
+                const auto& particle=cpu.particles()[batch*3+vertex];
+                expect(close(particle.position.x,10)&&close(particle.position.z,0),
+                    "each linked mesh birth reaches the current bone plane exactly once");
+                minimum=std::min(minimum,particle.position.y);maximum=std::max(maximum,particle.position.y);
+            }
+            expect(close(minimum,3-30*scale)&&close(maximum,3+30*scale),
+                "every birth cloud spans the full scaled nozzle wall during a turn");
+        }
+        cpu.follow_emitter();
+        expect(cpu.advance(0.251F).spawned==3,"sampled mesh frame is restored for subsequent births");
+        for(const auto& particle:cpu.particles())
+            expect(close(particle.position.x,10),"unchanged host does not carry mesh births twice");
+    }
+    // Shape and world-space mesh births also preserve scale in the sampled frame.
+    auto emitter=base_emitter();emitter.stop_time=0;emitter.spawn_interval=0.25F;
+    emitter.position.point={2,0,0};
+    auto shape=system_with(emitter);
+    shape.set_basis({{0.5F,0,0},{0,0.5F,0},{0,0,0.5F}});
+    static_cast<void>(shape.advance(std::numeric_limits<float>::min()));
+    shape.set_basis({{0,0.5F,0},{-0.5F,0,0},{0,0,0.5F}});
+    static_cast<void>(shape.advance(1));
+    expect(close(shape.particles()[2].position.x,std::sqrt(0.5F))&&
+           close(shape.particles()[2].position.y,std::sqrt(0.5F)),
+        "interpolated rotation retains authored half scale");
+    particles::MeshBinding binding;binding.geometry.submeshes={{{{{2,0,0},{0,0,1}}},{}}};
+    binding.frame={{3,0,0},{{0.5F,0,0},{0,0.5F,0},{0,0,0.5F}}};
+    emitter.creator_id=35;emitter.mesh_mode=particles::MeshSpawnMode::random_vertex;
+    particles::SystemDefinition definition;definition.emitters={emitter};
+    particles::CpuSystem world(definition,123,64,binding);
+    world.set_origin({});world.set_basis(binding.frame.basis);
+    static_cast<void>(world.advance(std::numeric_limits<float>::min()));
+    world.set_origin({10,0,0});world.set_basis({{0,0.5F,0},{-0.5F,0,0},{0,0,0.5F}});
+    expect(bool(world.set_mesh_frame({{10,3,0},{{0,0.5F,0},{-0.5F,0,0},{0,0,0.5F}}})),"world mesh frame updates");
+    static_cast<void>(world.advance(1));
+    expect(close(world.particles()[2].position.x,5+4*std::sqrt(0.5F))&&
+           close(world.particles()[2].position.y,4*std::sqrt(0.5F)),
+        "world mesh birth samples the earlier host while retaining independent bone offset");
+}
+
+void test_walk_rotation(){
+    constexpr float turn=6.283185307179586F;
+    auto emitter=base_emitter();emitter.initial_rotation_only=true;emitter.rotation_rate=constant(0.25F);
+    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    expect(close(cpu.particles()[0].rotation,turn/4),"initial-only rotation converts turns to bin 64 at birth");
+    static_cast<void>(cpu.advance(1));expect(close(cpu.particles()[0].rotation,turn/4),"initial-only orientation remains held");
+    emitter.initial_rotation_only=false;emitter.rotation_rate=constant(1);cpu=system_with(emitter);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));
+    expect(cpu.particles()[0].rotation==0,"one full turn wraps to bin zero");
+    for(const bool initial_only:{false,true})for(const float turns:{3.0F,6.0F,9.0F}){
+        auto whole=base_emitter();whole.initial_rotation_only=initial_only;whole.rotation_rate=constant(turns);
+        whole.spawn_interval=100;whole.lifetime=100;auto wrapped=system_with(whole);
+        static_cast<void>(wrapped.advance(std::numeric_limits<float>::min()));
+        if(initial_only)expect(wrapped.particles()[0].rotation_angle==0&&wrapped.particles()[0].rotation==0,
+            "initial 3/6/9 turns subtract the sourced float turn count to exact zero");
+        for(int step=0;step<3;++step){
+            static_cast<void>(wrapped.advance(1));
+            expect(wrapped.particles()[0].rotation_angle==0&&wrapped.particles()[0].rotation==0,
+                "initial-only and accumulated 3/6/9-turn updates retain bin zero");
+        }
+    }
+    emitter.rotation_rate=constant(0.25F);emitter.random_rotation_direction=true;cpu=system_with(emitter,7);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));
+    expect(cpu.particles()[0].rotation_direction<0&&close(cpu.particles()[0].rotation,191*turn/256),
+        "reverse rotation mirrors bin 64 to 191");
+    emitter.random_rotation_direction=false;emitter.rotation_rate=constant(0.5F);emitter.rotation_variation=0.4F;
+    cpu=system_with(emitter,41);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));std::uint32_t state=41;static_cast<void>(unit(state));float angle{};
+    for(int step=0;step<3;++step){
+        const float variation=-0.4F+0.8F*unit(state);const float increment=turn*0.5F*0.25F;
+        angle+=increment+increment*variation;
+        static_cast<void>(cpu.advance(0.25F));const int bin=static_cast<int>((angle/turn)*256);
+        expect(close(cpu.particles()[0].rotation,bin*turn/256),"each rotating update samples a fresh signed variation");
+    }
+    emitter.rotation_variation=0;emitter.initial_rotation_only=true;
+    for(const float turns:{0.2499F,0.25F,0.2501F}){
+        emitter.rotation_rate=constant(turns);cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+        expect(close(cpu.particles()[0].rotation,(turns<0.25F?63:64)*turn/256),"orientation truncates at a bin boundary");
+    }
+    // PS-29: divide by one turn before scaling; a reciprocal product rounds this down to bin 14.
+    emitter.rotation_rate=constant(15.0F/256);cpu=system_with(emitter);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    expect(close(cpu.particles()[0].rotation,15*turn/256),"source arithmetic retains bin 15 at its exact turn fraction");
+    Bytes props;append(props,mini(0x17,scalar(0.3F)));append(props,mini(0x48,Bytes{std::byte{1}}));
+    const auto loaded=particles::load_alo(legacy_fixture(scalar(2),scalar(4),vector3(0,0,0),props));
+    expect(loaded&&loaded.value().emitters[0].initial_rotation_only&&loaded.value().emitters[0].rotation_variation==0.3F,
+        "rotation loader retains the independent initial-only flag and raw variation");
+}
+
+void test_walk_color(){
+    // PS-23: derive inclusive integer offsets independently from the local seed.
+    auto emitter=base_emitter();emitter.bursting=true;emitter.particles_per_interval=256;
+    emitter.modifier_ids={53};emitter.color_variance={0.2F,0.3F,0.4F,0.1F};
+    emitter.red=emitter.green=emitter.blue=emitter.alpha=constant(128.0F/255);
+    for(const bool locked:{false,true}){
+        emitter.grayscale_variance=locked;auto cpu=system_with(emitter,29,256);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+        std::uint32_t state=29;bool negative{},positive{};
+        for(const auto& particle:cpu.particles()){
+            const int red=static_cast<int>(bounded(state,21));
+            const int green=locked?red:static_cast<int>(bounded(state,31));
+            const int blue=locked?red:static_cast<int>(bounded(state,41));
+            const int alpha=static_cast<int>(bounded(state,21))-10;
+            expect(particle.color_offset.x==red&&particle.color_offset.y==green&&
+                particle.color_offset.z==blue&&particle.color_offset.w==alpha,"variation is byte-scaled with independent signed alpha");
+            expect(close(particle.color.x,(128.0F+red)/255)&&close(particle.color.w,(128.0F+alpha)/255),
+                "byte tracks receive integer variation before conversion to upload floats");
+            negative|=alpha<0;positive|=alpha>0;
+        }
+        expect(negative&&positive,"signed alpha covers both sides even with locked RGB");
+    }
+    emitter.red=constant(1);emitter.alpha=constant(0);auto cpu=system_with(emitter,29,256);
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    expect(std::all_of(cpu.particles().begin(),cpu.particles().end(),[](const auto& p){
+        return p.color.x==1&&p.color.w>=0&&p.color.w<=10.0F/255;
+    }),"colour clamp endpoints stay within the byte range");
+}
+
+void test_walk_shapes(){
+    constexpr float turn=6.283185307179586F;
+    auto emitter=base_emitter();emitter.position.shape=particles::Shape::sphere;
+    emitter.position.radius_max=3;emitter.bursting=true;emitter.particles_per_interval=4096;
+    for(const bool hollow:{false,true}){
+        emitter.hollow_position=hollow;auto cpu=system_with(emitter,117,4096);
+        expect(cpu.advance(std::numeric_limits<float>::min()).spawned==4096,"sphere contract admits a complete batch");
+        std::uint32_t state=117;double cosine_sum{},cosine_square{},radius_sum{};
+        for(const auto& particle:cpu.particles()){
+            const float radius=hollow?3:3*unit(state);
+            const float angle=turn*unit(state),cosine=2*unit(state)-1;
+            const float planar=std::sqrt(1-cosine*cosine);
+            expect(close(particle.position.x,std::cos(angle)*planar*radius)&&
+                close(particle.position.y,std::sin(angle)*planar*radius)&&close(particle.position.z,cosine*radius),
+                "sphere uses uniform cosine and azimuth with authored radial sampling");
+            cosine_sum+=cosine;cosine_square+=cosine*cosine;radius_sum+=radius;
+        }
+        expect(std::abs(cosine_sum/4096)<0.03&&std::abs(cosine_square/4096-1.0/3)<0.025&&
+            std::abs(radius_sum/4096-(hollow?3:1.5))<0.06,"sphere moments follow a uniform polar cosine and radius");
+    }
+    emitter.position.shape=particles::Shape::pinched_cylinder;emitter.position.cylinder_radius=4;
+    emitter.position.cylinder_height_max=10;emitter.position.pinch_fraction=0.6F;emitter.particles_per_interval=128;
+    for(const bool hollow:{false,true}){
+        emitter.hollow_position=hollow;auto cpu=system_with(emitter,19,128);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+        std::uint32_t state=19;bool upper{},lower{};
+        for(const auto& particle:cpu.particles()){
+            const float angle=turn*unit(state);float height=0.3F*unit(state);
+            if(unit(state)<0.5F)height=1-height;
+            float radius=4*(4*height*height-4*height+1);if(!hollow)radius*=unit(state);
+            expect(close(particle.position.x,-std::sin(angle)*radius)&&close(particle.position.y,std::cos(angle)*radius)&&
+                close(particle.position.z,10*height),"pinched cylinder mirrors height and uses the radius polynomial");
+            upper|=height>=0.7F;lower|=height<=0.3F;
+        }
+        expect(upper&&lower,"pinched cylinder samples both ends");
+    }
+    Bytes group;u32(group,5);for(int index=0;index<15;++index)
+        f32(group,index==9?4:index==10?std::bit_cast<float>(1U):index==11?10:0);
+    const auto loaded=particles::load_alo(legacy_fixture(scalar(2),scalar(4),vector3(0,0,0),{},{},
+        chunk(0x1100,chunk(0x1101,group),true)));
+    expect(loaded&&loaded.value().emitters[0].velocity.shape==particles::Shape::pinched_cylinder&&
+        loaded.value().emitters[0].velocity.pinch_fraction==1&&loaded.value().emitters[0].hollow_velocity&&
+        loaded.value().emitters[0].velocity.cylinder_radius==4&&loaded.value().emitters[0].velocity.cylinder_height_max==10,
+        "known V1 selector loads cylinder geometry and retains native default pinch fraction");
+}
+
+void test_walk_motion(){
+    // PS-24..PS-26: expected values follow semi-implicit motion, not snapshots.
+    auto emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration={2,0,0};
+    auto cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(0.5F));
+    expect(close(cpu.particles()[0].velocity.x,1)&&close(cpu.particles()[0].position.x,0.5F),
+        "acceleration from rest precedes position motion");
+    emitter.acceleration={0,0,2};emitter.acceleration_local=true;emitter.gravity=3;
+    cpu=system_with(emitter);cpu.set_basis({{0,0,-1},{0,1,0},{1,0,0}});
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(0.5F));
+    expect(close(cpu.particles()[0].position.x,0.5F)&&close(cpu.particles()[0].position.z,-0.75F),
+        "gravity remains world negative Z after authored acceleration rotates");
+    for(const float value:{0.009F,0.01F,0.011F}){
+        emitter=base_emitter();emitter.gravity=value;cpu=system_with(emitter);
+        static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));
+        expect(close(cpu.particles()[0].velocity.z,value>0.01F?-value:0),"simple gravity threshold is inclusive");
+    }
+    for(const float value:{0.099F,0.101F}){
+        emitter=base_emitter();emitter.acceleration={value,0,0};emitter.modifier_ids={10,11};
+        emitter.position.point={2,0,0};emitter.inward_acceleration=-2;cpu=system_with(emitter);
+        static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));
+        expect(close(cpu.particles()[0].velocity.x,value>0.1F?value-2:0),
+            "simple radial acceleration shares the squared-length activation gate");
+    }
+    emitter=base_emitter();emitter.modifier_ids={11,54};emitter.position.point={2,0,0};
+    emitter.inward_acceleration=-2;emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));
+    expect(close(cpu.particles()[0].velocity.x,0),"ordinary radial path and half-scaled wind cancel");
+    emitter.inward_acceleration=0;emitter.wind_disturbances=true;cpu=system_with(emitter);
+    const particles::WindDisturbance disturbance{{},{4,0,0},4,2,1};
+    expect(bool(cpu.set_wind_disturbances(std::span(&disturbance,1))),"finite scene disturbance accepted");
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(0.25F));
+    expect(close(cpu.particles()[0].position.x,4)&&close(cpu.particles()[0].velocity.x,0),
+        "mid-radius disturbance advances position without changing stored velocity");
+    Bytes props;append(props,mini(0x0c,scalar(3)));append(props,mini(0x35,Bytes{std::byte{1}}));
+    const auto loaded=particles::load_alo(legacy_fixture(scalar(2),scalar(4),vector3(0,0,2),props));
+    expect(loaded&&loaded.value().emitters[0].gravity==3&&loaded.value().emitters[0].acceleration.z==2&&
+        loaded.value().emitters[0].wind_response==0.5F,"loader retains independent gravity and native wind scaling");
+}
+
+void test_modifier_families(){
+    auto emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration={2,0,0};auto cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"acceleration modifier");
+    emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration={2,0,0};emitter.acceleration_local=true;cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.y,2),"local acceleration uses portable basis");
+    emitter=base_emitter();emitter.position.point={2,0,0};emitter.modifier_ids={11};emitter.inward_acceleration=-3;emitter.wind_response=0.5F;cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,-3),"ordinary attract acceleration modifier");
+    emitter=base_emitter();emitter.modifier_ids={54};emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"wind acceleration modifier");
+
+    emitter=base_emitter();emitter.lifetime=2;emitter.modifier_ids={7,18,49};emitter.size={particles::Interpolation::linear,{{0,2},{1,6}}};emitter.uv_index={particles::Interpolation::step,{{0,0},{0.4F,3},{1,3}}};emitter.texture_size=4;emitter.rotation_rate=constant(2);emitter.red={particles::Interpolation::linear,{{0,0},{1,1}}};cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));const auto& p=cpu.particles().front();expect(close(p.size,4),"linear/keyed size modifier");expect(close(p.texcoords.x,0.5F)&&close(p.texcoords.y,0.5F),"constant/keyed UV modifier");expect(close(p.rotation,0),"two-turn rotation wraps to bin zero");expect(close(p.color.x,127.0F/255),"legacy keyed colour truncates to an integer byte");
 
     {   // Retail spread: a factor 1 + U(-v, v) around the halved key, so sizes
         // exceed the key; the former (1 + v/2) normalisation never did.
         emitter=base_emitter();emitter.modifier_ids={57};emitter.size=constant(5);emitter.size_variation=0.92F;
-        emitter.bursting=true;emitter.particles_per_interval=64;auto spread=system_with(emitter,5,64);static_cast<void>(spread.advance(0));
+        emitter.bursting=true;emitter.particles_per_interval=64;auto spread=system_with(emitter,5,64);static_cast<void>(spread.advance(std::numeric_limits<float>::min()));
         float smallest=100.0F,largest=0.0F;for(const auto& particle:spread.particles()){smallest=std::min(smallest,particle.size);largest=std::max(largest,particle.size);}
         expect(spread.particles().size()==64&&smallest>=5.0F*0.08F-1e-4F&&largest<=5.0F*1.92F+1e-4F&&largest>5.0F*1.5F&&smallest<5.0F*0.5F,
             "V1 size variation spreads the half-extent by the raw retail fraction");
     }
-    emitter=base_emitter();emitter.modifier_ids={57,53,58};emitter.size=constant(3);emitter.size_variation=0.2F;emitter.color_variance={0.2F,0.3F,0.4F,0.1F};emitter.random_rotation=true;emitter.random_rotation_average=1;emitter.random_rotation_variation=0.5F;auto first=system_with(emitter,99);auto second=system_with(emitter,99);static_cast<void>(first.advance(0));static_cast<void>(second.advance(0));const auto& a=first.particles().front();const auto& b=second.particles().front();expect(close(a.size,b.size)&&close(a.rotation,b.rotation)&&close(a.color.x,b.color.x),"fixed seed reproduces constant size/rotation and color variance");expect(a.size>=2.4F&&a.size<=3.6F&&a.color.x>=1.0F,"variance modifiers stay bounded and saturate color");
+    emitter=base_emitter();emitter.modifier_ids={57,53,58};emitter.size=constant(3);emitter.size_variation=0.2F;emitter.color_variance={0.2F,0.3F,0.4F,0.1F};emitter.random_rotation=true;emitter.random_rotation_average=1;emitter.random_rotation_variation=0.5F;auto first=system_with(emitter,99);auto second=system_with(emitter,99);static_cast<void>(first.advance(std::numeric_limits<float>::min()));static_cast<void>(second.advance(std::numeric_limits<float>::min()));const auto& a=first.particles().front();const auto& b=second.particles().front();expect(close(a.size,b.size)&&close(a.rotation,b.rotation)&&close(a.color.x,b.color.x),"fixed seed reproduces constant size/rotation and color variance");expect(a.size>=2.4F&&a.size<=3.6F&&a.color.x>=1.0F,"variance modifiers stay bounded and saturate color");
 }
 
 void test_uv_cell_is_integer_part(){
     // FoC's explosion debris (`debre`: UV 7 -> 2 as a step track) keeps atlas cell 7 all its life.
     auto emitter=base_emitter();emitter.lifetime=2;emitter.modifier_ids={18};emitter.texture_size=64;
     emitter.uv_index={particles::Interpolation::step,{{0,7},{1,2}}};auto cpu=system_with(emitter);
-    static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1.9F));auto uv=cpu.particles().front().texcoords;
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1.9F));auto uv=cpu.particles().front().texcoords;
     expect(close(uv.x,0.875F)&&close(uv.y,0)&&close(uv.z,0.125F),"a step UV track holds its start cell to the end");
     // An interpolated value takes its integer part: 1.6 draws cell 1, not the nearest cell 2.
     emitter=base_emitter();emitter.lifetime=1;emitter.modifier_ids={18};emitter.texture_size=4;
     emitter.uv_index={particles::Interpolation::linear,{{0,0},{1,4}}};cpu=system_with(emitter);
-    static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(0.4F));uv=cpu.particles().front().texcoords;
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(0.4F));uv=cpu.particles().front().texcoords;
     expect(close(uv.x,0.5F)&&close(uv.y,0),"a fractional UV value draws its integer cell");
 }
 
-void test_resource_bound(){auto emitter=base_emitter();emitter.bursting=true;emitter.particles_per_interval=10;auto cpu=system_with(emitter,1,3);const auto stats=cpu.advance(0);expect(stats.spawned==3&&stats.dropped_at_capacity==7&&cpu.particles().size()==3&&cpu.total_dropped()==7,"particle storage is hard bounded");emitter.particles_per_interval=std::numeric_limits<float>::max();cpu=system_with(emitter,1,2);const auto huge=cpu.advance(0);expect(huge.spawned==2&&cpu.particles().size()==2&&huge.dropped_at_capacity>1000000,"pathological burst is counted without an unbounded loop");}
+void test_resource_bound(){auto emitter=base_emitter();emitter.bursting=true;emitter.particles_per_interval=10;auto cpu=system_with(emitter,1,3);const auto stats=cpu.advance(std::numeric_limits<float>::min());expect(stats.spawned==3&&stats.dropped_at_capacity==7&&cpu.particles().size()==3&&cpu.total_dropped()==7,"particle storage is hard bounded");emitter.particles_per_interval=std::numeric_limits<float>::max();cpu=system_with(emitter,1,2);const auto huge=cpu.advance(std::numeric_limits<float>::min());expect(huge.spawned==2&&cpu.particles().size()==2&&huge.dropped_at_capacity>1000000,"pathological burst is counted without an unbounded loop");}
 
 particles::SystemDefinition parent_system(){
     particles::SystemDefinition definition;
@@ -526,14 +829,14 @@ particles::SystemDefinition parent_system(){
 void test_parent_lifecycle(){
     auto first=particles::CpuSystem(parent_system(),21,32);
     auto second=particles::CpuSystem(parent_system(),21,32);
-    const auto initial=first.advance(0);
+    const auto initial=first.advance(std::numeric_limits<float>::min());
     expect(initial.spawned==2&&initial.child_instances_started==1&&first.live_child_instances()==1,
-        "parent birth starts a separate child emitter instance");
+        "parent birth starts a separate link to the shared dependent emitter");
     expect(first.particles()[0].id!=first.particles()[1].id&&
         close(first.particles()[1].position.x,1)&&close(first.particles()[1].velocity.x,2.5F),
         "child position and capped inherited velocity use parent particle");
     const auto parent_id=first.particles()[0].id;
-    static_cast<void>(first.advance(0.25F));
+    static_cast<void>(first.advance(std::nextafter(0.25F,1.0F)));
     expect(first.particles().size()==3&&close(first.particles().back().position.x,2),
         "one child emitter follows its moving parent");
     const auto death=first.advance(0.25F);
@@ -545,7 +848,8 @@ void test_parent_lifecycle(){
     const auto after=first.advance(0.25F);
     expect(after.spawned==0&&after.death_bursts==0&&first.live_child_instances()==0,
         "detached child emitter stops and death burst does not repeat");
-    for(const float step:{0.0F,0.25F,0.25F,0.25F})static_cast<void>(second.advance(step));
+    // PS-10/PS-16: repeat the same positive initialization and shared-clock boundaries.
+    for(const float step:{std::numeric_limits<float>::min(),std::nextafter(0.25F,1.0F),0.25F,0.25F})static_cast<void>(second.advance(step));
     expect(first.particles().size()==second.particles().size(),"fixed step reproduces lifecycle count");
     for(std::size_t i=0;i<first.particles().size();++i)
         expect(first.particles()[i].id==second.particles()[i].id&&
@@ -555,15 +859,15 @@ void test_parent_lifecycle(){
     auto paired=parent_system();paired.emitters[0].bursting=true;
     paired.emitters[0].particles_per_interval=2;
     particles::CpuSystem two_parents(std::move(paired),21,32);
-    const auto births=two_parents.advance(0);
+    const auto births=two_parents.advance(std::numeric_limits<float>::min());
     expect(births.child_instances_started==2&&two_parents.live_child_instances()==2&&
-        births.spawned==4,"two parent particles own two independent child emitters");
+        births.spawned==4,"two parent particles own links to one shared dependent clock");
     const auto deaths=two_parents.advance(0.5F);
     expect(deaths.child_instances_detached==2&&deaths.death_bursts==2&&
         two_parents.live_child_instances()==0,"each parent detaches and bursts independently");
 
     particles::CpuSystem bounded(parent_system(),21,2);
-    static_cast<void>(bounded.advance(0));
+    static_cast<void>(bounded.advance(std::numeric_limits<float>::min()));
     const auto limited=bounded.advance(0.5F);
     expect(bounded.emitter_capacities()[0].reserved==1&&
         bounded.emitter_capacities()[1].reserved==1&&bounded.emitter_capacities()[2].reserved==0&&
@@ -572,7 +876,7 @@ void test_parent_lifecycle(){
         "PS-19 death bursts cannot borrow retired root slots under the explicit host budget");
     auto cycle=parent_system();cycle.emitters[0].creator_id=39;cycle.emitters[0].parent_emitter=1;
     particles::CpuSystem rejected(std::move(cycle),21,32);
-    expect(rejected.advance(0).spawned==0&&rejected.live_child_instances()==0,
+    expect(rejected.advance(std::numeric_limits<float>::min()).spawned==0&&rejected.live_child_instances()==0,
         "programmatic parent cycles fail closed");
 }
 
@@ -583,10 +887,10 @@ void test_parent_inward_speed_uses_system_origin(){
     definition.emitters[1].inward_speed=3;
     particles::CpuSystem cpu(std::move(definition),21,32);
     cpu.set_origin({5,0,0});
-    const auto stats=cpu.advance(0);
+    const auto stats=cpu.advance(std::numeric_limits<float>::min());
     expect(stats.child_instances_started==1&&cpu.particles().size()==2,
         "displaced parent starts one attached child at zero local offset");
-    expect(close(cpu.particles()[1].position.x,15)&&close(cpu.particles()[1].velocity.x,3),
+    expect(close(cpu.particles()[1].position.x,15)&&close(cpu.particles()[1].radial_velocity.x,3),
         "inward speed points from system translation even at zero child offset");
 }
 
@@ -597,8 +901,9 @@ void test_parent_id_survives_live_compaction(){
     auto& birth=definition.emitters[1];
     birth.position.point={1,0,0};birth.spawn_interval=0.25F;birth.stop_time=0;
     particles::CpuSystem cpu(std::move(definition),21,64);
-    static_cast<void>(cpu.advance(0));
-    static_cast<void>(cpu.advance(0.5F));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
+    // PS-10: admit the second parent just beyond the shared root interval.
+    static_cast<void>(cpu.advance(std::nextafter(0.5F,1.0F)));
     std::uint64_t surviving_parent_id{};
     std::size_t index_before{};
     for(std::size_t index=0;index<cpu.particles().size();++index){
@@ -626,11 +931,11 @@ void test_parent_id_survives_live_compaction(){
 
 void test_runtime_numeric_inputs(){
     const float nan=std::numeric_limits<float>::quiet_NaN();const float infinity=std::numeric_limits<float>::infinity();
-    auto emitter=base_emitter();emitter.position.point={1,0,0};auto cpu=system_with(emitter);cpu.set_origin({2,0,0});cpu.set_origin({nan,0,0});static_cast<void>(cpu.advance(0));expect(close(cpu.particles().front().position.x,3),"non-finite origin is ignored");
-    emitter=base_emitter();emitter.position.point={1,0,0};cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});cpu.set_basis({{infinity,0,0},{0,1,0},{0,0,1}});static_cast<void>(cpu.advance(0));expect(close(cpu.particles().front().position.y,1),"non-finite basis is ignored");
-    emitter=base_emitter();emitter.modifier_ids={54};emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});cpu.set_wind({infinity,0,0});static_cast<void>(cpu.advance(0));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"non-finite wind is ignored");
-    emitter=base_emitter();emitter.texture_size=4;emitter.uv_index=constant(std::numeric_limits<float>::max());cpu=system_with(emitter);static_cast<void>(cpu.advance(0));const auto uv=cpu.particles().front().texcoords;expect(close(uv.x,0.5F)&&uv.y>0&&std::isfinite(uv.y),"out-of-int-range UV index converts safely");
-    emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration.x=nan;cpu=system_with(emitter);expect(cpu.advance(0).spawned==0,"non-finite programmatic emitter input is inactive");
+    auto emitter=base_emitter();emitter.position.point={1,0,0};auto cpu=system_with(emitter);cpu.set_origin({2,0,0});cpu.set_origin({nan,0,0});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(close(cpu.particles().front().position.x,3),"non-finite origin is ignored");
+    emitter=base_emitter();emitter.position.point={1,0,0};cpu=system_with(emitter);cpu.set_basis({{0,1,0},{-1,0,0},{0,0,1}});cpu.set_basis({{infinity,0,0},{0,1,0},{0,0,1}});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));expect(close(cpu.particles().front().position.y,1),"non-finite basis is ignored");
+    emitter=base_emitter();emitter.modifier_ids={54};emitter.wind_response=0.5F;cpu=system_with(emitter);cpu.set_wind({4,0,0});cpu.set_wind({infinity,0,0});static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));static_cast<void>(cpu.advance(1));expect(close(cpu.particles().front().velocity.x,2),"non-finite wind is ignored");
+    emitter=base_emitter();emitter.texture_size=4;emitter.uv_index=constant(std::numeric_limits<float>::max());cpu=system_with(emitter);static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));const auto uv=cpu.particles().front().texcoords;expect(close(uv.x,0.5F)&&uv.y>0&&std::isfinite(uv.y),"out-of-int-range UV index converts safely");
+    emitter=base_emitter();emitter.modifier_ids={10};emitter.acceleration.x=nan;cpu=system_with(emitter);expect(cpu.advance(std::numeric_limits<float>::min()).spawned==0,"non-finite programmatic emitter input is inactive");
     particles::CpuSystem clock_only(particles::SystemDefinition{});static_cast<void>(clock_only.advance(std::numeric_limits<float>::max()));static_cast<void>(clock_only.advance(std::numeric_limits<float>::max()));expect(clock_only.presentation_time()==std::numeric_limits<float>::max()&&std::isfinite(clock_only.presentation_time()),"finite deltas cannot overflow the accumulated clock");
 }
 
@@ -656,12 +961,12 @@ void test_detach_before_first_spawn_and_schedule_boundary(){
     expect(!cpu.detached()&&!cpu.finished(),"a fresh system is neither detached nor finished");
     cpu.detach();
     expect(cpu.detached()&&cpu.finished(),"detach before the first spawn finishes with nothing to drain");
-    const auto first=cpu.advance(0);
+    const auto first=cpu.advance(std::numeric_limits<float>::min());
     expect(first.spawned==0&&cpu.particles().empty()&&cpu.finished(),"detached root never emits its first batch");
 
     auto delayed=continuous_emitter();delayed.start_delay=1.0F;
     auto waiting=system_with(delayed);
-    expect(waiting.advance(0).spawned==0&&waiting.particles().empty()&&!waiting.finished(),
+    expect(waiting.advance(std::numeric_limits<float>::min()).spawned==0&&waiting.particles().empty()&&!waiting.finished(),
         "empty but scheduled system is not finished while attached");
     static_cast<void>(waiting.advance(0.5F));
     expect(!waiting.finished(),"still empty and scheduled, still not finished");
@@ -669,12 +974,12 @@ void test_detach_before_first_spawn_and_schedule_boundary(){
     auto attached=system_with(continuous_emitter());
     auto boundary=system_with(continuous_emitter());
     for(auto* system:{&attached,&boundary}){
-        expect(system->advance(0).spawned==1,"first root batch at time zero");
+        expect(system->advance(std::numeric_limits<float>::min()).spawned==1,"first root batch at time zero");
         expect(system->advance(0.25F).spawned==0,"no batch before the 0.5 s schedule");
     }
     boundary.detach();
     expect(same_particles(attached,boundary),"detach itself changes no particle");
-    const auto kept=attached.advance(0.25F);
+    const auto kept=attached.advance(0.2501F);
     const auto stopped=boundary.advance(0.25F);
     expect(kept.spawned==1&&stopped.spawned==0&&stopped.killed==0,
         "detach just before a scheduled boundary cancels exactly that batch and kills nothing");
@@ -683,7 +988,7 @@ void test_detach_before_first_spawn_and_schedule_boundary(){
 
 void test_detach_after_births_drains(){
     auto cpu=system_with(continuous_emitter(),7,64);
-    static_cast<void>(cpu.advance(0));
+    static_cast<void>(cpu.advance(std::numeric_limits<float>::min()));
     for(int i=0;i<3;++i)static_cast<void>(cpu.advance(0.25F));
     const auto live=cpu.particles().size();
     expect(live==2,"two root batches are live before detach");
@@ -713,7 +1018,7 @@ void test_repeated_detach_is_stable(){
     definition.emitters[0].spawn_interval=0.2F;definition.emitters[0].stop_time=0;
     definition.emitters[0].lifetime_variation=0.5F;definition.emitters[1].size_variation=0.3F;
     particles::CpuSystem once(definition,33,64),again(definition,33,64);
-    for(auto* system:{&once,&again}){static_cast<void>(system->advance(0));static_cast<void>(system->advance(0.25F));}
+    for(auto* system:{&once,&again}){static_cast<void>(system->advance(std::numeric_limits<float>::min()));static_cast<void>(system->advance(0.25F));}
     const auto highest=std::max_element(once.particles().begin(),once.particles().end(),
         [](const auto& a,const auto& b){return a.id<b.id;})->id;
     once.detach();again.detach();again.detach();
@@ -735,11 +1040,11 @@ void test_detach_keeps_parent_chains(){
     auto definition=parent_system();
     definition.emitters[0].spawn_interval=0.2F;definition.emitters[0].stop_time=0;
     particles::CpuSystem cpu(definition,21,64);
-    const auto initial=cpu.advance(0);
+    const auto initial=cpu.advance(std::numeric_limits<float>::min());
     expect(initial.spawned==2&&cpu.live_child_instances()==1,"parent and its first child exist before detach");
     const auto parent_id=cpu.particles()[0].id;
     cpu.detach();
-    const auto trail=cpu.advance(0.25F);
+    const auto trail=cpu.advance(std::nextafter(0.25F,1.0F));
     const auto parent=std::find_if(cpu.particles().begin(),cpu.particles().end(),
         [&](const particles::Particle& p){return p.id==parent_id;});
     expect(trail.spawned==1&&trail.child_instances_started==0&&cpu.live_child_instances()==1&&
@@ -757,14 +1062,14 @@ void test_detach_keeps_parent_chains(){
     expect(cpu.finished()&&bursts==1,"children drain to finished without a second burst");
 
     particles::CpuSystem bounded(definition,21,2);
-    static_cast<void>(bounded.advance(0));
+    static_cast<void>(bounded.advance(std::numeric_limits<float>::min()));
     bounded.detach();
     const auto limited=bounded.advance(0.5F);
     expect(bounded.particles().size()<=2&&limited.death_bursts==1&&limited.dropped_at_capacity>=1,
         "draining child and burst emission keep the hard particle bound");
     auto capped=definition;capped.emitters[0].bursting=true;capped.emitters[0].particles_per_interval=4;
     particles::CpuSystem instances(capped,21,2);
-    const auto started=instances.advance(0);
+    const auto started=instances.advance(std::numeric_limits<float>::min());
     instances.detach();
     const auto drained=instances.advance(0.1F);
     expect(started.dropped_at_capacity==4&&started.child_instances_started==2&&
@@ -816,7 +1121,7 @@ void test_skip_and_freeze_times(){
     emitter.lifetime=1;emitter.velocity={.shape=particles::Shape::point,.point={0,0,3}};
     auto skipped=emitter;skipped.skip_time=2;
     auto plain=system_with(emitter,5,256);auto warm=system_with(skipped,5,256);
-    const auto cold_first=plain.advance(0);const auto warm_first=warm.advance(0);
+    const auto cold_first=plain.advance(std::numeric_limits<float>::min());const auto warm_first=warm.advance(std::numeric_limits<float>::min());
     expect(cold_first.spawned==1&&plain.particles().size()==1,"without a skip time the first frame holds one particle");
     expect(warm_first.spawned>=20&&warm.particles().size()>=9&&warm.particles().size()<=11,
         "a skip time pre-simulates to steady state before the first frame");
@@ -827,7 +1132,7 @@ void test_skip_and_freeze_times(){
         highest=std::max(highest,particle.position.z);spread|=particle.position.z>1.0F;
     }
     expect(spread&&highest<=3.0F+0.001F,"pre-rolled particles moved for their pre-rolled age");
-    auto again=system_with(skipped,5,256);static_cast<void>(again.advance(0));
+    auto again=system_with(skipped,5,256);static_cast<void>(again.advance(std::numeric_limits<float>::min()));
     expect(again.particles().size()==warm.particles().size()&&
         std::equal(again.particles().begin(),again.particles().end(),warm.particles().begin(),
             [](const particles::Particle& a,const particles::Particle& b){
@@ -835,7 +1140,7 @@ void test_skip_and_freeze_times(){
         "the pre-roll is deterministic for a fixed seed");
     // Freeze at the skip time: the field is filled, then nothing ages, moves, dies or spawns.
     auto field=skipped;field.freeze_time=2;
-    auto frozen=system_with(field,5,256);static_cast<void>(frozen.advance(0));
+    auto frozen=system_with(field,5,256);static_cast<void>(frozen.advance(std::numeric_limits<float>::min()));
     const auto snapshot=std::vector<particles::Particle>(frozen.particles().begin(),frozen.particles().end());
     for(int frame=0;frame<90;++frame){
         const auto stats=frozen.advance(1.0F/30.0F);
@@ -850,7 +1155,7 @@ void test_skip_and_freeze_times(){
     auto crossing=emitter;crossing.freeze_time=1;crossing.lifetime=10;
     auto long_step=system_with(crossing,5,256);
     auto split_step=system_with(crossing,5,256);
-    static_cast<void>(long_step.advance(0));static_cast<void>(split_step.advance(0));
+    static_cast<void>(long_step.advance(std::numeric_limits<float>::min()));static_cast<void>(split_step.advance(std::numeric_limits<float>::min()));
     const auto crossed=long_step.advance(2);
     const auto to_boundary=split_step.advance(1);
     const auto after_boundary=split_step.advance(1);
@@ -863,12 +1168,12 @@ void test_skip_and_freeze_times(){
     expect(long_step.advance(0.25F).spawned==0&&close(long_step.particles().front().position.z,0),
         "a smaller later delta cannot unfreeze the emitter");
     auto linked=crossing;linked.translater_id=26;
-    auto held=system_with(linked,5,256);held.set_origin({});static_cast<void>(held.advance(0));
+    auto held=system_with(linked,5,256);held.set_origin({});static_cast<void>(held.advance(std::numeric_limits<float>::min()));
     static_cast<void>(held.advance(2));held.set_origin({10,0,0});held.follow_emitter();
     expect(close(held.particles().front().position.x,0), "frozen linked particles stop following their owner");
     // An emitter without a skip time in a pre-rolled system starts at zero, exactly as before.
     particles::SystemDefinition mixed;mixed.emitters={skipped,emitter};
-    particles::CpuSystem both(mixed,5,512);static_cast<void>(both.advance(0));
+    particles::CpuSystem both(mixed,5,512);static_cast<void>(both.advance(std::numeric_limits<float>::min()));
     const auto late=std::count_if(both.particles().begin(),both.particles().end(),
         [](const particles::Particle& particle){return particle.emitter_index==1;});
     expect(late==1,"an emitter without a skip time is not pre-simulated with its neighbour");
@@ -878,26 +1183,26 @@ void test_prewarm_boundaries(){
     auto emitter=base_emitter();emitter.velocity.point={1,0,0};
     const auto probe=[&](const float target,const float caller_delta){
         auto warm=emitter;warm.skip_time=target;
-        auto cpu=system_with(warm,7,256);static_cast<void>(cpu.advance(caller_delta));return cpu;
+        auto cpu=system_with(warm,7,256);static_cast<void>(cpu.advance(caller_delta==0?std::numeric_limits<float>::min():caller_delta));return cpu;
     };
     const auto zero=probe(0,0),equal=probe(0.1F,0),between=probe(0.15F,0),next=probe(0.2F,0);
-    expect(zero.particles().front().spawn_time==0&&zero.particles().front().position.x==0,
+    expect(zero.particles().front().spawn_time==0&&close(zero.particles().front().position.x,0),
         "zero prewarm target runs no presimulation step");
-    expect(equal.particles().front().spawn_time==-0.2F&&close(equal.particles().front().position.x,0.1F),
+    expect(equal.particles().front().spawn_time==-0.2F&&close(equal.particles().front().position.x,0.2F),
         "inclusive 0.1-second target runs two 0.1-second steps");
-    expect(between.particles().front().spawn_time==-0.2F&&close(between.particles().front().position.x,0.1F),
+    expect(between.particles().front().spawn_time==-0.2F&&close(between.particles().front().position.x,0.2F),
         "a target between steps overshoots to the next complete step");
-    expect(next.particles().front().spawn_time==-0.3F&&close(next.particles().front().position.x,0.2F),
+    expect(next.particles().front().spawn_time==-0.3F&&close(next.particles().front().position.x,0.3F),
         "exact equality at the second prewarm step admits one more step");
     const auto ordinary=probe(0.1F,0.05F);
-    expect(close(ordinary.presentation_time(),0.05F)&&close(ordinary.particles().front().position.x,0.15F),
+    expect(close(ordinary.presentation_time(),0.05F)&&close(ordinary.particles().front().position.x,0.25F),
         "the admitted caller update runs after prewarm");
     auto warm=emitter;warm.skip_time=0.2F;warm.freeze_time=0.15F;
     auto admitted=system_with(warm,7,256);static_cast<void>(admitted.advance(0.05F));
-    expect(close(admitted.particles().front().position.x,0.25F),
+    expect(close(admitted.particles().front().position.x,0.35F),
         "first-update freeze admission precedes prewarm and is not repeated inside it");
     static_cast<void>(admitted.advance(0.01F));
-    expect(close(admitted.particles().front().position.x,0.25F), "the next crossing freezes the prewarmed state");
+    expect(close(admitted.particles().front().position.x,0.35F), "the next crossing freezes the prewarmed state");
     auto rejected=system_with(warm,7,256);
     expect(rejected.advance(0.2F).spawned==0&&rejected.particles().empty(),
         "a rejected first update freezes before prewarming or births");
@@ -905,8 +1210,8 @@ void test_prewarm_boundaries(){
     auto boundary=emitter;boundary.skip_time=0.1F;boundary.freeze_time=0.2F;boundary.translater_id=26;
     auto neighbor=emitter;neighbor.skip_time=10;neighbor.lifetime=100;
     particles::SystemDefinition mixed;mixed.emitters={boundary,neighbor};
-    particles::CpuSystem both(mixed,7,256);both.set_origin({});static_cast<void>(both.advance(0));
-    static_cast<void>(both.advance(0));both.set_origin({1,0,0});both.follow_emitter();
+    particles::CpuSystem both(mixed,7,256);both.set_origin({});static_cast<void>(both.advance(std::numeric_limits<float>::min()));
+    static_cast<void>(both.advance(std::numeric_limits<float>::min()));both.set_origin({1,0,0});both.follow_emitter();
     const auto first=std::find_if(both.particles().begin(),both.particles().end(),
         [](const auto& particle){return particle.emitter_index==0;});
     expect(first!=both.particles().end()&&first->position.x>1,
@@ -932,10 +1237,10 @@ void test_prewarmed_capacity() {
     const auto capacity = particles::prewarmed_capacity(field, 256);
     expect(capacity >= 830 && capacity < 850, "authored rates size the field, with bounded scheduling slack");
     particles::CpuSystem old(field, 238, 256), full(field, 238, capacity), repeat(field, 238, capacity);
-    expect(old.advance(0).dropped_at_capacity > 500, "the old per-proxy cap reproduces missing pebbles");
-    expect(full.advance(0).dropped_at_capacity == 0 && full.particles().size() >= 825,
+    expect(old.advance(std::numeric_limits<float>::min()).dropped_at_capacity > 500, "the old per-proxy cap reproduces missing pebbles");
+    expect(full.advance(std::numeric_limits<float>::min()).dropped_at_capacity == 0 && full.particles().size() >= 825,
         "the source-derived budget retains the prewarmed field");
-    static_cast<void>(repeat.advance(0));
+    static_cast<void>(repeat.advance(std::numeric_limits<float>::min()));
     expect(full.particles().size() == repeat.particles().size() &&
         std::equal(full.particles().begin(), full.particles().end(), repeat.particles().begin(),
             [](const auto& a, const auto& b) { return a.id == b.id && a.position.x == b.position.x
@@ -961,7 +1266,7 @@ void test_prewarmed_capacity() {
     field.emitters={short_freeze};
     const auto budget=particles::continuous_capacity(field,256);
     particles::CpuSystem warm(field,7,budget);
-    expect(budget>2500&&warm.advance(0).dropped_at_capacity==0&&warm.particles().size()>2400,
+    expect(budget>2500&&warm.advance(std::numeric_limits<float>::min()).dropped_at_capacity==0&&warm.particles().size()>2400,
         "capacity includes admitted prewarm even when its target exceeds freeze");
 }
 
@@ -1145,7 +1450,7 @@ void test_burst_capacity() {
     binding.geometry.submeshes.erase(binding.geometry.submeshes.begin());
     particles::CpuSystem preallocated(system, 71, large, binding);
     const auto* storage = preallocated.particles().data();
-    expect(preallocated.advance(0).spawned == 4500 && preallocated.particles().data() == storage,
+    expect(preallocated.advance(std::numeric_limits<float>::min()).spawned == 4500 && preallocated.particles().data() == storage,
         "a burst above 4096 births does not reallocate its particle pool");
 }
 
@@ -1164,11 +1469,12 @@ void test_independent_emitter_capacity() {
     expect(memory >= 16 * sizeof(particles::Particle)
         && memory <= 16 * (sizeof(particles::Particle) + sizeof(std::size_t)),
         "independent roots reserve bounded particle/slot payload without unused dependent scratch");
-    const auto first = cpu.advance(0);
+    const auto first = cpu.advance(std::numeric_limits<float>::min());
     expect(first.requested == 103 && first.spawned == 16 && first.dropped_at_capacity == 87,
         "requested and dropped counts include every emitter at exhaustion");
     const auto ids = std::vector<particles::Particle>(cpu.particles().begin(), cpu.particles().end());
-    const auto second = cpu.advance(0.1F);
+    // PS-10: subsequent emission enters only after the interval boundary.
+    const auto second = cpu.advance(std::nextafter(0.1F,1.0F));
     expect(second.spawned == 0 && second.dropped_at_capacity == 100,
         "exhausted emitter drops new births without oldest replacement");
     expect(std::equal(ids.begin(), ids.end(), cpu.particles().begin(),
@@ -1200,7 +1506,7 @@ void test_independent_emitter_capacity() {
     for (const auto& submesh : binding.geometry.submeshes) vertices += submesh.vertices.size();
     system.emitters = {mesh};
     particles::CpuSystem all_vertices(system, 1, 65536, binding);
-    const auto vertex_births = all_vertices.advance(0);
+    const auto vertex_births = all_vertices.advance(std::numeric_limits<float>::min());
     expect(all_vertices.emitter_capacities()[0].native_requested == 5003 * vertices
         && vertex_births.requested == 6000 * vertices && vertex_births.spawned == 5003 * vertices
         && vertex_births.dropped_at_capacity == 997 * vertices,
@@ -1210,6 +1516,13 @@ void test_independent_emitter_capacity() {
 } // namespace
 
 int main(const int argc,char** argv){
+    test_walk_trails();
+    test_walk_births();
+    test_mesh_birth_frames();
+    test_walk_rotation();
+    test_walk_color();
+    test_walk_shapes();
+    test_walk_motion();
     test_independent_emitter_capacity();
     if(argc==3&&std::string(argv[1])=="--inspect-alo"){
         std::ifstream input(argv[2],std::ios::binary);std::vector<char> raw((std::istreambuf_iterator<char>(input)),{});Bytes bytes(raw.size());

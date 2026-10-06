@@ -192,7 +192,10 @@ public:
     struct MinimapView final {
         presentation::ui::MinimapExtents extents;
         std::vector<presentation::ui::MinimapUnit> units;
+        std::vector<presentation::ui::MinimapMemory> memories;
         std::vector<presentation::ui::MinimapHazard> hazards;
+        struct RadarWarning final { double x{}; double y{}; double age{}; };
+        std::vector<RadarWarning> warnings;
         std::optional<std::array<std::array<double, 2>, 4>> ground; // MM-09, source X/Y
         std::vector<presentation::ui::MinimapRevealer> revealers;
         // #494: the local player's fog cells; when set, the fog layer reads them, not `revealers`.
@@ -201,9 +204,9 @@ public:
     };
     void set_minimap(const MinimapView& view);
     // What a left press or drag (look) and a right click (move) on the minimap do, in source X/Y.
-    void set_minimap_handlers(std::function<void(double, double)> look, std::function<void(double, double)> move);
+    void set_minimap_handlers(std::function<void(double, double)> look, std::function<void(double, double, bool)> move);
     // MM-07: a faction's colour from Factions.xml, for owners without a lobby colour.
-    [[nodiscard]] std::optional<data::ui::Rgba8> faction_colour(std::string_view faction) const;
+    [[nodiscard]] std::optional<data::ui::Rgba8> faction_colour(std::string_view faction, bool no_colorization = false) const;
     // MM-06: a type's minimap looks from its XML (cached).
     [[nodiscard]] const presentation::ui::MinimapTypeLooks& minimap_looks(std::string_view type);
     // A minimap point (x, y from -1 to 1) in viewport pixels while the minimap is shown.
@@ -217,6 +220,8 @@ public:
         std::function<void()> quit;
     };
     void set_time_handlers(TimeHandlers handlers);
+    void set_order_handler(std::function<void(std::string_view)> handler);
+    void set_order_mode(std::string_view active);
     // The panel's state each frame (TM-05, TM-06, TM-08, TM-09).
     struct TimeView final {
         bool paused{};

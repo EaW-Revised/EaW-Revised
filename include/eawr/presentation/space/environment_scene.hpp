@@ -3,6 +3,7 @@
 #include "eawr/assets/assets.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/space/space.hpp"
 
 #include <array>
@@ -171,6 +172,12 @@ inline constexpr float environment_sky_radius = 48000.0F;
 // Space_Mode supplies the pose and near plane; the environment needs its own
 // far plane to keep the camera-centred sky and distant backdrop in view.
 [[nodiscard]] FixedCamera environment_view_camera(FixedCamera camera) noexcept;
+
+// BP-04/BP-07: laser depth uses validated tactical clips, independently of
+// the sky render range or whether an interactive camera bridge exists.
+// The drawn pose, FOV and viewport are preserved; impacts use the render camera.
+[[nodiscard]] FixedCamera environment_laser_camera(FixedCamera drawn,
+                                                  const camera::Constants& tactical) noexcept;
 
 // Move a sky or sky-owned sun instance by the eye displacement without changing
 // its authored orientation, scale or local geometry.

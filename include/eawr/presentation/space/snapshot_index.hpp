@@ -2,11 +2,13 @@
 
 #include "eawr/presentation/space/fog_field.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/platform/live_session.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -44,6 +46,8 @@ public:
         visible_.clear();
         alive_.clear();
         revealers_.clear();
+        teams_.clear();
+        observer_team_.reset();
         ++work_.refreshes;
         if (!snapshot_) return;
         const auto players = snapshot_->players();
@@ -52,6 +56,8 @@ public:
         });
         const auto bit = seat == players.end() ? std::uint64_t{0}
             : std::uint64_t{1} << static_cast<std::size_t>(seat - players.begin());
+        observer_team_ = seat == players.end() ? std::nullopt : std::optional{seat->team_id};
+        for (const auto& player : players) teams_.emplace(player.player_id, player.team_id);
         alive_.reserve(snapshot_->instances().size());
         visible_.reserve(snapshot_->instances().size());
         const auto real = [](const sim::math::Fixed value) {
@@ -76,6 +82,31 @@ public:
     [[nodiscard]] const std::vector<FogFieldRevealer>& revealers() const noexcept { return revealers_; }
     [[nodiscard]] const Work& work() const noexcept { return work_; }
 
+    // V-04/16, WPJ-38: reuse the observer's immutable fog rows and alliance
+    // inputs. A projectile outlives its shooter; no entity lookup or new scan
+    // of units is needed. The caller supplies object stealth/force exceptions.
+    [[nodiscard]] bool point_visible(const sim::tactical::PlayerId owner, const sim::math::Vec3& position,
+                                    const platform::LiveFog* fog, const bool revealed = false,
+                                    const bool enemy_stealth = false) const noexcept {
+        if (revealed) return true;
+        if (!observer_team_) return false;
+        const auto team = teams_.find(owner);
+        if (team != teams_.end() && team->second == *observer_team_) return true;
+        if (enemy_stealth) return false;
+        if (!fog) return true; // WPJ-38: fog disabled
+        const auto& rules = fog->rules;
+        const auto cell = rules.cell_size.raw();
+        if (cell <= 0 || position.x < rules.map_left || position.y > rules.map_top) return false;
+        // Unsigned differences also cover the full fixed-point range safely.
+        const auto column = (static_cast<std::uint64_t>(position.x.raw())
+            - static_cast<std::uint64_t>(rules.map_left.raw())) / static_cast<std::uint64_t>(cell);
+        const auto row = (static_cast<std::uint64_t>(rules.map_top.raw())
+            - static_cast<std::uint64_t>(position.y.raw())) / static_cast<std::uint64_t>(cell);
+        if (column >= rules.cells_wide || row >= rules.cells_tall || row >= fog->values.size()) return false;
+        const auto& values = fog->values[static_cast<std::size_t>(row)];
+        return values && column < values->size() && (*values)[static_cast<std::size_t>(column)] != 0;
+    }
+
 private:
     std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_;
     sim::tactical::PlayerId viewer_{};
@@ -83,6 +114,8 @@ private:
     std::vector<sim::EntityId> alive_;
     std::vector<FogFieldRevealer> revealers_;
     Work work_;
+    std::optional<sim::tactical::TeamId> observer_team_;
+    std::map<sim::tactical::PlayerId, sim::tactical::TeamId> teams_;
 };
 
 } // namespace eawr::presentation::space

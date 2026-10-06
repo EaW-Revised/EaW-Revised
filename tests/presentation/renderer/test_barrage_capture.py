@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 
 from test_area_damage_capture import point_height_replay, rocket_overlay, set_tag
 from live_session_test_support import LiveSessionRunner, DUEL_CAMERA
+from capture_replay_cases import canonical_replay_header
 
 
 def barrage_overlay(game, root):
@@ -61,9 +62,7 @@ def barrage_replay(recorded):
 
 
 def ion_impact_replay(recorded):
-    header = bytearray(recorded[:104])
-    version, header_size = struct.unpack_from('<HH', header, 8)
-    assert version == 3 and header_size == 104
+    header, header_size = canonical_replay_header(recorded, 3)
     players, squadrons = struct.unpack_from('<II', header, 48)
     unit_count = struct.unpack_from('<Q', header, 56)[0]
     unit_start = header_size + players * 24
@@ -104,6 +103,29 @@ def ion_impact_replay(recorded):
             + struct.pack('<I', len(body)) + body)
 
 
+class IonImpactReplayFormatTests(unittest.TestCase):
+    def test_tagged_header_preserves_squadron_witness(self):
+        original = (Path(__file__).resolve().parents[3]
+                    / 'tests/skirmish/fixtures/m2-start.eawr-replay').read_bytes()
+        expected = ion_impact_replay(original)
+        extension = struct.pack('<IHHI', 1, 1, 4, 1)
+        header, setup_start = canonical_replay_header(original, 3)
+        struct.pack_into('<HH', header, 8, 5, 104 + len(extension))
+        witness = ion_impact_replay(bytes(header) + extension + original[setup_start:])
+        self.assertEqual(witness, expected)
+        self.assertEqual(struct.unpack_from('<HH', witness, 8), (3, 104))
+        players, squadrons = struct.unpack_from('<II', witness, 48)
+        self.assertEqual(squadrons, 1)
+        self.assertEqual(witness[104:104 + players * 24],
+                         original[setup_start:setup_start + players * 24])
+        units, commands = struct.unpack_from('<QQ', witness, 56)
+        self.assertEqual(commands, 1)
+        squadron_start = 104 + players * 24 + units * 80
+        container, members = struct.unpack_from('<QI', witness, squadron_start)
+        self.assertEqual(container, 4)
+        self.assertGreater(members, 0)
+
+
 @unittest.skipUnless(os.environ.get('EAWR_GODOT_VIEWER_RUNTIME_TEST')
                      and os.environ.get('EAWR_EAW_GAME_ROOT'), 'requires installed game and GPU viewer')
 class BarrageCapture(LiveSessionRunner, unittest.TestCase):
@@ -141,6 +163,13 @@ class BarrageCapture(LiveSessionRunner, unittest.TestCase):
                                 for key, count in effects['spawned'].items()), effects['spawned'])
 
     def test_point_proxy_uses_override_rocket_look(self):
+        # Keep the synthetic laser/rocket discriminator, and cover the two stock
+        # RG-03 consumers through the same capture case rather than a second suite.
+        for ship in ('Tartan_Patrol_Cruiser', 'Broadside_Class_Cruiser', 'Marauder_Missile_Cruiser'):
+            with self.subTest(ship=ship):
+                self._point_proxy_uses_override_rocket_look(ship)
+
+    def _point_proxy_uses_override_rocket_look(self, ship):
         with tempfile.TemporaryDirectory(prefix='eawr-barrage-') as temporary:
             directory = Path(temporary)
             overlay = directory / 'synthetic-mod'
@@ -148,14 +177,16 @@ class BarrageCapture(LiveSessionRunner, unittest.TestCase):
             record = directory / 'identity.eawr-replay'
             args = ('--eawr-mod-root', str(overlay), '--eawr-audio', 'off')
             code, result = self._run(directory, 'identity', (*args, '--eawr-live-ai', 'off',
-                '--eawr-live-ticks', '1', '--eawr-live-replay-out', str(record)))
+                '--eawr-live-ticks', '1', '--eawr-live-replay-out', str(record),
+                '--eawr-skirmish-fleet', f'2:{ship},Acclamator_Assault_Ship'),
+                session=('--eawr-live-session', 'skirmish'))
             self.assertEqual(code, 0, result.get('failure'))
             replay = directory / 'point-barrage.eawr-replay'
             replay.write_bytes(barrage_replay(record.read_bytes()))
-            ticks = (4, 12, 20, 28, 40, 48, 56, 60, 72, 96)
+            ticks = (4, 12, 20, 28, 40, 48, 56, 60, 72, 96, 160, 240, 300)
             code, result = self._run(directory, 'barrage-lit', (*args,
                 '--eawr-live-replay', str(replay), '--eawr-live-reveal', 'on', '--eawr-live-player', '2',
-                '--eawr-live-step', '1', '--eawr-live-ticks', '120', '--eawr-environment', 'map',
+                '--eawr-live-step', '1', '--eawr-live-ticks', '360', '--eawr-environment', 'map',
                 '--eawr-lighting', 'sh', '--eawr-live-capture-ticks', ','.join(map(str, ticks))),
                 session=('--eawr-live-session', 'replay'), camera=DUEL_CAMERA)
             self.assertEqual(code, 0, result.get('failure'))

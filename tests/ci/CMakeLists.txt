@@ -4,6 +4,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME ci_doc_refs COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/publish_scan/doc_refs.py"
          --root "${PROJECT_SOURCE_DIR}")
 add_test(NAME ci_doc_refs_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_doc_refs.py")
+add_test(NAME ci_native_cpp_fixture COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_native_cpp_fixture.py")
 
 # The XML tag registry gate (docs/tag-coverage.md): every (class, tag) of the FoC XML has a row with what its status
 # needs, every applied code location exists, the JSON and its rendering are canonical. Without game data; the

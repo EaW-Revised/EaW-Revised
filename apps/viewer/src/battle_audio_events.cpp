@@ -65,16 +65,72 @@ constexpr std::uint32_t natural_end_frames = 2;
 }
 } // namespace
 
-void BattleAudio::play(const audio::SfxEvent* sfx, const std::optional<audio::Vec3> position, const bool hidden,
-                       const std::string& reason, const sim::EntityId loop_child, const sim::EntityId attached) {
-    if (sfx == nullptr) return;
+std::optional<audio::EventQueue::Handle> BattleAudio::play(const audio::SfxEvent* sfx,
+    const std::optional<audio::Vec3> position, const bool hidden, const std::string& reason,
+    const sim::EntityId loop_child, const sim::EntityId attached, const bool engine_loop) {
+    if (!sfx || released_) return std::nullopt;
     ++requested_[reason + ":" + sfx->name];
+    auto& allocation = allocations_[reason];
+    ++allocation.requested;
+    const auto backend = event_backend();
+    // SND-19: replacement detaches before any gate and cannot be undone by refusal.
+    if (attached != sim::invalid_entity_id && sfx->kills_previous_object_sfx) events_.detach(attached, backend);
+    auto admission = options_.admission;
+    admission.speech_stream = speech_stream_.active();
+    const auto accepted = events_.admit({{sfx, position, attached ? false : hidden, false, false, clock_},
+                                       attached, loop_child != sim::invalid_entity_id}, random_, admission);
+    if (accepted.handle) ++allocation.admitted;
+    else ++allocation.refused;
+    ++results_[reason][std::string(audio::to_string(accepted.result))];
+    if (accepted.handle) {
+        event_states_[*accepted.handle] = {reason, attached, loop_child, engine_loop, hidden, sfx};
+        if (loop_child != sim::invalid_entity_id) pad_loops_[loop_child] = *accepted.handle;
+    }
+    return accepted.handle;
+}
+
+audio::EventQueue::Backend BattleAudio::event_backend() {
+    return {
+        [this](const audio::EventQueue::Sample& cue) { return start_sample(cue); },
+        [this](const std::size_t voice) {
+            const auto& state = voice_states_[voice];
+            return state.started && (state.paused || clock_ - state.started_at <= start_grace_seconds
+                || (audio::Voices::is_3d_voice(voice) ? players_3d_[voice]->is_playing()
+                    : players_2d_[voice - audio::Voices::voices_3d]->is_playing()));
+        },
+        [this](const std::size_t voice) {
+            if (audio::Voices::is_3d_voice(voice)) players_3d_[voice]->stop();
+            else players_2d_[voice - audio::Voices::voices_3d]->stop();
+            voices_.finished(voice);
+            end_voice(voice);
+        },
+        [this](const std::size_t voice) { voices_.set_fading(voice); }
+    };
+}
+
+audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
+    const auto& metadata = event_states_.at(cue.handle);
+    const auto* sfx = cue.request.voice.event;
+    const auto position = cue.request.voice.position;
+    const auto& reason = metadata.reason;
+    const auto attached = metadata.attached;
+    const bool engine_loop = metadata.engine_loop;
+    const bool hidden = metadata.hidden;
     const audio::Vec3 listener = listener_position_;
-    const audio::Start start = voices_.start({sfx, position, hidden}, listener, random_);
-    ++results_[reason][std::string(audio::to_string(start.result))];
-    if (start.result != audio::Start::Result::playing) return;
+    auto& allocation = allocations_[reason];
+    auto request = cue.request.voice;
+    request.started_at = clock_;
+    ++allocation.samples_requested;
+    auto start = voices_.allocate(request, listener, cue.values);
+    if (start.result != audio::Start::Result::playing) {
+        ++allocation.samples_failed;
+        ++results_[reason]["allocation_" + std::string(audio::to_string(start.result))];
+        return start;
+    }
+    ++allocation.allocated;
     if (start.stopped) {
         ++stolen_;
+        ++allocation.stolen;
         if (audio::Voices::is_3d_voice(*start.stopped)) players_3d_[*start.stopped]->stop();
         else players_2d_[*start.stopped - audio::Voices::voices_3d]->stop();
         end_voice(*start.stopped);
@@ -84,24 +140,33 @@ void BattleAudio::play(const audio::SfxEvent* sfx, const std::optional<audio::Ve
         // Listed under missing_samples; the voice is free again at once.
         ++results_[reason]["sample_missing"];
         voices_.finished(start.voice);
-        return;
+        start.result = audio::Start::Result::no_samples;
+        return start;
     }
     ++played_samples_[start.sample];
-    const double gain = audio::speech_sfx_gain(start.volume, speech_stream_.active(), gui_dialog_);
+    ++allocation.audible;
+    const double gain = audio::Voices::is_3d_voice(start.voice) && attached && hidden ? 0.0
+        : audio::speech_sfx_gain(start.volume, speech_stream_.active(), gui_dialog_);
     if (gain < start.volume) ++ducked_starts_;
-    if ((reason.starts_with("ability_") || reason.starts_with("battle_") || reason.starts_with("economy_")
-         || reason == "hyperspace_arrival" || reason == "response_attack_hardpoint"
-         || reason == "response_stop" || reason == "response_guard" || reason == "ambient_moving"
-         || reason.starts_with("sighting_")) && start_rows_.size() < log_limit) {
-        start_rows_.push_back({reason, sfx->name, start.sample, presented_tick_, gain, start.pitch});
+    if ((reason == "authored_chain" || reason.starts_with("ability_") || reason.starts_with("battle_") || reason.starts_with("economy_")
+         || reason == "hyperspace_arrival" || reason == "response_attack_hardpoint" || reason == "lifetime_detonation"
+         || reason == "response_stop" || reason == "response_guard" || reason == "ambient_moving" || reason == "base_under_attack"
+         || reason.starts_with("reinforcement_") || reason.starts_with("engine_") || reason.starts_with("sighting_") || reason.starts_with("command_") || reason.starts_with("response_") || reason == "negative_feedback") && start_rows_.size() < log_limit) {
+        start_rows_.push_back({reason, sfx->name, start.sample, presented_tick_, gain, start.pitch, position, attached, sfx->localized});
     }
     VoiceState& state = voice_states_[start.voice];
     state = {start.volume, position.value_or(audio::Vec3{}), true, frames_, clock_, attached, gain};
-    state.ambient = reason == "ambient_moving";
+    state.ambient = reason == "ambient_moving" || engine_loop;
+    state.engine_loop = engine_loop;
+    state.fade_started = clock_;
+    state.fade_seconds = engine_loop && cue.stage == audio::EventQueue::Stage::main ? sfx->loop_fade_in_seconds : 0.0;
+    state.event_handle = cue.handle;
+    state.paused = paused_ && audio::pauses_with_game(*sfx, audio::Voices::is_3d_voice(start.voice));
     if (audio::Voices::is_3d_voice(start.voice)) {
         godot::AudioStreamPlayer3D* player = players_3d_[start.voice];
+        player->set_bus(buses_[sfx->localized ? 1 : 0].name);
         player->set_stream(loaded.stream);
-        if (loop_child != sim::invalid_entity_id) {
+        if (cue.continuous) {
             // WBP-20: a private loop stream, stopped when this construction child leaves.
             godot::Ref<godot::AudioStreamWAV> loop = loaded.stream->duplicate();
             if (loop.is_valid()) {
@@ -109,7 +174,6 @@ void BattleAudio::play(const audio::SfxEvent* sfx, const std::optional<audio::Ve
                 loop->set_loop_begin(0);
                 loop->set_loop_end(static_cast<std::int32_t>(loop->get_data().size() / (loop->is_stereo() ? 4 : 2)));
                 player->set_stream(loop);
-                pad_loops_[loop_child] = {start.voice, frames_};
             }
         }
         player->set_position(render(state.position));
@@ -117,19 +181,35 @@ void BattleAudio::play(const audio::SfxEvent* sfx, const std::optional<audio::Ve
         const double distance = std::sqrt(std::pow(state.position[0] - listener[0], 2.0)
                                           + std::pow(state.position[1] - listener[1], 2.0)
                                           + std::pow(state.position[2] - listener[2], 2.0));
-        const float gain_db = decibels(gain * audio::falloff_gain(distance, sfx->saturation_distance, space_));
+        const float gain_db = decibels((state.fade_seconds > 0.0 ? 0.0 : gain)
+            * audio::falloff_gain(distance, sfx->saturation_distance, space_));
         start_distance_[reason].add(distance);
         start_gain_db_[reason].add(gain_db);
         player->set_volume_db(gain_db);
         player->play();
+        player->set_stream_paused(state.paused);
     } else {
         godot::AudioStreamPlayer* player = players_2d_[start.voice - audio::Voices::voices_3d];
+        const auto slot = start.voice - audio::Voices::voices_3d;
+        panners_[slot]->set_pan(static_cast<float>(start.pan * 2.0 - 1.0));
+        godot::AudioServer::get_singleton()->set_bus_send(pan_buses_[slot], buses_[sfx->localized ? 1 : 0].name);
         player->set_stream(loaded.stream);
+        if (cue.continuous) {
+            godot::Ref<godot::AudioStreamWAV> loop = loaded.stream->duplicate();
+            if (loop.is_valid()) {
+                loop->set_loop_mode(godot::AudioStreamWAV::LOOP_FORWARD);
+                loop->set_loop_begin(0);
+                loop->set_loop_end(static_cast<std::int32_t>(loop->get_data().size() / (loop->is_stereo() ? 4 : 2)));
+                player->set_stream(loop);
+            }
+        }
         player->set_pitch_scale(static_cast<float>(start.pitch));
         player->set_volume_db(decibels(gain));
         player->play();
+        player->set_stream_paused(state.paused);
     }
     max_voices_ = std::max<std::uint64_t>(max_voices_, voices_.playing_count());
+    return start;
 }
 
 const BattleAudio::BuildSounds& BattleAudio::build_sounds(const std::string& faction) {
@@ -146,8 +226,57 @@ const BattleAudio::BuildSounds& BattleAudio::build_sounds(const std::string& fac
     return build_sounds_.emplace(faction, sounds).first->second;
 }
 
+void BattleAudio::update_pause(const bool paused, const double delta) {
+    const bool changed = paused_ != paused;
+    if (changed) ++pause_transitions_;
+    paused_ = paused;
+    for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
+        auto& state = voice_states_[voice];
+        const auto* sfx = voices_.playing(voice);
+        if (!state.started || !sfx) continue;
+        const bool spatial = audio::Voices::is_3d_voice(voice);
+        const bool hold = paused && audio::pauses_with_game(*sfx, spatial);
+        double position{};
+        if (spatial) {
+            auto* player = players_3d_[voice];
+            player->set_stream_paused(hold);
+            position = player->get_playback_position();
+        } else {
+            auto* player = players_2d_[voice - audio::Voices::voices_3d];
+            player->set_stream_paused(hold);
+            position = player->get_playback_position();
+        }
+        if (hold) {
+            if (state.paused) pause_position_drift_ = std::max(pause_position_drift_, std::abs(position - state.paused_position));
+            else if (spatial) ++pause_3d_;
+            else ++pause_2d_loops_;
+            state.paused_position = position;
+            ++paused_voice_frames_;
+            // Preserve fade progress and the backend-start grace across a long pause.
+            state.started_at += std::max(0.0, delta);
+            state.fade_started += std::max(0.0, delta);
+        }
+        state.paused = hold;
+    }
+    speech_player_->set_stream_paused(paused);
+    if (paused && speech_stream_.active()) {
+        const double position = speech_player_->get_playback_position();
+        if (changed) ++pause_speech_;
+        else pause_position_drift_ = std::max(pause_position_drift_, std::abs(position - speech_paused_position_));
+        speech_paused_position_ = position;
+        speech_started_at_ += std::max(0.0, delta);
+        ++paused_speech_frames_;
+    }
+}
+
 void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionView& live) {
+    const auto backend = event_backend();
     const auto latest = live.battle_frame().latest;
+    // SND-19: a chain's source is independent of the primary's attachment. Check the
+    // current snapshot before natural completion can release a removed source's assist.
+    events_.cancel_missing_chains([&latest](const std::uint64_t source) {
+        return latest && space::find_instance(*latest, source);
+    });
     std::uint64_t local_bit = 0;
     if (latest) {
         const auto players = latest->players();
@@ -155,43 +284,51 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
             if (players[index].player_id == live.local_player()) local_bit = std::uint64_t{1} << index;
         }
     }
+    // SND-11/18: refresh queued attachments too; deletion cannot leave a delayed event behind.
+    for (auto& [handle, state] : event_states_) {
+        if (!events_.active(handle)) continue;
+        if (state.loop_child != sim::invalid_entity_id && !live.snapshot_index().instance(state.loop_child)) {
+            events_.stop(handle, backend);
+            continue;
+        }
+        if (state.attached == sim::invalid_entity_id) continue;
+        const auto* instance = latest ? space::find_instance(*latest, state.attached) : nullptr;
+        const auto unit = live.unit_frame(state.attached);
+        const bool dead_copy = state.reason == "spin_death";
+        if (!instance && !(dead_copy && unit)) {
+            events_.detach(state.attached, backend);
+            if (state.engine_loop) ++engine_detached_;
+            ++ambient_detached_;
+            continue;
+        }
+        const bool fogged = instance && (instance->visible_to & local_bit) == 0U;
+        const bool model_hidden = (!unit && !fogged) || (instance && instance->arrival
+            && *instance->arrival < tactical::arrival_visible_frame);
+        state.hidden = audio::attached_gain(silent_sources_.contains(state.attached), model_hidden,
+                                             fogged, options_.admission.story_cinematic) == 0.0;
+        if (unit) events_.set_position(handle, unit->position);
+        else if (instance) events_.set_position(handle, {to_double(instance->fixed_transform.rows[0][3]),
+            to_double(instance->fixed_transform.rows[1][3]), to_double(instance->fixed_transform.rows[2][3])});
+    }
     for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
         VoiceState& state = voice_states_[voice];
         if (!state.started) continue;
+        if (state.paused) continue; // SND-13: retain the slot, chain and fade while playback is held.
         const bool three_d = audio::Voices::is_3d_voice(voice);
-        const bool playing = three_d ? players_3d_[voice]->is_playing()
-                                     : players_2d_[voice - audio::Voices::voices_3d]->is_playing();
-        // Godot starts a player's stream on its next physics step, so a player asked to play is
-        // not playing yet for a frame or two (#443: freeing its voice then let the next sound cut it).
-        if (!playing && clock_ - state.started_at > start_grace_seconds) {
-            voices_.finished(voice);
-            end_voice(voice);
-            continue;
-        }
         // SND-61: ordinary ongoing 2D and attached 3D gain writes are capped;
         // fixed-position spatial voices retain the gain chosen at their start.
         const double gain = audio::speech_sfx_gain(state.volume, speech_stream_.active(), gui_dialog_);
         if (!three_d) {
             if (gain < state.volume) ++ducked_updates_;
-            players_2d_[voice - audio::Voices::voices_3d]->set_volume_db(decibels(gain));
+            players_2d_[voice - audio::Voices::voices_3d]->set_volume_db(decibels(gain * events_.fade(state.event_handle)));
             continue;
         }
-        bool hidden = false;
-        if (state.ambient) {
-            const auto* instance = latest ? space::find_instance(*latest, state.attached) : nullptr;
-            if (!instance) {
-                // SND-11: removal detaches the live-object cue; fixed voice slots bound this work.
-                players_3d_[voice]->stop();
-                voices_.finished(voice);
-                end_voice(voice);
-                ++ambient_detached_;
-                continue;
-            }
-            hidden = (instance->visible_to & local_bit) == 0U
-                || (instance->arrival && *instance->arrival < tactical::arrival_visible_frame)
-                || !live.unit_frame(state.attached);
+        const auto metadata = event_states_.find(state.event_handle);
+        const bool hidden = metadata != event_states_.end() && metadata->second.hidden && state.attached != sim::invalid_entity_id;
+        if (state.attached != sim::invalid_entity_id) {
             ++ambient_attached_updates_;
             if (hidden) ++ambient_hidden_updates_;
+            if (hidden && state.engine_loop) ++engine_hidden_updates_;
         }
         // SP-03: the spinning sound follows the same interpolated pose as the dead copy.
         // A missing pose keeps the last position until SP-08 stops the attached sound.
@@ -208,11 +345,81 @@ void BattleAudio::update_voices(const audio::Vec3& listener, const LiveSessionVi
         const double distance = std::sqrt(std::pow(state.position[0] - listener[0], 2.0)
                                           + std::pow(state.position[1] - listener[1], 2.0)
                                           + std::pow(state.position[2] - listener[2], 2.0));
+        double fade = 1.0;
+        if (state.engine_loop) {
+            const double progress = state.fade_seconds > 0.0
+                ? std::clamp((clock_ - state.fade_started) / state.fade_seconds, 0.0, 1.0) : 1.0;
+            fade = progress;
+            if (progress < 1.0) ++engine_fade_updates_;
+        }
         const double current_gain = hidden ? 0.0
             : state.attached == sim::invalid_entity_id ? state.positional_gain : gain;
         if (state.attached != sim::invalid_entity_id && gain < state.volume) ++ducked_updates_;
-        players_3d_[voice]->set_volume_db(decibels(current_gain * audio::falloff_gain(distance, sfx->saturation_distance, space_)));
+        players_3d_[voice]->set_volume_db(decibels(current_gain * fade * events_.fade(state.event_handle) * audio::falloff_gain(distance, sfx->saturation_distance, space_)));
     }
+    const auto chains = events_.service(event_delta_ms_, paused_, listener, random_, registry_, backend);
+    std::erase_if(event_states_, [this](const auto& row) { return !events_.active(row.first); });
+    for (const auto& chain : chains) {
+        play(chain.event, std::nullopt, false,
+            chain.runtime ? (chain.attack ? "response_assist_attack" : "response_assist_move") : "authored_chain",
+            sim::invalid_entity_id, chain.attachment);
+    }
+}
+
+void BattleAudio::stop_engine_loop(const sim::EntityId source, const audio::SfxEvent* event) {
+    if (!event) return;
+    const auto backend = event_backend();
+    for (const auto& [handle, state] : event_states_) {
+        if (!state.engine_loop || state.attached != source || state.event != event || !events_.active(handle)) continue;
+        events_.stop(handle, backend, event->loop_fade_out_seconds);
+        ++engine_stops_;
+    }
+}
+
+void BattleAudio::engine_loops(const tactical::TacticalSnapshot& snapshot, const std::span<const sim::EntityId> visible) {
+    const auto now = snapshot.completed_tick();
+    const auto stamp = now + 1;
+    for (const auto& instance : snapshot.instances()) {
+        ++engine_visits_;
+        const auto type = types_.find(instance.type_id);
+        if (type == types_.end() || type->second.squadron || !instance.locomotor_speed_per_frame
+            || (!type->second.engine_idle && !type->second.engine_moving)) continue;
+        auto& state = engine_states_[instance.entity_id];
+        state.seen = stamp;
+        const auto& sounds = type->second;
+        const bool online = !instance.durability || instance.durability->engines_online;
+        const bool hidden = !std::binary_search(visible.begin(), visible.end(), instance.entity_id)
+            || (instance.arrival && *instance.arrival < tactical::arrival_visible_frame);
+        const auto point = audio::Vec3{to_double(instance.fixed_transform.rows[0][3]),
+            to_double(instance.fixed_transform.rows[1][3]), to_double(instance.fixed_transform.rows[2][3])};
+        const auto set = [&](bool& active, const bool enabled, const audio::SfxEvent* sound, const char* reason) {
+            if (active == enabled) return;
+            active = enabled; // SND-45: refusal/missing authoring does not restore the transition.
+            ++engine_transitions_;
+            if (enabled) play(sound, point, hidden, reason, sim::invalid_entity_id, instance.entity_id, true);
+            else stop_engine_loop(instance.entity_id, sound);
+        };
+        if (!online) {
+            set(state.moving, false, sounds.engine_moving, "engine_moving");
+            set(state.idle, false, sounds.engine_idle, "engine_idle");
+        } else {
+            if (!state.online) set(state.idle, true, sounds.engine_idle, "engine_idle");
+            // SND-67: ordinary stopped service updates zero speed too. Hyperspace uses a separate service.
+            if (now > 0 && !instance.arrival) {
+                const bool moving = to_double(*instance.locomotor_speed_per_frame) >= engine_idle_speed_ * 1.1;
+                set(state.moving, moving, sounds.engine_moving, "engine_moving");
+                set(state.idle, !moving, sounds.engine_idle, "engine_idle");
+            }
+        }
+        state.online = online;
+    }
+    for (auto state = engine_states_.begin(); state != engine_states_.end();) {
+        if (state->second.seen == stamp) { ++state; continue; }
+        // SND-11: update_voices immediately detaches removed objects; retire their presentation state.
+        state = engine_states_.erase(state);
+        ++engine_retired_;
+    }
+    engine_peak_ = std::max<std::uint64_t>(engine_peak_, engine_states_.size());
 }
 
 void BattleAudio::ambient_moving(const tactical::TacticalSnapshot& snapshot, const LiveSessionView& live,
@@ -352,49 +559,60 @@ void BattleAudio::update_speech(const bool paused) {
 
 void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
     const char* mode = cue.mode == audio::MusicDirector::Mode::battle ? "battle"
+        : cue.mode == audio::MusicDirector::Mode::victory ? "victory"
+        : cue.mode == audio::MusicDirector::Mode::defeat ? "defeat"
         : cue.mode == audio::MusicDirector::Mode::none && summary_event_ ? "summary" : "ambient";
     if (music_log_.size() < log_limit) {
         music_log_.push_back(std::to_string(music_tick_) + " " + mode + " " + cue.event->name + " " + cue.file);
     }
-    const godot::Ref<godot::AudioStream> stream = music_stream(cue.file);
-    if (!stream.is_valid()) return;
-    // BA-44: the previous track fades out over the new event's Fade_Out_Previous_Seconds while the
-    // new one fades in over its Fade_In_Seconds.
+    const auto record = [this](const std::string& message) {
+        if (music_stream_log_.size() < log_limit) music_stream_log_.push_back(std::to_string(clock_) + " " + message);
+    };
+    // SND-72: retire before opening. A failed replacement cannot revive the old active stream.
     MusicTrack& previous = music_tracks_[music_current_];
-    if (previous.playing) {
-        previous.fading_out = true;
-        previous.fade_seconds = cue.event->fade_out_previous_seconds;
+    if (previous.player->get_stream().is_valid()) {
+        MusicTrack& older = music_tracks_[1 - music_current_];
+        if (older.player->get_stream().is_valid()) {
+            record("close " + older.file);
+            older.player->stop();
+            older.player->set_stream({});
+            older.playing = false;
+        }
+        record("retire " + previous.file + " level=" + std::to_string(previous.fade.level)
+            + " seconds=" + std::to_string(cue.event->fade_out_previous_seconds));
+        previous.fade.retire(cue.event->fade_out_previous_seconds);
+        previous.playing = true; // an allocated, naturally ended stream still retires
+        previous.player->set_volume_db(decibels(previous.volume * previous.fade.level));
+        music_current_ = 1 - music_current_;
     }
-    music_current_ = 1 - music_current_;
     MusicTrack& next = music_tracks_[music_current_];
-    next.player->stop();
+    const godot::Ref<godot::AudioStream> stream = music_stream(cue.file);
+    if (!stream.is_valid()) {
+        record("open_failed " + cue.file);
+        return;
+    }
     next.volume = cue.event->volume;
-    next.fade_seconds = cue.event->fade_in_seconds;
-    next.level = next.fade_seconds > 0.0 ? 0.0 : 1.0;
-    next.fading_out = false;
+    next.fade.begin(cue.event->fade_in_seconds);
+    next.file = cue.file;
     next.playing = true;
     next.player->set_stream(stream);
-    next.player->set_volume_db(decibels(next.volume * next.level));
+    next.player->set_volume_db(decibels(next.volume * next.fade.level));
     next.player->play();
+    record("start " + cue.file);
 }
 
 void BattleAudio::update_music(const double delta) {
     for (std::size_t index = 0; index < music_tracks_.size(); ++index) {
         MusicTrack& track = music_tracks_[index];
         if (!track.playing) continue;
-        const double step = track.fade_seconds > 0.0 ? delta / track.fade_seconds : 1.0;
-        if (track.fading_out) {
-            track.level = std::max(0.0, track.level - step);
-            if (track.level <= 0.0) {
-                track.player->stop();
-                track.playing = false;
-                continue;
-            }
-        } else {
-            track.level = std::min(1.0, track.level + step);
+        const double previous_level = track.fade.level;
+        track.fade.advance(delta);
+        track.player->set_volume_db(decibels(track.volume * track.fade.level));
+        // SND-72: retain the silent ending stream until replacement or teardown.
+        if (previous_level > 0.0 && track.fade.ending && track.fade.level == 0.0 && music_stream_log_.size() < log_limit) {
+            music_stream_log_.push_back(std::to_string(clock_) + " silent " + track.file);
         }
-        track.player->set_volume_db(decibels(track.volume * track.level));
-        if (index == music_current_ && !track.fading_out && !track.player->is_playing()) {
+        if (index == music_current_ && !track.fade.ending && !track.player->is_playing()) {
             track.playing = false;
             if (summary_event_) {
                 if (summary_event_->loop || summary_next_file_ < summary_event_->files.size()) {
@@ -409,6 +627,13 @@ void BattleAudio::update_music(const double delta) {
 }
 
 void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, const LiveSessionView& live) {
+    if (acknowledgement.cue != audio::CommandCue::none) {
+        constexpr std::array<const char*, static_cast<std::size_t>(audio::CommandCue::count)> reasons{
+            "", "command_attack", "command_attack_move", "command_guard", "command_move", "command_stop", "negative_feedback"};
+        const auto index = static_cast<std::size_t>(acknowledgement.cue);
+        if (index < command_cues_.size()) play(command_cues_[index], std::nullopt, false, reasons[index]);
+        return;
+    }
     // BA-20: the highest ranking selected unit speaks for the selection. A squadron's team
     // container has no response sounds or ranking fields of its own (BA-24): FoC resolves it to
     // its leading live craft, in roster order, for both the ranking category and the sound played
@@ -416,11 +641,9 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     // not track FoC's own leader reassignment), but `live_entities_` excludes it once it leaves the
     // tactical snapshot, ahead of the destruction event that would otherwise age it out of
     // `last_seen_` a tick or more later.
-    std::vector<audio::RankedUnit> ranked;
-    std::vector<const TypeSounds*> sounds;
-    for (const sim::EntityId entity : acknowledgement.units) {
+    const auto sounds_of = [&](const sim::EntityId entity) -> const TypeSounds* {
         const auto seen = last_seen_.find(entity);
-        if (seen == last_seen_.end() || seen->second.owner != live.local_player()) continue;
+        if (seen == last_seen_.end() || seen->second.owner != live.local_player() || !live_entities_.contains(entity)) return nullptr;
         sim::tactical::TypeId type_id = seen->second.type;
         const auto members = live.squadron_members().find(entity);
         if (members != live.squadron_members().end()) {
@@ -434,13 +657,37 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
             }
         }
         const auto type = types_.find(type_id);
-        if (type == types_.end()) continue;
-        ranked.push_back({sounds.size(), type->second.categories, type->second.ranking});
-        sounds.push_back(&type->second);
+        return type == types_.end() ? nullptr : &type->second;
+    };
+    const TypeSounds* selected = nullptr;
+    sim::EntityId chosen = sim::invalid_entity_id;
+    int best_category = -1, best_ranking = -1;
+    for (const auto entity : acknowledgement.units) {
+        const auto* sounds = sounds_of(entity);
+        if (!sounds) continue;
+        int category = -1;
+        for (std::size_t index = 0; index < rankings_.size() && category < 0; ++index) {
+            for (const auto& name : sounds->categories) if (same(name, rankings_[index])) {
+                category = static_cast<int>(index);
+                break;
+            }
+        }
+        if (category < 0) continue;
+        const int ranking = sounds->ranking.value_or(25);
+        // BA-20 retains the category threshold after a lower-ranking takeover.
+        if (best_category == -1 || category < best_category) {
+            best_category = category;
+            best_ranking = ranking;
+            selected = sounds;
+            chosen = entity;
+        } else if (best_ranking == -1 || ranking < best_ranking) {
+            best_ranking = ranking;
+            selected = sounds;
+            chosen = entity;
+        }
     }
-    const auto chosen = audio::speaker(ranked, rankings_);
-    if (!chosen) return;
-    const TypeSounds& speaker = *sounds[*chosen];
+    if (!selected) return;
+    const TypeSounds& speaker = *selected;
     const bool group = acknowledgement.units.size() > 1;
     const audio::SfxEvent* line = nullptr;
     const char* kind = "select";
@@ -449,9 +696,37 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
         line = speaker.select;
         break;
     case BattleInput::Acknowledgement::Kind::move:
-        // BA-22: Group_Move for more than one selected unit when the type has one.
-        line = group && speaker.group_move != nullptr ? speaker.group_move : speaker.move;
+        {
+        bool asteroid = false, nebula = false;
+        const auto* motion = live.motion();
+        const auto snapshot = live.battle_frame().latest;
+        if (acknowledgement.destination && motion && snapshot) {
+            const auto point = vec(*acknowledgement.destination);
+            for (const auto& instance : snapshot->instances()) {
+                const auto* footprint = motion->footprint(instance.type_id);
+                if (!footprint || footprint->layer != tactical::SpaceLayer::static_object
+                    || !footprint->obstacle || (!footprint->asteroid_field && !footprint->nebula)) continue;
+                const auto& transform = instance.fixed_transform.rows;
+                const double centre_x = to_double(transform[0][3]);
+                const double centre_y = to_double(transform[1][3]);
+                const double angle = std::atan2(to_double(transform[1][0]), to_double(transform[0][0]));
+                const double ox = to_double(footprint->obstacle_offset.x);
+                const double oy = to_double(footprint->obstacle_offset.y);
+                const double dx = point[0] - centre_x - ox * std::cos(angle) + oy * std::sin(angle);
+                const double dy = point[1] - centre_y - ox * std::sin(angle) - oy * std::cos(angle);
+                const double radius = to_double(footprint->radius);
+                if (dx * dx + dy * dy <= radius * radius) {
+                    asteroid = asteroid || footprint->asteroid_field;
+                    nebula = nebula || footprint->nebula;
+                }
+            }
+        }
+        line = audio::move_response(asteroid, nebula, group, speaker.move_asteroid,
+                                   speaker.move_nebula, speaker.group_move, speaker.move);
         kind = "move";
+        if (line && line == speaker.move_asteroid && asteroid) kind = "move_asteroid";
+        else if (line && line == speaker.move_nebula && !asteroid && nebula) kind = "move_nebula";
+        }
         break;
     case BattleInput::Acknowledgement::Kind::attack:
         line = group && speaker.group_attack != nullptr ? speaker.group_attack : speaker.attack;
@@ -479,7 +754,27 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     if (response_log_.size() < log_limit) {
         response_log_.push_back(std::string(kind) + " " + speaker.name + " " + (line ? line->name : std::string("<none>")));
     }
-    play(line, std::nullopt, false, std::string("response_") + kind);
+    const auto voice = play(line, std::nullopt, false, std::string("response_") + kind);
+    const bool attack = acknowledgement.kind == BattleInput::Acknowledgement::Kind::attack;
+    const bool move = acknowledgement.kind == BattleInput::Acknowledgement::Kind::move;
+    if (!voice || !line || line->is_3d || !group || (!move && !attack)) return;
+    // SND-22: the random-object helper excludes the primary, with 51 bounded retries;
+    // eligibility of the one resulting other object is tested once, without reselection.
+    sim::EntityId other = chosen;
+    for (int attempt = 0; attempt < 51 && other == chosen; ++attempt) {
+        const int index = random_.between(0, static_cast<int>(acknowledgement.units.size() - 1));
+        other = acknowledgement.units[static_cast<std::size_t>(index)];
+    }
+    // SND-22 reads the random selected object's own type, without the BA-24 speaker proxy.
+    const auto candidate = last_seen_.find(other);
+    const auto primary = last_seen_.find(chosen);
+    if (candidate == last_seen_.end() || primary == last_seen_.end()
+        || candidate->second.owner != live.local_player() || !live_entities_.contains(other)) return;
+    const auto assist = types_.find(candidate->second.type);
+    if (assist == types_.end() || !audio::assist_eligible(other == chosen,
+        candidate->second.type == primary->second.type, assist->second.vehicle_thief)) return;
+    const auto* cue = attack ? assist->second.assist_attack : assist->second.assist_move;
+    if (cue && !cue->is_3d) events_.chain(*voice, cue, attack, other);
 }
 
 const std::map<tactical::AbilityKind, BattleAudio::Toggle>& BattleAudio::toggles_of(const std::string& faction) {
@@ -521,7 +816,13 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
             const auto key = std::make_pair(instance.entity_id, status.kind);
             const auto before = ability_memory_.find(key);
             const bool timed = status.active && status.total_frames > 0U;
-            next[key] = {status.active, timed, status.active ? status.remaining_frames : 0U};
+            next[key] = {status.active, timed, status.active ? status.remaining_frames : 0U, status.started_tick};
+            if (before != ability_memory_.end() && status.started_tick != 0 && status.started_tick != before->second.started) {
+                if (status.kind == tactical::AbilityKind::harmonic_bomb || status.kind == tactical::AbilityKind::weaken_enemy) {
+                    const auto visible = snapshot.visible_entities(local);
+                    spawned_ability(instance, status, !std::binary_search(visible.begin(), visible.end(), instance.entity_id));
+                }
+            }
             if (!ability_memory_started_ || before == ability_memory_.end() || before->second.active == status.active) continue;
             // BA-51: a timed ability that ran out ends without a sound (its last read is 0 frames left); a
             // switch-off (or a lost engine or shield) plays the off sound, and so does an untimed one's end.
@@ -556,6 +857,36 @@ void BattleAudio::toggle_abilities(const tactical::TacticalSnapshot& snapshot, c
     }
 }
 
+void BattleAudio::target_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live) {
+    // BA-53: source-object attachment; confirming a target is separate from arming the button.
+    if (!click.activate || !click.targeted || click.units.empty()) return;
+    const sim::EntityId source = click.units.front();
+    const auto seen = last_seen_.find(source);
+    if (seen == last_seen_.end() || seen->second.owner != live.local_player()) return;
+    const auto type = types_.find(seen->second.type);
+    if (type == types_.end()) return;
+    const auto cue = type->second.ability_targets.find(click.ability);
+    if (cue == type->second.ability_targets.end()) return;
+    play(cue->second, seen->second.position, false, "ability_target", sim::invalid_entity_id, source);
+}
+
+void BattleAudio::spawned_ability(const tactical::TacticalInstance& instance, const tactical::AbilityStatus& status,
+                                const bool hidden) {
+    // BA-54: only the successful spawn route owns this effect (including script/AI starts).
+    if (status.kind != tactical::AbilityKind::harmonic_bomb && status.kind != tactical::AbilityKind::weaken_enemy) return;
+    const auto type = types_.find(instance.type_id);
+    if (type == types_.end()) return;
+    const auto cue = type->second.ability_targets.find(status.kind);
+    if (cue == type->second.ability_targets.end() || cue->second == nullptr) return;
+    // BA-54: the GUI acknowledgement may already have started the same event.
+    for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
+        if (voices_.playing(voice) == cue->second) return;
+    }
+    const auto& rows = instance.fixed_transform.rows;
+    const audio::Vec3 point{to_double(rows[0][3]), to_double(rows[1][3]), to_double(rows[2][3])};
+    play(cue->second, point, hidden, "ability_spawn", sim::invalid_entity_id, instance.entity_id);
+}
+
 void BattleAudio::voice_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live) {
     // BA-52: the first pressed unit that has the ability speaks (a squadron as its leading live craft, BA-24).
     for (const sim::EntityId entity : click.units) {
@@ -588,12 +919,42 @@ void BattleAudio::voice_ability(const LiveSessionView::AbilityClick& click, cons
 }
 
 void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
-                        std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta) {
+                        std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
+                        std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback,
+                        std::vector<BattleEffects::TerminalSound> terminal_sounds) {
     if (released_) return;
     ++frames_;
     gui_dialog_ = live.time().paused(); // the viewer's pause banner is its modal dialog
+    event_delta_ms_ = std::max(0.0, delta) * 1000.0;
     clock_ += delta;
+    update_pause(live.time().paused(), delta);
+    for (auto& warning : radar_warnings_) warning.age += std::max(0.0, delta);
+    std::erase_if(radar_warnings_, [](const auto& warning) { return warning.age >= 4.0; });
     const LiveSessionView::BattleFrame& battle = live.battle_frame();
+    if (!outcome_shown_ && live.battle_end()) {
+        outcome_shown_ = true;
+        const bool won = live.battle_end()->result == ui::BattleResult::victory;
+        const bool hostile = !battle.latest || !battle.latest->outcome()
+            || tactical::players_hostile(battle.latest->players(), live.local_player(), battle.latest->outcome()->winner);
+        // WBF-38: allied winner gets win HUD audio; neutral observers get no result HUD audio.
+        if (won || hostile) play(outcome_events_[won ? 0 : 1], std::nullopt, false, won ? "battle_victory" : "battle_defeat");
+        if (music_ && battle.latest && battle.latest->outcome()) {
+            const auto& outcome = *battle.latest->outcome();
+            const bool exact_winner = outcome.winner == live.local_player();
+            const auto loser = owners_.find(outcome.deciding_unit);
+            // SND-54: the music equality test is distinct from the HUD's allied-win test.
+            if (!exact_winner || loser != owners_.end()) {
+                const std::string opposing = live.player_faction(exact_winner ? loser->second : outcome.winner);
+                const std::string name = audio::tactical_music_event(tactical_music_fields_, exact_winner, opposing);
+                const auto event = std::find_if(music_events_.begin(), music_events_.end(),
+                    [&](const auto& entry) { return same(entry.name, name); });
+                if (event != music_events_.end()) {
+                    music_tick_ = outcome.decided_tick;
+                    if (const auto cue = music_->result(exact_winner, &*event)) cue_music(*cue);
+                }
+            }
+        }
+    }
     if (!summary_shown_ && live.battle_end() && live.battle_end()->ended_frame) {
         summary_shown_ = true;
         summary_event_ = summary_events_[live.battle_end()->result == ui::BattleResult::victory ? 0 : 1];
@@ -604,11 +965,6 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         }
     }
     presented_tick_ = battle.presented_tick;
-    if (!outcome_shown_ && live.battle_end()) {
-        outcome_shown_ = true;
-        const bool won = live.battle_end()->result == ui::BattleResult::victory;
-        play(outcome_events_[won ? 0 : 1], std::nullopt, false, won ? "battle_victory" : "battle_defeat");
-    }
     // BA-12: the listener stands where the camera looks, on the plane z = 60.
     const assets::Vec3f eye = space::source_from_render(camera.eye);
     const assets::Vec3f target = space::source_from_render(camera.target);
@@ -629,6 +985,16 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     listener_text_ = text;
     listener_position_ = listener.position;
     update_voices(listener.position, live);
+    for (const auto& cue : reinforcement_feedback) {
+        const auto index = static_cast<std::size_t>(cue.kind);
+        const audio::SfxEvent* sound = reinforcement_sounds_[index];
+        if (cue.kind == LiveSessionView::ReinforcementFeedback::Kind::enroute) {
+            const auto type = types_.find(cue.type);
+            if (type != types_.end() && type->second.fleet_move) sound = type->second.fleet_move;
+        }
+        constexpr std::array reasons{"reinforcement_pane", "reinforcement_placement", "reinforcement_enroute", "reinforcement_cancelled"};
+        play(sound, std::nullopt, false, reasons[index]);
+    }
     update_music(delta);
     meter_buses();
     if (!battle.latest) { update_speech(live.time().paused()); return; }
@@ -665,6 +1031,8 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             last_seen_.erase(craft.entity_id);
         }
     }
+    // BA-53/54: the confirmation precedes spawn playback, so the active-event guard avoids doubling it.
+    for (const auto& click : ability_clicks) target_ability(click, live);
     // The ticks this frame reaches: an event of tick t sounds once the frame presents t - 1 (as
     // the battle effects fire), up to the newest completed tick.
     const std::uint64_t latest = battle.latest->completed_tick();
@@ -674,6 +1042,7 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         if (!initial) initial = battle.previous ? battle.previous : battle.latest;
         const auto visible = initial->visible_entities(local);
         ambient_moving(*initial, live, visible);
+        engine_loops(*initial, visible);
         ambient_begun_ = true;
     }
     if (!music_begun_ && music_) {
@@ -684,6 +1053,26 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     // BA-13, BA-14 (shots) and BA-42 (the attack notification): a projectile ID not seen before is
     // a shot fired that tick. IDs are in creation order.
     for (std::uint64_t tick = fired_through_ + 1; tick <= reach; ++tick) {
+        // SND-40: logical service precedes this frame's attack notifications.
+        if (base_warning_countdown_ > 0) --base_warning_countdown_;
+        // The bounded journal retains notification-time metadata across snapshot eviction.
+        const auto record = std::lower_bound(battle.reached.begin(), battle.reached.end(), tick,
+            [](const auto& entry, const std::uint64_t value) { return entry.tick < value; });
+        if (record != battle.reached.end() && record->tick == tick) {
+            for (const auto& notification : record->base_attacks) {
+                if (base_warning_countdown_ != 0 || notification.attacker == notification.owner
+                    || live.is_ally_of_local(notification.attacker) == live.is_ally_of_local(notification.owner)) continue;
+                const auto type = types_.find(notification.type);
+                if (type == types_.end() || !type->second.base
+                    || (notification.owner != local && !(type->second.community_property && live.is_ally_of_local(notification.owner)))) continue;
+                base_warning_countdown_ = base_warning_delay_frames_;
+                if (base_under_attack_) {
+                    play(base_under_attack_, std::nullopt, false, "base_under_attack");
+                    radar_warnings_.push_back({vec(notification.position), 0.0});
+                }
+                if (base_warning_rows_.size() < log_limit) base_warning_rows_.push_back({tick, notification.target, base_under_attack_ != nullptr});
+            }
+        }
         std::shared_ptr<const tactical::TacticalSnapshot> snapshot = live.snapshot_at(tick);
         if (!snapshot && tick == latest) snapshot = battle.latest;
         bool attack = false;
@@ -722,6 +1111,7 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             if (snapshot != battle.latest) metadata_snapshot_.reset();
             toggle_abilities(*snapshot, live);
             ambient_moving(*snapshot, live, visible);
+            engine_loops(*snapshot, visible);
             // WPR-22/30/31: sparse snapshot notifications retain accepted type identity;
             // no queue-length inference, so duplicate buys and same-tick cancels remain distinct.
             const auto cues = snapshot->economy_cues();
@@ -784,7 +1174,16 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
                 if (!projectiles_seen_.insert(projectile.id).second) continue;
                 const auto* shooter = space::find_instance(*snapshot, projectile.shooter);
                 const auto target_owner = owners_.find(projectile.target);
-                if (projectile.owner == local || (target_owner != owners_.end() && target_owner->second == local)) attack = true;
+                const auto involved = [&](const tactical::PlayerId owner, const sim::EntityId entity) {
+                    if (owner == local) return true;
+                    if (!live.is_ally_of_local(owner)) return false;
+                    const auto identity = entity_types_.find(entity);
+                    const auto type = identity == entity_types_.end() ? types_.end() : types_.find(identity->second);
+                    return type != types_.end() && type->second.community_property;
+                };
+                // SND-51: either local-owned side or allied community property; no fog/camera test.
+                if (involved(projectile.owner, projectile.shooter)
+                    || (target_owner != owners_.end() && involved(target_owner->second, projectile.target))) attack = true;
                 if (shooter == nullptr) continue;
                 const auto type = types_.find(shooter->type_id);
                 if (type == types_.end()) continue;
@@ -811,15 +1210,27 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     // WBP-20: loop ownership includes the voice's start frame, so a stolen voice is never stopped.
     for (auto loop = pad_loops_.begin(); loop != pad_loops_.end();) {
         if (live.snapshot_index().instance(loop->first)) { ++loop; continue; }
-        const auto [voice, started] = loop->second;
-        if (voice < voice_states_.size() && voice_states_[voice].frame == started) {
-            players_3d_[voice]->stop();
-            voices_.finished(voice);
-            end_voice(voice);
-        }
+        events_.stop(loop->second, event_backend());
         loop = pad_loops_.erase(loop);
     }
+    // WPJ-35/37/40: only successful lifetime-effect receipts enter ordinary detonation audio.
+    for (const auto& terminal : terminal_sounds) {
+        const auto cue = terminal_detonations_.find(skirmish::type_id(terminal.projectile));
+        if (cue != terminal_detonations_.end()) {
+            play(cue->second, audio::Vec3{terminal.position[0], terminal.position[1], terminal.position[2]},
+                false, terminal.death_payload ? "death_projectile_detonation" : "lifetime_detonation");
+        }
+    }
     for (const platform::LiveTickEvents& record : battle.reached) {
+        // BA-85: one request at the countdown transition, independent of the
+        // number of units hit by its blast and the presentation frame's step.
+        const auto before_spawn = record.tick > 0 ? live.snapshot_at(record.tick - 1) : nullptr;
+        if (before_spawn) for (const auto& spawn : before_spawn->ability_spawns()) {
+            if (spawn.detonated || spawn.due + 1 != record.tick || !last_seen_.contains(spawn.source)) continue;
+            if (const auto cue = projectile_detonations_.find(spawn.type); cue != projectile_detonations_.end()) {
+                play(cue->second, vec(spawn.position), false, "projectile_detonation");
+            }
+        }
         for (const tactical::CombatEvent& event : record.combat_events) {
             if (event.kind != tactical::CombatEventKind::projectile_hit) continue;
             // Heard when the local player sees the target, as the impact effect is drawn.
@@ -853,12 +1264,15 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         }
         for (const tactical::Event& event : record.events) {
             if (event.kind == tactical::EventKind::station_replaced) {
-                // WPR-52 step 6: the local announcer's own/ally/enemy upgraded line.
-                const auto faction = catalog_->resolve(live.local_faction(), data::Category::faction);
+                // WPR-52 / EUS-25: relationship to local selects the line;
+                // the upgraded station owner's faction supplies it. Neutral is silent.
+                if (!live.battle_participant(event.player)) continue;
+                const std::string owner_faction = live.player_faction(event.player);
+                const auto faction = catalog_->resolve(owner_faction, data::Category::faction);
                 if (faction) {
                     const auto field = event.player == live.local_player() ? "SFXEvent_Starbase_Upgraded"
                         : live.is_ally_of_local(event.player) ? "SFXEvent_Starbase_Ally_Upgraded" : "SFXEvent_Starbase_Enemy_Upgraded";
-                    play(this->event(tag(faction.value(), field), live.local_faction()), std::nullopt, false, "station_upgraded");
+                    play(this->event(tag(faction.value(), field), owner_faction), std::nullopt, false, "station_upgraded");
                 }
                 continue;
             }
@@ -912,17 +1326,7 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             }
             if (event.kind == tactical::EventKind::spin_away_ended) {
                 // SP-08/BA-16: remove attached sound even after the copy leaves the visible cache.
-                for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
-                    const auto& state = voice_states_[voice];
-                    if (state.attached != event.unit) continue;
-                    if (audio::Voices::is_3d_voice(voice)) {
-                        players_3d_[voice]->stop();
-                    } else {
-                        players_2d_[voice - audio::Voices::voices_3d]->stop();
-                    }
-                    voices_.finished(voice);
-                    end_voice(voice);
-                }
+                events_.detach(event.unit, event_backend());
             }
             const auto seen = last_seen_.find(event.unit);
             if (seen == last_seen_.end()) continue;

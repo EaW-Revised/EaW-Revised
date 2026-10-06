@@ -55,6 +55,7 @@ public:
         std::optional<camera::TacticalFrame> camera;
         std::array<float, 2> viewport{};
         std::function<std::optional<std::array<float, 2>>(const ui::Vec3f&)> project;
+        std::function<std::optional<ui::Vec3f>(std::array<float, 2>, float)> world_at_height;
         const LiveSessionView* live{};
         const ui::AbilityState* abilities{}; // the same provider as the unit cards
         // #848 V-5d: false while either overview level is on: no unit bracket (health and shield
@@ -102,6 +103,7 @@ public:
 private:
     struct HardpointUi final {
         std::string texture;  // reticle art stem, empty: none
+        std::string tooltip; // WU-51: localised HardPoint Tooltip_Text
         bool targetable{};
         std::array<float, 3> local{};
         float max_health{};
@@ -203,8 +205,34 @@ private:
     std::vector<Icon> icons_;
     std::vector<Reticle> reticle_rects_;  // the hovered unit's reticles of the last drawn frame
     std::optional<Flash> flash_;
+    godot::Ref<godot::Font> tooltip_font_;
+    godot::Ref<godot::Font> tooltip_small_font_;
+    int tooltip_points_{7};
+    int tooltip_small_points_{5};
+    godot::Ref<godot::TextLine> tooltip_line_;
+    std::string tooltip_text_;
+    const HardpointUi* tooltip_source_{};
+    int tooltip_percent_{-1};
+    int tooltip_pixels_{};
+    std::optional<ReticleHit> tooltip_hit_;
+    float tooltip_health_{};
+    std::array<float, 4> tooltip_rect_{};
     std::size_t flashes_started_{};
     ui::CombatGrid grid_;
+    ui::CombatIconGrid icon_grid_;
+    float gripper_snap_distance_{};
+    bool identity_pixel_align_{true};
+    struct IdentityGeometry final {
+        sim::EntityId entity{};
+        std::array<float, 2> centre{};
+        ui::SquadronIconRect frame{}, inner{};
+    };
+    std::vector<IdentityGeometry> identity_geometry_;
+    struct GridSample final {
+        double tick{};
+        ui::CombatCell cell{};
+        std::array<float, 2> screen{};
+    };
     struct ArrivalIconSample final {
         double tick{};
         std::array<float, 3> desired{};
@@ -213,8 +241,22 @@ private:
         bool arriving{};
         bool drawn{};
     };
+    struct IconSample final {
+        std::uint64_t frame{};
+        double tick{};
+        std::array<float, 2> screen{};
+        bool drawn{};
+        bool grid{};
+    };
     struct Gripper final {
         ui::SquadronIconAnchor motion{};
+        ui::Vec3f desired{};
+        bool idle{}; // WSU-34: idle-grid ownership, not the craft locomotor's idle state.
+        std::optional<ui::CombatCell> settled_cell;
+        std::array<GridSample, 256> grid_samples{};
+        std::size_t grid_sample_count{};
+        std::array<IconSample, 256> icon_samples{};
+        std::size_t icon_sample_count{};
         std::uint64_t last_arrival_tick{};
         std::array<ArrivalIconSample, 512> arrival_samples{};
         std::size_t arrival_sample_count{};

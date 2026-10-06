@@ -550,6 +550,12 @@ FixedCamera environment_view_camera(FixedCamera camera) noexcept {
     return camera;
 }
 
+FixedCamera environment_laser_camera(FixedCamera drawn, const camera::Constants& tactical) noexcept {
+    drawn.near_plane = tactical.near_clip;
+    drawn.far_plane = tactical.far_clip;
+    return drawn;
+}
+
 Affine camera_relative_sky_transform(const Affine& original, const assets::Vec3f& original_eye,
                                      const assets::Vec3f& current_eye) noexcept {
     Affine result = original;

@@ -215,7 +215,7 @@ player's row bytes in the original order, keeping all replay hashes and pins unc
 | Spin commit, spin starts | serial | Drops the ended spins in ascending ID; then walks the tick's deaths in destruction order, one keyed draw each, and starts the spins (SP-02). Its work is per death, never per unit. |
 | `squadrons`: live craft and bounding-box centre | partitioned | Per squadron, from the survivors into its own slot; only when squadrons exist. |
 | Squadron commit | serial | Moves each container, removes emptied ones, in ascending container ID. |
-| Victory | serial | Only with victory rules: walks the tick's `unit_destroyed` events in order against the few counted star bases and decides the outcome ([VP-01](behaviour/space-victory.md#project-choices)). Its work is per destruction event, never per unit. |
+| Victory | serial hooks in ordered commit | Only with victory rules: relevant lifecycle hooks immediately update the few counted bases or gathered owner counts and decide the transactional outcome ([VP-01](behaviour/space-victory.md#project-choices)). Pending victory blocks later damage in the same tick; work is per relevant hook, never per unit. Finalization publishes the victory event. |
 | Sensor field build | serial | One index over all observers. It is a few percent of the serial remainder at 1500 units, so splitting it does not pay yet. |
 | `fog-reveal`: mark again? | partitioned | Per revealer, against the committed circles; only with fog rules. |
 | Fog changes | serial | Lists the circles to release and mark in ascending revealer ID; a few per tick. |
@@ -307,7 +307,7 @@ The shared build lock was held, but host load was elevated and varied between mo
 1-minute load at S starts was 28.10 before / 18.16 after; M was 19.44 / 17.10.
 The host was not exclusively idle. **Direction confirmed, absolute numbers pending a quiet
 rerun.** The original 2026-09-29 samples may include interference during the owner's
-identified 23:10â€“23:35 window; their exclusive-host condition, absolute times and hardware
+identified 23:10–23:35 window; their exclusive-host condition, absolute times and hardware
 worker-count claims are unconfirmed. This table replaces those samples with the reviewer's
 paired observations; private receipts identify the execution host and measured load.
 

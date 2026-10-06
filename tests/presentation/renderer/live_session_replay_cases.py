@@ -9,7 +9,7 @@ from live_session_test_support import (
     ROOT, S28, S28_LIVE_TICKS, STATION,
     decode_png, hit_rows_per_tick, json, os,
     pathlib, re, read, shutil,
-    source_text, strict_json, subprocess, sys,
+    source_text, strict_json, subprocess, sys, squadron_members,
     tempfile, time, unittest,
 )
 
@@ -131,7 +131,12 @@ class LiveSessionReplayCases:
             # A squadron company is its team container and has no model (#75). Its craft are start
             # units: the X-wings draw; the Y-wing and TIE interceptor models do not compose through
             # the placed-ship path yet (fidelity list, #80). The laser pads draw since #80.
+            # WHZ-01 also admits hazards whose art is already drawn by map composition.
+            composed_types = {surface["object"] for surface in result["space"]["surfaces"]
+                              if surface["status"] == "drawn"}
             self.assertTrue(all("Squadron" in item or "(Y-Wing)" in item or "(TIE_Interceptor)" in item
+                                or any(item.endswith(f"({kind}): no drawable FoC model")
+                                       for kind in composed_types)
                                 for item in units["not_drawn"]), units["not_drawn"])
             self.assertFalse(any("(X-Wing)" in item for item in units["not_drawn"]), units["not_drawn"])
             self.assertEqual(units["drawn"], live["units"] - len(units["not_drawn"]))
@@ -351,24 +356,36 @@ class LiveSessionReplayCases:
 
 
     def test_enemy_ship_ramps_across_the_fog_edge(self):
-        # FW-16 to FW-18: the Rebel corvette sails towards the Empire fleet.
-        # #1331: on the current M2 roster, TIE craft 51 enters around tick 1597
-        # and leaves around tick 2338. Craft 50 only enters before this run ends.
-        # Sample the actual two edges without changing the ramp assertions.
-        fog_crossing_fighter = 51
+        # FW-16 to FW-18: an enemy formation enters the corvette's vision, then an explicit
+        # move takes it out again. Keep it beyond weapon range so combat cannot remove the witness.
+        exit_tick = 3000
         with tempfile.TemporaryDirectory(prefix="eawr-live-session-fade-") as temporary:
             directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "fog-roster", ("--eawr-live-ticks", "1", "--eawr-live-ai", "off"))
+            self.assertEqual(code, 0, probe.get("failure"))
+            fog_crossing_fighter = squadron_members(probe, 9, "TIE_Interceptor_Squadron")[2]
             code, result = self._run(directory, "fade", (
-                "--eawr-live-order", f"15:move:{CORVETTE}@2500,-2600,0", "--eawr-live-ticks", "2400",
+                "--eawr-live-ai", "off",
+                "--eawr-live-order", f"15:move:{CORVETTE}@-2000,1800,0",
+                "--eawr-live-order", "1:move:9@-1000,1550,0",
+                "--eawr-live-order", f"{exit_tick}:move:9@6000,-6000,0", "--eawr-live-ticks", "3800",
+                "--eawr-live-follow-group", f"1:{CORVETTE}",
                 "--eawr-live-step", "3", "--eawr-live-workers", "2"))
             self.assertEqual(code, 0, result.get("failure"))
             live = result["live_session"]
             self.assertEqual(live["rejected"], [])
             self.assertIs(live["headless_hashes_equal"], True)
+            self.assertIn(fog_crossing_fighter, squadron_members(result, 9, "TIE_Interceptor_Squadron"))
+            self.assertNotIn(fog_crossing_fighter, {row["entity"] for row in live["hostile_units"]})
             rows = [(row["tick"], row["opacity"]) for row in live["fading_log"]
                     if row["entity"] == fog_crossing_fighter]
-            rising = [(tick, opacity) for tick, opacity in rows if tick < 2300]
-            falling = [(tick, opacity) for tick, opacity in rows if tick >= 2300]
+            rising = [(tick, opacity) for tick, opacity in rows if tick < exit_tick]
+            # Formation orbit may cross the edge again before the scripted exit. Measure
+            # the first complete entry ramp, ending before its first downward sample.
+            first_fall = next((index for index in range(1, len(rising))
+                               if rising[index][1] < rising[index - 1][1]), len(rising))
+            rising = rising[:first_fall]
+            falling = [(tick, opacity) for tick, opacity in rows if tick >= exit_tick]
             self.assertGreaterEqual(len(rising), 5, rows)
             self.assertGreaterEqual(len(falling), 5, rows)
             for series, sign in ((rising, 1), (falling, -1)):
@@ -428,9 +445,8 @@ class LiveSessionReplayCases:
 
 
     def test_victory_shows_the_message_and_ends_the_battle(self):
-        # #453 (battle-end.md BE-02, BE-03, BEP-01 to BEP-03): "WE ARE VICTORIOUS!" from the frame
-        # that carries the outcome, the session halts at end_tick 225 and the end panel opens; the
-        # run stops at the end, however many ticks it asked for.
+        # The outcome cue precedes the authored victory dialog; the session halts at end_tick
+        # 225 and opens that dialog, however many ticks the run asked for.
         with tempfile.TemporaryDirectory(prefix="eawr-live-session-end-") as temporary:
             directory = pathlib.Path(temporary)
             code, result = self._battle_end(directory, "won", EMPIRE_STATION, "victory")
@@ -445,12 +461,10 @@ class LiveSessionReplayCases:
             self.assertEqual(live["time"]["state"], "ended")
             self.assertEqual(live["time"]["track"][-1]["cause"], "end")
             overlay = result["hud"]["battle_overlay"]
-            self.assertEqual(overlay["message"]["text"], "WE ARE VICTORIOUS!")
-            self.assertEqual(overlay["end_panel"]["title"], "Victory!")
-            # BE-03: centred, its top at 0.4 of the height.
-            x, y, width, _ = overlay["message"]["rect"]
-            self.assertAlmostEqual(x + width / 2, 640.0, delta=1.0)
-            self.assertAlmostEqual(y, 288.0, delta=1.0)
+            self.assertIsNone(overlay["message"])
+            self.assertTrue(overlay["end_panel"]["authored_dialog"])
+            self.assertEqual(overlay["end_panel"]["title"], "You have won the battle!")
+            self.assertEqual(overlay["end_panel"]["rect"], [0, 0, 1280, 720])
             # The message is on the frame after the outcome and not before; the panel at the end.
             images = [decode_png((directory / name).read_bytes()) for name in ("won_t0012.png", "won_t0018.png", "won_f0080.png")]
             self.assertNotEqual(images[0][2], images[1][2])
@@ -474,8 +488,9 @@ class LiveSessionReplayCases:
             self.assertIs(live["battle_end"]["quit"], True)
             self.assertEqual(live["completed_ticks"], 225)
             overlay = result["hud"]["battle_overlay"]
-            self.assertEqual(overlay["message"]["text"], "WE HAVE BEEN DEFEATED!")
-            self.assertEqual((overlay["end_panel"]["title"], overlay["quit_presses"]), ("Defeat!", 1))
+            self.assertIsNone(overlay["message"])
+            self.assertTrue(overlay["end_panel"]["authored_dialog"])
+            self.assertEqual((overlay["end_panel"]["title"], overlay["quit_presses"]), ("You have lost the battle!", 1))
             # Quit ends the run on frame 82 (the pointer reaches the button on 80, the click is
             # sent on 81 and dispatched on 82), before the 30 warm-up and 120 timed frames end.
             self.assertLess(live["frames"], 120)

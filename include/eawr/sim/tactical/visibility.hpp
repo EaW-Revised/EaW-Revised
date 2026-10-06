@@ -22,6 +22,13 @@ class TacticalSnapshot;
 struct SensorProfile {
     TypeId type_id{};
     math::Fixed reveal_range{};
+    math::Fixed dense_multiplier{math::Fixed::from_raw(math::Fixed::scale / 2)};
+    bool multisample{};
+    bool reveals{true};
+    math::Vec2 half_extents{}; // V-21: scaled hard coordination extents, yaw oriented
+    math::Vec2 box_offset{};   // V-21: unscaled authored offset, yaw oriented
+    math::Vec3 flash_offset{}; // V-19: model box centre, added without unit yaw
+    math::Fixed flash_radius{};
     friend constexpr bool operator==(const SensorProfile&, const SensorProfile&) noexcept = default;
 };
 
@@ -46,6 +53,7 @@ public:
     // within its reveal range, measured in the source XY plane, inclusive.
     [[nodiscard]] std::uint64_t visible_to(PlayerId owner, const math::Vec3& position) const;
     [[nodiscard]] std::optional<math::Fixed> reveal_range(TypeId type_id) const noexcept;
+    [[nodiscard]] const SensorProfile* profile(TypeId type_id) const noexcept;
 
 private:
     [[nodiscard]] std::uint64_t team_mask(PlayerId player) const noexcept;

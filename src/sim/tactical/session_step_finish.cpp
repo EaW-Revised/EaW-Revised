@@ -40,6 +40,20 @@
 namespace eawr::sim::tactical {
 
 void session_detail::Tick::track_victory_change(const UnitState* before, const UnitState* after, const bool evaluate) {
+    // WPJ-17: sparse ordered creation notifications register static sources even
+    // when victory is disabled, before a later same-frame jammer activation.
+    if (!before && after) {
+        const auto* combat = impl_->combat.find(after->type_id);
+        const auto* ability = impl_->abilities.find(after->type_id);
+        if (combat && (combat->passive_missile_shield_radius.raw() > 0
+            || (ability && ability_slot(*ability, AbilityKind::missile_shield)))) {
+            if (std::find(created_static_defences_.begin(), created_static_defences_.end(), after->entity_id) == created_static_defences_.end())
+                created_static_defences_.push_back(after->entity_id);
+            if (!projectile_defence_order_.empty()
+                && std::find(projectile_defence_order_.begin(), projectile_defence_order_.end(), after->entity_id) == projectile_defence_order_.end())
+                projectile_defence_order_.push_back(after->entity_id);
+        }
+    }
     const auto& rules = impl_->victory;
     if (rules.condition == VictoryCondition::none) return;
     const auto& types = rules.condition == VictoryCondition::all_enemy_units_destroyed ? rules.relevant_types : rules.starbase_types;
@@ -48,10 +62,56 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
     };
     if (!relevant(before) && !relevant(after)) return;
     if (before != nullptr && after == nullptr && !victory_removed_.insert(before->entity_id).second) return;
-    const auto object = [](const UnitState* unit) -> std::optional<VictoryObject> {
-        return unit != nullptr ? std::optional(VictoryObject{unit->entity_id, unit->type_id, unit->owner}) : std::nullopt;
+    // VT-02, WCC-40: publish pending victory in the ordered destruction hook,
+    // before any later damage delivery. Only relevant lifecycle hooks visit player/base rows.
+    const bool all_units = rules.condition == VictoryCondition::all_enemy_units_destroyed;
+    const auto count_of = [&](const PlayerId owner) -> std::uint64_t& {
+        const auto player = std::lower_bound(impl_->setup.players.begin(), impl_->setup.players.end(), owner,
+            [](const Player& entry, const PlayerId value) { return entry.player_id < value; });
+        return victory_counts_[static_cast<std::size_t>(player - impl_->setup.players.begin())];
     };
-    victory_changes_.push_back(VictoryChange{object(before), object(after), evaluate});
+    bool lost_base = false;
+    if (relevant(before)) {
+        if (all_units) {
+            auto& count = count_of(before->owner);
+            if (count == 0) {
+                victory_error_ = detail::diagnostic(diagnostic_codes::worker_failure,
+                    "victory relevance count underflow for unit " + std::to_string(before->entity_id));
+                return;
+            }
+            --count;
+        } else {
+            const auto base = std::find_if(pending_starbases_.begin(), pending_starbases_.end(),
+                [&](const StarbaseEntry& entry) { return entry.unit == before->entity_id; });
+            lost_base = base != pending_starbases_.end();
+            if (lost_base) pending_starbases_.erase(base);
+        }
+    }
+    if (relevant(after)) {
+        if (all_units) ++count_of(after->owner);
+        else if (std::binary_search(rules.contenders.begin(), rules.contenders.end(), after->owner)) {
+            const auto position = std::lower_bound(pending_starbases_.begin(), pending_starbases_.end(), after->entity_id,
+                [](const StarbaseEntry& entry, const EntityId id) { return entry.unit < id; });
+            pending_starbases_.insert(position, StarbaseEntry{after->entity_id, after->owner});
+        }
+    }
+    if (pending_outcome_ || !evaluate || !before || (!all_units && !lost_base)) return;
+    std::optional<PlayerId> winner;
+    if (all_units) {
+        std::array<OwnerUnitCount, max_players> counts{};
+        for (std::size_t index = 0; index < impl_->setup.players.size(); ++index) {
+            counts[index] = {impl_->setup.players[index].player_id, victory_counts_[index]};
+        }
+        winner = all_units_destroyed_winner(rules, impl_->setup.players, before->owner,
+            std::span<const OwnerUnitCount>{counts.data(), impl_->setup.players.size()});
+    } else {
+        winner = starbase_destroyed_winner(rules, impl_->setup.players, before->owner, pending_starbases_);
+    }
+    if (winner) {
+        pending_outcome_ = BattleOutcome{rules.condition, *winner, impl_->teams.at(*winner), tick,
+            before->entity_id, tick + rules.countdown_frames};
+        pending_victory_event_ = Event{tick, EventKind::victory, *winner, 0, before->entity_id};
+    }
 }
 
 core::Result<void> session_detail::Tick::finalize() {
@@ -67,6 +127,41 @@ core::Result<void> session_detail::Tick::finalize() {
     const auto& world = targets_.value().world.value();
     const auto& view = world.value();
     const auto& table = impl_->motion;
+    if (!projectile_defence_order_.empty()) {
+        std::vector<std::uint8_t> registered(survivors.size()), jammer_only(survivors.size());
+        const auto prepared = executor.execute_phase("projectile-defence-lifecycle", tick_partition_count,
+            [&](const std::size_t partition) {
+            const auto range = partition_range(partition, survivors.size());
+            for (auto slot = range.begin; slot < range.end; ++slot) {
+                const auto& unit = survivors[slot];
+                const auto* combat = impl_->combat.find(unit.state.type_id);
+                if (!combat || (unit.durability && unit.durability->hull.raw() <= 0)) continue;
+                const auto* ability = impl_->abilities.find(unit.state.type_id);
+                const bool static_source = combat->passive_missile_shield_radius.raw() > 0
+                    || (ability && ability_slot(*ability, AbilityKind::missile_shield));
+                const auto jammer = ability ? ability_slot(*ability, AbilityKind::sensor_jamming) : std::nullopt;
+                const bool active_jammer = jammer && unit.abilities && unit.abilities->slots[*jammer].active;
+                registered[slot] = static_source || active_jammer ? 1U : 0U;
+                jammer_only[slot] = active_jammer && !static_source ? 1U : 0U;
+            }
+        });
+        if (!prepared) return prepared;
+        if (std::none_of(jammer_only.begin(), jammer_only.end(), [](const auto value) { return value != 0; })) {
+            projectile_defence_order_.clear(); // static creation order needs no additional state
+        } else {
+            std::vector<EntityId> retained;
+            for (std::size_t slot = 0; slot < survivors.size(); ++slot)
+                if (registered[slot]) retained.push_back(survivors[slot].state.entity_id);
+            std::erase_if(projectile_defence_order_, [&](const EntityId id) {
+                return !std::binary_search(retained.begin(), retained.end(), id);
+            });
+            // New static sources append after already registered jammers; their IDs
+            // follow creation order. Activation notifications already retained command order.
+            for (const auto id : retained)
+                if (std::find(projectile_defence_order_.begin(), projectile_defence_order_.end(), id) == projectile_defence_order_.end())
+                    projectile_defence_order_.push_back(id);
+        }
+    }
     std::vector<UnitState> positions;
     positions.reserve(survivors.size());
     for (const auto& unit : survivors) {
@@ -111,7 +206,12 @@ core::Result<void> session_detail::Tick::finalize() {
             if (shooter == nullptr || target == nullptr || !sensing.reveal_range(shooter->type_id)) {
                 continue;
             }
-            flashes.push_back(FogFlash{target->owner, shooter->position});
+            const auto* profile = sensing.profile(shooter->type_id);
+            const auto x = math::add(shooter->position.x, profile->flash_offset.x);
+            const auto y = math::add(shooter->position.y, profile->flash_offset.y);
+            if (!x || !y) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+                "fire reveal centre exceeds the coordinate range"));
+            flashes.push_back(FogFlash{target->owner, {x.value(), y.value(), shooter->position.z}, profile->flash_radius});
         }
         const auto advanced = fog->advance(tick, true, Impl::revealers(sensing, positions, disabled_revealers), executor, flashes);
         if (!advanced) {
@@ -125,7 +225,8 @@ core::Result<void> session_detail::Tick::finalize() {
     const auto sensed = executor.execute_phase("visibility", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, positions.size());
         for (auto index = range.begin; index < range.end; ++index) {
-            instances[index].visible_to = impl_->visible_to(sensing, cells, positions[index].owner, positions[index].position);
+            instances[index].visible_to = impl_->visible_to(sensing, cells, positions[index].owner, positions[index].position,
+                positions[index].type_id, positions[index].rotation);
             instances[index].reveal_range = std::binary_search(disabled_revealers.begin(), disabled_revealers.end(), positions[index].entity_id)
                 ? std::nullopt : sensing.reveal_range(positions[index].type_id);
         }
@@ -147,7 +248,7 @@ core::Result<void> session_detail::Tick::finalize() {
                 continue;
             }
             spinning[index] = SpinningCraft{spin.unit, spin.type, spin.owner, transform.value(), spin.roll, spin.pitch,
-                spin.yaw, impl_->visible_to(sensing, cells, spin.owner, spin.position)};
+                spin.yaw, impl_->visible_to(sensing, cells, spin.owner, spin.position, spin.type, rotation.value())};
         }
     });
     if (!sensed) {
@@ -198,65 +299,10 @@ core::Result<void> session_detail::Tick::finalize() {
         }
     }
 
-    // WBF-31/32/35/37: consume sparse lifecycle notifications in their ordered commit
-    // order. All-unit counts came from worker gather; each hook visits only player rows.
-    // Later losses of this tick still stand at an earlier hook, preserving the first winner.
-    auto& starbases = finalized_.value().starbases.emplace(impl_->starbases);
-    auto& outcome = finalized_.value().outcome.emplace(impl_->outcome);
-    if (impl_->victory.condition != VictoryCondition::none) {
-        std::optional<Event> decided;
-        const auto& rules = impl_->victory;
-        const bool all_units = rules.condition == VictoryCondition::all_enemy_units_destroyed;
-        std::array<OwnerUnitCount, max_players> counts{};
-        for (std::size_t index = 0; index < impl_->setup.players.size(); ++index) {
-            counts[index] = {impl_->setup.players[index].player_id, victory_counts_[index]};
-        }
-        const auto& types = all_units ? rules.relevant_types : rules.starbase_types;
-        const auto relevant = [&](const std::optional<VictoryObject>& object) {
-            return object && std::binary_search(types.begin(), types.end(), object->type);
-        };
-        const auto count_of = [&](const PlayerId owner) -> std::uint64_t& {
-            const auto player = std::lower_bound(impl_->setup.players.begin(), impl_->setup.players.end(), owner,
-                [](const Player& entry, const PlayerId value) { return entry.player_id < value; });
-            return counts[static_cast<std::size_t>(player - impl_->setup.players.begin())].units;
-        };
-        for (const auto& change : victory_changes_) {
-            bool lost_base = false;
-            if (relevant(change.before)) {
-                if (all_units) {
-                    auto& count = count_of(change.before->owner);
-                    if (count == 0) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
-                        "victory relevance count underflow for unit " + std::to_string(change.before->unit)));
-                    --count;
-                } else {
-                    const auto base = std::find_if(starbases.begin(), starbases.end(),
-                        [&](const StarbaseEntry& entry) { return entry.unit == change.before->unit; });
-                    lost_base = base != starbases.end();
-                    if (lost_base) starbases.erase(base);
-                }
-            }
-            if (relevant(change.after)) {
-                if (all_units) ++count_of(change.after->owner);
-                else if (std::binary_search(rules.contenders.begin(), rules.contenders.end(), change.after->owner)) {
-                    starbases.push_back(StarbaseEntry{change.after->unit, change.after->owner});
-                }
-            }
-            if (outcome || !change.evaluate || !change.before || (!all_units && !lost_base)) continue;
-            const auto winner = all_units
-                ? all_units_destroyed_winner(rules, impl_->setup.players, change.before->owner,
-                    std::span<const OwnerUnitCount>{counts.data(), impl_->setup.players.size()})
-                : starbase_destroyed_winner(rules, impl_->setup.players, change.before->owner, starbases);
-            if (winner) {
-                outcome = BattleOutcome{rules.condition, *winner, impl_->teams.at(*winner), tick, change.before->unit,
-                    tick + rules.countdown_frames};
-                decided = Event{tick, EventKind::victory, *winner, 0, change.before->unit};
-            }
-        }
-        if (decided) {
-            events.push_back(*decided);
-        }
-        std::sort(starbases.begin(), starbases.end(), [](const StarbaseEntry& left, const StarbaseEntry& right) { return left.unit < right.unit; });
-    }
+    if (victory_error_) return core::Result<void>::failure(*victory_error_);
+    finalized_.value().starbases.emplace(pending_starbases_);
+    auto& outcome = finalized_.value().outcome.emplace(pending_outcome_);
+    if (pending_victory_event_) events.push_back(*pending_victory_event_);
 
     // WBF-45: retain sparse notifications in delivery order for mounted scoring Lua.
     if (!pending_losses_.empty()) {
@@ -340,6 +386,7 @@ core::Result<void> session_detail::Tick::commit() {
     if (finalized_.value().economy_cues) impl_->economy_cues = std::make_shared<const std::vector<BattleEconomyCue>>(std::move(*finalized_.value().economy_cues));
     impl_->tracking_anchor = anchors;
     impl_->squadrons = std::move(squadrons);
+    impl_->free_garrisons = std::move(fighters_.value().free_garrisons.value());
     impl_->tick_work = tick_work;
     crafts.commit();
     minds.commit();
@@ -350,6 +397,7 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->projectile_collection = std::move(targets_.value().projectile_collection.value());
     impl_->next_id = next_id;
     impl_->manual_clocks = std::move(manual_clocks_);
+    impl_->projectile_defence_order = std::move(projectile_defence_order_);
     impl_->ledgers = std::move(ledgers);
     if (bonuses_.value().command_ledger) impl_->command_ledger = std::move(*bonuses_.value().command_ledger);
     if (sources_changed && !impl_->bonus_categories.empty()) impl_->committed_bonus_profiles.swap(impl_->bonus_profiles);
@@ -371,6 +419,8 @@ core::Result<void> session_detail::Tick::commit() {
             impl_->reinforcement_search_results.insert_or_assign(
                 std::pair{iterator->first.player_id, search->request.token}, search->result);
             impl_->reinforcement_searches.erase(iterator->first);
+            // SAE-10: only a successful search becomes an ordinary recorded command.
+            if (!search->result.valid) continue;
         }
         impl_->executed.push_back(std::move(iterator->second));
     }

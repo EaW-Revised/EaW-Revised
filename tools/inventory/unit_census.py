@@ -335,9 +335,10 @@ def handler_needs(row, mechanic, need):
         if kind in generic:
             if kind == "BARRAGE":
                 add("unit-ability:" + kind, kind + " ability", "partial",
-                    "Point activation, enemy target proxy and ordinary projectile/rate/accuracy overrides exist. Roster gates, targeting presentation and U-07 retail captures remain separate acceptance work.",
+                    "Point activation, enemy target proxy and ordinary projectile/rate/accuracy overrides exist. Broadside and Marauder pass RG-03; their enabled HUD buttons dispatch world-point area commands. Area-decal presentation and U-07 retail captures remain separate fidelity work.",
                     ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#apply_area_ability",
-                     "src/sim/tactical/combat_fire.cpp#attempt"), ("WAD-38",), 1074)
+                     "src/sim/tactical/combat_fire.cpp#attempt", "src/presentation/ui/command_sink.cpp#command_payload",
+                     "apps/viewer/src/battle_input_commands.cpp#BARRAGE"), ("WAD-38", "BARR-01"), 1074)
             else:
                 add("unit-ability:" + kind, kind + " ability", "implemented",
                     "The supported kind dispatches through the ability table and simulation service; other modifiers and handler-specific paths are separate needs.",

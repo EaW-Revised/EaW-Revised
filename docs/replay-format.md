@@ -75,7 +75,7 @@ For a step starting with completed tick t:
 2. Draw one SplitMix64 value into the authoritative synthetic `tick_nonce`; this is
    deliberate RNG exercise for this harness, not gameplay randomness.
 3. Evaluate movement from the post-command, pre-movement state. Per component,
-   displacement raw is nearest-even(velocity_raw Ãƒâ€” tick_numerator / tick_denominator).
+   displacement raw is nearest-even(velocity_raw × tick_numerator / tick_denominator).
    Then checked-add that displacement to position. Do not quantize the tick duration
    to Fixed before multiplying. On any arithmetic error, discard the whole step.
 4. Commit entity results in ascending stable-ID order, advance completed tick to t+1,
@@ -224,6 +224,39 @@ human/AI roles or map/options record, so those missing facts cannot be recovered
 from the command stream. Playback still requires the mounted content identity to
 match. Load-time metadata does not add a canonical state or snapshot block.
 
+Tag 3, `GSPN` (FL-13, coordinator-reserved), records objects with garrison spawning disabled.
+Its body is a nonempty array of uint64 initial entity IDs, strictly increasing and nonzero.
+Every ID must exist in the initial unit table; absent IDs, duplicates, disorder and lengths
+not divisible by eight fail. Other initial objects default to garrison enabled. The record
+is omitted when every object is enabled, preserving legacy replay bytes and behavior.
+Tags increase across all records. The combined header, including all extensions, must fit
+uint16 (65,535 bytes); the encoder rejects overflow before narrowing any body/header length.
+
+Canonical tactical state appends an optional `GSPN` block immediately after the unit records:
+ASCII tag, uint32 version 1, uint32 reserved zero, uint64 count, then the disabled live entity
+IDs as uint64 in stable-ID order. It is omitted for an all-enabled world. Station replacements
+preserve the flag on their new stable IDs; removing the last disabled object removes the block.
+This flag does not add presentation snapshot bytes.
+
+Tag 5, `GARR` (FL-14, coordinator-reserved), records opt-in player free-garrison bindings.
+Its body starts with uint32 version 1 and a nonzero uint32 player count (at most 64).
+Each row contains uint32 player ID, delay frames, template count and registered-object count,
+then uint64 template type IDs and uint64 registered initial entity IDs. Players strictly
+increase and must be commandable setup players. Templates are nonzero, nonempty (at most
+1,024), and retain authored order and repetitions. Registered IDs strictly increase, are
+nonzero initial units owned by that player, and exclude squadron containers (a self-contained
+solo craft is allowed). Counts must fit the record; trailing or truncated bytes fail. Bound
+creation profiles are checked when creating a session with bound hangar profiles;
+tableless or partial-table sessions retain the binding without an unbound creation table.
+The combined header remains bounded
+to 65,535 bytes. Free-starting-units off forbids a binding; absent bindings preserve legacy bytes.
+
+Optional canonical `GARR` follows `GSPN` and the unit records: ASCII tag, uint32 version 1,
+uint32 reserved zero, uint64 player count. Each row has uint32 player ID/delay, a uint64 count
+and ordered uint64 template IDs, a uint64 count and sorted uint64 registered live IDs, uint32
+timer-present flag/reserved zero, uint64 due frame (zero when absent), then uint64 pending
+count and ordered uint64 type IDs. Empty live/pending lists do not remove the configuration.
+
 ## Header: exactly 104 bytes for versions 2/3
 
 | Offset | Width | Field | Rule |
@@ -267,7 +300,7 @@ zero when exhausted); rules v1 creates no units.
 Each command is a uint32 body length, excluding that field, then a body. The 24-byte common
 part matches v1: uint64 tick, uint32 player_id (the issuer), uint64 sequence, uint8 opcode,
 uint8 flags (zero), uint16 reserved (zero). The opcode's fixed payload follows, then a unit
-list: uint32 unit_count (1 to 1,024; exactly 1 for a buy, 0 for a cancel, reinforce or credit grant), uint32
+list: uint32 unit_count (1 to 1,024; exactly 1 for a buy or hardpoint repair, 0 for a cancel, reinforce or credit grant), uint32
 reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasing.
 
 | Opcode | Order | Fixed payload | Body length |
@@ -290,6 +323,77 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 16 | Intentional quit (WBF-43/48) | none; no listed unit | 32 |
 | 18 | Manual target (WAD-39) | uint64 enemy ID, uint32 source hardpoint, uint32 reserved (zero) | 48 + 8n |
 | 17 | Area ability (WAD-38) | uint32 ability (6 BARRAGE), uint32 reserved (zero), three int64 point raw values; listed source units | 64 + 8n |
+| 19 | Reinforce reserved purchase (SAE-11) | uint64 type ID, three int64 point raw values, nonzero uint64 pool token; no unit | 72 |
+| 20 | Move through hazards (WHZ-08a) | three int64 destination raw values; listed units | 56 + 8n |
+| 21 | Reveal all (V-20) | uint32 player ID, uint32 reserved (zero); no unit | 40 |
+| 22 | Cancel entry (PU-17, PU-63, WPR-31) | uint32 queue (0 units, 1 upgrades), uint32 reserved (zero), nonzero uint64 entry identity; no unit | 48 |
+| 23 | AI reservation debit (WAS-25) | positive int64 Q24 credit amount; no unit | 40 |
+| 24 | Prepaid AI buy (WAS-26) | uint64 type ID; one station unit | 48 |
+| 25 | Repair hardpoint (WSL-40; OrderKind 21) | uint32 authored hardpoint index below 255, uint32 reserved (zero); exactly one listed station | 48 |
+| 26 | Reinforce with explicit facing (WR-X01) | uint64 type ID, three int64 point raw values, uint64 pool token (zero for ordinary admission), int64 yaw raw in [0, 360) degrees; no unit | 80 |
+
+The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
+
+Opcodes 23 and 24 are coordinator-reserved. Reservation debit applies only to an
+AI account and requires sufficient funds; it deducts the amount without the
+positive-credit difficulty adjustment. A prepaid buy retains ordinary production
+admission and queue cancellation, but skips the entry credit check and debit.
+Human accounts cannot use prepaid entry. Ordinary buys keep opcode 9 and its
+unchanged bytes. Unused AI plan allocations return through opcode 14; they are
+distinct from cancellation refunds for entries that already started.
+
+
+### Hardpoint repair command
+
+Opcode 25 records `RepairHardpointPayload` and maps to command/order kind 21.
+Its body is exactly 48 bytes, excluding the uint32 length prefix: the common
+24-byte fields, uint32 hardpoint index, uint32 reserved zero, uint32 unit count
+of 1, uint32 reserved zero, and one nonzero uint64 station entity ID. The index
+addresses the station type's authored HardPoints list; 255 and higher are invalid.
+Nonzero reserved data, another unit-list shape or an invalid index fail parsing
+or command validation.
+
+The common `player_id` is both issuer and payer (WSL-40/41). Execution requires
+a live station, an existing payer account and a destroyable slot with positive
+health below its maximum; destroyed, full, absent or arriving targets are refused.
+Each payer registers at most once for that slot. Registration has no ownership
+or current-funds gate. Per-frame service charges registered payers in registration
+order and applies the authored repair amount (HR-01..06); an unavailable or
+insolvent payer drops out, and completion clears the list. Zero authored amount
+can still pay without health progress.
+
+This additive opcode is accepted in tactical replay formats 2, 3, 4 and 5; it
+requires no header extension or format-version change. Older replays never contain
+it and retain their existing command bytes and state layout. Older readers that
+do not implement opcode 25 reject it as unsupported. Repair registration and
+disabled flags already participate in the existing optional `UPGD` state block,
+with payers retained in registration order; no new repair block is introduced.
+
+### Queue entry cancellation
+
+Cancel entry requires the coordinator-reserved `QIDS` header extension, tag 4,
+with a four-byte uint32 version of 1. It uses replay format 4 or 5 with the existing
+increasing-tag header record layout. New live recordings opt in; absent tag 4 keeps
+legacy state bytes and hashes. Opcode 10 retains its index payload and historical
+index cancellation, including after a queue shift; parsing and re-encoding it
+does not introduce tag 4 or change its bytes.
+
+Every accepted queued purchase receives a monotonically increasing nonzero identity,
+starting at one per player across both queues. Completion and cancellation never
+reuse an identity. Opcode 22 locates that identity in the issuer's named queue,
+refunds that entry's full paid price and advances the front if necessary (PU-17).
+A missing identity is refused with `no_queue_entry`; it never falls back to an index.
+The HUD retains the displayed identity through the press/release and scheduler,
+so repeated commands for the same entry cannot cancel its successor (PU-63, WPR-31).
+
+With tag 4 and economy rules, canonical session state appends coordinator-reserved
+ASCII `QIDS` after the existing state blocks: uint32 version 1, uint32 reserved zero,
+uint64 ledger count; per player in ascending ID, uint32 player, uint32 reserved zero,
+uint64 next queue identity, then for each queue (units, upgrades) uint64 count and
+its uint64 identities in entry order. The counter remains even with empty queues.
+`ECON` and canonical snapshot encoding retain their existing layouts; queue identities
+are exposed in immutable snapshot queue metadata. A session without tag 4 rejects
+identity cancellation, so commands never rely on identity state outside its hash.
 
 Manual target is command/order kind 17 and opcode 18. A zero enemy, out-of-bound
 hardpoint or nonzero reserved word is invalid. The assignment names a source gun;
@@ -394,6 +498,25 @@ Bit 11 appends uint64 positive muzzle-delay expiry after any flight extension.
 Absent/zero appearance delay emits no field. The projectile is hidden while the
 published completed tick is at most expiry, becomes visible at expiry plus one,
 and begins movement on the following executed frame (WAD-37/40, MC-07).
+
+Bit 13 (`8192`) appends int64 positive authored damage delay raw after any flight
+and muzzle-delay extensions (WAD-26). Nonpositive damage delay leaves this bit
+clear and appends no field, preserving the earlier encoding.
+
+Coordinator-reserved bit 14 appends three int64 Q24 values: turn rate, yaw and pitch
+for a nonhoming projectile, after the muzzle-delay and bit-13 damage-delay extensions. Its absence retains
+the previous zero turn rate; homing projectiles continue using their existing
+turn-rate/facing extension. The facing avoids accumulating angle error from
+  reconstructing a direct projectile's orientation from a rounded step.
+Coordinator-reserved bit 15 marks a rocket shield-detour attempt and appends one
+int64 Q24 remaining target-radius allowance after the bit-14 facing extension.
+It remains set when the forward ray cannot rebuild the route; such a failure
+retains the old cursor and allowance. A successful rebuild resets the cursor,
+reduces this allowance by consumed path distance and clears the missile target.
+The flight profile retains the original authored distance for subsequent trims.
+Bit-absent records retain the earlier encoding and flight behavior.
+WPJ-17 defence registries are copied phase inputs derived from live passive sources;
+they add no replay command or independently persisted state block.
 
 A session starts at completed tick 0 with the setup units and an empty queue. A step that
 starts at completed tick t:
@@ -532,11 +655,11 @@ SHA-256 consumes, without padding:
 | 8 | Player count, then each 24-byte player record |
 | 8 | Unit count, then per unit in ascending ID: its 80-byte record, a 48-byte order, for a durable unit its health and for a unit with a motion profile its 80-byte motion record |
 | optional | With live squadrons: ASCII `SQDN`, a uint64 squadron count and per squadron in ascending container ID the uint64 container, a uint64 craft count and the live craft IDs ascending |
-| optional | With fog rules: ASCII `FOGC`, a uint64 anchor count and per revealer circle in ascending ID the uint64 revealer, uint32 column, row and radius, uint32 owner and int64 x and y raw of the position it marked from; then a uint64 player count and each player's cell values, one byte per cell row by row, in ascending player ID |
+| optional | With fog rules: ASCII `FOGC`, a uint64 anchor count and per revealer circle in ascending ID the uint64 revealer, uint32 column, row and radii, uint32 owner and int64 x and y raw of the position it marked from; then a uint64 player count and each player's cell values, one byte per cell row by row, in ascending player ID. The radii word retains the normal radius in its low 16 bits; on a map with dense circles its high 16 bits retain the dense radius (V-22). Both radii are at most the grid width plus height (8192). Maps without dense circles keep the former radius encoding. The shared dense mask is immutable map content, rather than tick state. |
 | optional | With formation and avoidance rules (legacy EAWR-71): ASCII `TRAK` and four uint64 window anchors, one per dynamic tracking layer (capital, frigate, corvette, super capital): the frame the layer was last rebuilt |
 | optional | With a banked unit: ASCII `ROLL`, a uint64 count and per unit whose roll is not zero, in ascending ID, the uint64 unit and its int64 roll (degrees) raw |
 | optional | With damage rules: ASCII `PROJ`, uint64 next projectile ID, uint64 projectile count and per projectile in ascending ID 128 bytes: uint64 ID, shooter and target, uint32 owner, weapon, target hardpoint and damage type, uint32 flags (bit 0 shield damage, bit 1 hitpoint damage, bit 2 the shooter's DG-05 diminishing-firepower flag was off at the shot, bit 3 the projectile's internal damage type was not the misc type (DG-05); bits 2 and 3 are 0 for every M2 shooter and projectile, so the word is unchanged from before diminishing-firepower gates; bit 4 homing, bit 5 holds its target, bit 6 energy damage and bit 7 ion stun (ion weapon handling; both 0 before ion weapon handling, so no earlier word changed)), uint32 zero, int64 position and per-frame step raw (x, y, z each), and int64 speed, travel, maximum travel and damage raw; a homing projectile then appends 48 bytes: int64 turn rate, yaw and pitch raw (degrees) and its offset in the target's frame (x, y, z raw); an ion-stun projectile then appends 24 bytes: uint32 stun frames, int64 speed and shot rate reductions raw, uint32 stacks (0 or 1) |
-| optional | With queued blast distance damage (WAD-17/21, U-04 project policy): ASCII `BLST`, uint32 version 2, uint32 zero, uint64 count; per queued delivery in retained due-frame/creation order, uint64 due frame and recipient ID, int64 amount and delay raw, uint32 secondary hardpoint route (`0xffffffff` for hull), then the source projectile record including its blast extension. This block follows `PROJ` and precedes `FRMN`. |
+| optional | With queued delayed damage (WAD-17/21/26, U-04 project policy): ASCII `BLST`, uint32 version 3, uint32 zero, uint64 count; per queued delivery in retained due-frame/creation order, a fixed 48-byte record: uint64 due frame and recipient ID, int64 amount and delay raw, uint32 secondary hardpoint route (`0xffffffff` for hull), owner, damage type and internal-damage-kind flag (1 for misc, 0 otherwise). Unlike version 2, which appended the complete source projectile after the hardpoint route, version 3 retains only these delivery fields and appends no source projectile. This block follows `PROJ` and precedes `FRMN`. |
 | optional | With group members waiting to plan (formation slot assignment, FM-08): ASCII `FRMN`, a uint64 count and per waiting unit in ascending ID the uint64 unit, uint64 planning frame, int64 x, y and z raw of its slot, int64 raw planning speed, the group command's uint64 tick, uint32 player and uint64 sequence, and a uint32 rank |
 | optional | With approach mappings (attack closing, attack-move and guard, [space orders](behaviour/space-orders.md) OR-05 to OR-07): ASCII `APPR`, a uint64 count and per unit with one, in ascending ID, the uint64 unit and its uint64 prediction frame |
 | optional | With squadron craft that fly by a craft profile: ASCII `CRFT`, a uint64 count and per craft in ascending ID the uint64 ID, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, uint32 flipping (0 or 1) and uint32 zero |
@@ -556,13 +679,14 @@ SHA-256 consumes, without padding:
 | optional | With live nebula contact state (WHZ-20/21): ASCII `NEBC`, uint64 count, then ascending-ID records of uint64 unit ID, uint8 present, uint8 has-frame and uint64 last contact frame (zero when has-frame is zero). Absent when empty. |
 | optional | With cached ion-storm contact (WHZ-30/31): ASCII `STMC`, uint64 count, then ascending-ID records of uint64 unit ID and uint64 last shield-service contact frame. Absent when empty. |
 | optional | With converted hero purchases (WHE-02/06/07/49): coordinator-reserved ASCII `HERO`, uint64 carrier count, then ascending carrier-ID records of uint64 carrier ID, uint64 logical purchase type and uint64 contained count. Each contained record stores uint64 identity ID, uint64 type, uint64 parent, uint8 flags and uint64 member count followed recursively by its ordered members. Flag bits 0–7 mean named, generic, limbo, model visible, collidable, selected, movement coordinated and preserved combat. Riders and team members retain authored creation order. The block is absent without converted purchases; initial replay units cannot carry this derived state. |
+| optional | While jammer-only sources are registered: coordinator-reserved ASCII `PDEF`, uint64 source count, then uint64 source IDs in registration order. Static shield/passive declarations register at creation; jammer-only owners append on activation and leave on termination/death. The block is absent with no active jammer-only sources; static creation order then follows stable IDs. Staged changes commit only after a successful tick. |
 | optional | With nested special-handler state (WHE-09/10/12): coordinator-reserved ASCII `SPAB`, uint64 owner count, then ascending owner-ID records of uint64 owner ID, uint32 service-cancelled, uint32 zero and uint64 slot count. Declared-order slots store uint32 flags (bits 0 enabled, 1 cancelled, 2 successful despawn), uint32 context-present, uint64 next service frame, optional context (uint64 owner and target, uint32 mode: 0 space/1 ground/2 galactic, uint32 flags: owner exists/type exists/death clone/map editor), uint64 tracked-target count and ascending uint64 target IDs. Activation clears its context after Apply; ordinary committed slots therefore have no context. The block is absent with no nested slots. |
 | optional | With spawned hero ability objects or timed recipients: ASCII `HABL`, uint64 count; ascending shared-projectile-ID records of uint64 ID and spawned type, uint32 ability kind and owner, uint64 source, three int64 position and four int64 quaternion components, uint64 detonation deadline, uint32 detonated (0 or 1), uint64 recipient count, then recipient-query-order pairs of uint64 target and expiry tick. Empty sessions omit this block; the ordinary `PROJ` block holds the live stationary projectile until detonation. |
 | optional | While killed craft spin away (fighter spin-away deaths, [space fighter deaths](behaviour/space-fighter-deaths.md)): ASCII `SPIN`, a uint64 count and per spin in ascending craft ID the uint64 craft ID and type, uint32 owner, uint32 path (0 or 1), int64 position x, y and z raw, int64 roll, pitch and yaw raw (degrees), int64 velocity x, y and z raw, int64 accumulated roll raw, int64 x, y and z raw of the four control points, int64 raw length of the three segments and int64 raw distance travelled |
 
 The optional state blocks come in one fixed order, which is part of the format: the purchasing blocks
 (`ECON`, `ARRV`, `PADS`, `POPS`, station purchasing and WBP-01..19, then `AVUL`, WR-41, and `UPGD` for station upgrades) follow the collection block, then come the outcome and ability blocks
-(`VICT`, `ABIL`), then `IONS` (ion weapon handling), `ASTD` (asteroid contact), `EDIS` (temporary engine disable), `NEBC` (nebula contact), `STMC` (ion-storm contact), `HERO` (converted hero identity), `HBON` (hero command sources), `CFIR` (concentrate-fire recipients), `SPAB` (nested special handlers), `HABL` (spawned hero abilities), and the spin-away block (`SPIN`, fighter spin-away deaths). The order is a
+(`VICT`, `ABIL`), then `IONS` (ion weapon handling), `ASTD` (asteroid contact), `EDIS` (temporary engine disable), `NEBC` (nebula contact), `STMC` (ion-storm contact), `HBON` (hero command sources), `HERO` (converted hero identity), `PDEF` (projectile-defence registration), `SPAB` (nested special handlers), `CFIR` (concentrate-fire recipients), `HABL` (spawned hero abilities), and the spin-away block (`SPIN`, fighter spin-away deaths). The order is a
 deliberate choice: the purchasing blocks sit with the economy's other per-player state before the battle outcome, and
 the later blocks keep the order they landed on the integration branch. A session with none of them hashes
 as before, and a battle with several hashes in this order. The snapshot bytes carry `IONS`, then `ASTD`, `NEBC`, `STMC`, then `SPIN`; the
@@ -585,11 +709,37 @@ and that many uint32 player IDs. Ordinary hardpoint health stays in the base uni
 record. Effective maxima derive from the immutable type profile and these bonuses.
 Current build counts derive from live units, held objects, queues and pool.
 
+The conditional session-state block `LSVC` (version 1, coordinator-reserved)
+follows `UPGD` and precedes income-modifier state. It is absent when no held
+level-up has a service deadline. Its header is ASCII `LSVC`, uint32 version 1,
+uint32 zero and uint64 record count. Records follow ascending player order and
+held-object completion order: uint32 player, uint32 zero, uint64 hidden object
+ID and uint64 initial ability-service deadline. The held object's type and
+station remain in `UPGD`, whose encoding is unchanged. WSL-31 initializes the
+deadline with an inclusive creation-frame through creation-frame+2 draw; the
+late queue's missed traversal means the actual first service is one or two
+frames after completion. Removing the one-shot upgrade removes its deadline.
+
 Event 9 `station_replaced` uses the existing event record: player is the station
 owner, unit is the old station ID, sequence is the replacement ID, and order and
 reason are none. It does not imply death. The viewer transfers selection from the
 old ID to the new ID, even when several completed ticks reach one presentation.
 The command opcode remains buy (9); no new replay command was reserved.
+
+Event 10 `pad_captured` reports a real ownership transition, including capture,
+neutralization and child-death reclamation of a surviving pad (WNO-23/42).
+Player is the new owner, unit is the transferred object, sequence is the previous
+owner, and order and reason are none. A same-owner service emits no transition.
+The viewer removes selection and control-group membership only for the previous
+owner; allied observers keep theirs. Older output events with sequence zero lack
+previous-owner information and do not request this owner-specific removal.
+
+The event record widths and replay input parsing remain unchanged; no new state
+block, command opcode or format version is introduced. The previous-owner payload
+changes event CSV and snapshot digests for transitions, and surviving-pad
+reclamation now contributes such an event. Ownership-specific hull/shield fraction
+restoration and target cleanup can also change state hashes when those states are
+present. Replays without affected transfers retain their prior digests.
 
 The order is uint64 issued_tick, uint32 kind (0 none, 1 stop, 2 move, 3 attack, 5 face, 6
 attack-move, 7 guard), uint32 ordered hardpoint (zero, or the hardpoint index plus one of an attack on a hardpoint, specific-hardpoint attack orders), three int64 destination raw values and uint64 target (9 to 11, station purchasing, are command kinds only). A unit whose type has a profile
@@ -649,7 +799,7 @@ flags (bit 0 engines on-line, bit 1 shield on-line, bit 2 launch ready, bit 3 ha
 intact, 1 damaged, 2 destroyed), uint8 enabled, uint8 zero and uint32 zero. Then come a
 uint64 event count and 32-byte events: uint64 tick, uint32 player, uint8 kind (1
 order_accepted, 2 order_rejected, 3 hardpoint_destroyed, 4 unit_destroyed, 5 victory, 6
-spin_away_started, 7 spin_away_ended, 8 unloaded, 9 station_replaced), uint8 order kind
+spin_away_started, 7 spin_away_ended, 8 unloaded, 9 station_replaced, 10 pad_captured), uint8 order kind
 (4 is damage, 5 is face, 6 is attack-move, 7 is guard, 8 is ability, 9 to 11 are buy, cancel and
 reinforce), uint8 reason (0 none, 1 unit_not_live, 2 unit_not_owned, 3 target_not_live,
 4 target_not_hostile, 5 not_damageable, 6 hardpoint_invalid, 7 target_is_unit, 8 ability_unavailable;
@@ -806,7 +956,7 @@ One immutable grid for one opaque fixture team. The header is exactly 76 bytes.
 | 48 | 8 | cell_y_raw | int64 Q24, strictly positive; rectangular cells allowed |
 | 56 | 4 | encoding | Exactly 1 = linear u8 attenuation (0 dark RGB, 255 unchanged RGB) |
 | 60 | 8 | revision | At least 1 (stream rules below) |
-| 68 | 8 | byte_count | Exactly width Ãƒâ€” height |
+| 68 | 8 | byte_count | Exactly width × height |
 | 76 | byte_count | cells | Row-major `y*width+x`; +x is source +X, +y is source +Y |
 
 Cell `(x,y)` covers the half-open Q24 rectangle `origin + (x,y)*cell` to
@@ -1022,3 +1172,8 @@ It contains a u64 source count, then source rows ordered by source ID and declar
 u64 source ID, u64 carrier/host ID, u64 source type, u32 declared bonus slot, u64 recipient
 count, and ascending u64 recipient IDs. The recipient index and category totals are derived
 from these source rows and immutable content. Station-upgrade state encoding is unchanged.
+
+Ordinary ability command kind values 15 (`MISSILE_SHIELD`) and 16
+(`SENSOR_JAMMING`) are coordinator-reserved append-only extensions. They use
+existing opcode 8 and ordinary activation/deactivation/autofire payloads; no
+projectile optional bit or synchronized random stream is added.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -155,6 +156,37 @@ class PackageReleaseTests(unittest.TestCase):
 
 
 class DemoLauncherTests(unittest.TestCase):
+    def test_viewer_failure_is_forwarded_and_stale_report_is_removed(self):
+        for override in (False, True):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary).resolve()
+                (root / "out").mkdir()
+                report = root / "out" / ("chosen.json" if override else "preview-setup.json")
+                report.write_text(json.dumps({"status": "failed", "failure": "stale failure"}))
+                def fail(command, **kwargs):
+                    self.assertFalse(report.exists())
+                    flags = [index for index, value in enumerate(command) if value == "--eawr-report"]
+                    destination = pathlib.Path(command[flags[-1] + 1])
+                    if not destination.is_absolute():
+                        destination = kwargs["cwd"] / destination
+                    self.assertEqual(destination, report)
+                    report.write_text(json.dumps({"status": "failed", "failure":
+                        "Cannot read Config.meg. Check read permissions and repair the FoC installation."}))
+                    return 2
+                stderr = io.StringIO()
+                with patch.object(demo, "ROOT", root), patch.object(demo, "game_root", return_value=root / "game"), \
+                        patch.object(demo, "godot_binary", return_value=root / "Godot.exe"), \
+                        patch.object(demo.fonts, "locate_executable", return_value=root / "game/StarWarsG.exe"), \
+                        patch.object(demo.fonts, "extract"), patch.object(demo.subprocess, "call", side_effect=fail), \
+                        patch.object(sys, "stderr", stderr):
+                    arguments = ["--game-root", "game", "--godot", "Godot.exe"]
+                    if override:
+                        arguments += ["--", "--eawr-report", "out/chosen.json"]
+                    self.assertEqual(demo.main(arguments), 2)
+                self.assertIn("Config.meg", stderr.getvalue())
+                self.assertIn("read permissions", stderr.getvalue())
+                self.assertNotIn("stale failure", stderr.getvalue())
+
     def test_install_requires_both_data_directories_and_normalizes_expansion(self):
         with tempfile.TemporaryDirectory(prefix="install caf\u00e9 ") as temporary:
             game = pathlib.Path(temporary).resolve()

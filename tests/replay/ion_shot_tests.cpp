@@ -1,3 +1,5 @@
+#include "tactical_ai_internal.hpp"
+
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -9,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -165,6 +168,52 @@ constexpr eawr::sim::EntityId escort = 31; // a Rebel frigate: not a valid targe
     return {{tick, rebel, sequence}, {unit}, payload};
 }
 
+std::optional<tactical::CommandPayload> translated_lua_payload(const eawr::sim::EntityId recipient,
+    const std::string& method, tactical::TacticalSession& session) {
+    namespace auth = eawr::script::authoritative;
+    namespace foc = eawr::script::foc;
+    auto host = std::make_shared<foc::detail::Host>();
+    host->world = &session;
+    host->snapshot = session.snapshot();
+    host->view = foc::detail::build_view(session, *host->snapshot);
+    auth::ModuleManifest manifest;
+    expect(manifest.add("ORDER.LUA", "function Check(unit, target) unit." + method + "(target) end\n").has_value(),
+        "Lua probe module registers");
+    auth::SessionConfig config;
+    config.tick_duration = {1, 30};
+    auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+    expect(scripts.has_value(), "Lua probe scheduler starts");
+    if (!scripts) return std::nullopt;
+    std::vector<eawr::core::Diagnostic> errors;
+    foc::tactical_ai_detail::register_methods(scripts.value(), host, errors);
+    expect(errors.empty(), "Lua probe production bindings register");
+    expect(scripts.value().create_instance(1, "ORDER.LUA").has_value(), "Lua probe instance starts");
+    auth::ScriptEvent event;
+    event.key = {1, auth::first_simulation_producer, 1, 0};
+    event.target = 1;
+    event.kind = auth::ScriptEvent::Kind::call;
+    event.name = "Check";
+    auth::Value target = method == "Move_To"
+        ? foc::detail::position_value(at(-1600, 1200))
+        : auth::Value{auth::Handle{foc::handle_game_object, frigate}};
+    event.arguments = {auth::Value{auth::Handle{foc::handle_game_object, recipient}}, target};
+    expect(scripts.value().submit_event(std::move(event)).has_value(), "Lua probe event submits");
+    const eawr::sim::InlineExecutor executor;
+    const auto serviced = scripts.value().service(executor);
+    expect(serviced && serviced.value().commands.size() == 1, "Lua probe produces an order");
+    if (!serviced || serviced.value().commands.size() != 1) return std::nullopt;
+    const auto order = foc::tactical_ai_detail::translate_order(serviced.value().commands.front());
+    expect(order && order.value().units == std::vector<eawr::sim::EntityId>{recipient},
+        "Lua probe preserves recipient ID");
+    if (!order) return std::nullopt;
+    return order.value().payload;
+}
+struct LuaOrder {
+    eawr::sim::EntityId recipient;
+    std::string method;
+    std::uint64_t tick;
+};
+
 struct Run {
     std::vector<std::string> rows;
     std::vector<tactical::CombatEvent> fired;  // the craft's weapon_fired events
@@ -172,14 +221,18 @@ struct Run {
     std::vector<std::uint64_t> active_ticks;   // ticks the container's ion shot showed on
     std::optional<std::uint64_t> recharging_from;
     std::uint32_t recharge_total{};
+    std::uint64_t ready_tick{};
     std::size_t stunned{};                      // ticks the frigate showed stunned
     std::optional<tactical::DurabilityState> target;
+    std::optional<tactical::SquadronState> squadron;
+    std::optional<math::Vec3> position;
 };
 
 Run run(const std::vector<tactical::PlayerCommand>& commands, const std::vector<tactical::PlayerId>& humans,
-    const eawr::sim::PartitionExecutor& executor, const std::uint64_t ticks = 600) {
+    const eawr::sim::PartitionExecutor& executor, const std::uint64_t ticks = 600,
+    const tactical::TacticalSetup& initial = setup(), const std::optional<LuaOrder>& lua = std::nullopt) {
     Run result;
-    auto created = tactical::TacticalSession::create(setup(), sensors(), durability(), motion(), std::nullopt, combat(),
+    auto created = tactical::TacticalSession::create(initial, sensors(), durability(), motion(), std::nullopt, combat(),
         tactical::VictoryRules{}, abilities(humans));
     expect(static_cast<bool>(created), "the ion shot session builds: " + (created ? std::string{} : created.error().message));
     if (!created) return result;
@@ -189,6 +242,11 @@ Run run(const std::vector<tactical::PlayerCommand>& commands, const std::vector<
         expect(static_cast<bool>(submitted), "a command submits");
     }
     for (std::uint64_t index = 0; index < ticks; ++index) {
+        if (lua && index == lua->tick) {
+            const auto payload = translated_lua_payload(lua->recipient, lua->method, session);
+            if (payload) expect(session.submit({{lua->tick, rebel, 2}, {lua->recipient}, *payload}).has_value(),
+                "production Lua order submits while the team shot is active");
+        }
         const auto stepped = session.step(executor);
         if (!stepped) {
             expect(false, "step failed: " + stepped.error().message);
@@ -220,6 +278,11 @@ Run run(const std::vector<tactical::PlayerCommand>& commands, const std::vector<
         }
     }
     result.target = session.durability_state(frigate);
+    if (const auto state = session.ability_state(container)) result.ready_tick = state->slots.front().ready_tick;
+    result.squadron = session.squadron_state(container);
+    for (const auto& state : session.units()) {
+        if (state.entity_id == container) result.position = state.position;
+    }
     return result;
 }
 
@@ -282,6 +345,145 @@ void test_rejections() {
         "AB-65: cancelled before any craft fired, the shot costs no recharge");
 }
 
+// WAB-40: accepted orders, including those submitted by Lua, end the team shot.
+void test_new_orders() {
+    const eawr::sim::InlineExecutor inline_executor;
+    auto initial = setup();
+    initial.units[3].position = at(1400, 0); // 2000 units from the squadron
+    constexpr eawr::sim::EntityId other_target = 40;
+    initial.units.push_back(unit(other_target, frigate_type, empire, at(1400, 500)));
+    const math::Vec3 destination = at(-1600, 1200);
+    const std::vector<tactical::CommandPayload> orders{
+        tactical::MovePayload{destination}, tactical::AttackPayload{frigate}, tactical::AttackPayload{other_target},
+        tactical::GuardPayload{{}, escort}, tactical::GuardPayload{destination}};
+    for (const auto& payload : orders) {
+        const std::vector<tactical::PlayerCommand> commands{
+            shot(1, 1, container, frigate), {{100, rebel, 2}, {container}, payload}};
+        const auto value = run(commands, {rebel}, inline_executor, 101, initial);
+        // Command tick 100 publishes completed snapshot 101; snapshot 100 is the last on.
+        expect(value.active_ticks.size() == 99 && value.active_ticks.back() == 100,
+            "WAB-40: a new order ends the shot at tick 100");
+        expect(!value.recharging_from && bolts(value) == 0,
+            "AB-65: cancellation before a craft fires costs no recharge");
+        if (const auto* attack = std::get_if<tactical::AttackPayload>(&payload)) {
+            expect(value.squadron && value.squadron->target == attack->target,
+                "WAB-40: the requested attack target survives, including the original target");
+        }
+        if (const auto* guard = std::get_if<tactical::GuardPayload>(&payload)) {
+            expect(value.squadron && value.squadron->escorted == guard->target,
+                "WAB-40: the squadron follows the requested escort order");
+        }
+        if (std::holds_alternative<tactical::MovePayload>(payload)) {
+            expect(value.squadron && value.squadron->mode == tactical::SquadronMode::move
+                && value.squadron->anchor == destination,
+                "WAB-40: move destination survives the ion lock");
+            const auto flown = run(commands, {rebel}, inline_executor, 170, initial);
+            expect(flown.position && value.position && flown.position->y > value.position->y,
+                "WAB-40: the squadron flies towards the player's move");
+        }
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(run(commands, {rebel}, executor, 101, initial).rows == value.rows,
+                "new order cancellation hashes match with " + std::to_string(workers) + " worker(s)");
+        }
+    }
+    // Keep one craft out of range: cancel after the first bolt, while the other is due.
+    initial = setup();
+    initial.units[2].position = at(-5000, 10);
+    const auto probing = run({shot(1, 1, container, frigate)}, {rebel}, inline_executor, 300, initial);
+    const auto first = std::find_if(probing.fired.begin(), probing.fired.end(),
+        [](const auto& event) { return (event.outcome & tactical::fired_ability_shot) != 0U; });
+    expect(first != probing.fired.end(), "AB-65: one craft fires before cancellation");
+    if (first != probing.fired.end()) {
+        const auto cancel_tick = first->tick + 1;
+        const std::vector<tactical::PlayerCommand> commands{shot(1, 1, container, frigate),
+            {{cancel_tick, rebel, 2}, {container}, tactical::MovePayload{destination}}};
+        const auto cancelled = run(commands, {rebel}, inline_executor, cancel_tick + 1, initial);
+        expect(bolts(cancelled) == 1 && cancelled.recharging_from == cancel_tick + 1
+            && cancelled.recharge_total == 600 && cancelled.ready_tick == cancel_tick + 600,
+            "AB-65: a new order after one craft fires starts the 600-frame recharge");
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(run(commands, {rebel}, executor, cancel_tick + 1, initial).rows == cancelled.rows,
+                "partial-fire cancellation hashes match with " + std::to_string(workers) + " worker(s)");
+        }
+    }
+    const auto rejected = run({shot(1, 1, container, frigate),
+        {{100, empire, 1}, {container}, tactical::MovePayload{destination}}}, {rebel}, inline_executor, 101, initial);
+    expect(!rejected.active_ticks.empty() && rejected.active_ticks.back() == 101,
+        "an order rejected for ownership does not end another player's shot");
+}
+
+// WAB-40: production Lua retains the receiver craft ID; cancellation reaches the parent.
+void test_member_orders() {
+    const eawr::sim::InlineExecutor executor;
+    const math::Vec3 destination = at(-1600, 1200);
+    auto initial = setup();
+    initial.units[3].position = at(1400, 0);
+    const std::vector<tactical::CommandPayload> orders{
+        tactical::MovePayload{destination}, tactical::AttackPayload{frigate},
+        tactical::GuardPayload{{}, escort}, tactical::GuardPayload{destination}};
+    for (const auto recipient : {craft_a, craft_b}) {
+        for (const auto& payload : orders) {
+            for (const auto& humans : {std::vector<tactical::PlayerId>{rebel}, std::vector<tactical::PlayerId>{}}) {
+                const std::vector<tactical::PlayerCommand> commands{
+                    shot(1, 1, container, frigate), {{100, rebel, 2}, {recipient}, payload}};
+                const auto value = run(commands, humans, executor, 101, initial);
+                expect(value.active_ticks.size() == 99 && value.active_ticks.back() == 100
+                    && !value.recharging_from && bolts(value) == 0,
+                    "WAB-40: accepted player/AI member move, attack and guard cancel the unfired parent shot");
+                expect(value.events.size() == 2 && value.events.back().kind == tactical::EventKind::order_accepted
+                    && value.events.back().unit == recipient, "member order keeps its accepted recipient");
+                for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                    const eawr::platform::ThreadWorkerAdapter threaded(workers);
+                    expect(run(commands, humans, threaded, 101, initial).rows == value.rows,
+                        "member player/AI cancellation hashes match at " + std::to_string(workers) + " workers");
+                }
+            }
+        }
+        const auto rejected = run({shot(1, 1, container, frigate),
+            {{100, empire, 1}, {recipient}, tactical::MovePayload{destination}}}, {rebel}, executor, 101, initial);
+        expect(!rejected.active_ticks.empty() && rejected.active_ticks.back() == 101
+            && rejected.events.back().reason == tactical::RejectReason::unit_not_owned,
+            "rejected member order preserves the parent shot");
+    }
+    auto partial = setup();
+    partial.units[2].position = at(-5000, 10);
+    const auto probing = run({shot(1, 1, container, frigate)}, {rebel}, executor, 300, partial);
+    const auto first = std::find_if(probing.fired.begin(), probing.fired.end(),
+        [](const auto& event) { return (event.outcome & tactical::fired_ability_shot) != 0U; });
+    expect(first != probing.fired.end(), "Lua recharge fixture fires one craft");
+    if (first == probing.fired.end()) return;
+    for (const std::string method : {"Move_To", "Attack_Target"}) {
+        for (const auto recipient : {container, craft_a, craft_b}) {
+            for (const bool fired : {false, true}) {
+                const auto cancel_tick = fired ? first->tick + 1 : 100;
+                const auto& fixture = fired ? partial : initial;
+                const LuaOrder order{recipient, method, cancel_tick};
+                const std::vector<tactical::PlayerCommand> commands{shot(1, 1, container, frigate)};
+                const auto value = run(commands, {rebel}, executor, cancel_tick + 1, fixture, order);
+                expect(!value.active_ticks.empty() && value.active_ticks.back() == cancel_tick,
+                    "WAB-40: production Lua " + method + " ends the parent shot for receiver " + std::to_string(recipient));
+                expect(value.events.size() == 2 && value.events.back().kind == tactical::EventKind::order_accepted
+                    && value.events.back().unit == recipient, "production Lua receiver is accepted");
+                if (fired) {
+                    expect(bolts(value) == 1 && value.recharging_from == cancel_tick + 1
+                        && value.recharge_total == 600 && value.ready_tick == cancel_tick + 600,
+                        "AB-65: Lua container/member cancellation after one bolt pays exactly 600 frames");
+                } else {
+                    expect(bolts(value) == 0 && !value.recharging_from && value.ready_tick == 0,
+                        "AB-65: Lua container/member cancellation before firing pays no recharge");
+                }
+                for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                    const eawr::platform::ThreadWorkerAdapter threaded(workers);
+                    expect(run(commands, {rebel}, threaded, cancel_tick + 1, fixture, order).rows == value.rows,
+                        "Lua cancellation/recharge hashes match at " + std::to_string(workers) + " workers");
+                }
+            }
+        }
+    }
+}
+
 // AB-68: a player the engine plays uses the ion shot on its squadron's attack target by itself; a
 // human player's squadron without autofire never does.
 void test_autofire() {
@@ -332,6 +534,8 @@ void test_workers() {
 int main() {
     test_player_shot();
     test_rejections();
+    test_new_orders();
+    test_member_orders();
     test_autofire();
     test_replay();
     test_workers();

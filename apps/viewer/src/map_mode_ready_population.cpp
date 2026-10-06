@@ -6,6 +6,7 @@
 #include "eawr/presentation/camera/overview.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "eawr/presentation/particles/map_attachment_owner.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 
@@ -119,6 +120,19 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                 session_records = state.live_session->session_records();
                 state.battle = std::make_unique<BattleInput>(host);
                 state.battle->prepare(*state.filesystem, *state.catalog, *state.live_session);
+                state.battle->set_move_feedback([&state](const sim::math::Vec3& point,
+                    const ui::OrderMode mode, const bool double_click, const std::uint64_t tick) {
+                    if (state.battle_effects) state.battle_effects->move_feedback(point, mode, double_click, tick);
+                    if (state.hud && state.hud->minimap()) {
+                        const auto bounds = state.space ? state.space->live_camera_bounds() : std::nullopt;
+                        if (!bounds) return;
+                        constexpr double unit = static_cast<double>(sim::math::Fixed::scale);
+                        const auto centre = ui::minimap_point(ui::minimap_extents(
+                            bounds->min_x, bounds->max_x, bounds->min_y, bounds->max_y),
+                            static_cast<double>(point.x.raw()) / unit, static_cast<double>(point.y.raw()) / unit);
+                        state.hud->minimap()->move_feedback(centre, mode, double_click);
+                    }
+                });
                 // #494: the local player's fog of war in the world.
                 state.live_fog = std::make_unique<LiveFogView>(host);
                 state.live_fog->prepare(*state.filesystem, state.live_options.reveal, state.live_options.deploy_overlay);
@@ -310,7 +324,9 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             if (fog && update && !update.value().error) {
                                 FrameTimer timer(map_state->perf_trace ? &map_state->fog_ms : nullptr);
                                 fog->frame(*live_session, map_state->space ? map_state->space->live_camera_bounds()
-                                                                           : std::nullopt);
+                                                                           : std::nullopt,
+                                    map_state->hud && map_state->hud->production() && map_state->hud->production()->pane_open(),
+                                    map_state->battle && map_state->battle->placing().has_value());
                             }
                             // #453, #459: the HUD shows this frame's time panel and outcome.
                             {
@@ -361,7 +377,10 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                                     },
                                     camera, battle.presented_tick, live_session->options().reveal,
                                     [live_session](const sim::EntityId entity) { return live_session->unit_opacity(entity); },
-                                    live_session->unfogged_map_props())) {
+                                    live_session->unfogged_map_props(),
+                                    [effects](const std::size_t ship) {
+                                        return effects ? effects->projectile_model_opacity(ship) : 0.0F;
+                                    })) {
                                 return core::Result<SpaceLiveUpdate>::failure(
                                     {.code = "EAWR-VIEWER-UNIT-EMITTERS", .message = emitters->failure()});
                             }
@@ -374,11 +393,25 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             // #80: the frame's shots, hits and explosions, from the snapshots only.
                             particle_start = ParticleClock::now();
                             FrameTimer effects_timer(map_state->perf_trace ? &map_state->effects_frame_ms : nullptr);
+                            auto effects_camera = camera;
+                            if (map_state->space) {
+                                if (const auto tactical_frame = map_state->space->live_effects_camera_frame()) {
+                                    effects_camera.near_plane = tactical_frame->near_plane;
+                                    effects_camera.far_plane = tactical_frame->far_plane;
+                                }
+                            }
                             const bool shown = effects->frame(battle.reached, *battle.previous, *battle.latest,
                                 battle.alpha, [live_session](const sim::EntityId entity) {
                                     return live_session->unit_frame(entity);
                                 }, camera, battle.presented_tick,
-                                [live_session](const std::uint64_t tick) { return live_session->snapshot_at(tick); });
+                                [live_session](const std::uint64_t tick) { return live_session->snapshot_at(tick); },
+                                [population](const sim::EntityId entity, const std::uint32_t bone)
+                                    -> std::optional<BattleEffects::ContactBoneFrame> {
+                                    const auto posed = population->live_bone_frame(entity, bone);
+                                    if (!posed) return std::nullopt;
+                                    return BattleEffects::ContactBoneFrame{
+                                        particles::source_emitter_frame(posed->transform), posed->visible};
+                                }, &effects_camera);
                             particle_since(particle_start);
                             effects_timer.finish();
                             if (!shown) {
@@ -388,11 +421,13 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
                             // #84: the frame's sounds and the unit responses to the player's gestures.
                             // The ability clicks are taken every frame so a run without battle audio keeps none.
                             auto ability_clicks = live_session->take_ability_clicks();
+                            auto reinforcement_feedback = live_session->take_reinforcement_feedback();
                             if (sound) {
                                 FrameTimer timer(map_state->perf_trace ? &map_state->audio_ms : nullptr);
                                 sound->frame(*live_session, map_state->battle ? map_state->battle->take_acknowledgements()
                                                                               : std::vector<BattleInput::Acknowledgement>{},
-                                             std::move(ability_clicks), camera, delta);
+                                             std::move(ability_clicks), camera, delta, std::move(reinforcement_feedback),
+                                             effects->take_terminal_sounds());
                             }
                             // #391: the breakoff props' fires and explosions.
                             particle_start = ParticleClock::now();

@@ -56,8 +56,11 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.star_base = unit.kind == units::UnitKind::station;
         type.capture_point = unit.capture_point;
         type.build_pad = unit.build_pad;
+        type.tactical_cost = unit.production.build_cost_multiplayer.value_or(sim::math::Fixed{});
         // #449 goal system and perception inputs.
         type.space_evaluator = unit.has_space_evaluator;
+        type.initial_state_visible_under_fow = unit.initial_state_visible_under_fow;
+        type.last_state_visible_under_fow = unit.last_state_visible_under_fow;
         type.tech_level = unit.tech_level;
         type.base_level = unit.base_level;
         if (unit.ai_combat_power) type.combat_power = lua(*unit.ai_combat_power);

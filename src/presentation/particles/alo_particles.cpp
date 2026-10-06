@@ -234,7 +234,8 @@ core::Result<PropertyGroup> parse_old_group(const Chunk& outer,const std::string
     case 2: result.shape=Shape::range;result.range_min={-side/2,-side/2,-side/2};result.range_max={side/2,side/2,side/2};break;
     case 3: result.shape=Shape::sphere;result.radius_max=sphere;break;
     case 4: result.shape=Shape::cylinder;result.cylinder_radius=cylinder;result.cylinder_height_max=height;break;
-    default: break;
+    case 5: result.shape=Shape::pinched_cylinder;result.cylinder_radius=cylinder;result.cylinder_height_max=height;break;
+    default: result.point=point;break;
     }
     return core::Result<PropertyGroup>::success(result);
 }
@@ -242,7 +243,7 @@ core::Result<PropertyGroup> parse_old_group(const Chunk& outer,const std::string
 bool old_group_hollow(const Chunk& outer) {
     if (!outer.group || outer.children.size()!=1 || outer.children[0].payload.size()<64) return false;
     const auto data=outer.children[0].payload;const auto type=u32(data);
-    return (type==3&&u32(data,36)!=0)||(type==4&&u32(data,44)!=0);
+    return (type==3&&u32(data,36)!=0)||((type==4||type==5)&&u32(data,44)!=0);
 }
 
 Interpolation old_interpolation(const std::uint32_t value) {
@@ -301,7 +302,7 @@ bool finite(const PropertyGroup& group){return finite(group.point)&&finite(group
     finite(group.range_max)&&std::isfinite(group.angle_min)&&std::isfinite(group.angle_max)&&
     std::isfinite(group.spherical_radius_min)&&std::isfinite(group.spherical_radius_max)&&
     std::isfinite(group.cylinder_radius)&&std::isfinite(group.cylinder_height_min)&&
-    std::isfinite(group.cylinder_height_max)&&std::isfinite(group.torus_radius)&&std::isfinite(group.tube_radius);}
+    std::isfinite(group.cylinder_height_max)&&std::isfinite(group.pinch_fraction)&&std::isfinite(group.torus_radius)&&std::isfinite(group.tube_radius);}
 bool finite(const ScalarTrack& track){return std::all_of(track.keys.begin(),track.keys.end(),
     [](const ScalarKey& key){return std::isfinite(key.time)&&std::isfinite(key.value);});}
 bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.particles_per_interval)&&
@@ -311,11 +312,11 @@ bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.parti
     finite(emitter.position)&&finite(emitter.velocity)&&std::isfinite(emitter.lifetime)&&
     std::isfinite(emitter.lifetime_variation)&&(!emitter.lifetime_range||
         (std::isfinite(emitter.lifetime_range->minimum)&&std::isfinite(emitter.lifetime_range->maximum)))&&
-    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
+    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&std::isfinite(emitter.gravity)&&
     std::isfinite(emitter.inward_acceleration)&&std::isfinite(emitter.wind_response)&&
     std::isfinite(emitter.terrain_elasticity)&&finite(emitter.red)&&finite(emitter.green)&&finite(emitter.blue)&&
     finite(emitter.alpha)&&finite(emitter.size)&&std::isfinite(emitter.size_variation)&&finite(emitter.uv_index)&&
-    finite(emitter.rotation_rate)&&std::isfinite(emitter.random_rotation_average)&&
+    finite(emitter.rotation_rate)&&std::isfinite(emitter.rotation_variation)&&std::isfinite(emitter.random_rotation_average)&&
     std::isfinite(emitter.random_rotation_variation)&&finite(emitter.color_variance)&&std::isfinite(emitter.tail_size);}
 
 core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& path) {
@@ -363,8 +364,9 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
             };
             emitter.skip_time=seconds(0x33);emitter.freeze_time=seconds(0x32);
         }
-        emitter.inward_speed=read_float(props,0x09);emitter.acceleration=read_vec3(props,0x0a);emitter.acceleration.z-=read_float(props,0x0c);emitter.acceleration_local=read_bool(props,0x35);
-        emitter.inward_acceleration=-read_float(props,0x0b);emitter.wind_response=read_bool(props,0x31)?0.01F:0.0F;
+        emitter.inward_speed=read_float(props,0x09);emitter.acceleration=read_vec3(props,0x0a);emitter.gravity=read_float(props,0x0c);emitter.acceleration_local=read_bool(props,0x35);
+        emitter.inward_acceleration=-read_float(props,0x0b);emitter.wind_response=read_bool(props,0x31)?0.5F:0.0F;
+        emitter.wind_disturbances=read_bool(props,0x44);
         emitter.lifetime=read_float(props,0x0f,1.0F);emitter.lifetime_variation=read_float(props,0x13);
         // PL-01: the loaded scalar sampler uses its default for a point, saved X bounds otherwise.
         emitter.lifetime_range=scalar_ranges[1];
@@ -381,7 +383,8 @@ core::Result<SystemDefinition> parse_v1(const Chunk& root,const std::string& pat
         for(auto& key:emitter.size.keys)key.value=key.value/2.0F;
         emitter.color_variance=read_vec4(props,0x2c);emitter.grayscale_variance=read_bool(props,0x2d);
         emitter.random_rotation=read_bool(props,0x48);emitter.random_rotation_direction=read_bool(props,0x23);emitter.random_rotation_variation=std::fabs(read_float(props,0x17));
-        if(emitter.random_rotation){emitter.random_rotation_average=emitter.rotation_rate.keys.front().value;if(emitter.random_rotation_average>0){emitter.random_rotation_variation/=emitter.random_rotation_average;emitter.random_rotation_average-=std::trunc(emitter.random_rotation_average);}else emitter.random_rotation_variation=0;}
+        emitter.initial_rotation_only=read_bool(props,0x48);emitter.rotation_variation=read_float(props,0x17);
+        emitter.random_rotation_average=emitter.rotation_rate.keys.front().value;
         if(!finite(emitter))return core::Result<SystemDefinition>::failure(error(path,diagnostic_codes::invalid_value,
             "legacy emitter numeric conversion produced a non-finite value",node.offset));
         emitter.modifier_ids.clear();if(emitter.acceleration.x!=0||emitter.acceleration.y!=0||emitter.acceleration.z!=0)emitter.modifier_ids.push_back(10);if(emitter.inward_acceleration!=0)emitter.modifier_ids.push_back(11);if(emitter.wind_response!=0)emitter.modifier_ids.push_back(54);if(ground==2||ground==3){emitter.modifier_ids.push_back(51);emitter.cpu_ready=false;emitter.unsupported_reason="terrain bounce/stick has no behavior in the MIT reference";}

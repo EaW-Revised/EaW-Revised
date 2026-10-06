@@ -166,6 +166,7 @@ struct Projectile final {
     std::optional<Fixed> rocket_curve_offset{};
     std::optional<Fixed> rocket_straight_distance{};
     sim::tactical::WeakenProfile weaken{};
+    Fixed damage_delay{}; // Projectile_Damage_Delay_Secs, WAD-26
     bool operator==(const Projectile&) const = default;
 };
 
@@ -407,7 +408,11 @@ struct UnitType final {
     std::uint32_t tech_level{};
     std::uint32_t base_level{}; // SAE-02: Base_Level on live stations
     std::optional<Fixed> space_fow_reveal_range; // the type's own range (#68); used only with `reveal`
+    bool force_sensitive{}; // WAB-54: Is_Force_Sensitive
     bool reveal{}; // REVEAL in its Behavior or SpaceBehavior list (#271)
+    Fixed dense_fow_multiplier{Fixed::from_raw(Fixed::scale / 2)};
+    bool multisample_fow{};
+    Vec3 fog_box_offset{};
     // WSU-21, WSU-15: presentation selection eligibility; excluded from content identity.
     bool selectable{};
     bool mouse_sensitive{}; // WSU-13: behaviour, impassable asteroid or living-collidable valid target
@@ -419,6 +424,8 @@ struct UnitType final {
     bool initial_state_visible_under_fow{};
     std::optional<std::uint32_t> neutral_fog_animation_index; // FW-30: presentation only
     bool shielded{}; // SHIELDED in its Behavior or SpaceBehavior list (#74)
+    std::optional<Fixed> passive_missile_shield_radius;
+    std::optional<Fixed> ranged_target_z_adjust;
     bool powered{};  // POWERED in its Behavior or SpaceBehavior list: it has an energy pool (#361)
     bool ion_stun_effect{}; // ION_STUN_EFFECT in its Behavior or SpaceBehavior list: it can be ion stunned (#561)
     std::optional<CollisionBounds> collision; // collidable meshes of its model (#74)
@@ -437,6 +444,7 @@ struct UnitType final {
     // `Team`), and that container's Space_FOW_Reveal_Range when the container has REVEAL.
     std::string team_type;
     std::optional<Fixed> team_reveal_range;
+    Fixed team_dense_fow_multiplier{Fixed::from_raw(Fixed::scale / 2)};
     // WSQ-60: container trace metadata, independent of the craft's combat durability.
     std::optional<Fixed> team_hull; // Tactical_Health, including the debug-build default
     std::optional<Fixed> team_shield_points;
@@ -482,6 +490,9 @@ struct UnitType final {
     bool build_pad{};
     bool under_construction{};
     bool living_projectile_collision{}; // WBP-50/51: effective living object types opt in
+    bool valid_target{true}; // WCC-25: effective Is_Valid_Target, default true
+    bool special_weapon{}; // effective SPECIAL_WEAPON behavior
+    bool star_base{}; // effective DUMMY_STAR_BASE behavior
     bool influences_capture{true};
     bool ownership_sticks{};
     bool community_property{};
@@ -520,6 +531,9 @@ struct UnitType final {
     bool display_contained_hero_bars{};
     std::string replenish_team;
     bool redirect_damage_to_teammates{};
+    // WNO-29: authored order, resolved independently of ordinary weapons.
+    std::vector<std::string> death_projectiles{};
+    std::vector<std::uint32_t> death_projectile_indices{};
     bool operator==(const UnitType&) const = default;
 };
 
@@ -600,6 +614,7 @@ struct InputFile final {
 };
 
 struct UnitTables final {
+    std::optional<Fixed> ai_credit_multiplier{Fixed::from_raw(Fixed::scale)}; // WPR-12: neutral for synthetic content without difficulty data
     std::optional<Fixed> pad_ai_build_multiplier; // WBP-15: difficulty data, only with live capture content
     std::vector<std::uint64_t> pad_neutral_factions; // WHZ-51: authored Is_Neutral, sorted faction type CRCs
     std::vector<UnitType> units; // pinned types, then craft, in first-reference order

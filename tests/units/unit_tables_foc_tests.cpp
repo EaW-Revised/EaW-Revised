@@ -1,7 +1,490 @@
 #include "unit_tables_support.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
+#include "eawr/presentation/ui/ability_buttons.hpp"
+#include "eawr/presentation/ui/command_sink.hpp"
 
 namespace unit_tables_test_support {
+
+void foc_active_projectile_defence(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    using Kind = tactical::AbilityKind;
+    input.types = {"Y-Wing", "Nebulon_B_Frigate", "Interdictor_Cruiser", "Houndstooth"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WPJ-17/WHE-32: installed active defence types load");
+    if (!loaded) return;
+    auto combat = eawr::units::combat_table(loaded.value());
+    const auto health = eawr::units::durability_table(loaded.value());
+    const auto movement = eawr::units::motion_table(loaded.value());
+    const auto abilities = eawr::units::ability_table(loaded.value(), std::vector<tactical::PlayerId>{1, 2});
+    expect(combat && health && movement && abilities, "WPJ-17/WHE-32: installed defence profiles bind");
+    if (!combat || !health || !movement || !abilities) return;
+    const auto shooter = eawr::assets::object_type_crc("Y-Wing");
+    const auto victim = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto shield = eawr::assets::object_type_crc("Interdictor_Cruiser");
+    const auto jammer = eawr::assets::object_type_crc("Houndstooth");
+    auto fixture_motion = movement.value();
+    // Keep actual ship locomotors for jammer recipient qualification, while
+    // holding the bomber at its firing pose as in the passive flight witness.
+    std::erase_if(fixture_motion.squadrons.craft, [shooter](const auto& profile) {
+        return profile.type_id == shooter;
+    });
+    std::erase_if(fixture_motion.squadrons.squadrons, [shooter](const auto& profile) {
+        return profile.type_id == shooter;
+    });
+    const auto* shield_abilities = abilities.value().find(shield);
+    const auto* jam_abilities = abilities.value().find(jammer);
+    if (!shield_abilities || !jam_abilities) { expect(false, "installed defence ability owners bind"); return; }
+    const auto shield_slot = tactical::ability_slot(*shield_abilities, Kind::missile_shield);
+    const auto jam_slot = tactical::ability_slot(*jam_abilities, Kind::sensor_jamming);
+    expect(shield_slot && jam_slot, "WPJ-17/WHE-32: installed shield and jammer are activatable");
+    if (!shield_slot || !jam_slot) return;
+    expect(shield_abilities->abilities[*shield_slot].effective_radius == Fixed::from_raw(raw(750))
+        && jam_abilities->abilities[*jam_slot].effective_radius == Fixed::from_raw(raw(900))
+        && jam_abilities->abilities[*jam_slot].expiration_frames == 900
+        && jam_abilities->abilities[*jam_slot].recharge_frames == 2250,
+        "WPJ-17/WHE-31/32: installed authored radii and jammer duration/recharge apply");
+    const auto* bomber = combat.value().find(shooter);
+    if (!bomber) { expect(false, "installed defence shooter profile exists"); return; }
+    const auto torpedo = std::find_if(bomber->weapons.begin(), bomber->weapons.end(), [](const auto& weapon) {
+        return weapon.shot && weapon.shot->homing && weapon.shot->turn_rate.raw() > 0;
+    });
+    if (torpedo == bomber->weapons.end()) { expect(false, "installed defence torpedo exists"); return; }
+    for (auto& profile : combat.value().profiles) {
+        if (profile.type_id == shooter) profile.weapons = {*torpedo};
+        else profile.weapons.clear();
+        if (profile.type_id == shield || profile.type_id == jammer) {
+            profile.collision.reset(); profile.meshes.clear(); profile.mesh_bounds.reset();
+        }
+    }
+    std::vector<std::vector<tactical::Projectile>> active_trace, switched_trace;
+    for (const unsigned mode : {0U, 1U, 2U}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = 1791; setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+                {2, 2, 2, tactical::player_flag_commandable}};
+            // Low-ID jammer activates after the high-ID shield's creation registration.
+            // Opposite source offsets make the first source's deflection observable.
+            setup.units = {{1, jammer, 2, point(raw(200), raw(600), 0), eawr::sim::math::identity_quat(), {}},
+                {2, victim, 2, point(raw(400), 0, 0), eawr::sim::math::identity_quat(), {}},
+                {3, shield, 2, point(raw(200), raw(-600), 0), eawr::sim::math::identity_quat(), {}},
+                {4, shooter, 1, {}, eawr::sim::math::identity_quat(), {}}};
+            std::vector<tactical::SensorProfile> sensors;
+            for (const auto type : {shooter, victim, shield, jammer}) sensors.push_back({type, Fixed::from_raw(raw(2000))});
+            std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            auto created = tactical::TacticalSession::create(setup, sensors, health.value(), fixture_motion,
+                std::nullopt, combat.value(), {}, abilities.value());
+            expect(static_cast<bool>(created), "WPJ-17/WHE-32: installed active defence session creates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            const auto submit = [&](const std::uint64_t frame, const tactical::PlayerId owner,
+                const eawr::sim::EntityId id, tactical::CommandPayload payload) {
+                expect(static_cast<bool>(session.submit({{frame, owner, 0}, {id}, std::move(payload)})),
+                    "WPJ-17/WHE-32: installed defence lifecycle command submits");
+            };
+            submit(0, 1, 4, tactical::AttackPayload{2});
+            submit(0, 2, 3, tactical::AbilityPayload{Kind::missile_shield, tactical::AbilityAction::activate});
+            submit(2, 2, 1, tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate});
+            if (mode > 0) submit(245, 2, 3, tactical::AbilityPayload{Kind::missile_shield, tactical::AbilityAction::deactivate});
+            if (mode == 2) submit(251, 2, 1, tactical::DamagePayload{Fixed::from_raw(raw(100000)), tactical::hull_target});
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool ordered_deflection = false, removal_changes_flight = false;
+            std::optional<std::uint64_t> first_torpedo;
+            bool examined_first_service = false;
+            std::size_t fired = 0;
+            for (std::size_t frame = 0; frame < 300; ++frame) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "WPJ-17/WHE-32: installed active defence tick succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->combat_events())
+                    fired += event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 4;
+                for (const auto& projectile : session.projectiles()) {
+                    if (!projectile.homing || projectile.shooter != 4) continue;
+                    // Capture the first service of the first launched torpedo, before
+                    // later guidance or scatter could accidentally produce the same sign.
+                    if (!first_torpedo) first_torpedo = projectile.id;
+                    else if (!examined_first_service && projectile.id == *first_torpedo) {
+                        ordered_deflection = projectile.step.y.raw() > 0;
+                        examined_first_service = true;
+                    }
+                    const auto& comparison = mode == 1 ? active_trace : switched_trace;
+                    if (mode > 0 && frame >= (mode == 1 ? 246U : 252U) && frame < comparison.size()) {
+                        const auto matching = std::find_if(comparison[frame].begin(), comparison[frame].end(),
+                            [&](const auto& other) { return other.id == projectile.id; });
+                        removal_changes_flight = removal_changes_flight || (matching != comparison[frame].end()
+                            && matching->step != projectile.step);
+                    }
+                }
+                if (workers == 1 && mode < 2) {
+                    auto& trace = mode == 0 ? active_trace : switched_trace;
+                    trace.emplace_back(session.projectiles().begin(), session.projectiles().end());
+                }
+                if (mode == 2 && frame == 251) expect(!session.ability_state(1), "WPJ-17: installed jammer death removes owner");
+            }
+            expect(fired > 0 && examined_first_service && ordered_deflection,
+                "WPJ-17: high-ID creation source wins over later low-ID jammer activation");
+            if (mode > 0) expect(removal_changes_flight, "WPJ-17/WPJ-10: installed deactivation/death changes live missile flight");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WPJ-17/WHE-32: installed activation/deactivation/death equal at 1/2/4/8 workers");
+            std::cout << "active-defence," << mode << ',' << workers << ',' << fired << ','
+                << ordered_deflection << ',' << removal_changes_flight << '\n';
+        }
+    }
+}
+
+// WPJ-17: the installed sensor satellite is a real always-on missile-shield source.
+void foc_passive_projectile_defence(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Y-Wing", "Nebulon_B_Frigate", "Underworld_Defense_Satellite_Sensor"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WPJ-17: installed passive shield source loads");
+    if (!loaded) return;
+    auto combat = eawr::units::combat_table(loaded.value());
+    auto durability = eawr::units::durability_table(loaded.value());
+    expect(combat && durability, "WPJ-17: installed shield and projectile profiles bind");
+    if (!combat || !durability) return;
+    const auto shooter = eawr::assets::object_type_crc("Y-Wing");
+    const auto victim = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    const auto shield = eawr::assets::object_type_crc("Underworld_Defense_Satellite_Sensor");
+    const auto* source = combat.value().find(shield);
+    expect(source && source->passive_missile_shield_radius == Fixed::from_raw(raw(1000)),
+        "WPJ-17: installed satellite applies its authored 1000-unit passive radius");
+    const auto* bomber = combat.value().find(shooter);
+    if (!bomber) { expect(false, "WPJ-17: installed bomber profile exists"); return; }
+    const auto torpedo = std::find_if(bomber->weapons.begin(), bomber->weapons.end(), [](const auto& weapon) {
+        return weapon.shot && weapon.shot->homing && weapon.shot->turn_rate.raw() > 0;
+    });
+    expect(torpedo != bomber->weapons.end(), "WPJ-17: installed torpedo has authored homing and turn rate");
+    if (torpedo == bomber->weapons.end()) return;
+    std::vector<std::string> reference;
+    std::vector<std::vector<tactical::Projectile>> defended_trace;
+    for (const bool defended : {true, false}) {
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            if (!defended && workers != 1) continue;
+            auto table = combat.value();
+            for (auto& profile : table.profiles) {
+                if (profile.type_id == shooter) profile.weapons = {*torpedo};
+                else profile.weapons.clear();
+                if (!defended) profile.passive_missile_shield_radius = {};
+            }
+            tactical::TacticalSetup setup;
+            setup.seed = 1761; setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+                {2, 2, 2, tactical::player_flag_commandable}};
+            setup.units = {{1, shooter, 1, {}, eawr::sim::math::identity_quat(), {}},
+                {2, victim, 2, point(raw(400), 0, 0), eawr::sim::math::identity_quat(), {}},
+                {3, shield, 2, point(raw(200), 0, 0), eawr::sim::math::identity_quat(), {}}};
+            std::vector<tactical::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(2000))},
+                {victim, Fixed::from_raw(raw(2000))}, {shield, Fixed::from_raw(raw(2000))}};
+            std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            auto created = tactical::TacticalSession::create(setup, sensors, durability.value(), {}, {}, table);
+            expect(static_cast<bool>(created), "WPJ-17: installed passive source session creates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            expect(static_cast<bool>(session.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                "WPJ-17: installed bomber orders a missile attack");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool changed = false;
+            std::size_t fired = 0, live_torpedo_frames = 0;
+            // WWP-33: spawn readiness spans the initial eight-second recharge.
+            // Include that complete interval and two seconds of actual flight.
+            for (std::size_t frame = 0; frame < 300; ++frame) {
+                auto step = session.step(executor);
+                expect(static_cast<bool>(step), "WPJ-17: installed missile shield tick succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->combat_events()) {
+                    fired += event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1;
+                }
+                for (const auto& projectile : session.projectiles()) {
+                    live_torpedo_frames += projectile.shooter == 1 && projectile.homing;
+                }
+                if (defended && workers == 1) defended_trace.emplace_back(session.projectiles().begin(), session.projectiles().end());
+                if (!defended && frame < defended_trace.size()) {
+                    for (const auto& projectile : session.projectiles()) {
+                        const auto& before = defended_trace[frame];
+                        const auto matching = std::find_if(before.begin(), before.end(), [&](const auto& p) { return p.id == projectile.id; });
+                        changed = changed || (matching != before.end() && projectile.homing && matching->step != projectile.step);
+                    }
+                }
+            }
+            expect(fired > 0 && live_torpedo_frames > 0, "WPJ-17: installed torpedo fires and remains in flight");
+            std::cout << "passive-shield," << workers << ',' << defended << ',' << fired << ','
+                << live_torpedo_frames << ',' << changed << '\n';
+            if (defended) {
+                if (workers == 1) reference = hashes;
+                else expect(hashes == reference, "WPJ-17: installed source flight hashes equal at 1/2/4/8 workers");
+            } else expect(changed, "WPJ-17: production passive satellite changes real torpedo flight");
+        }
+    }
+}
+
+// WWP-31/33: the stock bomber's two torpedoes are separated by four logical frames.
+void foc_bomber_torpedo_volley(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Y-Wing", "TIE_Bomber", "Nebulon_B_Frigate"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WWP-33: stock bomber volley data loads");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto durability = eawr::units::durability_table(loaded.value());
+    expect(combat && durability, "WWP-33: stock bomber profiles bind");
+    if (!combat || !durability) return;
+    const auto target = eawr::assets::object_type_crc("Nebulon_B_Frigate");
+    for (const auto* name : {"Y-Wing", "TIE_Bomber"}) {
+        const auto shooter = eawr::assets::object_type_crc(name);
+        const auto* source = loaded.value().find(name);
+        const auto* profile = combat.value().find(shooter);
+        if (!source || !profile) { expect(false, "WWP-33: bomber exists"); continue; }
+        const auto hardpoint_name = std::string_view{name} == "Y-Wing" ? "HP_BOMBER_03" : "HP_BOMBER_02";
+        const auto hp = std::find_if(source->hardpoints.begin(), source->hardpoints.end(),
+            [hardpoint_name](const auto& row) { return row.id == hardpoint_name; });
+        expect(hp != source->hardpoints.end(), "WWP-33: bomber has its authored torpedo hardpoint");
+        if (hp == source->hardpoints.end()) continue;
+        const auto index = static_cast<std::uint32_t>(hp - source->hardpoints.begin());
+        const auto weapon = std::find_if(profile->weapons.begin(), profile->weapons.end(),
+            [index](const auto& row) { return row.hardpoint == index; });
+        expect(weapon != profile->weapons.end(), "WWP-33: torpedo hardpoint binds");
+        if (weapon == profile->weapons.end()) continue;
+        expect(weapon->pulse_count == 2 && weapon->pulse_delay_frames == 4
+            && weapon->min_recharge_hundredths == 800 && weapon->max_recharge_hundredths == 800
+            && weapon->shot && weapon->shot->homing && weapon->fire_a == weapon->fire_b,
+            "WWP-31/33: two same-muzzle torpedoes, four-frame gap, eight-second recharge");
+        auto isolated = combat.value();
+        for (auto& row : isolated.profiles) {
+            if (row.type_id == shooter) row.weapons = {*weapon};
+            else row.weapons.clear();
+        }
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = 1565;
+            setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+                             {2, 2, 2, tactical::player_flag_commandable}};
+            setup.units = {{1, shooter, 1, Vec3{}, eawr::sim::math::identity_quat(), {}},
+                {2, target, 2, point(raw(400), 0, 0), eawr::sim::math::identity_quat(), {}}};
+            std::vector<tactical::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(2000))},
+                                                       {target, Fixed::from_raw(raw(2000))}};
+            std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+            // Stationary units isolate the authored weapon cadence from attack-pass cone gates.
+            auto session = tactical::TacticalSession::create(setup, sensors, durability.value(), {}, std::nullopt, isolated);
+            expect(static_cast<bool>(session), "WWP-33: stationary bomber trace starts");
+            if (!session) continue;
+            expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                "WWP-33: bomber accepts attack order");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::uint64_t> fired;
+            std::vector<std::string> hashes;
+            // Spawn readiness is randomized across the initial eight-second recharge.
+            for (unsigned tick = 0; tick < 600 && fired.size() < 4; ++tick) {
+                const auto stepped = session.value().step(executor);
+                expect(static_cast<bool>(stepped), "WWP-33: bomber trace steps");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::weapon_fired || event.shooter != 1
+                        || event.weapon != index) continue;
+                    fired.push_back(event.tick);
+                    std::cout << "bomber-volley," << name << ',' << workers << ',' << event.tick
+                        << ',' << event.origin.x.raw() << ',' << event.origin.y.raw() << ',' << event.origin.z.raw() << '\n';
+                }
+            }
+            expect(fired.size() == 4, "WWP-31: exactly two torpedoes per volley");
+            if (fired.size() == 4) expect(fired[1] - fired[0] == 4 && fired[2] - fired[1] == 240
+                && fired[3] - fired[2] == 4, "WWP-33: four-frame pulse gap and 240-frame volley recharge");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WWP-33: bomber volley hashes equal on 1/2/4/8 workers");
+        }
+    }
+}
+
+// RG-02 / WAD-04/18: ordinary stock rockets damage neighbours independently of BARRAGE.
+void foc_diamond_boron_cluster(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"Broadside_Class_Cruiser", "Marauder_Missile_Cruiser", "TIE_Fighter"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "RG-02: stock blast ships load");
+    if (!loaded) return;
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto durability = eawr::units::durability_table(loaded.value());
+    expect(combat && durability, "WAD-01: stock blast combat and damage profiles bind");
+    if (!combat || !durability) return;
+    const auto target = eawr::assets::object_type_crc("TIE_Fighter");
+    auto health = durability.value();
+    for (auto& unit : health.profiles) if (unit.type_id == target) {
+        // Keep the ordered target alive through the volley, preventing autonomous retargeting.
+        unit.max_hull = Fixed::from_raw(raw(100000));
+    }
+    for (const auto* name : {"Broadside_Class_Cruiser", "Marauder_Missile_Cruiser"}) {
+        const auto shooter = eawr::assets::object_type_crc(name);
+        const auto* profile = combat.value().find(shooter);
+        expect(profile && !profile->weapons.empty() && profile->weapons.front().shot
+            && profile->weapons.front().shot->blast.damage == Fixed::from_raw(raw(150))
+            && profile->weapons.front().shot->blast.radius == Fixed::from_raw(raw(200)),
+            std::string("WAD-01: authored Diamond Boron blast binds: ") + name);
+        if (!profile) continue;
+        std::vector<std::string> reference;
+        for (const bool blast : {false, true}) {
+            auto isolated = combat.value();
+            for (auto& unit : isolated.profiles) {
+                if (unit.type_id != shooter) unit.weapons.clear();
+                else if (!blast) for (auto& weapon : unit.weapons) {
+                    if (weapon.shot) weapon.shot->blast.damage = Fixed{};
+                }
+            }
+            for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+                tactical::TacticalSetup setup;
+                setup.seed = 1604;
+                setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+                                 {2, 2, 2, tactical::player_flag_commandable}};
+                setup.units = {{1, shooter, 1, Vec3{}, eawr::sim::math::identity_quat(), {}},
+                    {2, target, 2, point(raw(800), 0, 0), eawr::sim::math::identity_quat(), {}},
+                    // WAD-12: the nearby craft receives area damage off the direct flight plane.
+                    {3, target, 2, point(raw(800), raw(100), raw(100)), eawr::sim::math::identity_quat(), {}},
+                    {4, target, 2, point(raw(800), raw(500), 0), eawr::sim::math::identity_quat(), {}}};
+                std::vector<tactical::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(2000))},
+                                                             {target, Fixed::from_raw(raw(2000))}};
+                std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+                auto session = tactical::TacticalSession::create(setup, sensors, health, {}, std::nullopt, isolated);
+                expect(static_cast<bool>(session), "WAD-18: stationary stock missile cluster starts");
+                if (!session) continue;
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                    "RG-02: blast ship accepts ordinary attack");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                bool fired = false, detonated = false, direct_neighbour = false, damaged_neighbour = false;
+                std::vector<std::string> hashes;
+                for (unsigned tick = 0; tick < 600; ++tick) {
+                    const auto stepped = session.value().step(executor);
+                    expect(static_cast<bool>(stepped), "WAD-04: stock rocket cluster step succeeds");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                    detonated = detonated || stepped.value().blast_detonations > 0;
+                    for (const auto& event : stepped.value().snapshot->combat_events()) {
+                        fired = fired || (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1);
+                        direct_neighbour = direct_neighbour || (event.kind == tactical::CombatEventKind::projectile_hit && event.target == 3);
+                    }
+                    const auto near = session.value().durability_state(3);
+                    const auto far = session.value().durability_state(4);
+                    damaged_neighbour = damaged_neighbour || !near || near->hull < health.find(target)->max_hull;
+                    expect(far && far->hull == health.find(target)->max_hull,
+                        "WAD-10: isolated distant craft stays outside the blast");
+                }
+                expect(fired && !direct_neighbour, "WAD-18: missiles fire at the primary craft only");
+                expect(damaged_neighbour == blast, "WAD-18: only blast damages the neighbouring craft");
+                expect(detonated == blast, "WAD-01: zero area damage control disables detonation work");
+                if (workers == 1) reference = hashes;
+                else expect(hashes == reference, "WAD: stock cluster hashes match at 1/2/4/8 workers");
+            }
+        }
+    }
+}
+
+// RG-03 / WAD-38: stock buttons pass through the production command sink to actual shots.
+void foc_barrage_buttons(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    namespace ui = eawr::presentation::ui;
+    input.types = {"Broadside_Class_Cruiser", "Marauder_Missile_Cruiser", "TIE_Fighter"};
+    input.obstacles.clear();
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WAD-38: stock BARRAGE ships and proxy load");
+    if (!loaded) return;
+    const std::array<tactical::PlayerId, 1> humans{1};
+    const auto content = eawr::skirmish::session_content(loaded.value(), humans);
+    expect(static_cast<bool>(content), "RG-03: roster-filtered stock BARRAGE content binds");
+    if (!content) return;
+    const auto proxy_type = eawr::assets::object_type_crc("Dummy_Barrage_Target");
+    for (const auto* name : {"Broadside_Class_Cruiser", "Marauder_Missile_Cruiser"}) {
+        expect(eawr::skirmish::roster_ability_reason(name, "BARRAGE").empty(), "RG-03: stock BARRAGE gate is lifted");
+        const auto shooter = eawr::assets::object_type_crc(name);
+        const auto* profile = content.value().abilities.find(shooter);
+        const auto slot = profile ? tactical::ability_slot(*profile, tactical::AbilityKind::barrage) : std::nullopt;
+        expect(slot.has_value(), "RG-03: filtered ability profile retains stock BARRAGE");
+        if (!slot) continue;
+        const auto& ability = profile->abilities[*slot];
+        expect(ability.expiration_frames == 300 && ability.recharge_frames == 1200
+            && ability.modifiers.fire_rate == Fixed::from_raw(raw(3))
+            && ability.fixed_inaccuracy == Fixed::from_raw(raw(320))
+            && ability.target_z_offset == Fixed::from_raw(raw(-150)), "WAD-38: stock timers and modifiers are complete");
+        auto combat = content.value().combat;
+        for (auto& row : combat.profiles) if (row.type_id != shooter) row.weapons.clear();
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = 1651;
+            setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+                            {2, 2, 2, tactical::player_flag_commandable}};
+            setup.units = {{1, shooter, 1, {}, eawr::sim::math::identity_quat(), {}},
+                {2, eawr::assets::object_type_crc("TIE_Fighter"), 2, point(raw(800), raw(500), 0),
+                    eawr::sim::math::identity_quat(), {}}};
+            auto session = tactical::TacticalSession::create(setup, content.value().sensors, content.value().durability,
+                content.value().motion, std::nullopt, combat, {}, content.value().abilities);
+            expect(static_cast<bool>(session), "WAD-38: stock BARRAGE session starts");
+            if (!session) continue;
+            const auto state = session.value().ability_state(1);
+            expect(state && tactical::ability_ready(ability, state->slots[*slot], {}, 0),
+                "RG-03: stock BARRAGE is ready in the simulation");
+            ui::CardUnit card;
+            card.id = 1; card.members = {1}; card.type = name; card.ability = ui::ability_index("BARRAGE");
+            const std::array<ui::CardUnit, 1> cards{card};
+            ui::ReadyAbilities buttons;
+            buttons.set_units(cards);
+            if (!state || !tactical::ability_ready(ability, state->slots[*slot], {}, 0))
+                buttons.stage({{1, card.ability, {ui::AbilityStatus::disabled, 1.0, false}}});
+            const auto bar = ui::ability_bar(ui::layout_unit_cards(cards, 24), cards, buttons, nullptr);
+            expect(bar.buttons.size() == 1 && !bar.buttons.front().disabled,
+                "RG-03: both stock ships show an enabled BARRAGE button");
+            if (bar.buttons.empty()) continue;
+            const auto click = ui::ability_click(bar.buttons.front(), false, buttons);
+            expect(click && click->targeted, "AB-09: stock BARRAGE click requests a world target");
+            if (!click) continue;
+            ui::TacticalIntent intent;
+            intent.verb = ui::TacticalVerb::ability; intent.units = click->units;
+            intent.unit_ability = tactical::AbilityKind::barrage;
+            intent.ability_action = tactical::AbilityAction::activate;
+            intent.destination = point(raw(800), 0, 0);
+            const auto payload = ui::command_payload(intent);
+            expect(payload && std::holds_alternative<tactical::AreaAbilityPayload>(payload.value()),
+                "WAD-38: stock button request uses the production area command");
+            if (!payload) continue;
+            expect(static_cast<bool>(session.value().submit({{0, 1, 1}, intent.units, payload.value()})),
+                "WAD-38: stock button activation submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            bool fired = false, proxy_seen = false;
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 310; ++tick) {
+                const auto step = session.value().step(executor);
+                expect(static_cast<bool>(step), "WAD-38: stock BARRAGE step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                const auto active = session.value().ability_state(1);
+                if (active && active->slots[*slot].target != 0) {
+                    const auto units = session.value().units();
+                    const auto proxy = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
+                        return unit.entity_id == active->slots[*slot].target;
+                    });
+                    proxy_seen = proxy_seen || (proxy != units.end() && proxy->type_id == proxy_type
+                        && proxy->owner == 2 && proxy->position.z == Fixed::from_raw(raw(-150)));
+                }
+                for (const auto& event : step.value().snapshot->combat_events())
+                    fired = fired || (event.kind == tactical::CombatEventKind::weapon_fired
+                        && event.shooter == 1 && (event.outcome & tactical::fired_barrage_shot) != 0U);
+            }
+            expect(proxy_seen && fired, std::string("WAD-38: stock BARRAGE proxy and override fire: ") + name);
+            const auto ended = session.value().ability_state(1);
+            expect(ended && !ended->slots[*slot].active && ended->slots[*slot].target == 0,
+                "WAD-38: stock BARRAGE expires and clears its proxy target");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WAD-38: stock BARRAGE hashes agree on 1/2/4/8 workers");
+        }
+    }
+}
 
 void foc_super_capitals(eawr::units::LoadInput input) {
     namespace tactical = eawr::sim::tactical;
@@ -72,6 +555,194 @@ void foc_super_capitals(eawr::units::LoadInput input) {
         }
         if (!reference) reference = hashes;
         else expect(hashes == *reference, "super-capital battle hashes match with 1/2/4/8 workers");
+    }
+}
+
+// WHZ-50/51, RO-2: the map's Hutt resource containers are live combat recipients.
+void foc_resource_container(eawr::units::LoadInput input) {
+    namespace tactical = eawr::sim::tactical;
+    input.types = {"TIE_Bomber_Squadron", "TIE_Fighter_Squadron", "Tartan_Patrol_Cruiser", "Nebulon_B_Frigate", "Corellian_Corvette"};
+    input.obstacles = {"Orbital_Resource_Container", "Skirmish_Merchant_Dock"};
+    const auto loaded = eawr::units::load_unit_tables(input);
+    expect(static_cast<bool>(loaded), "WHZ-50: damageable map objects load as live types");
+    if (!loaded) return;
+    const auto* container = loaded.value().find("Orbital_Resource_Container");
+    expect(container && container->hull == Fixed::from_decimal("20").value()
+        && container->living_projectile_collision && !container->has_space_evaluator,
+        "RO-2: resource container retains authored hull, collision and evaluator admission");
+    expect(container && container->ranged_target_z_adjust == Fixed::from_raw(raw(30)),
+        "WWP-72: installed resource container retains its authored aim offset");
+    const auto combat = eawr::units::combat_table(loaded.value());
+    const auto durability = eawr::units::durability_table(loaded.value());
+    const auto motion = eawr::units::motion_table(loaded.value());
+    expect(combat && durability && motion, "WHZ-50: damageable map combat, durability and motion bind");
+    if (!combat || !durability || !motion) return;
+    const auto target = eawr::assets::object_type_crc("Orbital_Resource_Container");
+    expect(combat.value().find(target) != nullptr && durability.value().find(target) != nullptr,
+        "RO-2: a non-capture map object has target and damage profiles");
+    expect(motion.value().find(target) == nullptr && container && container->footprint.space_obstacle,
+        "WHZ-50: the admitted container retains its obstacle footprint without a locomotor");
+    const auto* payload_profile = combat.value().find(target);
+    expect(payload_profile && payload_profile->death_projectiles.size() == 1
+        && payload_profile->ranged_target_z_adjust == Fixed::from_decimal("30").value(),
+        "WNO-29/30: installed container resolves one death payload at authored height");
+    if (payload_profile && !payload_profile->death_projectiles.empty()) {
+        const auto& shot = payload_profile->death_projectiles.front();
+        expect(shot.damage == Fixed{} && shot.blast.damage == Fixed::from_decimal("3000").value()
+            && shot.blast.radius == Fixed::from_decimal("400").value()
+            && shot.damage_delay == Fixed::from_decimal("0.5").value()
+            && shot.blast.immune_faction == eawr::assets::object_type_crc("Rebel"),
+            "WNO-30/32: installed detonation retains typed damage/radius/immunity/delay");
+    }
+    auto death_combat = combat.value();
+    for (auto& profile : death_combat.profiles) profile.weapons.clear();
+    tactical::TacticalSetup death_setup;
+    death_setup.seed = 1774;
+    death_setup.players = {{1, 1, eawr::assets::object_type_crc("Empire"), tactical::player_flag_commandable},
+        {2, 1, eawr::assets::object_type_crc("Rebel"), tactical::player_flag_commandable},
+        {7, 7, eawr::assets::object_type_crc("Hutts"), 0}};
+    death_setup.units = {{1, target, 7, {}},
+        {2, eawr::assets::object_type_crc("Tartan_Patrol_Cruiser"), 1, point(raw(150), raw(50), 0)},
+        {3, eawr::assets::object_type_crc("Corellian_Corvette"), 2, point(raw(150), raw(-50), 0)}};
+    auto death_session = tactical::TacticalSession::create(death_setup, {}, durability.value(), motion.value(),
+        std::nullopt, death_combat);
+    expect(static_cast<bool>(death_session), "WNO-31: installed container-death witness starts");
+    if (death_session) {
+        const auto empire_before = death_session.value().durability_state(2);
+        const auto rebel_before = death_session.value().durability_state(3);
+        const auto source_before = death_session.value().durability_state(1);
+        expect(source_before.has_value(), "WNO-29: stock container has scaled runtime health");
+        const auto lethal = source_before ? source_before->hull : Fixed{};
+        expect(static_cast<bool>(death_session.value().submit({{0, 1, 0}, {1}, tactical::DamagePayload{lethal}})),
+            "WNO-29: installed container ordinary death is submitted");
+        eawr::sim::InlineExecutor executor;
+        std::uint64_t detonations{};
+        for (int frame = 0; frame < 40; ++frame) {
+            const auto step = death_session.value().step(executor);
+            expect(static_cast<bool>(step), "WNO-31: installed container-death witness steps");
+            if (!step) break;
+            detonations += step.value().blast_detonations;
+        }
+        const auto empire_after = death_session.value().durability_state(2);
+        const auto rebel_after = death_session.value().durability_state(3);
+        expect(detonations == 1 && !death_session.value().durability_state(1),
+            "WNO-29/31: removed installed container produces exactly one detonation");
+        expect(empire_before && (!empire_after || empire_after->hull < empire_before->hull
+            || empire_after->shields < empire_before->shields || empire_after->hardpoints != empire_before->hardpoints),
+            "WNO-31: nearby installed non-Rebel ship receives qualifying damage");
+        expect(rebel_before && rebel_after && rebel_after->hull == rebel_before->hull
+            && rebel_after->shields == rebel_before->shields && rebel_after->hardpoints == rebel_before->hardpoints,
+            "WNO-31: nearby allied Rebel ship remains untouched");
+    }
+    const auto print_point = [](const Vec3& p) {
+        std::cout << ',' << p.x.raw() << ',' << p.y.raw() << ',' << p.z.raw();
+    };
+    const auto* target_profile = combat.value().find(target);
+    expect(target_profile && target_profile->ranged_target_z_adjust == Fixed::from_raw(raw(30)),
+        "WWP-72: installed aim offset reaches the resource combat profile");
+    if (target_profile) {
+        for (const auto& mesh : target_profile->meshes) {
+            for (const auto& triangle : mesh.triangles) {
+                std::cout << "resource-mesh";
+                print_point(triangle.a); print_point(triangle.b); print_point(triangle.c);
+                std::cout << '\n';
+            }
+        }
+    }
+    for (const auto& team_name : {"TIE_Bomber_Squadron", "TIE_Fighter_Squadron", "Tartan_Patrol_Cruiser", "Nebulon_B_Frigate"}) {
+        const auto* team = loaded.value().find(team_name);
+        expect(team != nullptr, "RO-2: the attacking type loads");
+        if (!team) continue;
+        const auto shooter = eawr::assets::object_type_crc(team_name);
+        for (const bool sustained : {false, true}) {
+            const auto trace_name = std::string(team_name) + (sustained ? ":sustained" : ":stock");
+            auto health = durability.value();
+            // Diagnostic fixture only: retain the installed geometry and weapons while preventing
+            // 20-HP overkill from turning later arrivals into apparent aiming misses.
+            if (sustained) {
+                for (auto& profile : health.profiles) {
+                    if (profile.type_id == target) profile.max_hull = Fixed::from_raw(raw(100000));
+                }
+            }
+            std::vector<std::string> reference;
+            for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                tactical::TacticalSetup setup;
+                setup.seed = 1728;
+                setup.players = {{1, 1, eawr::assets::object_type_crc("Empire"), tactical::player_flag_commandable},
+                    {7, 7, eawr::assets::object_type_crc("Hutts"), 0}};
+                setup.units = {{1, shooter, 1, Vec3{}, eawr::sim::math::identity_quat(), {}},
+                    {2, target, 7, point(raw(400), 0, 0), eawr::sim::math::identity_quat(), {}}};
+                if (!team->members.empty()) setup.squadrons = {{1, {}}};
+                std::vector<tactical::SensorProfile> sensors{{shooter, Fixed::from_raw(raw(2000))}};
+                for (const auto& member : team->members) {
+                    const auto craft_type = eawr::assets::object_type_crc(member.craft);
+                    sensors.push_back({craft_type, Fixed::from_raw(raw(2000))});
+                    const auto craft_id = static_cast<eawr::sim::EntityId>(setup.units.size() + 1);
+                    setup.units.push_back({craft_id, craft_type, 1, Vec3{}, eawr::sim::math::identity_quat(), {}});
+                    setup.squadrons.front().members.push_back(craft_id);
+                }
+                std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+                sensors.erase(std::unique(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) {
+                    return a.type_id == b.type_id;
+                }), sensors.end());
+                auto session = tactical::TacticalSession::create(setup, sensors, health, motion.value(), std::nullopt, combat.value());
+                expect(static_cast<bool>(session), "RO-2: Hutt resource firing world starts");
+                if (!session) continue;
+                expect(static_cast<bool>(session.value().submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                    "RO-2: submit an ordinary attack on the Hutt container");
+                std::size_t shots = 0;
+                std::size_t hits = 0;
+                std::vector<std::string> hashes;
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                // WWP-33: allow the authored bomber opening recharge and its approach.
+                for (std::uint64_t tick = 0; tick < 600; ++tick) {
+                    auto result = session.value().step(executor);
+                    expect(static_cast<bool>(result), "RO-2: Hutt resource firing step succeeds");
+                    if (!result) break;
+                    hashes.push_back(result.value().state_sha256);
+                    if (workers == 1) {
+                        for (const auto& projectile : result.value().snapshot->projectiles()) {
+                            if (projectile.target != 2) continue;
+                            std::cout << "resource-path," << trace_name << ',' << tick << ',' << projectile.id
+                                << ',' << projectile.shooter << ',' << projectile.weapon;
+                            print_point(projectile.position); print_point(projectile.step);
+                            std::cout << '\n';
+                        }
+                    }
+                    for (const auto& event : result.value().snapshot->combat_events()) {
+                        if (event.kind == tactical::CombatEventKind::projectile_expired && workers == 1
+                            && event.selected_target == 2) {
+                            std::cout << "resource-expired," << trace_name << ',' << tick << ',' << event.target;
+                            print_point(event.aim); std::cout << '\n';
+                        }
+                        if (event.target != 2 || event.shooter == 2) continue;
+                        shots += event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+                        hits += event.kind == tactical::CombatEventKind::projectile_hit ? 1U : 0U;
+                        if (workers == 1 && (event.kind == tactical::CombatEventKind::weapon_fired
+                            || event.kind == tactical::CombatEventKind::projectile_hit)) {
+                            std::cout << "resource-event," << trace_name << ',' << tick << ',' << tactical::to_string(event.kind)
+                                << ',' << event.shooter << ',' << event.weapon;
+                            print_point(event.origin); print_point(event.aim); std::cout << '\n';
+                        }
+                    }
+                }
+                const auto flying = static_cast<std::size_t>(std::count_if(session.value().projectiles().begin(),
+                    session.value().projectiles().end(), [](const auto& projectile) { return projectile.target == 2; }));
+                std::cout << "resource-attack," << trace_name << ',' << workers << ',' << shots << ',' << hits << ',' << flying << '\n';
+                const auto remaining = session.value().durability_state(2);
+                std::cout << "resource-health," << trace_name << ',' << workers << ','
+                    << (remaining ? remaining->hull.raw() : 0) << '\n';
+                if (sustained) expect(remaining && remaining->hull.raw() > 0,
+                    "RO-2: the diagnostic target remains alive for the entire aiming measurement");
+                expect(shots > 0, std::string("RO-2: an admitted container attack actually fires: ") + team_name);
+                // Survey the existing aiming behavior; this contract also runs before the height fix.
+                if (std::string_view(team_name) == "TIE_Fighter_Squadron") {
+                    expect(hits > 0, "RO-2: fighter projectiles hit the admitted container");
+                }
+                if (workers == 1) reference = hashes;
+                else expect(hashes == reference, "RO-2: resource firing hashes equal on 1/2/4/8 workers");
+            }
+        }
     }
 }
 
@@ -568,13 +1239,32 @@ void foc_fleet() {
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    foc_bomber_torpedo_volley(input);
+    foc_passive_projectile_defence(input);
+    foc_active_projectile_defence(input);
     foc_super_capitals(input);
     foc_hazard_maps(input);
     foc_mass_drivers(input);
+    foc_diamond_boron_cluster(input);
+    foc_barrage_buttons(input);
     auto loaded = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(loaded), "FoC unit tables load");
     if (!loaded) return;
     const auto& tables = loaded.value();
+    // WWP-72: only the Nebulon-B in the pinned ship/craft roster has nonzero aim height.
+    // Live map structures are checked separately by the resource-container fixture.
+    for (const auto& id : eawr::units::pinned_m2_types()) {
+        const auto* type = tables.find(id);
+        const auto expected = id == "Nebulon_B_Frigate" ? raw(35) : 0;
+        expect(type && type->ranged_target_z_adjust.value_or(Fixed{}).raw() == expected,
+            "WWP-72: pinned M2 aim adjustment for " + std::string{id});
+        if (!type) continue;
+        for (const auto& member : type->members) {
+            const auto* craft = tables.find(member.craft);
+            expect(craft && craft->ranged_target_z_adjust.value_or(Fixed{}).raw() == 0,
+                "WWP-72: pinned M2 member craft has zero/absent aim adjustment: " + member.craft);
+        }
+    }
     // WHE-04/49: all eleven authored skirmish purchases and five conversions load.
     auto hero_input = input;
     hero_input.types = {"Han_Solo_Team_Space_MP", "Sundered_Heart", "Rogue_Squadron_Space", "Home_One",
@@ -1114,7 +1804,14 @@ void foc_fleet() {
         expect(craft != nullptr && craft->abilities.size() == 1 && craft->abilities[0].kind == AbilityKind::ion_cannon_shot
                    && !craft->abilities[0].team,
             "AB-60: each Y-wing has its own ION_CANNON_SHOT slot");
-        for (const char* id : {"Rebel_X-Wing_Squadron", "TIE_Fighter", "TIE_Fighter_Squadron"}) {
+        const auto* hunter = table.find(eawr::assets::object_type_crc("TIE_Fighter"));
+        expect(hunter != nullptr && hunter->abilities.size() == 1
+                   && hunter->abilities[0].kind == AbilityKind::hunt && !hunter->abilities[0].team
+                   && hunter->abilities[0].expiration_frames == 0 && hunter->abilities[0].recharge_frames == 0
+                   && !hunter->abilities[0].supports_autofire
+                   && hunter->hunt_reveal_range == Fixed::from_raw(raw(500)),
+            "WAB-50/54: each stock TIE Fighter binds untimed Hunt and its authored reveal range");
+        for (const char* id : {"Rebel_X-Wing_Squadron", "TIE_Fighter_Squadron"}) {
             expect(table.find(eawr::assets::object_type_crc(id)) == nullptr, std::string("no modelled ability profile: ") + id);
         }
     }
@@ -1279,6 +1976,7 @@ void foc_fleet() {
     foc_gunboat_pole(input);
     foc_object_weapon_defaults(input);
     foc_living_collision(input);
+    foc_resource_container(input);
 }
 
 } // namespace unit_tables_test_support

@@ -383,7 +383,10 @@ and set `click_reset: true` and `screen_mouse_units: true`.
   resolution; the tests check 1280 x 720 and 1920 x 1080. The scale carries the FoC motion
   factor (4 without Ctrl, 1 with it) and the direction.
 - **Ctrl + middle drag rotates.** A `rotate` unit turns `Yaw_Per_Mouse_Unit` degrees: FoC's
-  1.5 gives 150 degrees per full-width drag. The -1 keeps the owner's direction check (the
+  1.5 gives 150 degrees per full-width drag. PI-9 wraps free yaw into [-180, 180)
+  before clamping to the authored yaw limits, so sentinel limits such as -1000..1000
+  do not introduce a discontinuous view turn. Narrow authored ranges remain clamp-only.
+  The -1 keeps the owner's direction check (the
   scene follows the pointer). An `orbit_pitch` unit tilts `Pitch_Per_Mouse_Unit` degrees; the
   -1 makes screen-up positive, as FoC does, so with FoC's space -1.5 a drag down tilts toward
   overhead, 150 degrees per full-height drag. FoC's land rate is 0, so FoC land never tilts;
@@ -393,6 +396,8 @@ and set `click_reset: true` and `screen_mouse_units: true`.
   drag, without feeding the eased pan velocity. A drag right moves the camera right and a
   drag down moves it back, as in FoC. The target bounds still clamp it. The Alt drag keeps
   its own screen-matched law.
+- **Wheel while grabbed (PI-9).** A held middle grab suppresses wheel events during
+  either translation or rotation. Release does not replay them; fresh wheel events zoom.
 - **Chords.** Both motions are routed only while a middle grab is held, and by the
   modifiers of each motion event, so pressing or releasing Ctrl mid-drag switches between
   rotating and translating, as FoC's code does.

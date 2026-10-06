@@ -216,6 +216,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
     live_shown_.assign(options_.placed_ships.size(), true);
     live_defend_.assign(options_.placed_ships.size(), false);
     live_clips_.assign(options_.placed_ships.size(), std::nullopt);
+    contact_bones_.resize(options_.placed_ships.size());
     live_alternate_clips_.assign(options_.placed_ships.size(), std::nullopt);
     live_retired_.assign(options_.placed_ships.size(), false);
     live_alternates_.assign(options_.placed_ships.size(), 0);
@@ -441,6 +442,17 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
         ++team_colour_status_[placement.team_colour_status];
         const assets::Model* model = cache.model(placement.model_path);
         if (model == nullptr) continue;  // drawn implies loaded; kept defensive
+        if (live_ship) {
+            auto pose = bind_poses.find(placement.model_path);
+            if (pose == bind_poses.end()) {
+                std::optional<std::vector<animation::BonePose>> bones;
+                if (auto player = animation::Player::create(*model)) {
+                    if (auto sampled = player.value().sample({})) bones = std::move(sampled.value().bones);
+                }
+                pose = bind_poses.emplace(placement.model_path, std::move(bones)).first;
+            }
+            if (pose->second) contact_bones_[*live_ship] = *pose->second;
+        }
         const std::size_t first_piece = pieces.size();
         const auto add_surface = [&](const std::size_t index, const std::optional<HardpointGate> gate) {
             const scene::Surface& surface = placement.surfaces[index];
@@ -525,6 +537,7 @@ bool SpacePopulation::compose(GodotRenderer& renderer, const assets::Map& map, c
                 ++animated_placements_;
                 const std::size_t idle = idle_placements_.size();
                 idle_placements_.push_back(idle_placement(placement, *clip));
+                if (live_ship) idle_live_ships_.emplace(idle, *live_ship);
                 for (std::size_t index = first_piece; index < pieces.size(); ++index) {
                     if (pieces[index].upload->pose) pieces[index].idle = idle;
                 }

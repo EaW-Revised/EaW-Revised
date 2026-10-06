@@ -117,7 +117,7 @@ const tactical::ConstructionState* LiveSessionView::pad_construction(const sim::
 std::optional<ui::UnitAbilityState> LiveSessionView::Abilities::state(const sim::EntityId unit,
                                                                      const std::uint32_t ability) const {
     const tactical::AbilityKind kind = tactical::ability_kind(ui::ability_name(ability));
-    // AB-03: a cut ability the unit's type authors keeps its button, never usable.
+    // An unsupported ability: a kind the unit's type authors keeps its button, never usable.
     if (kind == tactical::AbilityKind::none) return ui::UnitAbilityState{ui::AbilityStatus::disabled, 1.0, false};
     const auto& snapshot = view_.ability_snapshot_;
     if (!snapshot) return std::nullopt;
@@ -200,7 +200,7 @@ void LiveSessionView::Abilities::request(const ui::AbilityRequest& request) {
         ++issued_;
         if (intent.ability_action == tactical::AbilityAction::activate
             || intent.ability_action == tactical::AbilityAction::deactivate) {
-            view_.ability_clicks_.push_back({kind, intent.ability_action == tactical::AbilityAction::activate, request.units});
+            view_.ability_clicks_.push_back({kind, intent.ability_action == tactical::AbilityAction::activate, request.units, aimed});
         }
     } else {
         ++refused_;
@@ -294,6 +294,35 @@ bool LiveSessionView::sell_pad_structure(const sim::EntityId child, const bool s
     return issue_economy(scheduler_.get(), intent);
 }
 
+bool LiveSessionView::hardpoint_repair_allowed(const sim::EntityId station, const std::uint32_t hardpoint) const {
+    const auto* instance = snapshot_index_.instance(station);
+    if (!instance || !instance->durability || !local_economy()) return false;
+    // WSL-40/USL-03: ordinary own selection or allied community-station selection.
+    // Repair adds no second owner gate after that admission (debug build EUS-01).
+    if (instance->owner != player_) {
+        const auto type = presentation_types_.find(instance->type_id);
+        if (type == presentation_types_.end() || !type->second->station_community_property
+            || !is_ally_of_local(instance->owner)) return false;
+    }
+    if (std::none_of(economy_.menus.begin(), economy_.menus.end(),
+        [&](const tactical::StationMenu& menu) { return menu.station == instance->type_id; })) return false;
+    if (hardpoint >= instance->durability->hardpoints.size()) return false;
+    const auto& slot = instance->durability->hardpoints[hardpoint];
+    // WSL-40: disabled positive-health replacement slots still qualify.
+    return slot.health.raw() > 0 && slot.health < slot.max_health
+        && std::find(slot.repairing_players.begin(), slot.repairing_players.end(), player_) == slot.repairing_players.end();
+}
+
+bool LiveSessionView::repair_hardpoint(const sim::EntityId station, const std::uint32_t hardpoint) {
+    if (!hardpoint_repair_allowed(station, hardpoint)) return false;
+    ui::TacticalIntent intent;
+    intent.verb = ui::TacticalVerb::repair_hardpoint;
+    intent.units = {station};
+    intent.hardpoint = hardpoint;
+    intent.origin = ui::CommandOrigin::world_click;
+    return issue_economy(scheduler_.get(), intent);
+}
+
 bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId type) {
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::buy;
@@ -315,21 +344,40 @@ bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId ty
     return issued;
 }
 
-bool LiveSessionView::cancel_build(const tactical::BuildQueue queue, const std::uint32_t index) {
+bool LiveSessionView::cancel_build(const tactical::BuildQueue queue, const std::uint64_t entry_id) {
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::cancel;
     intent.queue = queue;
-    intent.index = index;
+    intent.queue_entry_id = entry_id;
     intent.origin = ui::CommandOrigin::hud_button;
     const bool issued = issue_economy(scheduler_.get(), intent);
     ++(issued ? economy_requests_.cancels : economy_requests_.refused);
     return issued;
 }
 
+sim::math::Fixed LiveSessionView::reinforcement_facing() const noexcept {
+    const auto* player = economy_.player(player_);
+    return deployment_facing_.value_or(player ? player->reinforcement_yaw : sim::math::Fixed{});
+}
+
+bool LiveSessionView::rotate_reinforcement(const double detents) {
+    if (!reinforcement_allowed() || !std::isfinite(detents) || detents == 0.0) return false;
+    constexpr double degrees_per_detent = 15.0; // WR-X01: owner-requested project constant
+    const auto step = scene::fixed_from_binary32(static_cast<float>(std::fmod(detents * degrees_per_detent, 360.0)));
+    if (!step) return false;
+    constexpr auto turn = 360 * sim::math::Fixed::scale;
+    auto yaw = (reinforcement_facing().raw() % turn + step.value().raw()) % turn;
+    if (yaw < 0) yaw += turn;
+    deployment_facing_ = sim::math::Fixed::from_raw(yaw);
+    preview_valid_ = false;
+    preview_checked_tick_.reset();
+    return true;
+}
+
 bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Vec3& point) {
     // WR-15: drop checks placement before room. A busy preview query has no authority;
     // the cached same-point verdict may be used, and the command independently rechecks state.
-    const auto valid = session_ ? session_->reinforcement_point(player_, type, point) : std::optional<bool>{false};
+    const auto valid = session_ ? session_->reinforcement_point(player_, type, point, deployment_facing_) : std::optional<bool>{false};
     const bool cached = preview_type_ == type && preview_point_ == point && preview_valid_;
     if (!reinforcement_allowed() || !valid.value_or(cached) || !reinforcement_room(type)) {
         ++economy_requests_.refused;
@@ -339,10 +387,58 @@ bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Ve
     intent.verb = ui::TacticalVerb::reinforce;
     intent.type = type;
     intent.destination = point;
+    intent.reinforcement_facing = deployment_facing_;
     intent.origin = ui::CommandOrigin::world_click;
+    const std::uint64_t tick = order_tick();
     const bool issued = issue_economy(scheduler_.get(), intent);
     ++(issued ? economy_requests_.reinforcements : economy_requests_.refused);
+    if (issued) {
+        std::erase_if(pending_reinforcements_, [this](const PendingReinforcement& drop) { return !reinforcement_pending(drop); });
+        pending_reinforcements_.push_back({tick, type});
+        reinforcement_feedback(ReinforcementFeedback::Kind::enroute, type);
+    }
     return issued;
+}
+
+void LiveSessionView::reinforcement_feedback(const ReinforcementFeedback::Kind kind, const tactical::TypeId type) {
+    // WR-07/11/16: local presentation gestures/submissions, separate from authoritative arrival.
+    if (reinforcement_allowed()) reinforcement_feedback_.push_back({kind, type});
+}
+
+bool LiveSessionView::reinforcement_pending(const PendingReinforcement& drop) const noexcept {
+    // A command stamped for tick t is applied by the step that completes tick t + 1.
+    return !battle_frame_.latest || battle_frame_.latest->completed_tick() <= drop.tick;
+}
+
+std::uint32_t LiveSessionView::population_of(const tactical::TypeId type) const noexcept {
+    for (const auto& menu : economy_.menus) {
+        if (const auto* option = menu.find(type)) return option->population;
+    }
+    return 0U;
+}
+
+std::vector<tactical::TypeId> LiveSessionView::reinforcement_pool() const {
+    const auto* ledger = local_economy();
+    if (ledger == nullptr) return {};
+    std::vector<tactical::TypeId> pool = ledger->pool;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (!reinforcement_pending(drop)) continue;
+        if (const auto found = std::find(pool.begin(), pool.end(), drop.type); found != pool.end()) pool.erase(found);
+    }
+    return pool;
+}
+
+std::uint32_t LiveSessionView::pending_reinforcement_population() const {
+    std::uint32_t population = 0;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (reinforcement_pending(drop)) population += population_of(drop.type);
+    }
+    return population;
+}
+
+std::size_t LiveSessionView::pending_reinforcements() const {
+    return static_cast<std::size_t>(std::count_if(pending_reinforcements_.begin(), pending_reinforcements_.end(),
+        [this](const PendingReinforcement& drop) { return reinforcement_pending(drop); }));
 }
 
 bool LiveSessionView::reinforcement_allowed() const noexcept {
@@ -355,13 +451,19 @@ bool LiveSessionView::reinforcement_allowed() const noexcept {
 
 bool LiveSessionView::reinforcement_room(const tactical::TypeId type) const noexcept {
     const auto* ledger = local_economy();
-    if (ledger == nullptr || std::find(ledger->pool.begin(), ledger->pool.end(), type) == ledger->pool.end()) return false;
-    for (const auto& menu : economy_.menus) {
-        if (const auto* option = menu.find(type)) {
-            return ledger->population <= ledger->population_cap && option->population <= ledger->population_cap - ledger->population;
-        }
+    if (ledger == nullptr) return false;
+    // A unit dropped while paused has left the pool and taken its population (TM-10).
+    std::size_t waiting = 0;
+    std::uint64_t population = ledger->population;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (!reinforcement_pending(drop)) continue;
+        if (drop.type == type) ++waiting;
+        population += population_of(drop.type);
     }
-    return false;
+    if (static_cast<std::size_t>(std::count(ledger->pool.begin(), ledger->pool.end(), type)) <= waiting) return false;
+    const std::uint32_t added = population_of(type);
+    return population <= ledger->population_cap && added <= ledger->population_cap - population
+        && std::any_of(economy_.menus.begin(), economy_.menus.end(), [type](const auto& menu) { return menu.find(type) != nullptr; });
 }
 
 void LiveSessionView::placement_preview(const std::optional<tactical::TypeId> type,
@@ -377,7 +479,7 @@ void LiveSessionView::placement_preview(const std::optional<tactical::TypeId> ty
     const auto tick = session_->completed_tick();
     if (preview_checked_tick_ == tick) return;
     ++preview_queries_;
-    if (const auto valid = session_->reinforcement_point(player_, *type, *point)) {
+    if (const auto valid = session_->reinforcement_point(player_, *type, *point, deployment_facing_)) {
         preview_valid_ = *valid;
         preview_checked_tick_ = tick;
     }

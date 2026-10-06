@@ -98,7 +98,10 @@ namespace sim_headless::scenario_detail {
         entry.position = *at;
         entry.facing_degrees = *facing;
         if (const auto* staging = unit.get("staging"); staging != nullptr && staging->array() != nullptr) {
-            for (const auto& flag : *staging->array()) entry.hold_fire = entry.hold_fire || text_of(&flag) == "hold_fire";
+            for (const auto& flag : *staging->array()) {
+                entry.hold_fire = entry.hold_fire || text_of(&flag) == "hold_fire";
+                entry.invulnerable = entry.invulnerable || text_of(&flag) == "invulnerable";
+            }
         }
         scenario.units.push_back(std::move(entry));
     }
@@ -333,6 +336,28 @@ core::Result<ScenarioRun> build_scenario(const std::filesystem::path& scenario_p
             }
             profile.max_attack_distance = Fixed{};
         }
+    }
+    // DG-40: scenario-only table content leaves ordinary skirmish/replay tables unchanged.
+    // Like hold_fire, a table override must agree for every occurrence of the affected type.
+    std::map<tactical::TypeId, bool> protection;
+    for (const auto& unit : scenario.units) {
+        std::vector<std::string> affected{unit.type};
+        const auto* type = tables.value().find(unit.type);
+        if (type != nullptr) {
+            for (const auto& member : type->members) affected.push_back(member.craft);
+        }
+        for (const auto& name : affected) {
+            const auto id = eawr::skirmish::type_id(name);
+            const auto [found, inserted] = protection.emplace(id, unit.invulnerable);
+            if (!inserted && found->second != unit.invulnerable) {
+                return fail<ScenarioRun>("invulnerable on '" + unit.label
+                    + "' needs every " + name + " to agree, including squadron members", path);
+            }
+        }
+    }
+    for (auto& profile : durability.value().profiles) {
+        const auto found = protection.find(profile.type_id);
+        if (found != protection.end()) profile.scenario_invulnerable = found->second;
     }
     return execute_scenario(scenario, path, bytes, tables, sensors, durability, motion, combat, workers, build_sha256);
 }

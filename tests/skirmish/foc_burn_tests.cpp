@@ -1,8 +1,11 @@
 // The Empire AI's attack on the starbase after it has destroyed the Rebel fleet (#532,
 // docs/behaviour/foc-tactical-ai.md AI-24, FH-20, PL-45). The Rebel player sends every mobile
 // unit of the M2 fleet without the MC80 at the Empire station; at 180 s scripted hull damage
-// destroys its remaining ships and craft (#847). Once the game is 180 s old and the Rebel
-// fighter, bomber, corvette and frigate force is below 500 (the last craft may still be alive),
+// destroys its remaining ships and craft (#847) and explicitly reveals the map to the Empire
+// (V-20, fixture staging). FH-20/WNO-11 require a visible burn target; a short unscouted control
+// checks that the authored plan cannot order an attack on the hidden station.
+// Once the game is 180 s old and the Rebel fighter, bomber, corvette and frigate force is below
+// 500 (the last craft may still be alive),
 // the retail burn plan starts: it abandons the other plans (PL-45), sleeps 1 s, collects the free
 // units and attack-moves them at Find_Nearest's "Structure | Capital" (a category mask, FH-20),
 // which is the Rebel starbase, and they hit it after the Rebel fleet is gone. The same journal,
@@ -88,6 +91,8 @@ struct Run {
     std::uint64_t three_near{};           // first tick after the wipe with three Empire units near the Rebel station
     std::uint64_t first_hit{};            // first hit on the Rebel station after the wipe
     std::optional<std::int64_t> power_at_burn;
+    std::optional<bool> station_visible_before_wipe;
+    std::optional<bool> station_visible_at_burn;
     std::set<eawr::sim::EntityId> empire_ships_at_order; // Empire ships (not squadrons) alive at the first burn order
     std::set<eawr::sim::EntityId> empire_squadrons_at_order;
     // #669 (space-damage DG-39): each death of a unit with destroyable hardpoints as it stood the
@@ -101,7 +106,7 @@ struct Run {
 constexpr std::int64_t near_range = 3000;
 constexpr std::uint64_t wipe_tick = 180 * 30;
 
-std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t ticks) {
+std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t ticks, bool reveal_target) {
     auto world = tactical::TacticalSession::create(battle.start.setup, battle.content.sensors, battle.content.durability,
         battle.content.motion, battle.content.fog, battle.content.combat, battle.victory);
     expect(static_cast<bool>(world), "the world is created");
@@ -129,6 +134,18 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
         }
     }
     expect(rebel_station != 0 && empire_station != 0, "both stations start");
+    std::uint64_t empire_mask = 0;
+    const auto players = session.value().world().snapshot()->players();
+    for (std::size_t index = 0; index < players.size() && index < 64; ++index) {
+        if (players[index].player_id == empire) empire_mask = std::uint64_t{1} << index;
+    }
+    expect(empire_mask != 0, "the Empire has a raw fog observer bit");
+    const auto station_visible = [&](const tactical::TacticalSnapshot& snapshot) {
+        const auto instances = snapshot.instances();
+        return std::any_of(instances.begin(), instances.end(), [&](const auto& instance) {
+            return instance.entity_id == rebel_station && (instance.visible_to & empire_mask) != 0;
+        });
+    };
     const auto& squadrons = battle.content.motion.squadrons;
     std::map<eawr::sim::EntityId, std::pair<std::string, double>> standing; // #669: last tick's units with hardpoints
     // AI-24 / PG-08: raw Rebel fighter, bomber, corvette and frigate AI_Combat_Power.
@@ -155,6 +172,12 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
         // The Rebel player attack-moves every new ship and squadron at the Empire station.
         std::vector<tactical::PlayerCommand> commands;
         const auto snapshot = session.value().world().snapshot();
+        if (tick + 1 == wipe_tick) {
+            out.station_visible_before_wipe = station_visible(*snapshot);
+            // FH-20/WNO-11: the age/force burn branch has no authored fog reveal or regional
+            // fallback. Stage a visible target explicitly, without changing production AI fog.
+            if (reveal_target) commands.push_back({{tick + 1, rebel, sequence++}, {}, tactical::RevealAllPayload{empire}});
+        }
         std::vector<eawr::sim::EntityId> fresh;
         for (const auto& instance : snapshot->instances()) {
             if (instance.owner != rebel || instance.entity_id == rebel_station) continue;
@@ -248,6 +271,7 @@ std::optional<Run> run(const Battle& battle, std::size_t workers, std::uint64_t 
                 }
             }
             if (event.plan != "burnunits" || event.event != "started" || out.power_at_burn) continue;
+            out.station_visible_at_burn = station_visible(*result.world.snapshot);
             std::int64_t power = 0;
             for (const auto& instance : result.world.snapshot->instances()) {
                 if (instance.owner != rebel) continue;
@@ -330,6 +354,17 @@ int main(int argc, char** argv) {
     auto start = skirmish::build_start(fixture, inputs.value());
     expect(static_cast<bool>(start), "FoC start builds");
     if (!start) return 1;
+    // FH-20/WHZ-50: keep the controlled burn target the Rebel starbase. In the stock
+    // scene a nearer Hutt resource's authored Structure category also qualifies.
+    std::set<eawr::sim::EntityId> omitted;
+    for (const auto& unit : start.value().units) {
+        const auto owner = std::find_if(start.value().players.begin(), start.value().players.end(),
+            [&](const auto& player) { return player.player.player_id == unit.state.owner; });
+        if (unit.role == skirmish::UnitRole::map_object && owner != start.value().players.end()
+            && owner->faction == "Hutts") omitted.insert(unit.state.entity_id);
+    }
+    std::erase_if(start.value().units, [&](const auto& unit) { return omitted.contains(unit.state.entity_id); });
+    std::erase_if(start.value().setup.units, [&](const auto& unit) { return omitted.contains(unit.entity_id); });
     auto content = skirmish::session_content(tables.value());
     expect(static_cast<bool>(content), "FoC session content builds");
     if (!content) return 1;
@@ -346,9 +381,29 @@ int main(int argc, char** argv) {
     if (!modules || failures != 0) return 1;
     const Battle battle{start.value(), content.value(), skirmish::victory_rules(start.value(), tables.value()), ai, modules.value()};
 
+    // FH-20/WNO-11: false in the authored nearest call selects nonallies, not unforced fog.
+    // With no visible enemy left after the wipe, both nearest queries answer nil and no order
+    // follows. This control would fail if an AI requester regained blanket fog immunity.
+    auto unscouted = run(battle, 1, 195 * 30, false);
+    if (!unscouted) return 1;
+    expect(unscouted->wipe == wipe_tick && unscouted->power_at_burn == 0,
+        "unscouted control verifies the wipe and starts the age/force burn branch");
+    expect(unscouted->station_visible_before_wipe == false && unscouted->station_visible_at_burn == false,
+        "unscouted control keeps the Rebel station raw-fogged to the Empire");
+    const auto hidden_start = std::find_if(unscouted->plans.plans.begin(), unscouted->plans.plans.end(),
+        [](const auto& event) { return event.plan == "burnunits" && event.event == "started"; });
+    expect(hidden_start != unscouted->plans.plans.end() && hidden_start->tick + 60 <= 195 * 30,
+        "unscouted control observes the burn plan beyond its first-order deadline");
+    const auto hidden_order = std::find_if(unscouted->plans.plans.begin(), unscouted->plans.plans.end(),
+        [](const auto& event) { return event.plan == "burnunits" && event.event == "order"; });
+    expect(hidden_order == unscouted->plans.plans.end(), "the burn plan issues no order at an unscouted station");
+    expect(unscouted->diagnostics.empty(), "the unscouted burn control has no script diagnostics");
+    std::cout << "FH-20: unscouted burn starts with zero mobile force and issues "
+              << (hidden_order == unscouted->plans.plans.end() ? "no order" : "an unexpected order") << '\n';
+
     std::vector<Run> runs;
     for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
-        auto result = run(battle, workers, ticks);
+        auto result = run(battle, workers, ticks, true);
         if (!result) return 1;
         std::cout << workers << " worker(s): final " << result->hashes.back() << '\n';
         runs.push_back(std::move(result).value());
@@ -388,6 +443,8 @@ int main(int argc, char** argv) {
     for (const auto& death : first.hardpoint_deaths) std::cout << "destroyed: " << death << '\n';
 
     expect(first.scripted_victims > 0 && first.wipe == wipe_tick, "scripted damage destroys every remaining Rebel ship and craft at 180 s");
+    expect(first.station_visible_before_wipe == false && first.station_visible_at_burn == true,
+        "explicit Empire reveal changes the raw-fogged station into a visible burn target");
     // AI-24: the burn trigger needs a game age above 180 s (5,400 ticks) and a Rebel fighter, bomber,
     // corvette and frigate raw force below 500 (PG-08); this equation has no health attenuation.
     expect(burn_start.has_value() && *burn_start > 5400, "the burn plan starts after 180 s");

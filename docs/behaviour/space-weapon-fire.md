@@ -41,14 +41,14 @@ covered. Rules marked *project* are remake choices; everything else is what FoC 
 | T-03 | A target taken by a scan is re-examined every frame: when it is no longer suitable (T-06) or its priority is not `1.0`, the unit scans again; a different result replaces it only when the current target is unsuitable or the result is better (T-07). A target whose priority is `1.0` is never rescanned. FoC also keeps a target whose estimated time to death is within `Targeting_Stickiness_Time_Threshold`; the remake has no damage tracking yet and always rescans. |
 | T-04 | A player-ordered target (A-01) is never rescanned or replaced by a scan. |
 | T-05 | A scan runs only when the frame has reached the unit's next-scan frame, and then sets the next one to the frame plus one second plus a synchronized draw of 0 to half a second (30 + 0..15 frames). It visits the players cyclically from a synchronized random start, skipping the owner and every player of the owner's team. For each visited player it examines that player's units inside a box of half extent `Targeting_Max_Attack_Distance` on every axis around the unit, in collection order, and keeps a per-player best by T-07 starting from none; the last visited player that yields a best supplies the result, and the best priority is carried from player to player. The scan stops early only when the candidate is the current target and its priority is `1.0`. |
-| T-06 | A candidate is suitable when it is live, hostile and visible to the unit's owner, at least one of the unit's weapons may fire at its category (not destroyed, category not in `Fire_Category_Restrictions`), the unit's priority set gives it a priority (R-09; a unit without a set scores `1.0`), and it lies within `Targeting_Max_Attack_Distance` of the unit in the XY plane, inclusive, unless it is the current target. |
+| T-06 | A candidate must first pass ordinary ship-level admission (WCC-25): a non-team object must have effective `Collidable_By_Projectile_Living` true and `Is_Valid_Target` true; team containers bypass those two type checks. Limbo, death, transport and hero clash reject every target. `SPECIAL_WEAPON` rejects a target unless it also has `DUMMY_STAR_BASE`, independently of `Victory_Relevant` or XML class. The candidate must also be hostile and visible to the unit's owner, at least one of the unit's weapons may fire at its category (not destroyed, category not in `Fire_Category_Restrictions`), the unit's priority set must give it a priority (R-09; a unit without a set scores `1.0`), and it must lie within `Targeting_Max_Attack_Distance` of the unit in the XY plane, inclusive, unless it is the current target. These checks cover scan acquisition and non-direct retention/replacement; lower-level forced player attacks retain their separate path. |
 | T-07 | A candidate is better than the best so far when: it has a priority and the best has none, or there is no best; otherwise not when the best is the current player-ordered target; otherwise, when exactly one of the two is damaged (hull at most `Health_Low_Percent_Threshold` of its maximum), the damaged one; otherwise when its priority is strictly lower; otherwise, when exactly one of the two can be hit by the unit's object weapon, that one; otherwise when it is strictly nearer in the XY plane. A candidate with an equal or worse priority therefore wins when it is nearer: in S-01 the TIE Defender's own target is the nearer X-Wing although the Y-Wing ranks better, because FoC met the Y-Wing first. |
 
 ## Attack orders
 
 | Rule | Behaviour |
 |---|---|
-| A-01 | An accepted attack command (replay opcode 3, the UI command sink of UI input routing and command sink through next-tick replay input) sets each listed unit's ship-level target to the command's target and marks it player-ordered. It acts from the next frame's targeting, like a move (MV-02). |
+| A-01 | An accepted attack command (replay opcode 3, the UI command sink of UI input routing and command sink through next-tick replay input) sets each listed unit's ship-level target to the command's target and marks it player-ordered, subject to WCC-25's direct-assignment gate. An invalid effective target type silently leaves the previous combat target unchanged while the outer order and approach movement proceed. It acts from the next frame's targeting, like a move (MV-02). |
 | A-02 | A player-ordered target is handed to every weapon hardpoint of the unit, which tries it before any opportunity target (W-04). A target taken by a scan is not: in S-01 to S-03 the hardpoint's own attack-target slot stays empty while the unit's object weapon engages its ship-level target. |
 | A-03 | *Project:* any other accepted order (stop, move, face, attack-move, guard) ends a player-ordered attack: the target is cleared and the unit scans again (T-02). Retail handling of these replacement orders is not traced. |
 | A-04 | **Turning toward an ordered target** (research AT-01 to AT-03, AT-05, AT-06, AT-10; recordings S-26, S-27). Each frame the ship-level targeting checks a unit that has a locomotor and no movement left (no path and no turn in place under way) and whose target lies within `Targeting_Max_Attack_Distance` in the XY plane, measured to its aim point. The aim point is the target's live targetable hardpoint nearest the unit (W-05's choice), else the target's position. The unit's wanted heading is the XY bearing to that point, adjusted by A-06. When the unit's yaw differs from it by more than 10 degrees (wrapped to [-180, 180)), the unit turns in place to face that heading, exactly as a face order does (MV-20, MV-21: the short way, at `Max_Rate_Of_Turn` over the layer's turn-in-place slowdown, ending on the heading, without moving). A heading within 10 degrees is left alone. The distance is the type's last authored `Targeting_Max_Attack_Distance`: the Tartan authors 2000 and then 800, so it turns only toward a target within 800 (S-26/S-27 aim at about 760). The turn starts at the next frame: an order in the commands of tick t reaches targeting at t + 1, and the unit first turns at t + 3 (S-26/S-27: order at 30, first turn at 33). While it turns (or moves) nothing is checked; after the turn it is checked again. |
@@ -214,7 +214,7 @@ meets first, which need not be the one nearest a given hardpoint's bore.
 | S-37 Rebel, TBL only | 70 | `TBL` 54; `CCM`, `LC` 0 | Same |
 | S-38 Rebel, LC/TBL overlap | 140 | `LC` 54, `TBL` 54; `CCM` 0 | Same |
 | S-39 Empire, missile+01 | -120 | `00` 23, `01` 54; `02` 0 | Same |
-| S-40 Empire, missile+01 | -30 | `00` 23, `01` 54; `02` 0 | Same until the target loses a hardpoint; then `02` also fires (19), because the runner lacks `invulnerable` (scenario staging flags, below) |
+| S-40 Empire, missile+01 | -30 | `00` 23, `01` 54; `02` 0 | Same: staged invulnerability preserves the target and `02` stays silent |
 | S-41 Empire, missile+02 | 60 | `00` 23, `02` 54; `01` 0 | Same |
 | S-42 Empire, missile only | 150 | `00` 23; `01`, `02` 0 | Same |
 
@@ -235,15 +235,16 @@ they cover more of the circle than any one weapon alone.
   degrees to port. It reaches 60, holds at -120 and 150, and holds at -30 as well.
 - Why `02` holds at -30: the station's own model carries `02`'s fire bones, the same as the
   debug build resolves them (a non-turret hardpoint's fire bones come from the parent model), so
-  the cone frame is not in question. A firing attempt aims at the target's nearest hardpoint
-  (W-05). For the Nebulon-B at -30 that is its engine hardpoint, 90.9 degrees off `02`'s bore
-  from the weapon midpoint, just outside the 90-degree half-cone (W-07). Retail's target is
+  the fire-bone source is not in question. A firing attempt aims at the target's nearest
+  hardpoint (W-05). The raw model-bone review places the engine hardpoint 95.0 degrees off
+  `02`'s bore from the weapon midpoint, outside the 90-degree half-cone (W-07). Retail's target is
   invulnerable and keeps that hardpoint, so `02` never fires.
-- The remake's scenario runner does not apply `invulnerable` (scenario staging flags). The station shoots the
-  engine hardpoint away (the target's first hull loss is at tick 802), W-05 moves the aim to `BL`
-  at -88.3 degrees, just inside, and `02` fires from tick 812. The remake matches FoC for as long
-  as the target is intact. The test keeps `02` in S-40 as a strict expected-fail until scenario staging flags is
-  fixed.
+- Scenario invulnerability now keeps hull, shield and every hardpoint intact (space-damage
+  DG-40). `02` stays silent for the entire S-40 recording. The raw model-bone review gives
+  engine bearing -95.0 degrees and BL bearing -91.3 degrees relative to the bore: both
+  are outside the 90-degree half-cone. Those raw bearings alone do not establish the old
+  claim that BL entered the cone after engine loss; the regression checks intact health,
+  the positive `00`/`01` fire windows and the silent `02` windows directly.
 
 <a id="rear-arc-and-attack-order-recording-s-22-to-s-27-361"></a>
 
@@ -272,10 +273,10 @@ to the right of the frigate's centre): -179.147 and 166.05 degrees (A-04). The T
 MV-20). Shot counts repeat across three pinned-seed retail captures but follow retail's
 synchronized draws, so they are not recharge oracles (P-02). The fixtures'
 [fire windows](../traces.md#fire-windows) turn the which-hardpoints-fire column into
-timing-free per-hardpoint shot-count bounds that the comparer checks in every trace. The remake's scenario runner does
-not apply the target's `hold_fire` and `invulnerable` staging flags, so its target fires back
-and whole-run shot totals are not comparable; which hardpoints fire and when the turn happens
-are.
+timing-free per-hardpoint shot-count bounds that the comparer checks in every trace.
+The remake applies the target's `hold_fire` and `invulnerable` staging flags (DG-40),
+so the test checks every window. Whole-run shot totals follow separate recharge draws;
+which hardpoints fire and when the turn happens are the comparison targets.
 
 ## Unknowns
 

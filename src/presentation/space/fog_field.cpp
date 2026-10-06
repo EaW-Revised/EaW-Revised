@@ -110,6 +110,14 @@ FogLooks fog_looks(const data::XmlNode& game_constants) {
     } else {
         fallback(looks, "SpaceReinforceFOWColor", "is absent");
     }
+    if (const auto* node = last_child(game_constants, "SpaceReinforceFeedbackOnlyWhileDragging")) {
+        const auto text = trim(node->raw_text);
+        if (text == "Yes" || text == "yes" || text == "true" || text == "True" || text == "1") {
+            looks.reinforce_only_while_dragging = true;
+        } else if (text != "No" && text != "no" && text != "false" && text != "False" && text != "0") {
+            fallback(looks, "SpaceReinforceFeedbackOnlyWhileDragging", "is not a boolean");
+        }
+    }
     return looks;
 }
 

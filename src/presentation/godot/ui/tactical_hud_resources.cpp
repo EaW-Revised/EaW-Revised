@@ -50,8 +50,8 @@ const model::MinimapTypeLooks& TacticalHud::minimap_looks(const std::string_view
     return state.minimap_types.emplace(std::string(type), model::minimap_type_looks(type, state.objects)).first->second;
 }
 
-std::optional<data::ui::Rgba8> TacticalHud::faction_colour(const std::string_view faction) const {
-    return model::faction_colour(state_->minimap_settings, faction);
+std::optional<data::ui::Rgba8> TacticalHud::faction_colour(const std::string_view faction, const bool no_colorization) const {
+    return model::faction_colour(state_->minimap_settings, faction, no_colorization);
 }
 
 

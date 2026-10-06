@@ -109,6 +109,30 @@ void BattleAudio::write_report(std::ostream& output) const {
            << json(listener_text_) << ", \"voices_3d\": " << audio::Voices::voices_3d << ", \"max_voices\": " << max_voices_
            << ", \"stolen\": " << stolen_ << ", \"attacks\": " << attacks_
            << ", \"attached_moves\": " << attached_moves_;
+    output << ", \"lifecycle\": {\"retained\": " << events_.size()
+           << ", \"completed_loops\": " << events_.completed_loops() << "}";
+    output << ", \"pause\": {\"active\": " << (paused_ ? "true" : "false")
+           << ", \"transitions\": " << pause_transitions_ << ", \"voice_frames\": " << paused_voice_frames_
+           << ", \"spatial\": " << pause_3d_ << ", \"loops_2d\": " << pause_2d_loops_
+           << ", \"speech\": " << pause_speech_ << ", \"speech_frames\": " << paused_speech_frames_
+           << ", \"position_drift\": " << pause_position_drift_ << "}";
+    output << ", \"allocations\": {";
+    bool allocation_first = true;
+    for (const auto& [reason, row] : allocations_) {
+        output << (allocation_first ? "" : ", ") << json(reason) << ": {\"requested\": " << row.requested
+               << ", \"admitted\": " << row.admitted << ", \"allocated\": " << row.allocated
+               << ", \"refused\": " << row.refused << ", \"stolen\": " << row.stolen
+               << ", \"samples_requested\": " << row.samples_requested << ", \"samples_failed\": " << row.samples_failed
+               << ", \"audible\": " << row.audible << "}";
+        allocation_first = false;
+    }
+    output << "}";
+    output << ", \"engines\": {\"idle_speed\": " << engine_idle_speed_
+           << ", \"visits\": " << engine_visits_ << ", \"sources\": " << engine_states_.size()
+           << ", \"peak_sources\": " << engine_peak_ << ", \"transitions\": " << engine_transitions_
+           << ", \"stops\": " << engine_stops_ << ", \"retired\": " << engine_retired_
+           << ", \"hidden_updates\": " << engine_hidden_updates_ << ", \"fade_updates\": " << engine_fade_updates_
+           << ", \"detached\": " << engine_detached_ << "}";
     output << ", \"ambient\": {\"visits\": " << ambient_visits_
            << ", \"initialized\": " << ambient_initialized_ << ", \"retired\": " << ambient_retired_
            << ", \"timers\": " << ambient_timers_.size() << ", \"peak_timers\": " << ambient_peak_
@@ -132,6 +156,14 @@ void BattleAudio::write_report(std::ostream& output) const {
            << ", \"speech_overflow\": " << speech_overflow_ << ", \"speech_active\": " << (speech_stream_.active() ? "true" : "false")
            << ", \"ducked_starts\": " << ducked_starts_ << ", \"ducked_updates\": " << ducked_updates_ << "}";
     counts("requested", requested_);
+    output << ", \"base_warning\": {\"delay_frames\": " << base_warning_delay_frames_
+           << ", \"countdown\": " << base_warning_countdown_ << ", \"radar_active\": " << radar_warnings_.size() << ", \"rows\": [";
+    for (std::size_t index = 0; index < base_warning_rows_.size(); ++index) {
+        const auto& row = base_warning_rows_[index];
+        output << (index ? ", " : "") << "{\"tick\": " << row.tick << ", \"target\": " << row.target
+               << ", \"radar\": " << (row.radar ? "true" : "false") << "}";
+    }
+    output << "]}";
     output << ", \"results\": {";
     bool first = true;
     for (const auto& [reason, values] : results_) {
@@ -162,6 +194,9 @@ void BattleAudio::write_report(std::ostream& output) const {
         output << (first ? "" : ", ") << json(sounds.name) << ": {\"death\": " << name(sounds.death)
                << ", \"spin_death\": " << name(sounds.spin_death)
                << ", \"ambient_moving\": " << name(sounds.ambient_moving)
+               << ", \"engine_idle\": " << name(sounds.engine_idle)
+               << ", \"engine_moving\": " << name(sounds.engine_moving)
+               << ", \"fleet_move\": " << name(sounds.fleet_move)
                << ", \"ambient_min_delay_frames\": " << sounds.ambient_min_delay
                << ", \"ambient_max_delay_frames\": " << sounds.ambient_max_delay
                << ", \"select\": " << name(sounds.select) << ", \"move\": " << name(sounds.move)
@@ -190,14 +225,23 @@ void BattleAudio::write_report(std::ostream& output) const {
                    << name(voice.deactivated) << "]";
             inner = false;
         }
+        output << "}, \"ability_targets\": {";
+        inner = true;
+        for (const auto& [kind, cue] : sounds.ability_targets) {
+            output << (inner ? "" : ", ") << json(tactical::to_string(kind)) << ": " << name(cue);
+            inner = false;
+        }
         output << "}}";
         first = false;
     }
     output << "}";
     output << ", \"music_mode\": "
            << json(!music_ ? "none" : music_->mode() == audio::MusicDirector::Mode::battle ? "battle"
-                   : music_->mode() == audio::MusicDirector::Mode::ambient ? "ambient" : "none");
+                   : music_->mode() == audio::MusicDirector::Mode::ambient ? "ambient"
+                   : music_->mode() == audio::MusicDirector::Mode::victory ? "victory"
+                   : music_->mode() == audio::MusicDirector::Mode::defeat ? "defeat" : "none");
     strings("music", music_log_);
+    strings("music_streams", music_stream_log_);
     strings("responses", response_log_);
     strings("abilities", ability_log_);
     const auto starts = [&output, this](const char* name, const bool announcements) {
@@ -208,7 +252,13 @@ void BattleAudio::write_report(std::ostream& output) const {
             if (announcement != announcements) continue;
             output << (first_row ? "" : ", ") << "{\"reason\": " << json(row.reason) << ", \"event\": " << json(row.event)
                    << ", \"sample\": " << json(row.sample) << ", \"tick\": " << row.tick << ", \"volume\": " << row.volume
-                   << ", \"pitch\": " << row.pitch << "}";
+                   << ", \"pitch\": " << row.pitch << ", \"attached\": " << row.attached
+                   << ", \"localized\": " << (row.localized ? "true" : "false")
+                   << ", \"bus\": " << json(row.reason.starts_with("speech_") || row.localized ? "EAWR_Voice" : "EAWR_SFX")
+                   << ", \"position\": ";
+            if (row.position) output << "[" << (*row.position)[0] << ", " << (*row.position)[1] << ", " << (*row.position)[2] << "]";
+            else output << "null";
+            output << "}";
             first_row = false;
         }
         output << "]";

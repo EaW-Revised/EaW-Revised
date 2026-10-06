@@ -92,8 +92,12 @@ bool apply(SfxEvent& event, const std::string& tag, const std::string_view value
     else if (key == "MAX_VOLUME") integer(event.max_volume, 0, 100);
     else if (key == "MIN_PITCH") integer(event.min_pitch, 50, 200);
     else if (key == "MAX_PITCH") integer(event.max_pitch, 50, 200);
+    else if (key == "MIN_PAN2D") integer(event.min_pan, 0, 100);
+    else if (key == "MAX_PAN2D") integer(event.max_pan, 0, 100);
     else if (key == "MIN_PREDELAY") integer(event.min_predelay_ms, 0, std::numeric_limits<int>::max());
     else if (key == "MAX_PREDELAY") integer(event.max_predelay_ms, 0, std::numeric_limits<int>::max());
+    else if (key == "MIN_POSTDELAY") integer(event.min_postdelay_ms, 0, std::numeric_limits<int>::max());
+    else if (key == "MAX_POSTDELAY") integer(event.max_postdelay_ms, 0, std::numeric_limits<int>::max());
     else if (key == "VOLUME_SATURATION_DISTANCE") real(event.saturation_distance);
     else if (key == "LOOP_FADE_IN_SECONDS") real(event.loop_fade_in_seconds);
     else if (key == "LOOP_FADE_OUT_SECONDS") real(event.loop_fade_out_seconds);
@@ -282,11 +286,28 @@ std::string_view to_string(const Start::Result result) noexcept {
     case Start::Result::hidden: return "hidden";
     case Start::Result::no_samples: return "no_samples";
     case Start::Result::no_voice: return "no_voice";
+    case Start::Result::category_disabled: return "category_disabled";
+    case Start::Result::cinematic_feedback: return "cinematic_feedback";
+    case Start::Result::hud_speech: return "hud_speech";
+    case Start::Result::tutorial_hud: return "tutorial_hud";
+    case Start::Result::demo_dialog: return "demo_dialog";
+    case Start::Result::delete_pending: return "delete_pending";
+    case Start::Result::zero_gain: return "zero_gain";
+    case Start::Result::attached_loop: return "attached_loop";
     }
     return "playing";
 }
 
-Start Voices::start(const Request& request, const Vec3& listener, Random& random) {
+double category_gain(const SfxEvent& event, const MixLevels& levels) noexcept {
+    return std::clamp(levels.master, 0.0, 1.0)
+        * std::clamp(event.localized ? levels.speech : levels.sfx, 0.0, 1.0);
+}
+
+bool pauses_with_game(const SfxEvent& event, const bool spatial) noexcept {
+    return spatial || event.play_count == -1;
+}
+
+Start Voices::start(const Request& request, const Vec3& listener, Random& random, const Admission& admission) {
     Start start;
     const SfxEvent* event = request.event;
     const auto refuse = [&start](const Start::Result result) {
@@ -294,39 +315,42 @@ Start Voices::start(const Request& request, const Vec3& listener, Random& random
         return start;
     };
     if (event == nullptr || event->preset || event->play_count == 0) return refuse(Start::Result::preset);
+    // SND-16/17: forcing bypasses ordinary admission, never disabled categories.
+    if (event == admission.negative_feedback && admission.cinematic) return refuse(Start::Result::cinematic_feedback);
+    if ((!admission.localized && event->localized) || (!admission.unit_response && event->unit_response_vo)
+        || (!admission.hud && event->hud_vo) || (!admission.ambient && event->ambient_vo)) {
+        return refuse(Start::Result::category_disabled);
+    }
+    if (!request.forced) {
+        if (admission.demo_dialog && (!event->gui || event == admission.negative_feedback)) return refuse(Start::Result::demo_dialog);
+        if (event->hud_vo && admission.tutorial_tactical) return refuse(Start::Result::tutorial_hud);
+        if (event->hud_vo && admission.speech_stream) return refuse(Start::Result::hud_speech);
+    }
     // BA-04: Max_Instances 0 never plays; a 2D event at its limit is refused, a 3D one goes on to
     // the distance cull below.
-    if (event->max_instances == 0) return refuse(Start::Result::no_instances);
+    if (!request.forced && event->max_instances == 0) return refuse(Start::Result::no_instances);
     const bool three_d = event->is_3d && request.position.has_value();
     std::size_t instances = 0;
-    std::optional<std::size_t> farthest;
-    double farthest_distance = -1.0;
-    for (std::size_t index = 0; index < voices_.size(); ++index) {
-        if (voices_[index].event != event) continue;
-        ++instances;
-        if (is_3d_voice(index)) {
-            const double distance = squared(voices_[index].position, listener);
-            if (!farthest || farthest_distance < distance) {
-                farthest = index;
-                farthest_distance = distance;
-            }
-        }
+    for (const Voice& voice : voices_) {
+        if (voice.event == event && !voice.fading) ++instances;
     }
-    if (!three_d && instances >= static_cast<std::size_t>(event->max_instances)) {
+    if (!request.forced && !three_d && instances >= static_cast<std::size_t>(event->max_instances)) {
         return refuse(Start::Result::instance_limit);
     }
     // BA-05: one event with the same Overlap_Test playing keeps this one silent.
-    if (!event->overlap_test.empty()) {
+    if (!request.forced && !event->overlap_test.empty()) {
         for (const Voice& voice : voices_) {
-            if (voice.event != nullptr && voice.event->overlap_test == event->overlap_test) {
+            if (voice.event != nullptr && !voice.fading && voice.event->overlap_test == event->overlap_test) {
                 return refuse(Start::Result::overlap);
             }
         }
     }
     // BA-06: a Probability under 100 is a roll of 1..100.
-    if (event->probability < 100 && random.between(1, 100) > event->probability) return refuse(Start::Result::probability);
+    if (!request.forced && event->probability < 100 && random.between(1, 100) > event->probability) return refuse(Start::Result::probability);
     // BA-07: the sound of a unit the local player does not see does not play.
-    if (request.hidden) return refuse(Start::Result::hidden);
+    if (request.delete_pending) return refuse(Start::Result::delete_pending);
+    if (request.hidden && !admission.story_cinematic) return refuse(Start::Result::hidden);
+    start.admitted = true;
     if (event->samples.empty()) return refuse(Start::Result::no_samples);
     // BA-08: volume and pitch drawn from their ranges; the sample in turn or at random.
     start.volume = random.between(event->min_volume, event->max_volume) / 100.0;
@@ -340,21 +364,62 @@ Start Voices::start(const Request& request, const Vec3& listener, Random& random
         pick = static_cast<std::size_t>(random.between(0, static_cast<int>(event->samples.size()) - 1));
     }
     start.sample = event->samples[pick];
+    if (!three_d && start.volume <= 0.0) return refuse(Start::Result::zero_gain);
+    return allocate(request, listener, std::move(start));
+}
+
+Start Voices::allocate(const Request& request, const Vec3& listener, Start start) {
+    const auto* event = request.event;
+    const bool three_d = event->is_3d && request.position.has_value();
+    const auto refuse = [&start](const Start::Result result) {
+        start.result = result;
+        return start;
+    };
+    if (!three_d && start.volume <= 0.0) return refuse(Start::Result::zero_gain);
+    std::size_t instances = 0;
+    std::optional<std::size_t> farthest;
+    double farthest_distance = -1.0;
+    for (std::size_t index = 0; index < voices_.size(); ++index) {
+        if (voices_[index].event != event || voices_[index].fading) continue;
+        ++instances;
+        if (is_3d_voice(index)) {
+            const double distance = squared(voices_[index].position, listener);
+            if (!farthest || farthest_distance < distance) {
+                farthest = index;
+                farthest_distance = distance;
+            }
+        }
+    }
+    const double started_at = request.started_at.value_or(static_cast<double>(starts_++));
     if (!three_d) {
         for (std::size_t index = voices_3d; index < voices_.size(); ++index) {
             if (voices_[index].event == nullptr) {
-                voices_[index] = {event, {}};
+                voices_[index] = {event, {}, started_at};
                 start.voice = index;
                 return start;
             }
         }
-        return refuse(Start::Result::no_voice);
+        // SND-07: least important, then oldest; equal clocks retain the first slot.
+        std::size_t candidate = voices_3d;
+        for (std::size_t index = voices_3d + 1; index < voices_.size(); ++index) {
+            const Voice& current = voices_[candidate];
+            const Voice& next = voices_[index];
+            if (next.event->priority > current.event->priority
+                || (next.event->priority == current.event->priority && next.started_at < current.started_at)) {
+                candidate = index;
+            }
+        }
+        if (voices_[candidate].event->priority < event->priority) return refuse(Start::Result::no_voice);
+        voices_[candidate] = {event, {}, started_at};
+        start.voice = candidate;
+        start.stopped = candidate;
+        return start;
     }
     const Vec3 position = *request.position;
     const double distance = squared(position, listener);
     // BA-05 (3D): at Max_Instances the new instance plays only when it is not farther than the
     // farthest playing one, which it stops.
-    if (instances >= static_cast<std::size_t>(event->max_instances)) {
+    if (!request.forced && instances >= static_cast<std::size_t>(event->max_instances)) {
         if (!farthest || distance > farthest_distance) return refuse(Start::Result::instance_limit);
         voices_[*farthest] = {};
         start.stopped = farthest;
@@ -399,6 +464,254 @@ void Voices::finished(const std::size_t voice) {
 
 void Voices::set_position(const std::size_t voice, const Vec3& position) {
     if (is_3d_voice(voice) && voices_[voice].event != nullptr) voices_[voice].position = position;
+}
+
+void Voices::set_fading(const std::size_t voice) {
+    if (voice < voices_.size()) voices_[voice].fading = true;
+}
+
+double attached_gain(const bool silent, const bool model_hidden, const bool fogged, const bool story_cinematic) noexcept {
+    return silent || model_hidden || (fogged && !story_cinematic) ? 0.0 : 1.0;
+}
+
+EventQueue::Entry* EventQueue::find(const Handle handle) {
+    const auto found = handles_.find(handle);
+    return found == handles_.end() ? nullptr : found->second;
+}
+
+std::size_t EventQueue::instances(const SfxEvent* event) const {
+    return static_cast<std::size_t>(std::count_if(entries_.begin(), entries_.end(), [event](const Entry& entry) {
+        return entry.request.voice.event == event && !entry.fading && entry.stage != Stage::done;
+    }));
+}
+
+EventQueue::Accepted EventQueue::admit(const Request& request, Random& random, const Admission& admission) {
+    const auto* event = request.voice.event;
+    const auto refuse = [](const Start::Result result) { return Accepted{result, std::nullopt}; };
+    if (!event || event->preset || event->play_count == 0) return refuse(Start::Result::preset);
+    if (event == admission.negative_feedback && admission.cinematic) return refuse(Start::Result::cinematic_feedback);
+    if ((!admission.localized && event->localized) || (!admission.unit_response && event->unit_response_vo)
+        || (!admission.hud && event->hud_vo) || (!admission.ambient && event->ambient_vo)) {
+        return refuse(Start::Result::category_disabled);
+    }
+    if (!request.voice.forced) {
+        if (admission.demo_dialog && (!event->gui || event == admission.negative_feedback)) return refuse(Start::Result::demo_dialog);
+        if (event->hud_vo && admission.tutorial_tactical) return refuse(Start::Result::tutorial_hud);
+        if (event->hud_vo && admission.speech_stream) return refuse(Start::Result::hud_speech);
+        if (event->max_instances == 0) return refuse(Start::Result::no_instances);
+        for (const auto& entry : entries_) {
+            if (entry.fading || entry.stage == Stage::done) continue;
+            if (entry.request.voice.event == event && request.attachment != 0
+                && entry.request.attachment == request.attachment
+                && (event->play_count == -1 || request.continuous_main)) {
+                return refuse(Start::Result::attached_loop);
+            }
+        }
+        if (!(event->is_3d && request.voice.position) && instances(event) >= static_cast<std::size_t>(event->max_instances)) {
+            return refuse(Start::Result::instance_limit);
+        }
+        if (!event->overlap_test.empty()) {
+            for (const auto& entry : entries_) {
+                if (!entry.fading && entry.stage != Stage::done
+                    && entry.request.voice.event->overlap_test == event->overlap_test) return refuse(Start::Result::overlap);
+            }
+        }
+        if (event->probability < 100 && random.between(1, 100) > event->probability) return refuse(Start::Result::probability);
+    }
+    if (request.voice.delete_pending) return refuse(Start::Result::delete_pending);
+    if (request.voice.hidden && !admission.story_cinematic) return refuse(Start::Result::hidden);
+    // SND-05: synchronization occurs on admission; stage selection advances independent cursors later.
+    if (event->play_sequentially) {
+        auto& cursor = cursors_[event];
+        if (event->pre_samples.size() == event->samples.size()) cursor.pre = cursor.main;
+        if (event->post_samples.size() == event->samples.size()) cursor.post = cursor.main;
+    }
+    Entry entry;
+    entry.handle = next_++;
+    entry.request = request;
+    const Handle handle = entry.handle;
+    if (event->is_3d && request.voice.position) {
+        entries_.push_back(std::move(entry));
+        handles_[handle] = &entries_.back();
+    } else {
+        entries_.push_front(std::move(entry));
+        handles_[handle] = &entries_.front();
+    }
+    return {Start::Result::playing, handle};
+}
+
+std::vector<EventQueue::Chain> EventQueue::service(const double elapsed_ms, const bool paused,
+    const Vec3& listener, Random& random, const SfxRegistry& registry, const Backend& backend) {
+    std::vector<Entry*> order;
+    order.reserve(entries_.size());
+    for (auto& entry : entries_) order.push_back(&entry);
+    std::stable_sort(order.begin(), order.end(), [&listener](const Entry* a, const Entry* b) {
+        const auto distance = [&listener](const Entry* entry) {
+            return entry->request.voice.event->is_3d && entry->request.voice.position
+                ? squared(*entry->request.voice.position, listener) : -1.0;
+        };
+        return distance(a) < distance(b);
+    });
+    std::vector<Chain> chains;
+    for (auto* pointer : order) {
+        auto& entry = *pointer;
+        const auto* event = entry.request.voice.event;
+        const bool spatial = event->is_3d && entry.request.voice.position;
+        if (entry.stage == Stage::done || (paused && pauses_with_game(*event, spatial))) continue;
+        const double delta = std::max(0.0, elapsed_ms);
+        if (entry.fading) {
+            entry.fade_remaining_ms = std::max(0.0, entry.fade_remaining_ms - delta);
+            if (entry.fade_remaining_ms == 0.0 || (entry.voice && !backend.playing(*entry.voice))) {
+                if (entry.voice) backend.stop(*entry.voice);
+                entry.voice.reset();
+                entry.stage = Stage::done;
+            }
+            continue;
+        }
+        if (entry.voice) {
+            if (backend.playing(*entry.voice)) continue;
+            backend.stop(*entry.voice);
+            entry.voice.reset();
+            entry.stage = entry.stage == Stage::pre ? Stage::main
+                : entry.stage == Stage::main ? Stage::post : Stage::postdelay;
+            if (entry.stage == Stage::postdelay) entry.delay_ms = entry.postdelay_ms;
+            continue;
+        }
+        switch (entry.stage) {
+        case Stage::initialize:
+            entry.values.volume = random.between(event->min_volume, event->max_volume) / 100.0;
+            entry.values.pan = random.between(event->min_pan, event->max_pan) / 100.0;
+            entry.values.pitch = random.between(event->min_pitch, event->max_pitch) / 100.0;
+            entry.delay_ms = random.between(event->min_predelay_ms, event->max_predelay_ms);
+            entry.postdelay_ms = random.between(event->min_postdelay_ms, event->max_postdelay_ms);
+            // SND-08: no authored pre sample means the next service starts main directly.
+            entry.stage = entry.delay_ms > 0.0 ? Stage::predelay
+                : event->pre_samples.empty() ? Stage::main : Stage::pre;
+            break;
+        case Stage::predelay:
+            entry.delay_ms = std::max(0.0, entry.delay_ms - delta);
+            if (entry.delay_ms == 0.0) entry.stage = event->pre_samples.empty() ? Stage::main : Stage::pre;
+            break;
+        case Stage::pre:
+        case Stage::main:
+        case Stage::post: {
+            const auto& samples = entry.stage == Stage::pre ? event->pre_samples
+                : entry.stage == Stage::main ? event->samples : event->post_samples;
+            if (samples.empty()) {
+                entry.stage = entry.stage == Stage::pre ? Stage::main
+                    : entry.stage == Stage::main ? Stage::post : Stage::postdelay;
+                if (entry.stage == Stage::postdelay) entry.delay_ms = entry.postdelay_ms;
+                break;
+            }
+            auto& cursors = cursors_[event];
+            auto& cursor = entry.stage == Stage::pre ? cursors.pre : entry.stage == Stage::main ? cursors.main : cursors.post;
+            const auto pick = event->play_sequentially ? cursor % samples.size()
+                : static_cast<std::size_t>(random.between(0, static_cast<int>(samples.size()) - 1));
+            if (event->play_sequentially) cursor = (pick + 1) % samples.size();
+            entry.values.sample = samples[pick];
+            entry.values.admitted = true;
+            const bool continuous = entry.stage == Stage::main && (event->play_count == -1 || entry.request.continuous_main);
+            const auto start = backend.start({entry.handle, entry.request, entry.values, entry.stage, continuous});
+            if (start.stopped) {
+                // SND-08/18: release the stolen slot, then complete its former event loop.
+                for (auto& previous : entries_) {
+                    if (previous.handle != entry.handle && previous.voice == start.stopped) {
+                        previous.voice.reset();
+                        previous.stage = previous.fading ? Stage::done : Stage::complete;
+                    }
+                }
+            }
+            if (start.result == Start::Result::playing) entry.voice = start.voice;
+            else {
+                // SND-08/09/18: admitted allocation failures retain completion and chain precedence.
+                entry.stage = Stage::complete;
+            }
+            break;
+        }
+        case Stage::postdelay:
+            entry.delay_ms = std::max(0.0, entry.delay_ms - delta);
+            if (entry.delay_ms == 0.0) entry.stage = Stage::complete;
+            break;
+        case Stage::complete:
+            ++entry.completed;
+            ++completed_loops_;
+            if (event->play_count == -1 || entry.completed < event->play_count) entry.stage = Stage::initialize;
+            else {
+                const auto* authored = registry.find(event->chained);
+                const auto* chained = entry.chained && !entry.chained->is_3d ? entry.chained : authored;
+                if (!event->is_3d && chained && !chained->is_3d) {
+                    chains.push_back({chained, entry.request.attachment, chained == entry.chained, entry.attack});
+                }
+                entry.stage = Stage::done;
+            }
+            break;
+        case Stage::done: break;
+        }
+    }
+    std::erase_if(entries_, [this](const Entry& entry) {
+        if (entry.stage != Stage::done) return false;
+        handles_.erase(entry.handle);
+        return true;
+    });
+    return chains;
+}
+
+void EventQueue::stop(const Handle handle, const Backend& backend, const double fade_seconds) {
+    auto* entry = find(handle);
+    if (!entry || entry->stage == Stage::done || entry->fading) return;
+    entry->chained = nullptr;
+    if (entry->voice && fade_seconds > 0.0) {
+        entry->fading = true;
+        entry->fade_ms = fade_seconds * 1000.0;
+        entry->fade_remaining_ms = entry->fade_ms;
+        if (backend.fading) backend.fading(*entry->voice);
+    } else {
+        if (entry->voice) backend.stop(*entry->voice);
+        entry->voice.reset();
+        entry->stage = Stage::done;
+    }
+}
+
+void EventQueue::detach(const std::uint64_t source, const Backend& backend) {
+    if (source == 0) return;
+    for (auto& entry : entries_) {
+        if (entry.chain_source == source) entry.chained = nullptr;
+        if (entry.request.attachment != source) continue;
+        if (entry.voice) backend.stop(*entry.voice);
+        entry.voice.reset();
+        entry.chained = nullptr;
+        entry.stage = Stage::done;
+    }
+}
+
+void EventQueue::set_position(const Handle handle, const Vec3& position) {
+    if (auto* entry = find(handle)) entry->request.voice.position = position;
+}
+
+void EventQueue::chain(const Handle handle, const SfxEvent* event, const bool attack, const std::uint64_t source) {
+    if (auto* entry = find(handle); entry && !entry->fading && entry->stage != Stage::done) {
+        entry->chained = event;
+        entry->attack = attack;
+        entry->chain_source = source;
+    }
+}
+
+void EventQueue::cancel_missing_chains(const std::function<bool(std::uint64_t)>& alive) {
+    for (auto& entry : entries_) {
+        if (entry.chained && entry.chain_source != 0 && !alive(entry.chain_source)) entry.chained = nullptr;
+    }
+}
+
+bool EventQueue::active(const Handle handle) const {
+    const auto found = handles_.find(handle);
+    return found != handles_.end() && found->second->stage != Stage::done;
+}
+
+double EventQueue::fade(const Handle handle) const {
+    const auto found = handles_.find(handle);
+    if (found == handles_.end()) return 0.0;
+    const auto& entry = *found->second;
+    return entry.fading ? entry.fade_remaining_ms / entry.fade_ms : 1.0;
 }
 
 const SfxEvent* Voices::playing(const std::size_t voice) const {
@@ -460,6 +773,39 @@ MusicEvent parse_music_event(const std::string_view name, const std::span<const 
     return event;
 }
 
+std::string tactical_music_event(const std::span<const Field> fields, const bool won,
+                                 const std::string_view opposing_faction) {
+    const std::string_view key = won ? "Music_Event_Tactical_Win" : "Music_Event_Tactical_Lose";
+    const std::string override_key = std::string(key) + "_Vs_Faction";
+    std::string fallback;
+    for (const auto& [name, value] : fields) {
+        if (equals(name, key)) fallback = trim(value);
+        if (!equals(name, override_key)) continue;
+        const auto comma = value.find(',');
+        if (comma != std::string::npos && equals(trim(std::string_view(value).substr(0, comma)), opposing_faction)) {
+            return std::string(trim(std::string_view(value).substr(comma + 1)));
+        }
+    }
+    return fallback;
+}
+
+void MusicFade::begin(const double seconds) {
+    ending = false;
+    level = seconds > 0.0 ? 0.0 : 1.0;
+    slope = seconds > 0.0 ? 1.0 / seconds : 0.0;
+}
+
+void MusicFade::retire(const double seconds) {
+    ending = true;
+    slope = seconds > 0.0 ? -level / seconds : 0.0;
+    if (seconds <= 0.0) level = 0.0; // finite immediate policy; SND-U02 acoustic edge unverified
+}
+
+void MusicFade::advance(const double seconds) {
+    level = std::clamp(level + slope * std::max(0.0, seconds), 0.0, 1.0);
+    if (level == (ending ? 0.0 : 1.0)) slope = 0.0;
+}
+
 MusicDirector::MusicDirector(std::vector<const MusicEvent*> ambient, std::vector<const MusicEvent*> battle,
                              const std::uint64_t peace_ticks)
     : ambient_(std::move(ambient)), battle_(std::move(battle)), peace_ticks_(peace_ticks) {}
@@ -510,6 +856,18 @@ std::optional<MusicDirector::Cue> MusicDirector::track_ended() {
     const std::size_t index = next % current_->files.size();
     next = (index + 1) % current_->files.size();
     return Cue{current_, current_->files[index], mode_};
+}
+
+std::optional<MusicDirector::Cue> MusicDirector::result(const bool exact_local_winner, const MusicEvent* event) {
+    const Mode mode = exact_local_winner ? Mode::victory : Mode::defeat;
+    if (mode_ == mode || event == nullptr || event->files.empty()) return std::nullopt;
+    mode_ = mode;
+    if (current_ == event) return std::nullopt;
+    current_ = event;
+    auto& next = next_file_[event];
+    const auto index = next % event->files.size();
+    next = (index + 1) % event->files.size();
+    return Cue{event, event->files[index], mode};
 }
 
 } // namespace eawr::presentation::audio

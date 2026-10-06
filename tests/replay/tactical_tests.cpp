@@ -676,6 +676,9 @@ void test_gripper_metadata_is_not_canonical() {
         eawr::sim::math::Fixed::from_raw(100), eawr::sim::math::Fixed::from_raw(200),
         eawr::sim::math::Fixed::from_raw(300)};
     instance.squadron_in_idle_grid = true;
+    instance.squadron_idle_anchor = eawr::sim::math::Vec3{
+        eawr::sim::math::Fixed::from_raw(400), eawr::sim::math::Fixed::from_raw(500),
+        eawr::sim::math::Fixed::from_raw(600)};
     const tactical::TacticalSnapshot presented(0, {{1, 1}}, {instance}, {});
     expect(plain.canonical_bytes() == presented.canonical_bytes() && plain.sha256() == presented.sha256(),
         "WSU-34: icon velocity and idle-grid metadata do not change canonical bytes or hashes");

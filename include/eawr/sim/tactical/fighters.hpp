@@ -87,6 +87,7 @@ struct SpawnerProfile {
     std::uint32_t delay_frames{};           // trunc(Spawned_Squadron_Delay_Seconds x 30)
     std::vector<BayProfile> bays;           // HardPoints order
     bool mobile{};                          // it has a locomotor: its squadrons escort it (FL-07)
+    bool starbase{};                        // WSL-26: DUMMY_STAR_BASE admits allied players' pending free forces
     friend bool operator==(const SpawnerProfile&, const SpawnerProfile&) = default;
 };
 
@@ -272,6 +273,10 @@ struct SpawnDecision {
 [[nodiscard]] std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, SpawnerState& state,
     std::uint64_t seed, std::uint64_t frame, EntityId unit, const std::vector<bool>& bay_intact,
     bool suspended = false);
+
+// FL-14: use the ordinary bay draw without changing authored reserve/alive counters.
+[[nodiscard]] std::optional<std::uint32_t> free_garrison_bay(const SpawnerProfile& profile,
+    std::uint64_t seed, std::uint64_t frame, EntityId unit, const std::vector<bool>& bay_intact);
 
 // A launched squadron of `entry` left the session at `frame` (FL-08).
 void squadron_lost(const SpawnerProfile& profile, SpawnerState& state, std::uint32_t entry, std::uint64_t frame);

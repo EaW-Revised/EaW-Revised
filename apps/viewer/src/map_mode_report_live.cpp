@@ -136,7 +136,9 @@ void MapMode::State::write_report_camera(std::ostream& output) const {
             << ", \"final\": {\"target\": [" << camera.target[0] << ", "
             << camera.target[1] << ", " << camera.target[2] << "], \"eye\": ["
             << camera.eye[0] << ", " << camera.eye[1] << ", " << camera.eye[2]
-            << "], \"zoom\": " << bridge.controller().state().zoom
+            << "], \"near\": " << camera.near_plane << ", \"far\": " << camera.far_plane
+            << ", \"distance\": " << bridge.controller().state().distance
+            << ", \"zoom\": " << bridge.controller().state().zoom
             << ", \"pitch_degrees\": " << bridge.controller().state().pitch_degrees
             << ", \"orbit_pitch_offset_degrees\": " << bridge.controller().orbit_pitch_offset()
             << ", \"orbit_pitch_range_degrees\": [" << bridge.orbit_pitch_range().min_degrees

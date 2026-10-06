@@ -410,6 +410,7 @@ OR-01); S stops, A, M, T and G arm the attack, move, attack-move and guard modes
 selection, twice within a second focuses the camera); many wheel clicks out at the farthest zoom,
 or Insert, step into the tactical overview and the map overview. The arrows and the screen edge
 pan (`space-live-camera-bindings.json`); the middle button and wheel work as on the map camera.
+While dragging a space reinforcement, wheel up/down rotates its arrival facing by +15/-15 degrees per detent and rotates squadron preview offsets. That player's choice remains for following drops until another drag wheel gesture changes it; a new battle starts with the FoC facing. The wheel resumes camera zoom after placement ends. Scripted `--eawr-live-input <tick>:wheel:in` and `wheel:out` drive the same input path.
 A fighter or bomber squadron selects and takes orders as one unit, also through its icon, and FoC's
 selection circles, shield and health bars, squadron icons and hovered ships' hardpoint reticles are
 drawn in the world ([battle UI in the world](../../docs/behaviour/foc-battle-world-ui.md)).

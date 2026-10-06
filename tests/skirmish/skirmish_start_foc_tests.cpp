@@ -4,6 +4,114 @@ namespace skirmish_start_test_support {
 
 namespace {
 
+void foc_station_refill(const skirmish::SkirmishStart& start, const eawr::units::UnitTables& tables) {
+    const auto content = skirmish::session_content(tables);
+    expect(static_cast<bool>(content), "WSL-26: installed station refill content binds");
+    if (!content) return;
+    const auto& motion = content.value().motion;
+    for (const auto* faction : {"Rebel", "Empire"}) for (int level = 1; level <= 5; ++level) {
+        const auto name = std::string("Skirmish_") + faction + "_Star_Base_" + std::to_string(level);
+        const auto* profile = motion.squadrons.find_spawner(skirmish::type_id(name));
+        expect(profile && profile->starbase && !profile->mobile && !profile->bays.empty(),
+            "WSL-26: installed station role and bay bind: " + name);
+    }
+    for (const auto& binding : start.setup.free_garrisons) {
+        auto initial = start.setup;
+        const auto station = std::find_if(start.units.begin(), start.units.end(), [&](const auto& unit) {
+            return unit.role == skirmish::UnitRole::station && unit.state.owner == binding.player;
+        });
+        expect(station != start.units.end(), "WSL-26: installed free player has a station");
+        if (station == start.units.end()) continue;
+        const auto registered = [&](const auto id) {
+            return std::find(binding.registered.begin(), binding.registered.end(), id) != binding.registered.end();
+        };
+        std::erase_if(initial.squadrons, [&](const auto& group) {
+            return std::none_of(group.members.begin(), group.members.end(), registered);
+        });
+        std::erase_if(initial.units, [&](const auto& unit) {
+            return unit.entity_id != station->state.entity_id && !registered(unit.entity_id)
+                && std::none_of(initial.squadrons.begin(), initial.squadrons.end(), [&](const auto& group) {
+                    return group.container == unit.entity_id;
+                });
+        });
+        initial.free_garrisons = {binding};
+        // WSL-24/25: damage at command tick 9 depletes on logical frame 10;
+        // the 600-frame timer matures after the hangars on frame 610.
+        constexpr std::uint64_t depleted = 10;
+        const auto ready = depleted + binding.delay_frames;
+        const auto service = tactical::initial_spawner(initial.seed, 1, station->state.entity_id).next_service_frame;
+        const auto first = service + ((ready - service) / 30 + 1) * 30;
+        const auto* profile = motion.squadrons.find_spawner(station->state.type_id);
+        if (!profile) continue;
+        std::vector<std::string> hashes;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(initial, content.value().sensors,
+                content.value().durability, motion);
+            expect(static_cast<bool>(created), "WSL-26: installed isolated free garrison creates");
+            if (!created) return;
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit({{depleted - 1, binding.player, 0}, binding.registered,
+                tactical::DamagePayload{whole(1000000)}})), "WSL-23: full installed free depletion submits");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            while (world.completed_tick() < first + profile->delay_frames) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "WSL-26: installed refill step succeeds");
+                if (!step) return;
+                const auto frame = world.completed_tick();
+                if (workers == 1) hashes.push_back(step.value().state_sha256);
+                else expect(step.value().state_sha256 == hashes[frame - 1],
+                    "WSL-26: installed refill every tick equals on 1/2/4/8 workers");
+                if (frame >= depleted && frame < first)
+                    expect(world.squadrons().empty(), "WSL-24/25: no installed free birth before first eligible service");
+                if (frame == first || frame == first + profile->delay_frames) {
+                    const auto count = frame == first ? 1U : 2U;
+                    expect(world.squadrons().size() == count,
+                        "WSL-26/27: installed station launches ordered free templates at sourced frames");
+                    for (std::size_t index = 0; index < world.squadrons().size(); ++index) {
+                        const auto& group = world.squadrons()[index];
+                        const auto state = world.squadron_state(group.container);
+                        expect(state && state->spawner == 0 && index < binding.templates.size()
+                            && state->squadron_type == binding.templates[index],
+                            "WSL-27: installed replacement is a player garrison, outside authored counters");
+                        for (const auto id : group.members) {
+                            const auto units = world.units();
+                            const auto craft = std::find_if(units.begin(), units.end(), [id](const auto& unit) {
+                                return unit.entity_id == id;
+                            });
+                            expect(craft != units.end() && craft->owner == binding.player,
+                                "WSL-27: installed free births retain player ownership");
+                        }
+                    }
+                }
+            }
+            if (workers == 1) std::cout << "Station refill player " << binding.player << ": depletion "
+                << depleted << ", timer " << ready << ", expected births " << first << '/' << first + profile->delay_frames << '\n';
+        }
+        // WSL-12/17: the role affects pending-player admission, not ordinary
+        // authored launches. Compare the same stock hangar with the role removed.
+        initial.units = {station->state};
+        initial.units.front().garrison_enabled = true;
+        initial.squadrons.clear();
+        initial.free_garrisons.clear();
+        auto carrier_motion = motion;
+        for (auto& hangar : carrier_motion.squadrons.spawners)
+            if (hangar.type_id == station->state.type_id) hangar.starbase = false;
+        auto with_role = tactical::TacticalSession::create(initial, {}, content.value().durability, motion);
+        auto without_role = tactical::TacticalSession::create(initial, {}, content.value().durability, carrier_motion);
+        expect(with_role && without_role, "WSL-12: installed authored station hangar controls create");
+        if (!with_role || !without_role) return;
+        for (std::uint64_t frame = 1; frame <= service + profile->delay_frames; ++frame) {
+            const auto left = with_role.value().step(eawr::sim::InlineExecutor{});
+            const auto right = without_role.value().step(eawr::sim::InlineExecutor{});
+            expect(left && right && left.value().state_sha256 == right.value().state_sha256,
+                "WSL-12/17: ordinary installed hangar launch unchanged by station role");
+            if (frame == service) expect(with_role.value().squadrons().size() == 1,
+                "WSL-07: ordinary installed hangar first launch at its original service frame");
+        }
+        expect(with_role.value().squadrons().size() == 2, "WSL-18: ordinary installed hangar keeps launch spacing");
+    }
+}
+
 void foc_ffa_visibility(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
     const eawr::units::UnitTables& tables) {
     const auto sensors = skirmish::sensor_table(tables);
@@ -122,6 +230,7 @@ void foc_reinforced_victory(const skirmish::SkirmishStart& start, const skirmish
         eawr::sim::math::identity_quat(), {}},
         {2, victory, 2, {whole(3500), whole(500), whole(-110)}, eawr::sim::math::identity_quat(), {}}};
     initial.squadrons.clear();
+    initial.free_garrisons.clear(); // this carrier-only world has no free starting force
     const auto menu = std::find_if(economy.value().menus.begin(), economy.value().menus.end(), [&](const auto& row) {
         return row.station == initial.units.front().type_id && row.faction == faction;
     });
@@ -591,8 +700,8 @@ void foc_start(const std::filesystem::path& fixtures) {
                "SK-12: slot 2 MP_Color_Red");
         expect(rebel.combat_power_tick_zero == whole(13525) && empire.combat_power_tick_zero == whole(9590),
                "SK-24: tick-zero AI_Combat_Power");
-        expect(rebel.combat_power_launches == whole(1050) && empire.combat_power_launches == whole(1455),
-               "SK-24: SK-23 launch power");
+        expect(rebel.combat_power_launches == Fixed{} && empire.combat_power_launches == whole(485),
+               "FL-13: only the Empire's carrier contributes launch power");
         const std::vector<std::pair<std::string, std::int32_t>> non_playable{
             {"Pirates", 2}, {"Neutral", 3}, {"Hostile", 4}, {"Sarlacc", 5}, {"Hutts", 7}};
         for (std::size_t index = 0; index < non_playable.size(); ++index) {
@@ -635,10 +744,26 @@ void foc_start(const std::filesystem::path& fixtures) {
                "SK-20 to SK-22 unit " + std::to_string(index + 1) + " " + lobby[index].first);
     }
     foc_placement(start, tables.value());
+    foc_station_refill(start, tables.value());
     std::size_t map_objects = 0;
     for (const auto& unit : start.units) map_objects += unit.role == skirmish::UnitRole::map_object ? 1U : 0U;
     expect(map_objects == 23, "SK-04: 6 extractor pads, 7 laser pads, dock, gravity well, 8 containers");
-    expect(start.launches.size() == 6, "SK-23: two station launches each and the Acclamator's two");
+    expect(start.launches.size() == 2 && std::all_of(start.launches.begin(), start.launches.end(),
+        [](const auto& launch) { return launch.spawner_type == "Acclamator_Assault_Ship"; }),
+        "FL-13: only the Acclamator's two authored garrison entries remain");
+    for (const auto& unit : start.units) {
+        expect(unit.state.garrison_enabled == (unit.role != skirmish::UnitRole::station),
+            "FL-13: installed skirmish stations disable authored garrisons per object");
+    }
+    expect(start.setup.free_garrisons.size() == 2
+        && std::all_of(start.setup.free_garrisons.begin(), start.setup.free_garrisons.end(), [](const auto& binding) {
+            return binding.delay_frames == 600 && binding.templates.size() == 2 && !binding.registered.empty();
+        }), "FL-14: installed factions record two free templates and their authored 20-second delay");
+    for (const auto& binding : start.setup.free_garrisons) for (const auto id : binding.registered) {
+        const auto unit = std::find_if(start.units.begin(), start.units.end(), [id](const auto& value) { return value.state.entity_id == id; });
+        expect(unit != start.units.end() && unit->role == skirmish::UnitRole::craft && unit->state.owner == binding.player,
+            "FL-14: installed free garrison registers actual craft, excluding team containers and purchased/fleet ships");
+    }
     expect(start.markers.size() == 10, "SK-03: station, base position and three spawn markers per team");
     // #68, #271 V-01, V-03: REVEAL stations and ships, the Y-Wing craft, and the squadrons
     // through their team containers.

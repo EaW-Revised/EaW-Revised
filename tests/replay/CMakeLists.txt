@@ -287,7 +287,8 @@ add_test(
     COMMAND tactical_ion_tests
 )
 add_executable(tactical_ion_shot_tests ion_shot_tests.cpp)
-target_link_libraries(tactical_ion_shot_tests PRIVATE eawr::sim eawr::platform)
+target_link_libraries(tactical_ion_shot_tests PRIVATE eawr::sim eawr::platform eawr::script_foc)
+target_include_directories(tactical_ion_shot_tests PRIVATE "${PROJECT_SOURCE_DIR}/src/script/foc")
 target_compile_features(tactical_ion_shot_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_ion_shot_tests)
 add_test(

@@ -242,6 +242,29 @@ void test_camera_relative_sky() {
     }
 }
 
+void test_config_free_laser_camera() {
+    eawr::presentation::FixedCamera fixed;
+    fixed.eye = {0.0F, 707.10678F, 2207.10678F};
+    fixed.target = {0.0F, 0.0F, 1500.0F};
+    fixed.vertical_fov_degrees = 60.0F;
+    const auto render = space::environment_view_camera(fixed);
+    eawr::presentation::camera::Constants tactical;
+    tactical.near_clip = 10.0F;
+    tactical.far_clip = 7000.0F;
+    const auto laser = space::environment_laser_camera(render, tactical);
+    expect(render.far_plane == 60000.0F && laser.near_plane == 10.0F && laser.far_plane == 7000.0F,
+           "config-free laser camera uses tactical planes while render keeps the sky range");
+    expect(laser.eye == render.eye && laser.target == render.target && laser.up == render.up
+               && laser.vertical_fov_degrees == render.vertical_fov_degrees
+               && laser.width == render.width && laser.height == render.height,
+           "laser clips preserve the fixed drawn pose, FOV and viewport without a bridge");
+    tactical.near_clip = 20.0F;
+    tactical.far_clip = 9000.0F;
+    const auto overridden = space::environment_laser_camera(render, tactical);
+    expect(overridden.near_plane == 20.0F && overridden.far_plane == 9000.0F,
+           "laser planes follow supplied XML or bridge override constants");
+}
+
 } // namespace
 
 int main() {
@@ -251,6 +274,7 @@ int main() {
     test_sunlight_glow_offset();
     test_default_camera();
     test_camera_relative_sky();
+    test_config_free_laser_camera();
     if (failures != 0) {
         std::cerr << failures << " environment scene contract failure(s)\n";
         return 1;

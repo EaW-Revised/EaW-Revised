@@ -109,7 +109,7 @@ struct SkirmishSetupMode::State final {
     bool two_vs_two{};
     bool policy_test{};
     bool startup_metrics{};
-    bool visible{true}, test{}, captured{};
+    bool visible{true}, test{}, captured{}, capture_error_reported{}, bench_started{};
     std::string failure;
     std::string notice;
 
@@ -139,7 +139,7 @@ bool SkirmishSetupMode::State::load() {
     roots.emplace_back("expansion", expansion);
     roots.emplace_back("base", base);
     auto chain = vfs::resolve_manifest_chain(roots);
-    if (!chain) { failure = chain.error().message; return false; }
+    if (!chain) { failure = core::format_diagnostic(chain.error()); return false; }
     std::vector<vfs::MountSpec> specs;
     std::vector<std::string> layers;
     for (auto& manifest : chain.value()) {
@@ -147,10 +147,10 @@ bool SkirmishSetupMode::State::load() {
         specs.push_back(std::move(manifest.mount));
     }
     auto mounted = vfs::Vfs::mount(specs);
-    if (!mounted) { failure = mounted.error().message; return false; }
+    if (!mounted) { failure = core::format_diagnostic(mounted.error()); return false; }
     filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted).value());
     auto objects = data::load_catalog(*filesystem, profile == "foc" ? data::Profile::foc : data::Profile::remake);
-    if (!objects) { failure = objects.error().message; return false; }
+    if (!objects) { failure = core::format_diagnostic(objects.error()); return false; }
     catalog = std::make_shared<const data::Catalog>(std::move(objects.value().catalog));
     content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, std::move(layers)});
     auto colours = skirmish::read_lobby_colours(*filesystem);
@@ -571,6 +571,7 @@ void SkirmishSetupMode::State::process_options() {
 
 SkirmishSetupMode::SkirmishSetupMode(Options options) : state_(std::make_unique<State>(std::move(options))) {}
 SkirmishSetupMode::~SkirmishSetupMode() = default;
+const std::string& SkirmishSetupMode::failure() const { return state_->failure; }
 bool SkirmishSetupMode::ready(Node3D& host) {
     state_->host = &host;
     if (!state_->load()) { UtilityFunctions::printerr(text(state_->failure)); return false; }
@@ -597,9 +598,15 @@ void SkirmishSetupMode::process() {
     state.validate();
     ++state.frames;
     if (!state.captured && state.frames >= (state.two_vs_two && state.test ? 94U : state.policy_test ? 114U : state.three_players ? 98U : state.test ? 78U : 30U) && !state.options.capture_path.empty()) {
-        std::filesystem::create_directories(state.options.capture_path.parent_path());
+        std::error_code directory_error;
+        std::filesystem::create_directories(state.options.capture_path.parent_path(), directory_error);
         auto image = state.host->get_viewport()->get_texture()->get_image();
-        state.captured = image.is_valid() && image->save_png(text(ViewerPath::utf8(state.options.capture_path))) == OK;
+        state.captured = !directory_error && image.is_valid()
+            && image->save_png(text(ViewerPath::utf8(state.options.capture_path))) == OK;
+        if (!state.captured && !state.capture_error_reported) {
+            state.capture_error_reported = true;
+            UtilityFunctions::printerr("EAWR setup capture failed: ", text(ViewerPath::utf8(state.options.capture_path)));
+        }
     }
     // GPU contract hook: real GUI pointer/key events, then the ordinary Start handler.
     if (state.test) {
@@ -646,7 +653,11 @@ void SkirmishSetupMode::process() {
             return;
         }
         if (state.benchmark) {
-            if (state.frames == 60) click(state.start->get_global_rect().get_center());
+            // A requested setup capture must finish before the bench leaves this screen.
+            if (!state.bench_started && state.frames >= 60 && (state.options.capture_path.empty() || state.captured)) {
+                state.bench_started = true;
+                click(state.start->get_global_rect().get_center());
+            }
         } else if (state.frames == (state.three_players ? 82U : 62U)) {
             click(state.colour[0]->get_global_rect().get_center());
         } else if (state.frames >= (state.three_players ? 84U : 64U)
@@ -735,6 +746,8 @@ void SkirmishSetupMode::show(std::string message) {
     state_->validate();
     state_->test = state_->benchmark;
     state_->frames = 0;
+    state_->bench_started = false;
+    state_->capture_error_reported = false;
     if (!state_->options.capture_path.empty()) {
         state_->options.capture_path = state_->options.capture_path.parent_path()
             / (state_->options.capture_path.stem().string() + ".returned.png");

@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 from test_space_map_mode import decode_png, strict_json  # noqa: E402
 from viewer_mode_sources import source_text  # noqa: E402
+from battle_input_test_support import squadron_members  # noqa: E402
 
 CORUSCANT = "data/art/maps/_mp_space_coruscant.ted"
 CAMERA = ROOT / "apps/viewer/project/config/coruscant-live-session-camera.xml"

@@ -75,6 +75,16 @@ std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, Spaw
     return decision;
 }
 
+std::optional<std::uint32_t> free_garrison_bay(const SpawnerProfile& profile, const std::uint64_t seed,
+    const std::uint64_t frame, const EntityId unit, const std::vector<bool>& bay_intact) {
+    std::vector<std::uint32_t> bays;
+    for (std::uint32_t index = 0; index < profile.bays.size(); ++index)
+        if (index < bay_intact.size() && bay_intact[index]) bays.push_back(index);
+    if (bays.empty()) return std::nullopt;
+    CombatRandom draw(seed, frame, unit, bay_slot);
+    return bays[draw.uniform(0, static_cast<std::uint32_t>(bays.size() - 1))];
+}
+
 void squadron_lost(const SpawnerProfile& profile, SpawnerState& state, const std::uint32_t entry, const std::uint64_t frame) {
     // FL-08: the entries up to the lost one were all full: the next launch waits a full delay.
     bool full = true;

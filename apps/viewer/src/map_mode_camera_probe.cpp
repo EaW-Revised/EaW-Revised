@@ -350,7 +350,13 @@ void MapMode::State::camera_selftest_tick() {
         break;
     // A middle drag without Ctrl translates (FoC); left and down, away from the X clamp.
     case 6: inject_map_motion(centre, Vector2(-20.0F, 20.0F)); break;
+    case 7:
+        map_camera_zoom_mark = map_camera->controller().state().zoom;
+        inject_map_button(MOUSE_BUTTON_WHEEL_DOWN, centre);
+        break;
     case 8:
+        check("wheel ignored during middle translation",
+            map_camera->controller().state().zoom == map_camera_zoom_mark);
         check("grabbed motion translates without turning", locked ? unchanged()
             : map_camera->controller().yaw_degrees() == map_camera->config().yaw_degrees
                 && map_camera->frame().target[0] < map_camera_mark[0]
@@ -466,9 +472,10 @@ void MapMode::State::camera_selftest_tick() {
     // horizon (#348 owner deviation: FoC land tilts 0 per mouse unit).
     case 42:
         inject_map_motion(centre, Vector2(8.0F, -40.0F), true);
+        inject_map_button(MOUSE_BUTTON_WHEEL_DOWN, centre, true, true);
         inject_map_ctrl(true, true);
         break;
-    case 44:
+    case 44: {
         check("Ctrl grabbed motion rotates yaw and tilts", locked ? unchanged()
             : map_camera->controller().yaw_degrees() < map_camera_yaw_mark
                 && map_camera->controller().state().pitch_degrees < map_camera_pitch_mark
@@ -476,9 +483,29 @@ void MapMode::State::camera_selftest_tick() {
                 && map_camera->controller().state().zoom == map_camera_zoom_mark
                 && orbit_focus_at_centre(map_camera->frame(), map_camera_mark,
                     map_camera_orbit_radius_mark));
+        check("wheel ignored during middle rotation",
+            map_camera->controller().state().zoom == map_camera_zoom_mark);
+        bool continuous = true;
+        for (const float direction : {-1.0F, 1.0F}) {
+            for (int drag = 0; drag < 12; ++drag) {
+                const float before = map_camera->controller().yaw_degrees();
+                const float width = static_cast<float>(map_camera->frame().width);
+                inject_map_motion(centre, Vector2(direction * width, 0.0F), true);
+                Input::get_singleton()->flush_buffered_events();
+                static_cast<void>(map_camera->step(0.0F));
+                const float after = map_camera->controller().yaw_degrees();
+                const float expected = -direction * 100.0F
+                    * map_camera->constants().yaw_per_mouse_unit;
+                continuous = continuous && (locked ? unchanged()
+                    : after >= -180.0F && after < 180.0F
+                        && std::abs(std::remainder(after - before - expected, 360.0F)) < 0.01F);
+            }
+        }
+        check("full width drags preserve yaw continuity", continuous);
         inject_map_button(MOUSE_BUTTON_MIDDLE, centre, false, true);
         inject_map_ctrl(false);
         break;
+    }
     // A Ctrl click does not reset; a plain middle click resets the view in place.
     case 46:
         inject_map_ctrl(true);

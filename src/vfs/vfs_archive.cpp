@@ -29,6 +29,15 @@ core::Diagnostic error(
 }
 
 
+core::Diagnostic native_io_error(const std::filesystem::path& path, const std::string_view operation,
+    std::optional<std::string> logical_path, std::optional<std::string> source_id) {
+    const auto utf8 = path.generic_u8string();
+    const std::string name(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+    return error(diagnostic_codes::native_io,
+        std::string(operation) + " '" + name + "'. Check read permissions for this account "
+        "and verify or repair the FoC installation.", std::move(logical_path), std::move(source_id));
+}
+
 std::uint16_t decode_u16(const std::array<unsigned char, 2>& bytes) {
     return static_cast<std::uint16_t>(bytes[0]) |
            static_cast<std::uint16_t>(static_cast<std::uint16_t>(bytes[1]) << 8U);
@@ -47,7 +56,7 @@ bool read_exact(std::ifstream& stream, void* target, const std::size_t size) {
     return stream.gcount() == static_cast<std::streamsize>(size);
 }
 
-core::Result<ParsedMeg> parse_meg(
+static core::Result<ParsedMeg> parse_meg_records(
     const std::filesystem::path& archive_path,
     const std::string& source_id,
     const std::string& logical_prefix
@@ -55,21 +64,13 @@ core::Result<ParsedMeg> parse_meg(
     std::error_code ec;
     const auto archive_size = std::filesystem::file_size(archive_path, ec);
     if (ec) {
-        return core::Result<ParsedMeg>::failure(error(
-            diagnostic_codes::native_io,
-            "cannot determine archive size",
-            std::nullopt,
-            source_id
-        ));
+        return core::Result<ParsedMeg>::failure(native_io_error(
+            archive_path, "cannot determine archive size", std::nullopt, source_id));
     }
     std::ifstream input(archive_path, std::ios::binary);
     if (!input) {
-        return core::Result<ParsedMeg>::failure(error(
-            diagnostic_codes::native_io,
-            "cannot open archive",
-            std::nullopt,
-            source_id
-        ));
+        return core::Result<ParsedMeg>::failure(native_io_error(
+            archive_path, "cannot read archive", std::nullopt, source_id));
     }
     std::array<unsigned char, 4> word{};
     if (!read_exact(input, word.data(), word.size())) {
@@ -185,5 +186,22 @@ core::Result<ParsedMeg> parse_meg(
     return core::Result<ParsedMeg>::success(std::move(parsed));
 }
 
+
+core::Result<ParsedMeg> parse_meg(
+    const std::filesystem::path& archive_path,
+    const std::string& source_id,
+    const std::string& logical_prefix
+) {
+    auto parsed = parse_meg_records(archive_path, source_id, logical_prefix);
+    if (!parsed && parsed.error().code != diagnostic_codes::native_io) {
+        auto diagnostic = parsed.error();
+        const auto utf8 = archive_path.generic_u8string();
+        diagnostic.message += " in archive '" +
+            std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size()) +
+            "'. Verify or repair the FoC installation.";
+        return core::Result<ParsedMeg>::failure(std::move(diagnostic));
+    }
+    return parsed;
+}
 
 } // namespace eawr::vfs

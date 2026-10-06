@@ -4,6 +4,7 @@
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/space/snapshot_index.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
 
@@ -27,9 +28,6 @@ namespace {
 // #862: how long an ability shot's projectile ID is remembered after its launch tick (its flight
 // and hit fall well inside: a shot's Max_Travel_Distance over its speed is far shorter).
 constexpr std::uint64_t ability_projectile_memory = 900;
-// GAMECONSTANTS.XML Laser_Beam_Z_Scale_Factor and Laser_Kite_Z_Scale_Factor (BP-04, BP-08).
-constexpr float beam_z_scale = 8.0F;
-constexpr float kite_z_scale = 1.2F;
 [[nodiscard]] float dot(const V a, const V b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 [[nodiscard]] V cross(const V a, const V b) {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -61,7 +59,7 @@ struct View final {
     return view;
 }
 
-// The debug build's normalised view depth (BP-17): (view depth - near) / (far - near).
+// BP-04/BP-07: normalised linear view depth, not the projected depth-buffer value.
 [[nodiscard]] float normalized_view_z(const View& view, const V point) {
     return (dot(sub(point, view.eye), view.forward) - view.near_plane) / (view.far_plane - view.near_plane);
 }
@@ -185,19 +183,73 @@ const BattleEffects::ProjectileLook* BattleEffects::look_of(const tactical::Proj
     return weapon == type->second.weapons.end() ? nullptr : &weapon->second;
 }
 
+void BattleEffects::observe_projectiles(const tactical::TacticalSnapshot& previous,
+                                        const tactical::TacticalSnapshot& latest, const double presented_tick,
+                                        ProjectileObserver observer) {
+    projectile_observer_ = std::move(observer);
+    const auto observe = [&](const tactical::Projectile& projectile, const double tick,
+                             const tactical::TacticalSnapshot& snapshot) {
+        // Historical observations need only this shot's metadata. Reuse the
+        // snapshot's ordered indices, without traversing every unit per tick.
+        if (const auto* shooter = space::find_instance(snapshot, projectile.shooter))
+            entity_types_[projectile.shooter] = shooter->type_id;
+        const auto spawns = snapshot.ability_spawns();
+        const auto spawn = std::lower_bound(spawns.begin(), spawns.end(), projectile.id,
+            [](const auto& item, const std::uint64_t id) { return item.id < id; });
+        if (spawn != spawns.end() && spawn->id == projectile.id)
+            spawned_projectile_types_[projectile.id] = spawn->type;
+        auto& state = projectile_visibility_[projectile.id];
+        state.owner = projectile.owner;
+        if (const auto* look = look_of(projectile)) state.look = look;
+        const auto fog_tick = snapshot.completed_tick();
+        const bool limbo = projectile.muzzle_delay_until != 0 && fog_tick <= projectile.muzzle_delay_until;
+        state.hide.advance(tick, limbo, state.look && state.look->immediate_fog, [&] {
+            return !state.look || !state.look->hide_when_fogged
+                || (projectile_observer_ && projectile_observer_(projectile.owner, projectile.position, fog_tick));
+        });
+    };
+    // Retain terminal owner/look even when the latest snapshot removed the shot.
+    for (const auto& projectile : previous.projectiles()) {
+        if (!projectile_visibility_.contains(projectile.id))
+            observe(projectile, static_cast<double>(previous.completed_tick()), previous);
+    }
+    for (const auto& projectile : latest.projectiles()) observe(projectile, presented_tick, latest);
+}
+
+bool BattleEffects::projectile_terminal_admitted(const tactical::CombatEvent& event) const {
+    const auto state = projectile_visibility_.find(event.target);
+    if (state == projectile_visibility_.end()) return false;
+    // WPJ-40: decoration creation requires both model admission and the
+    // projectile object's current local fog query, independent of endpoints.
+    return state->second.hide.drawn() && projectile_observer_
+        && projectile_observer_(state->second.owner, event.aim, event.tick);
+}
+
+float BattleEffects::projectile_model_opacity(const std::size_t ship) const {
+    const auto slot = model_ship_slot_.find(ship);
+    if (slot == model_ship_slot_.end()) return 1.0F;
+    const auto pool = model_pools_.find(slot->second.first);
+    if (pool == model_pools_.end()) return 0.0F;
+    const auto id = pool->second.slots.bound(slot->second.second);
+    if (!id) return 0.0F;
+    const auto state = projectile_visibility_.find(*id);
+    return state != projectile_visibility_.end() ? state->second.hide.opacity() : 0.0F;
+}
+
 void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& previous,
                                            const tactical::TacticalSnapshot& latest, const double alpha,
-                                           const UnitLookup& units, std::vector<SpacePopulation::LivePose>& live) {
+                                           const UnitLookup&, std::vector<SpacePopulation::LivePose>& live) {
     modelled_now_.clear();
     if (released_ || model_pools_.empty()) return;
     note_types(previous, latest);
-    // Per pool, the model projectiles the local player sees (BP-09), ascending ID.
+    // WPJ-38/39: per pool, projectile observer admission, ascending ID.
     std::map<std::string, std::vector<const tactical::Projectile*>> flying;
     for (const tactical::Projectile& projectile : latest.projectiles()) {
         if (projectile.muzzle_delay_until != 0 && latest.completed_tick() <= projectile.muzzle_delay_until) continue;
         const ProjectileLook* look = look_of(projectile);
         if (look == nullptr || look->render != Render::model) continue;
-        if (!units(projectile.shooter) && !units(projectile.target)) continue;
+        const auto visibility = projectile_visibility_.find(projectile.id);
+        if (visibility == projectile_visibility_.end() || !visibility->second.hide.drawn()) continue;
         flying[look->projectile].push_back(&projectile);
     }
     const auto earlier = previous.projectiles();
@@ -251,6 +303,8 @@ std::optional<SpacePopulation::LivePose> BattleEffects::projectile_model_pose_at
     // the one it just computed for the frame's own (later) presented tick.
     const auto projectile = pool->second.slots.bound_before(found->second.second);
     if (!projectile) return std::nullopt;
+    const auto visibility = projectile_visibility_.find(*projectile);
+    if (visibility == projectile_visibility_.end() || !visibility->second.hide.drawn()) return std::nullopt;
     const auto base = static_cast<std::uint64_t>(std::max(0.0, std::floor(tick + 1.0e-9)));
     const auto before = snapshot_at(base);
     const auto after = snapshot_at(base + 1U);
@@ -333,7 +387,8 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             continue;
         }
         // HIDE_WHEN_FOGGED, approximated: shown while the local player sees its shooter or target.
-        if (!units(projectile.shooter) && !units(projectile.target)) {
+        const auto visibility = projectile_visibility_.find(projectile.id);
+        if (visibility == projectile_visibility_.end() || !visibility->second.hide.drawn()) {
             ++projectiles_hidden_;
             continue;
         }
@@ -364,11 +419,16 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         if (look->render == Render::kite) {
             // BP-02 to BP-04: a diamond about the projectile, its long point towards B2, i.e. trailing
             // the flight; the glow cell centres on the projectile, so the thick end leads.
-            const float width = look->width * (kite_z_scale * normalized_view_z(view, centre) + 1.0F);
+            const float width = presentation_constants::laser_width(look->width, laser_scales_.kite, normalized_view_z(view, centre));
+            max_kite_width_ = std::max(max_kite_width_, width);
+            if (!first_kite_depth_) first_kite_depth_ = std::array<float, 4>{
+                dot(sub(centre, view.eye), view.forward), normalized_view_z(view, centre),
+                laser_scales_.kite * normalized_view_z(view, centre) + 1.0F, width};
             const float reach = std::max(1.0F, look->length * axes.across);
             const float u0 = look->slot[0] / 8.0F;
             const float v0 = look->slot[1] / 8.0F;
-            const particles::Color colour{look->colour[0], look->colour[1], look->colour[2], look->colour[3]};
+            const particles::Color colour{look->colour[0], look->colour[1], look->colour[2],
+                look->colour[3] * visibility->second.hide.opacity()};
             const V tail = add(centre, scale(axes.along, width * reach));
             const V head = sub(centre, scale(axes.along, width));
             push(stream, add(centre, scale(axes.side, width)), colour, u0, v0 + 0.125F);
@@ -409,12 +469,16 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             const V half = scale(backward, 0.5F * look->length);
             const V b1 = sub(centre, half);
             const V b2 = add(centre, half);
-            const float width = look->width * (beam_z_scale * normalized_view_z(view, centre) + 1.0F);
+            const float width = presentation_constants::laser_width(look->width, laser_scales_.beam, normalized_view_z(view, centre));
+            max_beam_width_ = std::max(max_beam_width_, width);
+            if (!first_beam_depth_) first_beam_depth_ = std::array<float, 4>{
+                dot(sub(centre, view.eye), view.forward), normalized_view_z(view, centre),
+                laser_scales_.beam * normalized_view_z(view, centre) + 1.0F, width};
             const V a = scale(axes.along, width);
             const V p = scale(axes.side, width);
             const float u0 = look->slot[0] / 4.0F;
             const float v0 = look->slot[1] / 4.0F;
-            const particles::Color white{1.0F, 1.0F, 1.0F, 1.0F};
+            const particles::Color white{1.0F, 1.0F, 1.0F, visibility->second.hide.opacity()};
             push(stream, sub(b1, a), white, u0 + 0.25F, v0);
             push(stream, add(b1, p), white, u0 + 0.125F, v0);
             push(stream, sub(b1, p), white, u0 + 0.25F, v0 + 0.125F);
@@ -460,7 +524,11 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         active = weaken_effects_.erase(active);
     }
     std::set<sim::EntityId> active_energy;
-    for (auto& look : hero_beams_) look.batch.stream.clear();
+    std::set<sim::EntityId> active_tractors;
+    for (auto& look : hero_beams_) {
+        look.batch.stream.clear();
+        look.sparks.stream.clear();
+    }
     // WHE-26/27: tracked endpoints follow the live poses; releasing the slot removes the beam.
     for (const auto& instance : latest.instances()) {
         const auto source = units(instance.entity_id);
@@ -513,16 +581,67 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             const auto direction = normalized(sub(b, a));
             if (!direction) continue;
             const auto axes = screen_axes(view, scale(add(a, b), 0.5F), *direction);
-            const V side = scale(axes.side, look.width);
+            // TBF-01/02: full world width; texture U crosses the line, V follows it.
+            const V side = scale(axes.side, look.width * 0.5F);
             auto& stream = look.batch.stream;
             const auto base = static_cast<std::uint32_t>(stream.vertices.size());
-            push(stream, add(a, side), look.colour, 0.0F, 0.0F);
-            push(stream, sub(a, side), look.colour, 0.0F, 1.0F);
-            push(stream, add(b, side), look.colour, 1.0F, 0.0F);
-            push(stream, sub(b, side), look.colour, 1.0F, 1.0F);
+            push(stream, add(a, side), look.colour, 0.0F, 1.0F);
+            push(stream, sub(a, side), look.colour, 1.0F, 1.0F);
+            push(stream, add(b, side), look.colour, 0.0F, 0.0F);
+            push(stream, sub(b, side), look.colour, 1.0F, 0.0F);
+            std::copy_n(stream.vertices.begin() + base, look.last_quad.size(), look.last_quad.begin());
             for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
             ++stream.quads;
             ++(beam == 0 ? energy_beams_drawn_ : tractor_beams_drawn_);
+            if (beam == 1) {
+                active_tractors.insert(instance.entity_id);
+                auto [birth, inserted] = look.births.try_emplace(instance.entity_id,
+                    std::pair{status.target, latest.completed_tick()});
+                if (birth->second.first != status.target) {
+                    birth->second = {status.target, latest.completed_tick()};
+                    inserted = true;
+                }
+                const double elapsed = latest.completed_tick() >= birth->second.second
+                    ? static_cast<double>(latest.completed_tick() - birth->second.second) : 0.0;
+                // TBF-02/03: simple-line UVs do not scroll. Endpoint refresh and
+                // animation service advance four small highlights toward the source.
+                const double advances = 1.0 + elapsed * (look.frames != 0 ? 2.0 : 1.0);
+                if (look.sparks.resource == 0) {
+                    particles::EmitterRenderPlan plan;
+                    plan.family = particles::RenderFamily::billboard;
+                    plan.blend_selector = 1; plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1";
+                    plan.blend = particles::Blend::additive; plan.phase = particles::DrawPhase::transparent;
+                    plan.depth_test = true; plan.depth_write = false; plan.drawable = true;
+                    plan.texture = "w_galaxy_dot.tga";
+                    look.sparks.resource = backend_->create_emitter(plan);
+                    if (look.sparks.resource == 0) { failure_ = "tractor highlights: " + backend_->failure_cause(); return false; }
+                }
+                const auto byte_tint = [](const float value) {
+                    return static_cast<float>(static_cast<unsigned>(value * 0.7F * 255.0F)) / 255.0F;
+                };
+                const particles::Color tint{byte_tint(look.colour.x), byte_tint(look.colour.y),
+                    byte_tint(look.colour.z), byte_tint(look.colour.w)};
+                const V across = scale(axes.side, 1.75F);
+                const V along = scale(*direction, 1.75F);
+                for (const double start : {0.45, 0.70, 0.50, 0.89}) {
+                    double fraction = std::fmod(start - advances / 50.0, 1.0);
+                    if (fraction < 0.0) fraction += 1.0;
+                    const V centre = add(a, scale(sub(b, a), static_cast<float>(fraction)));
+                    auto& highlights = look.sparks.stream;
+                    const auto first = static_cast<std::uint32_t>(highlights.vertices.size());
+                    push(highlights, add(sub(centre, along), across), tint, 0.0F, 1.0F);
+                    push(highlights, sub(sub(centre, along), across), tint, 1.0F, 1.0F);
+                    push(highlights, add(add(centre, along), across), tint, 0.0F, 0.0F);
+                    push(highlights, sub(add(centre, along), across), tint, 1.0F, 0.0F);
+                    for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) highlights.indices.push_back(first + index);
+                    ++highlights.quads;
+                    ++look.sparks_drawn;
+                    if (start == 0.45) {
+                        if (!inserted && look.last_spark_fraction != static_cast<float>(fraction)) ++look.moving_samples;
+                        look.last_spark_fraction = static_cast<float>(fraction);
+                    }
+                }
+            }
         }
     }
     for (auto active = energy_owner_effects_.begin(); active != energy_owner_effects_.end();) {
@@ -530,8 +649,11 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         for (auto& effect : effects_) if (effect.handle == active->second) effect.lifetime = effect.age;
         active = energy_owner_effects_.erase(active);
     }
-    for (auto& look : hero_beams_) if (look.batch.resource != 0)
-        backend_->update_emitter(look.batch.resource, look.batch.stream);
+    std::erase_if(hero_beams_[1].births, [&](const auto& entry) { return !active_tractors.contains(entry.first); });
+    for (auto& look : hero_beams_) {
+        if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
+        if (look.sparks.resource != 0) backend_->update_emitter(look.sparks.resource, look.sparks.stream);
+    }
     max_kites_ = std::max<std::uint64_t>(max_kites_, kites_.stream.quads);
     max_beams_ = std::max<std::uint64_t>(max_beams_, beams_.stream.quads);
     timer.finish();

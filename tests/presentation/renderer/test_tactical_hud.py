@@ -194,8 +194,14 @@ class TacticalHudGraphical(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.cache, ignore_errors=True)
 
+    def assert_hud_diagnostics(self, hud):
+        # #1632: the authored Resume rollover has no texture. Keep every other
+        # diagnostic fatal so this accepted warning cannot mask a HUD failure.
+        known_resume_warning = "EAWR-UI-0322 [warning] : Resume rollover texture  cannot be drawn"
+        self.assertEqual([row for row in hud["diagnostics"] if row != known_resume_warning], [])
+
     def assert_shell(self, hud, faction):
-        self.assertEqual(hud["diagnostics"], [])
+        self.assert_hud_diagnostics(hud)
         self.assertEqual((hud["faction"], hud["shell_model"]), (faction, "i_tactical_controls.alo"))
         self.assertGreater(hud["faceplate_masks"], 0)
         self.assertEqual(len(hud["meshes"]), 3, hud["meshes"])
@@ -313,7 +319,7 @@ class TacticalHudGraphical(unittest.TestCase):
                         self.directory / "hud-cards-many.json", resolution="1280x720")
         self.assertTrue(capture.is_file())
         hud = result["hud"]
-        self.assertEqual(hud["diagnostics"], [])
+        self.assert_hud_diagnostics(hud)
         cards = hud["unit_cards"]
         self.assertEqual((cards["slots"], cards["borders"]), (24, 12))
         drawn = {card["slot"]: card for card in cards["drawn"]}

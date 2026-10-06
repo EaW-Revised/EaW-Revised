@@ -77,12 +77,14 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         tactical::UnitAbilityProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
         profile.special = unit.special_abilities;
+        profile.force_sensitive = unit.force_sensitive;
         for (const auto& ability : unit.abilities) {
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
             tactical::AbilityProfile entry;
             entry.kind = kind;
+            if (kind == tactical::AbilityKind::hunt) profile.hunt_reveal_range = unit.space_fow_reveal_range.value_or(Fixed{});
             entry.expiration_frames = frames(ability.expiration_seconds);
             entry.recharge_frames = frames(ability.recharge_seconds);
             entry.supports_autofire = ability.supports_autofire;
@@ -115,7 +117,8 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
                 entry.spawned = std::move(spawned);
             }
             if (kind == tactical::AbilityKind::concentrate_fire || kind == tactical::AbilityKind::energy_weapon
-                || kind == tactical::AbilityKind::tractor_beam) {
+                || kind == tactical::AbilityKind::tractor_beam || kind == tactical::AbilityKind::missile_shield
+                || kind == tactical::AbilityKind::sensor_jamming) {
                 entry.effective_radius = ability.effective_radius.value_or(Fixed{});
                 entry.gui_activated_ability_name = ability.gui_activated_ability_name;
             }
@@ -136,7 +139,7 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
             }
             if (modelled) profile.abilities.push_back(entry);
         }
-        if (profile.abilities.empty() && profile.special.empty()) continue;
+        if (profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive) continue;
         if (profile.abilities.size() > tactical::max_abilities_per_type) {
             return Result::failure(failure(unit.id + " authors more than two modelled abilities"));
         }

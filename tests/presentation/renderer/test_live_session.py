@@ -38,13 +38,15 @@ from live_session_audio_cases import LiveSessionAudioCases
 from live_session_death_cases import LiveSessionDeathCases
 from space_hazard_cases import SpaceHazardsGpu
 from test_battle_flow import BattleFlowGpu
-from test_area_damage_capture import AreaDamageCapture
+from test_area_damage_capture import AreaDamageCapture, PointHeightReplayFormatTests
 from test_fog_ghosts import FogGhostsGraphical
-from test_barrage_capture import BarrageCapture
+from test_barrage_capture import BarrageCapture, IonImpactReplayFormatTests
 from test_manual_delay_capture import ManualDelayCapture
+from test_particle_contact import ParticleContactCapture, ParticleContactFixtureTests
 
 
 from test_pad_sale import PadSaleGraphical
+from test_live_team_colour import TeamColourGraphical
 
 
 class LiveSessionSources(LiveSessionSourceCases, unittest.TestCase):
@@ -64,11 +66,16 @@ def load_tests(loader, tests, pattern):
         LiveSessionSources,
         BattleFlowGpu,
         PadSaleGraphical,
+        TeamColourGraphical,
         SpaceHazardsGpu,
         AreaDamageCapture,
+        PointHeightReplayFormatTests,
         FogGhostsGraphical,
         BarrageCapture,
+        IonImpactReplayFormatTests,
         ManualDelayCapture,
+        ParticleContactCapture,
+        ParticleContactFixtureTests,
     ))
 
 

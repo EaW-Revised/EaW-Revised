@@ -157,6 +157,7 @@ std::optional<ShieldSegmentHit> first_shield_hit(const std::span<const ShieldTri
     hit.fraction = limit;
     hit.contact = add(start, scale(delta, limit));
     hit.normal = normalized_or_zero(cross(sub(met->b, met->a), sub(met->c, met->a)));
+    hit.triangle = static_cast<std::size_t>(met - triangles.data());
     return hit;
 }
 
@@ -260,6 +261,7 @@ std::optional<ShieldSegmentHit> first_shield_hit(const ShieldCollisionMesh& mesh
     hit.fraction = limit;
     hit.contact = add(start, scale(delta, limit));
     hit.normal = rotate_to_world(normalized_or_zero(cross(sub(met->b, met->a), sub(met->c, met->a))), pose);
+    hit.triangle = static_cast<std::size_t>(met - mesh.triangles.data());
     return hit;
 }
 

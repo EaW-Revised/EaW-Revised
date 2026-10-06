@@ -4,6 +4,15 @@
 
 # Space battle audio
 
+BA-85: A countdown-spawned projectile enters ordinary death presentation and
+requests `Death_SFXEvent_Start_Die` once at its own position, independently of
+blast recipients. This route does not request `Projectile_SFXEvent_Detonate`,
+even when authored: that cue belongs to ordinary projectile contacts (BA-15).
+Consequently, adding countdown death audio leaves those contact cues unchanged
+and does not double-play a projectile that authors both. Evidence: debug build
+(countdown service, death initialization and death-effect selection); effective
+projectile XML. Muted output retains the same request bookkeeping.
+
 ## Applicability
 
 What FoC plays for a space battle: the sound events of shots, hits, deaths and hardpoint deaths,
@@ -62,12 +71,34 @@ is marked as such.
 | BA-17 | A destroyed hardpoint plays its `Death_Explosion_SFXEvent` at the hardpoint's world position, else the `Death_SFXEvent_Start_Die` of its `Death_Breakoff_Prop` type. | AU-17 |
 | BA-18 | Battle sounds are heard when the local player sees the unit, as the battle effects are drawn (BP rules of `battle-presentation.md`); an event fires on the first frame whose presented tick reaches its tick minus one. | viewer rule, mirrors live space-battle presentation |
 
+BA-16 distinguishes the start of death from the end of a persistent death copy.
+The debug build requests `Death_SFXEvent_End_Die` when that copy shuts down, after
+detaching its attached sounds. The field supplies an event, not a duration: a
+persistent copy waits for its death animation to finish and then for
+`Death_Persistence_Duration` before removal or fading. A completed fighter spin
+instead requests the ordinary `Death_SFXEvent_Start_Die` (SP-08).
+The effective FoC XML authors no nonempty `Death_SFXEvent_End_Die` for a
+`SpaceUnit`, including inherited variants. Its authored `UniqueUnit` entries
+belong to land death copies. The Krayt and Vengeance space death copies author
+only `Death_SFXEvent_Start_Die` and `Remove_Upon_Death`; they have no end cue.
+M2 therefore has no stock end-of-death event to schedule on this route.
+
 ### Moving ambience
 
 | ID | Rule | Evidence |
 |---|---|---|
 | BA-80 | A live craft with `SFXEvent_Ambient_Moving` initializes a uniform delay from its current logical frame. The authored `SFXEvent_Ambient_Moving_Min_Delay_Seconds` and `_Max_Delay_Seconds` default to 5 and 10 seconds (150..300 frames); positive, ordered values are required. When due, only a team's current leading live craft services the cue. A locomotor with movement remaining requests the event attached to that craft; idle orbiting alone does not qualify. Reschedule from the current frame even when stationary or playback is refused. | SND-46; fresh debug-build path/idle/combat cross-check |
 | BA-81 | Moving ambience uses the ordinary event's finite play count, random sample/pitch/volume, instance admission and 32 spatial voice limit. Its attachment follows the interpolated height-adjusted craft pose; ongoing local fog or hidden arrival sets gain to zero. Removal stops the attached voice and retires its timer. Timers and random delay state are presentation-only, bounded by live authored craft; movement presence is published during the existing snapshot pass, outside canonical state. | SND-11, SND-46; BA-05/08/09 |
+| BA-82 | Ordinary space engine audio enables the authored idle loop on engine enable, then services the sampled walk speed against `SpaceIdleMovementSpeed * 1.1`. At or above the threshold enable moving before disabling idle; below it disable moving before enabling idle. Stock threshold is zero: stopped service writes zero and still selects moving. Engine disable switches both off. State changes survive missing events or refused admission; no per-frame retry. Hyperspace does not run ordinary locomotor service. | SND-45/67; fresh debug-build moving switch and stopped-service cross-check |
+| BA-83 | Engine idle/moving events must be spatial loops. They share ordinary event admission and the 32 spatial voices, retain object attachment and use authored `Loop_Fade_In_Seconds` and `Loop_Fade_Out_Seconds`. Fogged attached starts are admitted at zero gain; ongoing fog/hidden arrival mutes them, reveal restores gain, and removal detaches immediately. Fades and source ownership cannot stop a slot stolen by another event. Presentation reads existing sampled speed published in the existing worker snapshot slots, outside canonical bytes. | SND-04/11/45; BA-05/08/09/13 |
+
+The ordinary engine path consumes idle and moving loops for live space locomotors.
+`SFXEvent_Engine_Cinematic_Focus_Loop` belongs to the separate cinematic-focus interface.
+`SFXEvent_Ambient_Loop` has authored ship entries, often duplicating engine events, but its
+getter cross-references only establish parse-time validation; continuous playback remains
+unverified (SND-U05). It is not started in addition to the sourced engine loops.
+Effective `Ambient_Map_Sounds` has seven land environments and no Space mapping (SND-47),
+so stock space maps add no generic ambient bed. Custom space-bed execution remains unverified.
 
 Stock X-wings and TIEs author flyby events rather than normal idle/moving engine loops.
 Their moving event uses `Preset_EGB`: priority 5, two instances, volume 70%, saturation
@@ -77,9 +108,26 @@ The report's `battle_audio.ambient` records timer work, due ticks, movement elig
 follower skips and attachment updates. Delay randomness is independent of voice admission.
 
 The attached-event retail overload admits hidden cues and applies ongoing zero gain;
-the viewer still uses its generic start-time hidden refusal (SND-04). Story-cinematic
-visibility bypass and explicit attached-audio silencing remain outside this live path.
+attached starts use ongoing gain rather than a generic fog refusal (SND-04/11).
+Story-cinematic fog bypass and explicit attached silencing are presentation interface facts.
 Audio clips verify audible output; XML and admission counts alone establish no retail mix parity.
+
+### Reinforcement feedback
+
+| ID | Rule | Evidence |
+|---|---|---|
+| BA-84 | Local pane opening requests faction `Reinforcements_Selection_SFXEvent`; closing, an idempotent open and permission refusal add no selection cue. A valid pooled-type placement start requests `Reinforcements_Pick_Landing_Zone_SFXEvent`; an already active drag adds none. A valid arrival submitted to the local scheduler requests type `SFXEvent_Command_Fleet_Move`, else faction `Reinforcements_Enroute_SFXEvent`. Invalid drops and refused submission add no en-route cue. These are ordinary nonspatial starts, separate from authoritative cap refusal and frame-35 spatial arrival. Muting output leaves cue admission/reporting active. | WR-07/11/16; debug-build placement/drop cross-check |
+
+`Reinforcements_Ready_SFXEvent` services a pending-garrison countdown, not ordinary space
+skirmish pool completion; that caller remains outside this M2 path.
+`Reinforcements_Cancelled_SFXEvent` is sourced on a placement-end request with its
+cancel flag set and a selected type, plus a separate transport dialog. Successful
+submission clears placement with that flag unset. The ordinary space drop callback
+ends placement with cancellation set even after a failed placement or room check;
+invalid drops and explicit right-click cancellation request the authored faction cue.
+Ordinary overlap admission may refuse playback. Pane closure has no established
+cancellation requirement, and `Reinforcements_Requesting_SFXEvent` runtime use remains
+unverified.
 
 ### Unit responses
 
@@ -93,6 +141,29 @@ Audio clips verify audible output; XML and admission counts alone establish no r
 
 | BA-25 | An attack aimed at a hardpoint first requests the speaker's repeated `SFXEvent_Attack_Hardpoint` entry for that target hardpoint's authored type. A missing entry falls through to the group or ordinary attack response (BA-22). This includes shields, engines, hangars and weapon kinds where the speaker authors a line. | SND-20, SND-21; XML data |
 | BA-26 | Accepted stop and guard orders request the ranked speaker's `SFXEvent_Stop` and `SFXEvent_Guard`, respectively. A missing event is silent; arming or cancelling a mode alone does not request its response. Squadron speakers resolve through BA-24. | SND-23 |
+| BA-27 | Command-bar attack, attack-move, guard and move presses request the corresponding Audio `SFXEvent_Command_Bar_*` only when their mode becomes armed. Disarming and executing the world order are silent on this route. Stop requests `SFXEvent_Command_Bar_Stop` after the stop action, separately from its unit response. The mouse and order hotkey routes share this transition. | Fresh debug-build button handlers; OR-01 |
+| BA-28 | A left ability press with no eligible unit, or a mixed inactive/recharging group with no ready unit, requests Audio `SFXEvent_GUI_Negative_Feedback` and sends no ability. An all-active group may deactivate; one ready member permits activation without refusal feedback. Targeted abilities also refuse recharging presses before targeting. Autofire right clicks have their separate route. | Fresh debug-build ordinary and targeted ability handlers |
+| BA-29 | An admitted group move or attack response may chain one other selected unit's `SFXEvent_Assist_Move` or `SFXEvent_Assist_Attack`. Draw uniformly from the original selection, excluding the speaker with at most 51 draws; test the resulting object's different type and lack of `EJECT_VEHICLE_THIEF` once. Both lines must be 2D. The assist starts at completed primary event end and re-enters normal admission; refused or explicitly cancelled primaries cannot release it. Sample stealing and backend failure still complete the admitted loop and preserve its chain. The chain retains the assist source independently of the primary's attachment; removing that source cancels it before completion. Stop, guard and single selections add no assist. | SND-08/09/18/19/22; fresh debug-build random-selection, completion and chain-detachment cross-check |
+
+Space move destinations test live static obstacle circles using the bound motion footprint,
+including authored scale and rotated, unscaled offset (WHZ-03/05). Asteroid containment wins
+over nebula containment. The selected environment line precedes group and ordinary move;
+a missing asteroid line skips nebula and falls through to those defaults (SND-24/25).
+These checks use the presentation snapshot and add no simulation state. Runtime chains use
+fixed voice slots and completion scratch storage, without frame-time storage growth.
+The assist candidate's type and assist fields belong to the selected object itself;
+the BA-24 leading-craft proxy is used for the primary speaker, without transferring
+craft assist fields to a selected squadron container (debug build).
+
+An invalid targeted ability action also requests BA-28 feedback. Right-click and Escape
+cancellation remain silent on this route. Land garrison, galactic movement and other unsupported
+refusal callers are outside the local space command bar. Waypoint arming has the same sourced
+cue rule as BA-27, but its queued-order semantics remain deferred (legacy EAWR-1503).
+Build-pad refusal checks are separate: a local request blocked by fog, non-allied ownership,
+an occupied pad or insufficient credits plays feedback, whereas a pad cooldown is silent
+(debug build). Those land-pad callers are outside this space implementation.
+Stock Audio command-mode fields and M2 space assist fields are empty; test overlays use
+existing events to prove the consumers without changing shipped data.
 
 <a id="ability-sounds-559"></a>
 
@@ -109,9 +180,59 @@ pilot shouting to lock the S-foils, the Nebulon-B's officer engaging the shields
 | BA-51 | **A timed ability that runs out is silent.** FoC's expiry handler deactivates the ability and starts the faction's *enemy* off-event, not the plain one, for the local player's units; every enemy off-entry is blank in the M2 data. Only a switch-off (button, script) plays the off sound. The remake tells the two apart from the snapshot: a timed ability (one that has read frames left while active) whose last read, the final active tick's 0 included, had two frames or fewer left and that is then off ended by itself; an untimed ability's end always plays the off sound. A switch-off within the last two frames of a timed ability is taken for a natural end, silently. A switch that the engines or the shield end (AB-16, AB-17) is not told apart from a switch-off and plays the off sound (**unverified**: the debug build's deactivation for those was not traced). | AU-36 |
 | BA-52 | **Voice line.** A press of an ability's button or key that reaches the simulation plays a voice line from the first pressed unit that has the ability (a squadron resolves to its leading live craft, BA-24): its `SFXEvent_GUI_Unit_Ability_Activated` when the press switches the group on (not every unit was on), its `SFXEvent_GUI_Unit_Ability_Deactivated` when it switches it off. The line is a plain 2D start of the event, not a unit response: it takes no part in the speaker ranking (BA-20) and no acknowledgement follows it. The events are `Preset_UR` ones (BA-23: one instance, `Overlap_Test` per unit type), so a line is refused while another line of the same type plays, and there is no cooldown beyond that. The M2 lines: the Corellian corvette's `TURBO` `Unit_Speed_Corvette`, the Nebulon-B's `DEFEND` `Unit_Defend_Nebulon`, the X-wing's `SPOILER_LOCK` `Unit_Ability_On_X_Wing` and `Unit_Ability_Off_X_Wing`, the Tartan's and the Acclamator's `POWER_TO_WEAPONS` `Unit_Barrage_Tartan` and `Unit_Barrage_Acclamator`; no other M2 ability has a deactivation line. Script and AI switches play no voice. | AU-33, AU-37, data |
 
-Not modelled: the negative-feedback sound FoC plays for a press on an ability that is recharging (or
-that no selected unit has); the press is refused here without a sound. The ability-active loop
-(`SFXEvent_Special_Ability_Loop`) is not authored by any M2 ability.
+Refused ability presses follow BA-28. The ability-active loop
+(`SFXEvent_Special_Ability_Loop`) is not authored by the starting M2 roster.
+Some expanded heroes author beam loops; those remain unimplemented. No default loop is supplied.
+
+BA-50's faction effect and BA-52's command-bar voice have separate callers.
+The debug build's successful faction-effect route does not check the UI-request
+flag, selection, fog or camera distance. Lua activation retains its enabled
+sound flag while clearing the UI-request flag; that flag gates refusal feedback
+only. The issuing player's faction supplies the table, and the local player's
+enemy relationship selects the enemy entry. A nonempty plain entry is required
+before that selection, even if an enemy entry is authored. Arming autofire
+changes its setting without starting an activation sound. These predicates do
+not grant an AI or script activation the command-bar unit voice.
+
+### Ability payload cues and superweapon scope
+
+| ID | Rule | Evidence |
+|---|---|---|
+| BA-53 | A valid player confirmation of a targeted ability requests the first source object's `SFXEvent_Target_Ability`, attached to that source, rather than the target or terrain point. Arming, cancelling, deactivating and autofire changes do not request it. Invalid targeting uses BA-28. The event's authored 2D/3D mode, admission and sample rules remain in force. This acknowledgement precedes simulation success; it is not an activation notification for every affected unit or for AI/script beam commands. | debug build: targeted action acknowledgement; effective XML |
+| BA-54 | A successful spawned-object ability also requests its source's `SFXEvent_Target_Ability` on the source object, including script/AI activation. Suppress this request if that same event is already playing anywhere, so player confirmation and the spawn do not double it. The viewer observes changes to the existing `started_tick` of HARMONIC_BOMB and WEAKEN_ENEMY through each retained logical snapshot; inactive instant slots still carry the birth. The zero-position fallback controls where the payload spawns, not where this cue attaches. | debug build: spawned-object ability execution; WHE-61; effective XML |
+| BA-55 | No implemented M2 action invokes cluster-bomb, point-laser defense, stealth or maximum-firepower payload effects. Maximum-firepower authoring belongs to the land AT-AT; merely recognizing its nested type does not implement its action. Their effect cues have explicit deferred or land scope, rather than being treated as applied. None of the reachable nested concentrate/beam/ion payloads authors `SFXEvent_Activate`. | effective XML survey; implemented ability consumers in `src/sim/tactical/abilities.cpp` and `src/sim/tactical/session_step_commands.cpp`; debug-build payload type lookup |
+| BA-56 | TSW button feedback belongs to a tactical superweapon stage request. On an in-range, ready, destroyable-target power-up transition, activation voice and weapon power-up start as unattached SFX, followed by the authored music override. Approach, 60/30/15/5-second warnings and arrival in range use the local faction's speech entries, selected for the owner or enemy relationship. Special-weapon readiness is separate: after its ready frame, with battlefield special weapons enabled, local/allied sources use their own `SFXEvent_Special_Weapon_Ready`, else the local faction's indexed `SFXEvent_HUD_Special_Weapon_Ready`; enemies use the indexed enemy entry. Stock space skirmish authors planetary ion-cannon and hypervelocity use upgrades at higher station levels, and land has its own weapons. M2 has the superweapon option and purchase filtering, but no implemented weapon firing/readiness or TSW stage. Existing upgrade-completion audio remains BA-60; a purchase never synthesizes TSW power-up or a second readiness cue. | debug build: stage request, power-up, approach speech and special-weapon service routes; effective XML; current space command consumers |
+
+Reachable ability cue audit (effective XML, including the expanded M2 hero roster):
+
+| Ability group | Authored separate cue and route |
+|---|---|
+| DEFEND, TURBO, POWER_TO_WEAPONS, SPOILER_LOCK | BA-50/52 only; no payload activation cue |
+| ION_CANNON_SHOT | No target cue; weapon fire/detonation retains BA-13/14 |
+| BARRAGE | Broadside `Unit_Barrage_Interdictor`, Marauder `Unit_Barrage_Corvette` would use BA-53; both actions are disabled by the current RG-03 release gate, so no confirmation is reachable in space skirmish. |
+| INVULNERABILITY, REPLENISH_WINGMEN | No authored payload cue; no default |
+| CONCENTRATE_FIRE | Home One `Unit_Barrage_Ackbar`; BA-53 |
+| ENERGY_WEAPON | Accuser `Unit_Energy_Blast_Piett`; BA-53 |
+| TRACTOR_BEAM | Accuser and tractor satellite `Unit_Tractor_Beam_Star_Destroyer`, Admonitor `Unit_Tractor_Beam_Thrawn`, Executor `Unit_Tractor_Beam_Vader_Executor`; BA-53. Generic destroyer target entries are blank. |
+| HARMONIC_BOMB | Slave I has no authored target cue; BA-54 remains silent unless data authors one |
+| WEAKEN_ENEMY | Sundered Heart `Unit_Energy_Flux_Antilles`; BA-53/54 |
+
+Cluster-bomb and point-laser defense are authored on MC30 and Crusader respectively,
+but their action consumers are unavailable. Space stealth on Vengeance, Phantom and
+Peacebringer is also unavailable. Land payloads (force powers, grenade, repair, hack,
+shield flare, maximum firepower) and galactic corruption/credit effects stay outside
+this space audit. Existing hero beam-loop authoring does not justify a general loop.
+The underlying barrage consumer does not override the disabled ability entries in
+`data/skirmish/roster-gate.json`; its authored sound remains unavailable in this release.
+
+The stock space upgrades `RS_Ion_Cannon_Use_Upgrade` and
+`ES_Hypervelocity_Gun_Use_Upgrade` enable battlefield special weapons and are
+listed at higher-level skirmish stations. Their build-complete and readiness tags
+are separate even where both name the same availability line. The current build
+does not apply their enable/firing/readiness state, so readiness entries are
+deferred, rather than classified as land-only. Death Star TSW stage and range
+speech likewise have no current playable state. Future state consumers must
+publish their actual transitions before presentation can request these cues.
 
 ### Production and hyperspace
 
@@ -130,7 +251,7 @@ that no selected unit has); the press is refused here without a sound. The abili
 | BA-71 | A logically visible enemy owned by a battle party can consume the battle's first-enemy flag. Set the flag before resolving the local faction `SFXEvent_Enemy_Spotted`; missing/refused playback never retries. This route has no whole-pool busy test. A type-cued enemy may trigger it at a later service while still visible. Projectiles are excluded by the caller; heroes are not a generic exclusion. | debug build SND-E39/54 |
 | BA-72 | Standalone space skirmish does not automatically queue attacker/defender tactical intros or their conditions. The intro requires a parent campaign, a 10-second wait, no cinematic and an empty speech queue. Campaign conditions evaluate OR before AND, with the third object an exclusion. Automatic hero respawn and its local planetary-spawn sound are campaign behavior. Network-only victory-near and scripted/story speech remain separate interfaces. | SND-41/49/65; SND-E35/36/57; WHE-38 |
 | BA-73 | Authored speech events append FIFO, including duplicates, and service only the front. Draw one file uniformly, use its volume, normal priority, no fade and centered output. Failed playback or a finished/interrupted stream removes the front without retry. One stream is independent of WAV response slots; lower numeric priority is more important, and equal/more important replacement retires the old stream before opening a file. Pause retains the stream and suspends queue cleanup. There is no additional speech cooldown. | debug build SND-E25/26/27/61; SND-44/48 |
-| BA-74 | Speech files resolve from the queued language's speech directory. Authored production speech can name PCM WAV files as well as MP3; the stream route, not the filename extension, determines speech ducking. The current viewer supports English and preloads reachable production speech at preparation. Text/movie presentation and other languages remain unimplemented. | SND-E26; SND-62/69; XML/sample header SA-E01 |
+| BA-74 | Speech files resolve from the queued language's speech directory. Authored production speech can name PCM WAV files as well as MP3; the stream route, not the filename extension, determines speech ducking. The current viewer supports English and preloads reachable production speech at preparation. Associated text/movie consumers are campaign/story scope under SND-69; other languages remain unimplemented. | SND-E26; SND-62/69; XML/sample header SA-E01 |
 | BA-75 | The inspected music start/update routes apply authored track volume, fade level and music/master sliders without a speech-active predicate or 0.3 ceiling. The shared category-gain getter only multiplies its slider by master. The sourced speech cap belongs to SFX; this change does not add a music cap. | debug build SA-E03 |
 
 The viewer reads existing logical visibility from snapshots; no new simulation facts or
@@ -141,6 +262,36 @@ remains a fidelity gap. Type/enemy eligibility never resets on hiding or re-reve
 The speech queue has 256 preallocated entries; saturation increments a report counter and
 drops the new request. This bound is viewer policy, not an original-game cooldown.
 The report includes queue completion/failure/overflow counts and capped SFX start/update counts.
+
+#### Speech text and command-bar movies
+
+SND-69 is a consumer interface, not automatic subtitles for every voice line. The
+associated `Text_ID` is available only for a now-playing front speech event with
+a valid selected-file index and equal `Files`/`Text_ID` list lengths. A pending,
+failed or removed event supplies no text. The external hologram consumer displays
+that indexed text in the command bar's tutorial/message text area, using
+`Message_Text_Color`, only when its pending event is the playing event. Its text
+has no elapsed-time expiry; the consumer removes remembered text when the
+tracked event name is no longer queued or playing. A speech replacement completes the interrupted
+front through the ordinary queue service; pause holds that service and the
+retained speech stream (SND-13/44/48). Movies pause through the separate movie
+hook (WBF-53). See the [speech text/movie scope audit](walks/audio.md#speech-text-and-movie-scope)
+for the start, conflict and cleanup distinctions.
+
+Effective stock XML authors `Build_Speech_Underway`, `Build_Speech_Completed`,
+`Build_Speech_Stopped` and `Build_Speech_Countdowns` only on `Death_Star` in
+`SPACEUNITSSUPERS.XML`. That object's `Tech_Level` is 99, above the stock
+`MP_Default_Max_Tech_Level` of 5. The viewer's synthetic production-speech cases
+exercise the existing stream interface; they do not establish stock M2 subtitle
+or movie authoring. The faction `Tactical_Intro_Command_Bar_Movie_Name` belongs
+to the parented briefing (SND-41); standalone skirmish marks that briefing done
+without queuing speech. External hologram callers are galactic corruption
+results and initiation, not ordinary space production or WAV responses.
+
+Stock M2 therefore adds no speech subtitle, talking head or movie lifecycle.
+The indexed-text query, explicit campaign/story text consumer and command-bar
+movie playback remain work for those modes. No new text/movie tags are applied
+by the M2 viewer on the strength of their presence in the global registries.
 
 ### Music playback
 
@@ -199,15 +350,91 @@ The report includes queue completion/failure/overflow counts and capped SFX star
 |---|---|---|
 | BA-30 | Every SFX sample in FoC is a 16-bit PCM WAVE (mono or stereo, 11025, 22050 or 44100 Hz) under `Data/Audio/SFX`; the viewer hands the PCM to Godot as it is. Music is MP3 under `Data/Audio/Music`, decoded by Godot's MP3 stream. A sample that is missing or does not decode is listed in the report and its voice freed; nothing is dropped silently. | data survey (12,007 WAV, 2,151 MP3) |
 
+## Event playback lifecycle
+
+SND-03/04/05/08/09/18 separate an admitted event from its current sample. Admission
+returns a presentation identifier before decoding or allocating a voice. Delayed events
+count toward the 2D instance and overlap limits; fading events do not. Repeating events
+already attached to the same source are refused. Attached replacement detaches before
+admission (SND-19), including queued events and runtime chains sourced by that object.
+
+Every event loop draws volume, pitch, 2D pan and pre/post delays, then progresses through
+predelay, optional pre sample, main sample, optional post sample and postdelay. A positive
+predelay enters a waiting stage; initialization with zero predelay and predelay expiry
+select main directly when no pre sample is authored (SND-08, debug build). The selected
+sample starts on the following service, without a separate empty pre-stage wait.
+`RHD_Battle_End` and `RHD_Defeated` inherit `Preset_HUD`, which authors neither predelay
+nor pre samples; both therefore use zero predelay and start their main sample on that
+next service. Their outcome request remains tied to the deciding frame (WBF-38).
+Positive play counts count completed event loops; an infinite main sample loops continuously in
+the backend. Pre and post samples remain finite. Sequential pre/main/post cursors advance
+independently and equal-sized stage lists synchronize to the main cursor at admission.
+Elapsed presentation milliseconds drive delays; spatial events and infinite 2D events
+retain their stages through game pause. Each service makes at most one stage transition
+per event, preventing a stalled frame from draining repeated empty or failed samples.
+
+Natural event completion releases a runtime 2D chain ahead of the authored
+`Chained_SFXEvent`. The destination re-enters ordinary admission. Cancelled events
+cannot release a chain; a removed assist source clears its runtime chain before
+completion. Stealing releases the former event's slot and completes its current loop,
+retaining finite repeats and chain precedence without controlling the new slot owner.
+Backend failure likewise completes the admitted loop and retains runtime-before-authored
+chain precedence; admission refusal never creates an event to complete.
+The report distinguishes admitted events, allocated samples and decoded starts.
+
+SND-11 attached spatial events refresh their height-adjusted visible pose and logical
+fog/arrival-hidden state while queued and playing. Explicit attached silence can be
+supplied through the presentation interface. Story cinematics bypass fog, while explicit
+silence and model hiding still mute. Removal detaches queued and playing events, including
+engine loops and construction-owned continuous playback. Spinning dead copies retain
+their published pose until their end notification. Fixed-position and ordinary 2D samples
+do not inherit this attached gain multiplier. Fogged sources without a published visible
+pose retain their snapshot position; exact hidden pose interpolation remains unverified.
+
+The private cross-check refreshed SND-E02/E03/E21/E33/E34 and the spatial allocation
+policy in the debug build. The effective XML includes pre/post speech and creature
+samples; custom space overlays exercise these stages without redistributing retail assets.
+The 2D panner uses the backend's pan effect per slot; its acoustic curve is not claimed
+to match the original library.
+
+## Base warning and construction unlock
+
+SND-40 base warnings read the existing firing notifications, without requiring damage,
+selection or fog visibility. A `DUMMY_STAR_BASE` or `DUMMY_ORBITAL_STRUCTURE` target
+must belong to the local player, or be allied community property, and the attacker must
+be hostile. One logical-frame cooldown covers all bases: the authored
+`Delay_Between_Space_Base_Attack_Announcement_Seconds` is truncated after multiplying
+by 30. The timer resets before the local faction's
+`SFXEvent_Space_Base_Under_Attack_Announcement` is attempted. This is an ordinary WAV
+SFX request, not a production speech stream. An authored event also places the
+`radar_blip` component's `Icon_Texture_Name` (`i_radar_focus.tga` in stock) at the base's
+notification position for four presentation seconds, even when sound admission fails.
+The marker retains its texture colour without player tint; its alpha and size pulse
+at the debug build's observed rate. No world highlight or object tracking is requested.
+The platform captures base attack ownership, type and position in its bounded presentation
+journal before snapshot eviction. Audio services the cooldown and consumes those immutable
+notifications in logical tick order, so a render stall preserves the warning/reset tick.
+The journal's existing tick/byte bounds and explicit gap reporting also cover these rows.
+
+The viewer covers published weapon-fire notifications; attack paths without an existing
+fire notification remain outside this presentation observer.
+
+SND-68 is a qualified construction unlock, not a universal station-upgrade announcement.
+The debug build requires requested unlock processing and notification, plus an affiliated
+type with `Build_Initially_Locked` and `Build_Can_Be_Unlocked_By_Slicer`, below the
+resulting tech level and absent from the player's unlocked list. Only a newly added type
+allows local faction `SFXEvent_New_Construction_Options_Available`. The skirmish economy
+has no slicer unlocked-list state; ordinary station or tech upgrades therefore retain
+their own cues and stay silent on this route. The qualified unlock consumer belongs to
+the galactic implementation (legacy EAWR-1644).
+
 ## Not modelled (fidelity list)
 
-- Assist responses (`SFXEvent_Assist_Move`, `SFXEvent_Assist_Attack`), chained after the speaker's
-  line in FoC from a random selected unit of another type;
-  nebula/asteroid move lines, and the negative-feedback
-  sound of a refused ability press (BA-52).
-- Engine loops (`SFXEvent_Engine_*_Loop`, `SFXEvent_Ambient_Loop`), health warnings, HUD and
-  advisor speech and the ambient map beds.
-- Pre/post samples, predelay and `Chained_SFXEvent` (no battle event of the M2 roster uses them).
+- Waypoint command semantics and unsupported land/galactic refusal routes (BA-27/28).
+- Cinematic-focus engine loops and continuous `SFXEvent_Ambient_Loop` playback (SND-U05).
+  Custom space map beds remain unverified; stock space has no configured bed (SND-47).
+- Exact backend panning law, distance/clipping parity and an audible retail loop/chain comparison
+  remain unverified (SND-U02); lifecycle tests establish timing and stage order.
 - A volume slider UI (the defaults of BA-45 play) and the superweapon music override.
 - BA-24's leader resolution reads `LiveSessionView::squadron_members()`, built once from the
   start's tick-zero squadrons (battle world UI and squadron selection): a squadron a spawner launches after tick zero (space-fighters

@@ -10,9 +10,8 @@ docs/behaviour/space-weapon-fire.md (A-04 to A-07, the S-22 to S-27 table): an i
 keeps yaw 0 and only the hardpoints that reach the target fire; an ordered Tartan keeps yaw 0
 through tick 32, turns in place from tick 33 at 0.84 degrees per frame, the short way, settles
 on the recorded heading at the recorded tick without moving, and then fires all five
-hardpoints. The scenario runner does not apply the target's hold_fire and invulnerable flags,
-so the target fires back and a ship may die: hardpoint participation is counted before that,
-and the windows a death overlaps are printed, not checked. The original recordings stay private; the recorded values below are the note's.
+hardpoints. Staged hold_fire and invulnerable targets preserve every fire window;
+S-40 must retain its initial hull and shield and keep the station's 02 hardpoint silent. The original recordings stay private; the recorded values below are the note's.
 """
 
 from __future__ import annotations
@@ -59,14 +58,6 @@ CASES = {
     "S-41": ("S-41-empire-station-l02-only", {"hp_empire_station_one_00", "hp_empire_station_one_02"}, 0.0, None),
     "S-42": ("S-42-empire-station-missile-only", {"hp_empire_station_one_00"}, 0.0, None),
 }
-# case: (hardpoint, issue) known to fire where FoC's does not, only because the runner does not
-# apply the target's invulnerable flag (#575). In S-40 the station shoots away the Nebulon-B's
-# nearest hardpoint, the engines (-90.9 degrees from hp_02's bore, outside its 90-degree
-# half-cone). W-05 then aims at the next nearest, BL (-88.3, inside), and hp_02 starts firing.
-# FoC's invulnerable target keeps every hardpoint. The hardpoint's fire windows aren't checked. It
-# must stay silent until the target first loses hull, and must fire after that: once it
-# doesn't, remove the entry.
-EXPECTED_FAIL = {"S-40": ("hp_empire_station_one_02", "#575")}
 YAW_TOLERANCE = 0.01  # degrees
 RATE = 0.84           # degrees per frame: Max_Rate_Of_Turn 1.4 x 1.2 over the corvette slowdown 2
 
@@ -78,11 +69,11 @@ def check(condition: bool, message: str) -> None:
 
 def run(program: pathlib.Path, scenario: pathlib.Path, root: str, work: pathlib.Path, workers: int) -> Dict[str, bytes]:
     stem = f"{scenario.stem[:4]}.w{workers}"
-    outputs = {"trace": work / f"{stem}.csv", "hashes": work / f"{stem}.hashes.csv", "replay": work / f"{stem}.eawr-replay"}
+    outputs = {"combat": work / f"{stem}.combat.csv", "trace": work / f"{stem}.csv", "hashes": work / f"{stem}.hashes.csv", "replay": work / f"{stem}.eawr-replay"}
     completed = subprocess.run(
         [str(program), "--scenario", str(scenario), "--game-root", root, "--workers", str(workers),
          "--trace-out", str(outputs["trace"]), "--hash-out", str(outputs["hashes"]),
-         "--replay-out", str(outputs["replay"])],
+         "--replay-out", str(outputs["replay"]), "--combat-out", str(outputs["combat"])],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
     )
     check(completed.returncode == 0, f"{stem}: sim_headless failed: {completed.stdout}{completed.stderr}")
@@ -113,26 +104,6 @@ def first_death(path: pathlib.Path) -> Optional[int]:
     rows = read(path)
     ticks = [tick for unit in ("shooter", "target") for tick, value in rows[(unit, "alive")].items() if value == 0]
     return min(ticks) if ticks else None
-
-
-def first_hull_loss(path: pathlib.Path) -> Optional[int]:
-    """The first tick on which the target's hull is below its tick-0 value."""
-    hull = read(path)[("target", "hull")]
-    return next((tick for tick in sorted(hull) if hull[tick] < hull[0]), None)
-
-
-def split_windows(scenario: dict, death: Optional[int],
-                  expected_fail: Optional[str] = None) -> Tuple[List[dict], List[Tuple[int, dict]]]:
-    """The fire windows a death cannot break (silent ones, and those closing before `death`), and
-    the numbered rest. A window of an expected-fail hardpoint goes to the rest."""
-    def kept(window: dict) -> bool:
-        if expected_fail is not None and f"shooter/{expected_fail}" in window["hardpoints"]:
-            return False
-        return death is None or window["min_shots"] == 0 or window["to_tick"] < death
-
-    windows = list(enumerate(scenario["fire_windows"]))
-    return [window for _, window in windows if kept(window)], [(index, window) for index, window in windows
-                                                               if not kept(window)]
 
 
 def load_tool(path: pathlib.Path):
@@ -172,18 +143,21 @@ def check_case(case: str, path: pathlib.Path) -> str:
               f"{case}: final yaw {yaw(rows, live[-1]):.4f}, recorded {final}")
     fired = {obj.split("/", 1)[1] for (obj, field), series in rows.items()
              if field == "shots" and obj.startswith("shooter/") and any(series.get(tick, 0) for tick in live)}
-    if case in EXPECTED_FAIL:
-        hardpoint, issue = EXPECTED_FAIL[case]
-        shots = rows[(f"shooter/{hardpoint}", "shots")]
-        first = next((tick for tick in live if shots.get(tick, 0)), None)
-        loss = first_hull_loss(path)
-        check(first is not None, f"{case}: {hardpoint} no longer fires, as recorded: remove its expected-fail ({issue})")
-        if first is not None:
-            check(loss is not None and first > loss,
-                  f"{case}: {hardpoint} fires at tick {first}, before the target first loses hull ({loss})")
-            print(f"{case}: XFAIL {hardpoint} fires from tick {first}, after the target first loses hull at tick "
-                  f"{loss}; FoC's invulnerable target never does ({issue})")
-        fired.discard(hardpoint)
+    if case == "S-40":
+        for field in ("hull", "shield"):
+            health = rows[("target", field)]
+            check(bool(health) and all(value == health[0] for value in health.values()),
+                  f"{case}: invulnerable target keeps its {field} (DG-40)")
+        check(first_death(path) is None, f"{case}: the staged target survives the entire recording")
+        health_by_part = defaultdict(list)
+        with path.with_suffix(".combat.csv").open(newline="", encoding="utf-8") as stream:
+            for row in csv.DictReader(stream):
+                if row["kind"] == "health" and row["object"] == "target":
+                    health_by_part[row["part"]].append(row["value"])
+        check(any(part not in ("hull", "shield") for part in health_by_part),
+              f"{case}: combat log includes target hardpoints")
+        check(all(all(value == values[0] for value in values) for values in health_by_part.values()),
+              f"{case}: invulnerability preserves every target hardpoint (DG-40)")
     check(fired == firing, f"{case}: hardpoints that fire {sorted(fired)}, recorded {sorted(firing)}")
     total = sum(value for (obj, field), series in rows.items() if field == "shots" and obj.startswith("shooter/")
                 for tick, value in series.items() if tick in live)
@@ -213,35 +187,21 @@ def main() -> int:
                 for kind in ("trace", "hashes", "replay", "header"):
                     check(runs[workers][kind] == runs[1][kind], f"{case}: {kind} differs with {workers} workers")
             trace_path = runs[1]["path"].decode("utf-8")
-            # The comparer checks the whole scenario, then its fire windows in order. Windows a
-            # death can break depend on the hold_fire and invulnerable flags the runner does not
-            # apply: they may fail, every other one must pass.
+            # Every staged arc scenario must keep every recorded fire window.
             death = first_death(pathlib.Path(trace_path))
-            expected_fail = EXPECTED_FAIL.get(case, (None, None))[0]
-            kept, rest = split_windows(json.loads(scenario.read_text(encoding="utf-8")), death, expected_fail)
+            kept = json.loads(scenario.read_text(encoding="utf-8"))["fire_windows"]
             compared = subprocess.run(
                 [sys.executable, str(args.tool), trace_path, trace_path, "--scenario", str(scenario)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
             )
-            known = compared.returncode == 1 and any(f": fire window {index}," in compared.stdout for index, _ in rest)
-            check(compared.returncode == 0 or known, f"{case}: not a complete scenario trace: {compared.stdout}")
+            check(compared.returncode == 0, f"{case}: not a complete scenario trace: {compared.stdout}")
             try:
                 tool.check_fire_rows(pathlib.Path(trace_path), tool.read_trace(pathlib.Path(trace_path)),
                                      {"fire_windows": kept})
             except tool.Divergence as error:
                 check(False, f"{case}: {error}")
             print(check_case(case, pathlib.Path(trace_path)))
-            print(f"{case}: {len(kept)} of {len(kept) + len(rest)} fire windows checked (first death: tick {death})")
-            for index, window in rest:
-                shots = window_shots(pathlib.Path(trace_path), window)
-                low, high = window["min_shots"], window["max_shots"]
-                missed = {label: count for label, count in shots.items()
-                          if count < low or (high is not None and count > high)}
-                if missed:
-                    why = (f"expected-fail ({EXPECTED_FAIL[case][1]})" if expected_fail is not None
-                           and f"shooter/{expected_fail}" in window["hardpoints"] else f"after the death at tick {death}")
-                    print(f"{case}: fire window {index} (ticks {window['from_tick']}..{window['to_tick']}, "
-                          f"{low}..{high}) not kept {why}: {missed}")
+            print(f"{case}: {len(kept)} fire windows checked (first death: tick {death})")
     for failure in FAILURES:
         print(f"FAIL: {failure}")
     if FAILURES:

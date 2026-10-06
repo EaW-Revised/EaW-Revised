@@ -40,6 +40,10 @@ namespace {
 
 void BattleEffects::release() {
     if (released_) return;
+    // The capture report is written after resources are released; retain its last shown count.
+    move_feedback_at_release_ = static_cast<std::uint64_t>(std::count_if(effects_.begin(), effects_.end(), [this](const auto& effect) {
+        return std::find(move_particles_.begin(), move_particles_.end(), effect.particle) != move_particles_.end();
+    }));
     released_ = true;
     for (const LiveEffect& effect : effects_) static_cast<void>(registry_->release(effect.handle));
     effects_.clear();
@@ -49,6 +53,10 @@ void BattleEffects::release() {
     for (auto& look : hero_beams_) {
         if (look.batch.resource != 0) backend_->destroy_emitter(look.batch.resource);
         look.batch.resource = 0;
+        if (look.sparks.resource != 0) backend_->destroy_emitter(look.sparks.resource);
+        look.sparks.resource = 0;
+        look.active_at_release = look.births.size();
+        look.births.clear();
     }
     for (Batch* target : {&kites_, &beams_}) {
         if (target->resource != 0) backend_->destroy_emitter(target->resource);
@@ -64,7 +72,41 @@ void BattleEffects::write_report(std::ostream& output) const {
            << kite_axis_max_sine_ << ", \"reversed\": " << kite_axis_reversed_ << "}"
            << ", \"max_beams\": " << max_beams_ << ", \"projectile_models_drawn\": " << models_drawn_ << ", \"live_effects\": " << effects_.size()
            << ", \"max_live_effects\": " << max_live_effects_ << ", \"effects_dropped\": " << effects_dropped_;
+    output << ", \"laser_z_scales\": [" << laser_scales_.beam << ',' << laser_scales_.kite << ']'
+           << ", \"max_beam_width\": " << max_beam_width_ << ", \"max_kite_width\": " << max_kite_width_;
+    output << ", \"laser_depth\": {\"clips\": [" << effect_clips_[0] << ',' << effect_clips_[1] << ']';
+    const auto depth_sample = [&](const char* name, const auto& sample) {
+        output << ", \"" << name << "\": ";
+        if (sample) output << "{\"view_depth\":" << (*sample)[0] << ",\"normalized_depth\":" << (*sample)[1]
+            << ",\"factor\":" << (*sample)[2] << ",\"half_width\":" << (*sample)[3] << '}';
+        else output << "null";
+    };
+    depth_sample("first_kite", first_kite_depth_);
+    depth_sample("first_beam", first_beam_depth_);
+    output << '}';
     output << ", \"energy_beams_drawn\": " << energy_beams_drawn_ << ", \"tractor_beams_drawn\": " << tractor_beams_drawn_;
+    output << ", \"hero_beam_looks\": [";
+    for (std::size_t index = 0; index < hero_beams_.size(); ++index) {
+        const auto& look = hero_beams_[index];
+        output << (index ? "," : "") << "{\"width\":" << look.width << ",\"frames\":" << look.frames
+            << ",\"colour\":[" << look.colour.x << ',' << look.colour.y << ',' << look.colour.z << ',' << look.colour.w
+            << "],\"sparks_drawn\":" << look.sparks_drawn << ",\"moving_samples\":" << look.moving_samples
+            << ",\"last_spark_fraction\":" << look.last_spark_fraction
+            << ",\"active_sources\":" << (released_ ? look.active_at_release : look.births.size())
+            << ",\"last_quad\":[";
+        for (std::size_t vertex = 0; vertex < look.last_quad.size(); ++vertex) {
+            const auto& point = look.last_quad[vertex];
+            output << (vertex ? "," : "") << "[" << point.position.x << ',' << point.position.y << ',' << point.position.z
+                << ',' << point.u << ',' << point.v << ']';
+        }
+        output << "]}";
+    }
+    output << ']';
+    const auto move_active = released_ ? move_feedback_at_release_
+        : static_cast<std::uint64_t>(std::count_if(effects_.begin(), effects_.end(), [this](const auto& effect) {
+        return std::find(move_particles_.begin(), move_particles_.end(), effect.particle) != move_particles_.end();
+    }));
+    output << ", \"move_feedback_active\": " << move_active << ", \"move_feedback_scale\": " << move_scale_;
     const auto counts = [&output](const char* name, const std::map<std::string, std::uint64_t>& values) {
         output << ", \"" << name << "\": {";
         bool first = true;
@@ -77,6 +119,23 @@ void BattleEffects::write_report(std::ostream& output) const {
     counts("spawned", spawned_);
     counts("spawn_failed", spawn_failed_);
     counts("expired", expired_);
+    const auto point = [&output](const particles::Vec3 value) {
+        output << '[' << value.x << ',' << value.y << ',' << value.z << ']';
+    };
+    output << ", \"contacts\": {\"attached\": " << contact_attached_ << ", \"missing\": " << contact_missing_
+           << ", \"hidden\": " << contact_hidden_ << ", \"removed\": " << contact_removed_ << ", \"samples\": [";
+    for (std::size_t index = 0; index < contact_samples_.size(); ++index) {
+        const auto& sample = contact_samples_[index];
+        output << (index ? "," : "") << "{\"sample\":" << sample.sample << ",\"handle\":" << sample.handle
+               << ",\"key\":" << json(sample.key) << ",\"age\":" << sample.age << ",\"attached\":"
+               << (sample.contact ? "true" : "false") << ",\"owner\":" << (sample.contact ? sample.contact->owner : 0)
+               << ",\"bone\":" << (sample.contact ? sample.contact->bone : 0) << ",\"origin\":";
+        point(sample.frame.origin);
+        output << ",\"bounds\":" << (sample.bounds ? "true" : "false") << ",\"centre\":";
+        point(sample.centre);
+        output << ",\"detached\":" << (sample.detached ? "true" : "false") << '}';
+    }
+    output << "]}";
     counts("projectiles_not_drawn", not_drawn_);
     // #862 (AB-66): ability shots fired and their drawn frames, by the projectile type they drew as.
     counts("ability_shots_fired", ability_shots_fired_);

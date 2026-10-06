@@ -6,6 +6,7 @@
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/space.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
+#include "eawr/sim/world.hpp"
 #include "collection.hpp"
 
 #include <cstddef>
@@ -17,6 +18,38 @@
 #include <vector>
 
 namespace eawr::sim::tactical::detail {
+
+// WPJ-17: activation owners publish copied sources in registration order. Radius
+// precedence is independent of whether the shield ability itself is active.
+struct ProjectileDefenceSource {
+    EntityId id{};
+    PlayerId owner{};
+    math::Vec3 position{}, adjusted_position{};
+    bool active_shield{}, passive_shield{}, sensor_jammed{};
+    math::Fixed passive_radius{};
+    std::optional<math::Fixed> shield_radius{}, jamming_radius{};
+    [[nodiscard]] math::Fixed radius() const noexcept {
+        return sensor_jammed && jamming_radius ? *jamming_radius : shield_radius.value_or(passive_radius);
+    }
+};
+
+// Immutable per-phase registry; the existing spatial index handles candidate
+// lookup, and the source's ordinal restores registration order after querying.
+struct ProjectileDefenceRegistry {
+    std::vector<ProjectileDefenceSource> sources;
+    SpaceIndex index;
+    math::Fixed query_radius{};
+    [[nodiscard]] core::Result<void> rebuild(std::vector<ProjectileDefenceSource> registered);
+    [[nodiscard]] std::vector<std::size_t> candidates(const math::Vec3& position,
+        std::uint64_t* inspected = nullptr) const;
+};
+
+// Copied from the existing ability slots, aligned with CombatWorld::units.
+// Declared radii remain present while inactive for WPJ-17's radius precedence.
+struct ProjectileDefenceAbilityInput {
+    bool active_shield{}, active_jamming{};
+    std::optional<math::Fixed> shield_radius{}, jamming_radius{};
+};
 
 // One live unit as the targeting phase sees it: copied before the phase, never written by it.
 struct CombatUnit {
@@ -55,6 +88,8 @@ struct CombatUnit {
     std::optional<math::Fixed> fixed_inaccuracy{};
     math::Fixed object_fire_rate{math::Fixed::from_raw(math::Fixed::scale)};
     bool target_prepared{};       // WSQ-42/43: member targeting has already run before team sharing
+    std::optional<math::Vec3> squadron_centre{}; // WWP-49: copied team position for object-weapon aim
+    bool sensor_jammed{}; // WPJ-10: supplied by the recipient-stamping owner
 };
 
 // The immutable inputs of one tick's targeting phase.
@@ -87,7 +122,14 @@ struct CombatWorld {
     [[nodiscard]] std::vector<EntityId> candidates(const math::Vec3& centre, math::Fixed half, PlayerId owner) const;
     const MotionTable* motion{}; // WSQ-45 / AV-05: canonical hard extents, including custom overrides
     const std::map<EntityId, EntityId>* craft_containers{}; // immutable existing membership index for this tick
+    ProjectileDefenceRegistry projectile_defences;
+    std::vector<EntityId> static_projectile_defences; // creation registrations, including inactive declared shields
 };
+
+// WHE-32/WPJ-17: derive this frame's recipient stamps and immutable source records.
+[[nodiscard]] core::Result<void> prepare_projectile_defences(CombatWorld& world,
+    std::span<const ProjectileDefenceAbilityInput> abilities, const PartitionExecutor& executor,
+    std::span<const EntityId> registration_order = {});
 
 struct ManualFire {
     PlayerId player{};
@@ -161,16 +203,19 @@ struct ProjectileStep {
     math::Vec3 contact{};
     math::Vec3 from{};              // its position at the start of the frame
     bool expired{};
+    ProjectileExpiryReason expiry_reason{ProjectileExpiryReason::none};
 };
 // #636: a worker's candidate buffers, reused from one projectile to the next.
 struct ProjectileScratch {
+    std::uint64_t defence_inspected{}, defence_candidates{};
     std::vector<EntityId> contacts; // DG-30 ray matches, retained per partition
     std::vector<std::uint32_t> near;       // immutable unit positions in hostile-player/ray order
     std::uint64_t candidate_count{};       // the work done so far (TacticalTick's counters)
     std::uint64_t exact_count{};
 };
 [[nodiscard]] core::Result<ProjectileStep> step_projectile(
-    const CombatWorld& world, const Projectile& projectile, ProjectileScratch& scratch);
+    const CombatWorld& world, const Projectile& projectile, ProjectileScratch& scratch,
+    MeshCollisionWork* mesh_work = nullptr); // optional caller-owned diagnostics, never canonical state
 
 // A new projectile for a weapon_fired event of a weapon with a shot profile (DG-21 to DG-25).
 // `allow_diminishing_firepower` is the shooter's DG-05 mode flag, snapshotted at the shot; a
@@ -180,6 +225,19 @@ struct ProjectileScratch {
     math::Fixed target_radius = {});
 
 void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& projectile);
+
+// WPJ-42: caller owns admission/probability, random draws and disposal of the old
+// projectile. This helper creates a fresh instance; it never guesses callback odds.
+struct ProjectileRedirect {
+    std::uint64_t new_id{};
+    const CombatUnit* source{};
+    const CombatUnit* target{};
+    math::Fixed yaw_spread_draw{};
+    bool add_pitch{};
+    math::Fixed pitch_draw{}; // caller's uniform draw in [-60,30]
+};
+[[nodiscard]] core::Result<Projectile> redirect_projectile(Projectile& original,
+    const ShotProfile& projectile_type, const ProjectileRedirect& request);
 
 // Canonical combat record of a unit (docs/replay-format.md): attack target, flags, next scan
 // frame, then per weapon its opportunity target, last scan frame, countdown and pulses left.

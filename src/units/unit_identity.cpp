@@ -201,6 +201,14 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.ai_combat_power);
     out.fixed(unit.space_fow_reveal_range);
     out.flag(unit.reveal);
+    if (unit.dense_fow_multiplier.raw() != Fixed::scale / 2 || unit.multisample_fow
+        || unit.fog_box_offset != Vec3{} || unit.team_dense_fow_multiplier.raw() != Fixed::scale / 2) {
+        out.text("fog-sampling-v1");
+        out.fixed(unit.dense_fow_multiplier);
+        out.flag(unit.multisample_fow);
+        out.vec3(unit.fog_box_offset);
+        out.fixed(unit.team_dense_fow_multiplier);
+    }
     out.text(unit.team_type);
     if (!unit.replenish_team.empty() || unit.redirect_damage_to_teammates) {
         out.text("hero-wingmen-v1"); out.text(unit.replenish_team); out.flag(unit.redirect_damage_to_teammates);
@@ -209,6 +217,11 @@ void encode(Encoder& out, const UnitType& unit) {
     out.flag(unit.victory_relevant);
     out.flag(unit.destroyed_with_hardpoints);
     out.flag(unit.shielded);
+    if ((unit.passive_missile_shield_radius && unit.passive_missile_shield_radius->raw() > 0)
+        || (unit.ranged_target_z_adjust && unit.ranged_target_z_adjust->raw() != 0)) {
+        out.text("projectile-defence-v1"); out.fixed(unit.passive_missile_shield_radius);
+        out.fixed(unit.ranged_target_z_adjust);
+    }
     out.flag(unit.powered);
     out.flag(unit.ion_stun_effect);
     out.flag(unit.collision.has_value());
@@ -226,6 +239,11 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.collision_box_modifier);
     out.each(unit.hardpoints, [&](const Hardpoint& hardpoint) { encode(out, hardpoint); });
     encode(out, unit.weapon);
+    if (!unit.death_projectiles.empty()) {
+        out.text("death-projectiles-v1");
+        out.each(unit.death_projectiles, [&](const std::string& projectile) { out.text(projectile); });
+        out.each(unit.death_projectile_indices, [&](const std::uint32_t index) { out.u32(index); });
+    }
     out.each(unit.target_bones, [&](const BonePoint& point) { encode(out, point); });
     out.each(unit.abilities, [&](const Ability& ability) {
         out.text(ability.type);
@@ -368,6 +386,9 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.u32(static_cast<std::uint32_t>(projectile.blast.max_victims));
         out.text(projectile.blast_immune_faction);
         out.fixed(projectile.blast.max_delay);
+        if (projectile.damage_delay.raw() > 0) {
+            out.text("projectile-damage-delay-v1"); out.fixed(projectile.damage_delay);
+        }
         if (projectile.weaken.on_detonation) {
             const auto& weaken = projectile.weaken;
             out.text("hero-weaken-v1"); out.fixed(weaken.radius); out.fixed(weaken.take_damage_increase);
@@ -417,7 +438,24 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.text(row.armor_type);
         out.fixed(row.multiplier);
     });
+    // WPR-12: retain existing Normal identities; alternate credit rules bind replays.
+    if (tables.ai_credit_multiplier != Fixed::from_raw(Fixed::scale)) {
+        out.text("AI-CREDITS-v1");
+        out.fixed(tables.ai_credit_multiplier);
+    }
     // WAD-14: collision eligibility matters even in content without live capture points.
+    // WCC-25: bind nondefault suitability content without changing default-only fixtures.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return !unit.valid_target || unit.special_weapon;
+        })) {
+        out.text("ship-suitability-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.flag(unit.valid_target);
+            out.flag(unit.special_weapon);
+            out.flag(unit.star_base);
+        });
+    }
     out.text("BLAST-COLLISION-v1");
     out.each(tables.units, [&](const UnitType& unit) {
         out.text(unit.id);
@@ -457,6 +495,11 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
                 out.flag(obstacle.living_projectile_collision);
             });
         }
+    }
+    // WAB-54: only authored force-sensitive content adds this extension.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.force_sensitive; })) {
+        out.text("hunt-force-sensitive-v1");
+        out.each(tables.units, [&](const UnitType& unit) { out.text(unit.id); out.flag(unit.force_sensitive); });
     }
     // SAE-02: bind station-level perceptions without changing profiles that have no station.
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) { return unit.base_level != 0; })) {
@@ -585,6 +628,17 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
                 out.each(bonus.filter.excluded_types, [&](const auto id) { out.u64(id); });
                 out.u64(bonus.filter.excluded_categories);
             });
+        });
+    }
+    // WWP-72: zero and omission have identical aim behavior. Preserve older identities for
+    // closures without an effective adjustment; bind nonzero adjustments as an extension.
+    if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
+            return unit.ranged_target_z_adjust.value_or(Fixed{}).raw() != 0;
+        })) {
+        out.text("height-adjusted-aim-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id);
+            out.fixed(unit.ranged_target_z_adjust.value_or(Fixed{}));
         });
     }
     return out.take();

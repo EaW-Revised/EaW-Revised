@@ -61,6 +61,35 @@ class RosterGateTests(unittest.TestCase):
         self.assertTrue(all("MASS_DRIVER" not in u["reason"] for u in after["infrastructure_gaps"]))
         self.assertTrue(any("WEAPON_SPECIAL" in u["reason"] for u in after["infrastructure_gaps"]))
 
+    def test_blast_ships_and_barrage_enabled_without_enabling_special_weapons(self):
+        self.assertIn("blast-damage", self.review["supported_capabilities"])
+        enabled = gate.generate(self.census, self.review)
+        self.review["supported_capabilities"].remove("blast-damage")
+        blocked = gate.generate(self.census, self.review)
+        before = {u["unit"]: u for u in blocked["disabled_units"]}
+        after = {u["unit"]: u for u in enabled["disabled_units"]}
+        for ship in ("Broadside_Class_Cruiser", "Marauder_Missile_Cruiser"):
+            self.assertIn("Proj_Ship_Diamond_Boron_Missile", before[ship]["reason"])
+            self.assertNotIn(ship, after)
+            barrage = [a for a in enabled["disabled_abilities"]
+                       if a["unit"] == ship and a["ability"] == "BARRAGE"]
+            self.assertEqual(barrage, [])
+        for ship in ("Krayt_Class_Destroyer", "The_Peacebringer"):
+            self.assertIn("WEAPON_SPECIAL", after[ship]["reason"])
+            self.assertNotIn("blast-area", after[ship]["reason"])
+            self.assertEqual(after[ship]["tooltip"], "This ship's weapons are not supported yet.")
+        self.assertEqual(blocked["disabled_abilities"], enabled["disabled_abilities"])
+
+    def test_barrage_requires_both_reviewed_handler_and_fire_rate_modifier(self):
+        for field, value in (("abilities", "BARRAGE"), ("ability_modifiers", "FIRE_RATE_MULTIPLIER")):
+            with self.subTest(field=field):
+                review = dict(self.review)
+                review[field] = [entry for entry in review[field] if entry != value]
+                disabled = gate.generate(self.census, review)["disabled_abilities"]
+                for ship in ("Broadside_Class_Cruiser", "Marauder_Missile_Cruiser"):
+                    self.assertTrue(any(row["unit"] == ship and row["ability"] == "BARRAGE"
+                                        for row in disabled))
+
     def test_empty_generated_tables_compile_shape(self):
         self.assertIn("std::array<DisabledUnit, 0>", gate.header({"disabled_units": [], "disabled_abilities": []}))
 

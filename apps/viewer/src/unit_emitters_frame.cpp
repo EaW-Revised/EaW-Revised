@@ -1,4 +1,5 @@
 #include "unit_emitters.hpp"
+#include "presentation_constants.hpp"
 #include "frame_timer.hpp"
 
 #include "eawr/presentation/animation/animation.hpp"
@@ -107,8 +108,15 @@ void UnitEmitters::update(Ship& ship, const SpacePopulation::LiveShipEmitterView
         });
         if (present) continue;
         const EffectSystem& system = effect_system(wanted.effect);
-        auto handle = wanted.mesh ? registry_->spawn(*system.system, wanted.seed, wanted.capacity, *wanted.mesh)
-                                  : registry_->spawn(*system.system, wanted.seed, wanted.capacity);
+        auto definition = *system.system;
+        // BP-70: the frame scales emission; sprite sizes also use the root model scale.
+        if (wanted.size_scale != 1.0F) for (auto& emitter : definition.emitters) {
+            if (emitter.size.keys.empty()) emitter.size.keys.push_back({0.0F, wanted.size_scale});
+            else for (auto& key : emitter.size.keys) key.value *= wanted.size_scale;
+            emitter.tail_size *= wanted.size_scale;
+        }
+        auto handle = wanted.mesh ? registry_->spawn(std::move(definition), wanted.seed, wanted.capacity, *wanted.mesh)
+                                  : registry_->spawn(std::move(definition), wanted.seed, wanted.capacity);
         if (!handle) {
             wanted.failed = true;
             ++start_failed_[wanted.effect + ": " + core::format_diagnostic(handle.error())];
@@ -158,7 +166,7 @@ void UnitEmitters::place(const std::size_t index, const sim::math::Mat3x4& pose)
 bool UnitEmitters::step_clone_proxy(CloneProxy& proxy, const bool visible, const particles::EmitterFrame& frame,
                                     const particles::MeshFrame* mesh, const sim::EntityId entity,
                                     const std::uint64_t tick, const std::uint64_t born) {
-    auto step = proxy.life->prepare_step(visible, frame, mesh, 1.0F / 30.0F);
+    auto step = proxy.life->prepare_step(visible, frame, mesh, presentation_constants::logical_frame_seconds);
     if (!step) {
         // A clone emitter that fails is reported and let go; the battle view goes on.
         ++clone_failed_[proxy.name + ": " + core::format_diagnostic(step.error())];
@@ -296,7 +304,7 @@ bool UnitEmitters::advance_sample() {
     for (const Ship& ship : ships_) {
         for (const Running& running : ship.running) batch_handles_.push_back(running.handle);
     }
-    if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_); !advanced) {
+    if (auto advanced = registry_->advance_all(batch_handles_, presentation_constants::logical_frame_seconds, camera_frame_, batch_stats_); !advanced) {
         failure_ = "unit emitter: " + core::format_diagnostic(advanced.error());
         return false;
     }
@@ -305,6 +313,14 @@ bool UnitEmitters::advance_sample() {
         for (auto running = ship.running.begin(); running != ship.running.end();) {
             const particles::EffectFrameStats& advanced = batch_stats_[next++];
             particles_now += advanced.particles;
+            if (running->log < start_log_.size()) {
+                std::uint64_t quads = 0;
+                for (const auto& emitter : advanced.emitters) {
+                    if (emitter.drawn && emitter.maximum_alpha > 0.0F) quads += emitter.quads;
+                }
+                auto& row = start_log_[running->log];
+                row.max_visible_quads = std::max(row.max_visible_quads, quads);
+            }
             if (running->ion_stun) {
                 ion_stun_max_particles_ = std::max(ion_stun_max_particles_,
                     static_cast<std::uint64_t>(advanced.particles));
@@ -359,7 +375,8 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                          const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest,
                          const ClonePoseAt& clone_pose_at, const ProjectilePoseAt& projectile_pose_at,
                          const FixedCamera& camera, const double presented_tick, const bool reveal,
-                         const FadeOpacity& fade_opacity, const std::span<const sim::EntityId> unfogged_props) {
+                         const FadeOpacity& fade_opacity, const std::span<const sim::EntityId> unfogged_props,
+                         const ProjectileOpacity& projectile_opacity) {
     if (released_) return true;
     const auto instance_of = [](const sim::tactical::TacticalSnapshot& snapshot, const sim::EntityId entity)
         -> const sim::tactical::TacticalInstance* {
@@ -538,7 +555,8 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         // BP-45/FW-19: engine brightness and shared unit opacity multiply at presentation;
         // damage, fire and other unit emitters carry the same opacity as their hull.
         for (auto running = ship.running.begin(); running != ship.running.end();) {
-            const float fade = fade_opacity ? fade_opacity(view->entity) : 1.0F;
+            const float fade = view->projectile && projectile_opacity ? projectile_opacity(index)
+                : fade_opacity ? fade_opacity(view->entity) : 1.0F;
             if (registry_->set_brightness(running->handle, (running->engine ? ship.engine_brightness : 1.0F) * fade)) {
                 ++running;
                 continue;

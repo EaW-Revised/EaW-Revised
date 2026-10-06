@@ -49,6 +49,13 @@ void test_looks() {
     expect(later.cell_size == 100.0 && later.diagnostics.size() == 1, "a bad cell size falls back and says so");
     eawr::data::XmlNode empty;
     expect(space::fog_looks(empty).diagnostics.size() == 5, "every absent value is reported");
+    expect(!looks.reinforce_only_while_dragging, "FW-23: absent drag restriction leaves the pane overlay enabled");
+    root.children.push_back(node("SpaceReinforceFeedbackOnlyWhileDragging", "Yes"));
+    expect(space::fog_looks(root).reinforce_only_while_dragging, "FW-23: authored drag-only mode is read");
+    root.children.push_back(node("SpaceReinforceFeedbackOnlyWhileDragging", "No"));
+    expect(!space::fog_looks(root).reinforce_only_while_dragging, "FW-23: last drag-only entry wins");
+    root.children.push_back(node("SpaceReinforceFeedbackOnlyWhileDragging", "invalid"));
+    expect(space::fog_looks(root).diagnostics.size() == 2, "malformed drag restriction is diagnosed");
 }
 
 void test_steps_and_table() {

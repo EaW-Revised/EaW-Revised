@@ -245,6 +245,13 @@ HudShell hud_shell(const data::ui::ShellAnchors& shell, const data::ui::CommandB
     }
 
     const auto* text_anchor = shell.find(planet_name_component);
+    // BA-27: retain authored positions, including the deferred waypoint slot's gap.
+    for (const auto name : tactical_order_buttons) {
+        const auto* anchor = shell.find(name);
+        const auto* component = catalog.find(name);
+        if (anchor && component) out.order_buttons.push_back(shell_button(*anchor, *component));
+        else missing(name, anchor == nullptr ? "is not in the shell" : "is not in the catalogue");
+    }
     const auto* text_component = catalog.find(planet_name_component);
     if (text_anchor != nullptr && text_component != nullptr) {
         HudShellText text;

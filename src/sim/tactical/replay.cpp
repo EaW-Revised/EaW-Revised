@@ -150,7 +150,36 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
                 "setup unit " + std::to_string(unit.entity_id) + " must not carry an order", path);
         }
     }
-    return validate_squadrons(setup);
+    const auto squadrons = validate_squadrons(setup);
+    if (!squadrons) return squadrons;
+    PlayerId previous_garrison{};
+    for (const auto& binding : setup.free_garrisons) {
+        const auto player = std::find_if(setup.players.begin(), setup.players.end(),
+            [&](const auto& value) { return value.player_id == binding.player; });
+        if (binding.player <= previous_garrison || player == setup.players.end() || !player->commandable()
+            || binding.templates.empty() || binding.templates.size() > 1024U
+            || binding.registered.size() > max_units
+            || !setup.match_policy.value_or(SkirmishMatchPolicy{}).free_starting_units) {
+            return fail<void>(diagnostic_codes::invalid_setup, "invalid free garrison player or templates", path);
+        }
+        previous_garrison = binding.player;
+        for (const auto type : binding.templates) if (type == 0)
+            return fail<void>(diagnostic_codes::invalid_setup, "free garrison template type is zero", path);
+        EntityId previous{};
+        for (const auto id : binding.registered) {
+            const auto unit = std::lower_bound(setup.units.begin(), setup.units.end(), id,
+                [](const auto& value, const auto sought) { return value.entity_id < sought; });
+            const auto team = std::lower_bound(setup.squadrons.begin(), setup.squadrons.end(), id,
+                [](const auto& value, const auto sought) { return value.container < sought; });
+            if (id <= previous || unit == setup.units.end() || unit->entity_id != id || unit->owner != binding.player
+                || (team != setup.squadrons.end() && team->container == id
+                    && (team->members.size() != 1 || team->members.front() != id))) {
+                return fail<void>(diagnostic_codes::invalid_setup, "invalid free garrison registered object", path);
+            }
+            previous = id;
+        }
+    }
+    return core::Result<void>::success();
 }
 
 core::Result<void> validate_replay(const TacticalReplay& replay) {
@@ -177,6 +206,10 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
         const auto shape = detail::validate_command_shape(command, replay.setup.players, label, path);
         if (!shape) {
             return shape;
+        }
+        if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+            cancel != nullptr && cancel->entry_id != 0 && !replay.setup.queue_identities) {
+            return fail<void>(diagnostic_codes::invalid_command, label + ": cancel entry requires QIDS extension", path);
         }
     }
     return core::Result<void>::success();

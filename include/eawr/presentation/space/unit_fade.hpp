@@ -26,6 +26,26 @@ struct UnitFadeLooks {
     double hide_threshold{0.025};
 };
 
+// WPJ-38/39: one projectile's observer hide service. The query belongs to the
+// visibility owner; endpoint visibility never participates. Delayed shots stay
+// in limbo and do not start their visibility clock until appearance.
+class ProjectileHide final {
+public:
+    using Query = std::function<bool()>;
+    void advance(double tick, bool limbo, bool immediate, const Query& visible);
+    [[nodiscard]] float opacity() const noexcept { return static_cast<float>(value_); }
+    [[nodiscard]] static constexpr bool model_visible(double opacity) noexcept { return !(opacity < 0.025); }
+    [[nodiscard]] bool drawn() const noexcept { return started_ && model_visible(value_); }
+    [[nodiscard]] bool revealed() const noexcept { return target_; }
+private:
+    bool started_{};
+    bool target_{};
+    double value_{};
+    double velocity_{};
+    double last_tick_{};
+    double checked_tick_{};
+};
+
 // FW-16 to FW-18: a unit first tracked while visible shows at once. One first tracked while
 // fogged eases in when later revealed; any visible unit eases toward zero when hidden,
 // and is forgotten once it eases below

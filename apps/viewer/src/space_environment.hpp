@@ -211,6 +211,8 @@ public:
     // interactive space map camera moves), the tactical overview key, and the
     // overview level ("off", "overview", "map" or "unavailable").
     [[nodiscard]] std::optional<presentation::camera::TacticalFrame> live_camera_frame() const;
+    // Battle effects use tactical clip planes; the sky may widen the render far clip.
+    [[nodiscard]] std::optional<presentation::camera::TacticalFrame> live_effects_camera_frame() const;
     [[nodiscard]] std::pair<bool, bool> live_camera_pointer_mode(bool ctrl) const;
     void live_camera_focus(float source_x, float source_y);
     // #455: the space map camera's target bounds (source X/Y), which the minimap spans; nothing

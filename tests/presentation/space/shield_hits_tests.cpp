@@ -1,6 +1,7 @@
 // #415: how a live battle orients and places a shield hit (presentation::space shield_hits,
 // docs/behaviour/battle-presentation.md BP-10, BP-17 to BP-19). Synthetic inputs only.
 #include "eawr/presentation/space/shield_hits.hpp"
+#include "eawr/presentation/particles/contact_frame.hpp"
 
 #include <array>
 #include <cmath>
@@ -291,6 +292,23 @@ void placement_rule() {
 } // namespace
 
 int main() {
+    namespace particles = eawr::presentation::particles;
+    const particles::EmitterFrame bone{{10, 20, 30}, {{0, 2, 0}, {-2, 0, 0}, {0, 0, 2}}};
+    const particles::EmitterFrame hit{{6, 26, 38}, {}};
+    const auto offset = particles::contact_local_frame(bone, hit);
+    expect(offset && near(offset->origin.x, 3) && near(offset->origin.y, 2) && near(offset->origin.z, 4),
+           "PS-02: contact offset is relative to the scaled bone, not the owner centre");
+    if (offset) {
+        const auto same = particles::contact_world_frame(bone, *offset);
+        expect(near(same.origin.x, 6) && near(same.origin.y, 26) && near(same.origin.z, 38)
+            && near(same.basis.x.x, 1) && near(same.basis.y.y, 1), "PS-02: initial frame has no second model turn or scale");
+        const auto moved = particles::contact_world_frame({{100, 200, 300}, {{2, 0, 0}, {0, 0, 2}, {0, -2, 0}}}, *offset);
+        expect(near(moved.origin.x, 106) && near(moved.origin.y, 192) && near(moved.origin.z, 304),
+               "PS-02: translated and rotated bone carries the complete offset");
+        expect(near(moved.basis.x.z, -1) && near(moved.basis.y.x, 1) && near(moved.basis.z.y, -1),
+               "PS-02: contact facing follows bone rotation with effect scale preserved");
+    }
+    expect(!particles::contact_local_frame({{}, {{}, {}, {}}}, hit), "PS-02: lost/singular bone cannot form an attachment");
     direction_rule();
     axes_rule();
     segment_rule();

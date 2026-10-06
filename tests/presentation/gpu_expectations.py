@@ -26,7 +26,7 @@ import unittest
 from typing import Mapping, TypeVar
 
 PROFILE_ENV = "EAWR_GPU_PROFILE"
-KNOWN_PROFILES = ("amd-rx7900xtx", "nvidia-gtx970", "nvidia-rtx4070-laptop", "llvmpipe")
+KNOWN_PROFILES = ("amd-rx7900xtx", "nvidia-gtx970", "nvidia-rtx4070-laptop", "nvidia-rtx4060-laptop", "llvmpipe")
 T = TypeVar("T")
 
 

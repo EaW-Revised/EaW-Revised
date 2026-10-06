@@ -265,6 +265,30 @@ void test_snapshot_index_budget() {
     space::SnapshotIndex index;
     index.refresh(snapshot, 1);
     expect(index.visible() == snapshot->visible_entities(1), "cached visibility matches the published visibility");
+    eawr::platform::LiveFog fog;
+    fog.rules = {math::Fixed::from_raw(0), math::Fixed::from_raw(100 * math::Fixed::scale),
+                 math::Fixed::from_raw(100 * math::Fixed::scale), 3, 1};
+    fog.player = 1;
+    fog.values.push_back(std::make_shared<const std::vector<std::uint8_t>>(
+        std::initializer_list<std::uint8_t>{255, 0, 1}));
+    const auto at = [](const int x, const int y = 50) {
+        return math::Vec3{math::Fixed::from_raw(x * math::Fixed::scale),
+                          math::Fixed::from_raw(y * math::Fixed::scale), {}};
+    };
+    expect(index.point_visible(2, at(50), &fog) && index.point_visible(2, at(250), &fog),
+           "WPJ-38: projectile positions at visible endpoints are admitted by the observer grid");
+    expect(!index.point_visible(2, at(150), &fog),
+           "WPJ-38: visible endpoints cannot reveal fogged intermediate flight");
+    expect(index.point_visible(2, at(250), &fog),
+           "WPJ-38: point admission does not need a surviving shooter instance");
+    expect(index.point_visible(1, at(150), &fog) && index.point_visible(2, at(150), nullptr)
+           && index.point_visible(2, at(150), &fog, true), "visibility owner retains allied and fog-off exceptions");
+    expect(!index.point_visible(2, at(50), &fog, false, true), "enemy object stealth overrides clear fog");
+    expect(!index.point_visible(2, at(-1), &fog) && !index.point_visible(2, at(300), &fog)
+           && !index.point_visible(2, at(50, 101), &fog), "outside-grid projectile positions remain fogged");
+    const auto work_before = index.work().instance_rows;
+    for (int shot = 0; shot < 1000; ++shot) static_cast<void>(index.point_visible(2, at(150), &fog));
+    expect(index.work().instance_rows == work_before, "projectile admission adds no per-shot unit scans");
     expect(index.alive().size() == 1024 && index.revealers().size() == 512, "liveness and allied sensors share one tick pass");
     for (int frame = 0; frame < 100; ++frame) index.refresh(snapshot, 1);
     expect(index.work().refreshes == 1 && index.work().instance_rows == 1024,

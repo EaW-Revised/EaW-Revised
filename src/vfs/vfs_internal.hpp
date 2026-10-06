@@ -20,6 +20,9 @@ core::Diagnostic error(std::string_view code, std::string message,
     std::optional<std::string> logical_path = std::nullopt,
     std::optional<std::string> source_id = std::nullopt);
 bool read_exact(std::ifstream& stream, void* target, std::size_t size);
+core::Diagnostic native_io_error(const std::filesystem::path& path, std::string_view operation,
+    std::optional<std::string> logical_path = std::nullopt,
+    std::optional<std::string> source_id = std::nullopt);
 core::Result<ParsedMeg> parse_meg(
     const std::filesystem::path& archive_path,
     const std::string& source_id,

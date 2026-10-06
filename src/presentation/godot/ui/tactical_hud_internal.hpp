@@ -23,6 +23,7 @@
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
@@ -60,6 +61,24 @@ public:
     }
     // #459: what a press does (the time panel's buttons); the options button has none yet.
     void set_action(std::function<void()> action) { action_ = std::move(action); }
+    void set_order_icon(const Ref<Texture2D>& texture, bool shift) {
+        order_icon_ = memnew(TextureRect);
+        order_icon_->set_mouse_filter(MOUSE_FILTER_IGNORE);
+        order_icon_->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+        order_icon_->set_stretch_mode(TextureRect::STRETCH_SCALE);
+        order_icon_->set_anchors_and_offsets_preset(PRESET_FULL_RECT);
+        order_icon_->set_texture(texture);
+        add_child(order_icon_);
+        order_shift_ = shift;
+        connect("button_down", callable_mp(this, &EawrHudButton::order_down));
+        connect("button_up", callable_mp(this, &EawrHudButton::order_up));
+    }
+    void set_order_selected(bool selected) {
+        order_selected_ = selected;
+        set_pressed_no_signal(selected);
+        shift_order_icon(selected);
+    }
+    void set_order_shift_pixels(float pixels) { order_shift_pixels_ = pixels; }
     [[nodiscard]] int presses() const { return presses_; }
     void set_flash_texture(const Ref<Texture2D>& texture) {
         flash_ = memnew(TextureRect);
@@ -98,6 +117,18 @@ protected:
     static void _bind_methods() {}
 
 private:
+    void shift_order_icon(bool down) {
+        if (!order_icon_) return;
+        const float shift = down && order_shift_ ? order_shift_pixels_ : 0.0F;
+        order_icon_->set_offset(SIDE_TOP, shift);
+        order_icon_->set_offset(SIDE_BOTTOM, shift);
+    }
+    void order_down() { shift_order_icon(true); }
+    void order_up() { shift_order_icon(order_selected_); }
+    TextureRect* order_icon_{};
+    bool order_shift_{};
+    bool order_selected_{};
+    float order_shift_pixels_{1.0F};
     int presses_{};
     TextureRect* flash_{};
     bool flashing_{};
@@ -139,6 +170,8 @@ struct TacticalHud::State final {
     EawrHudButton* fast_forward_button{};
     EawrBattleOverlay* overlay{};
     TacticalHud::TimeHandlers time_handlers;
+    std::function<void(std::string_view)> order_handler;
+    std::map<std::string, EawrHudButton*, std::less<>> order_buttons;
     TacticalHud::TimeView time_view;
     bool time_view_set{};
     // #848 V-5b: an overview level is on.
@@ -168,7 +201,7 @@ struct TacticalHud::State final {
     model::MinimapExtents minimap_extents;
     std::map<std::string, model::MinimapTypeLooks, std::less<>> minimap_types;
     std::function<void(double, double)> minimap_look;
-    std::function<void(double, double)> minimap_move;
+    std::function<void(double, double, bool)> minimap_move;
     int world_presses{};
     struct Probe final {
         std::string name;

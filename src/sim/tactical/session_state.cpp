@@ -67,6 +67,8 @@ namespace session_detail {
             hardpoint_state(profile, rules, state, index),
             !hardpoint_destroyed(profile, state, index) && !hardpoint_disabled(state, index),
             state.hardpoints[index],
+            profile.hardpoints[index].max_health,
+            index < state.repairing_players.size() ? state.repairing_players[index] : std::vector<PlayerId>{},
         });
     }
     return status;
@@ -86,13 +88,15 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
         instances.reserve(live.size());
         for (const auto& unit : live) {
             auto instance = instance_for(unit, math::to_matrix(unit.state.rotation, unit.state.position).value(), completed_tick);
-            instance.visible_to = visible_to(field, fog ? &*fog : nullptr, unit.state.owner, unit.state.position);
+            instance.visible_to = visible_to(field, fog ? &*fog : nullptr, unit.state.owner, unit.state.position,
+                unit.state.type_id, unit.state.rotation);
             instance.reveal_range = field.reveal_range(unit.state.type_id);
             if (const auto craft = crafts.find(unit.state.entity_id); craft != crafts.end()) {
                 instance.craft_velocity_per_frame = craft->second.velocity;
             }
             if (const auto squadron = minds.find(unit.state.entity_id); squadron != minds.end()) {
                 instance.squadron_in_idle_grid = squadron->second.idle_cell.has_value();
+                if (squadron->second.idle_cell) instance.squadron_idle_anchor = squadron->second.anchor;
                 const auto& flight = squadron->second;
                 instance.has_movement_path = flight.mode == SquadronMode::move || flight.approach
                     || (flight.mode == SquadronMode::escort && !flight.idle_cell);
@@ -122,21 +126,43 @@ std::vector<FogRevealer> TacticalSession::Impl::revealers(const SensorField& fie
         for (const auto& unit : units) {
             if (const auto range = field.reveal_range(unit.type_id);
                 range && !std::binary_search(disabled.begin(), disabled.end(), unit.entity_id)) {
-                result.push_back(FogRevealer{unit.entity_id, unit.owner, unit.position, *range});
+                result.push_back(FogRevealer{unit.entity_id, unit.owner, unit.position, *range,
+                    field.profile(unit.type_id)->dense_multiplier});
             }
         }
         return result;
     }
 
 std::uint64_t TacticalSession::Impl::visible_to(const SensorField& field, const FogCells* cells, const PlayerId owner,
-    const math::Vec3& position) const {
+    const math::Vec3& position, const TypeId type, const math::Quat rotation) const {
         if (cells == nullptr) {
             return field.visible_to(owner, position);
         }
         const auto team = teams.at(owner);
+        // V-21: centre plus corners and edge midpoints of the yaw-oriented hard box.
+        std::array<math::Vec3, 9> samples{};
+        samples[0] = position;
+        std::size_t sample_count = 1;
+        const auto* profile = field.profile(type);
+        if (profile != nullptr && profile->multisample) {
+            const auto yaw = yaw_degrees(rotation);
+            const auto level = yaw ? yaw_rotation(yaw.value()) : core::Result<math::Quat>::success(math::identity_quat());
+            const auto frame = math::to_matrix(level ? level.value() : math::identity_quat(), position);
+            if (frame) for (int y = -1; y <= 1; ++y) for (int x = -1; x <= 1; ++x) {
+                if (x == 0 && y == 0) continue;
+                const auto sx = math::add(profile->box_offset.x,
+                    math::Fixed::from_raw(x * profile->half_extents.x.raw()));
+                const auto sy = math::add(profile->box_offset.y,
+                    math::Fixed::from_raw(y * profile->half_extents.y.raw()));
+                if (!sx || !sy) continue;
+                const auto point = math::transform_point(frame.value(), {sx.value(), sy.value(), math::Fixed{}});
+                if (point) samples[sample_count++] = point.value();
+            }
+        }
         std::uint64_t mask = 0;
         for (std::size_t index = 0; index < setup.players.size(); ++index) {
-            if (setup.players[index].team_id == team || cells->revealed(index, position)) {
+            if (setup.players[index].team_id == team
+                || cells->revealed(index, std::span<const math::Vec3>{samples.data(), sample_count})) {
                 mask |= std::uint64_t{1} << index;
             }
         }
@@ -151,6 +177,7 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         }
         instance.abilities = ability_statuses(unit, now);
         instance.has_movement_path = unit.motion && unit.motion->kind == MotionKind::path;
+        if (unit.motion && motion.find(unit.state.type_id)) instance.locomotor_speed_per_frame = unit.speed;
         instance.in_tractor_beam = unit.in_tractor_beam;
         instance.in_asteroid_field = unit.asteroid_contact.has_value();
         instance.in_nebula = unit.nebula && unit.nebula->present;
@@ -234,7 +261,38 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 detail::append_combat(bytes, *unit.combat);
             }
         }
+        std::uint64_t disabled_garrisons = 0;
+        for (const auto& unit : units) disabled_garrisons += unit.state.garrison_enabled ? 0U : 1U;
+        // FL-13: sparse GSPN keeps every all-enabled session's canonical bytes unchanged.
+        if (disabled_garrisons != 0) {
+            bytes.insert(bytes.end(), {'G', 'S', 'P', 'N'});
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, disabled_garrisons);
+            for (const auto& unit : units) {
+                if (!unit.state.garrison_enabled) sim::detail::append_u64(bytes, unit.state.entity_id);
+            }
+        }
         std::uint64_t manual_weapons = 0;
+        if (!free_garrisons.empty()) {
+            bytes.insert(bytes.end(), {'G', 'A', 'R', 'R'});
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, free_garrisons.size());
+            for (const auto& state : free_garrisons) {
+                sim::detail::append_u32(bytes, state.setup.player);
+                sim::detail::append_u32(bytes, state.setup.delay_frames);
+                sim::detail::append_u64(bytes, state.setup.templates.size());
+                for (const auto type : state.setup.templates) sim::detail::append_u64(bytes, type);
+                sim::detail::append_u64(bytes, state.registered.size());
+                for (const auto id : state.registered) sim::detail::append_u64(bytes, id);
+                sim::detail::append_u32(bytes, state.due_frame ? 1U : 0U);
+                sim::detail::append_u32(bytes, 0);
+                sim::detail::append_u64(bytes, state.due_frame.value_or(0));
+                sim::detail::append_u64(bytes, state.pending.size());
+                for (const auto type : state.pending) sim::detail::append_u64(bytes, type);
+            }
+        }
         for (const auto& unit : units) {
             if (!unit.combat) continue;
             for (const auto& weapon : unit.combat->weapons) manual_weapons += weapon.manual ? 1 : 0;
@@ -316,7 +374,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
         if (!pending_blast_damage.empty()) {
             constexpr std::array<std::uint8_t, 4> blast_tag{'B', 'L', 'S', 'T'};
             bytes.insert(bytes.end(), blast_tag.begin(), blast_tag.end());
-            sim::detail::append_u32(bytes, 2);
+            sim::detail::append_u32(bytes, 3);
             sim::detail::append_u32(bytes, 0);
             sim::detail::append_u64(bytes, pending_blast_damage.size());
             for (const auto& queued : pending_blast_damage) {
@@ -325,7 +383,9 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 append_fixed(bytes, queued.recipient.amount);
                 append_fixed(bytes, queued.recipient.delay);
                 sim::detail::append_u32(bytes, queued.recipient.hardpoint);
-                detail::append_projectile(bytes, queued.source);
+                sim::detail::append_u32(bytes, queued.owner);
+                sim::detail::append_u32(bytes, queued.damage_type);
+                sim::detail::append_u32(bytes, queued.internal_damage_misc ? 1U : 0U);
             }
         }
         // Waiting group members (#344), then ships waiting for a sliced search (PC-08), each
@@ -534,6 +594,22 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 }
             }
         }
+        // WSL-31: LSVC v1, coordinator-reserved; only pending held level-up deadlines.
+        std::uint64_t level_up_services = 0;
+        for (const auto& account : ledgers) for (const auto& held : account.completed)
+            level_up_services += held.level_up_service_frame.has_value() ? 1U : 0U;
+        if (level_up_services != 0) {
+            constexpr std::array<std::uint8_t, 4> tag{'L', 'S', 'V', 'C'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1); sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, level_up_services);
+            for (const auto& account : ledgers) for (const auto& held : account.completed) {
+                if (!held.level_up_service_frame) continue;
+                sim::detail::append_u32(bytes, account.player); sim::detail::append_u32(bytes, 0);
+                sim::detail::append_u64(bytes, held.object);
+                sim::detail::append_u64(bytes, *held.level_up_service_frame);
+            }
+        }
         // WBP-44..46: IMOD v1 is omitted when no modifier object has state.
         // Active ownership remains in UPGD; reverse termination effects live only here.
         std::uint64_t modifier_objects = 0;
@@ -692,6 +768,13 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 for (const auto& rider : unit.state.contained) append_rider(append_rider, rider);
             }
         }
+        if (!projectile_defence_order.empty()) {
+            // Coordinator-reserved PDEF: source IDs in registration order, never sorted.
+            constexpr std::array<std::uint8_t, 4> tag{'P', 'D', 'E', 'F'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u64(bytes, projectile_defence_order.size());
+            for (const auto id : projectile_defence_order) sim::detail::append_u64(bytes, id);
+        }
         const auto special_owners = std::count_if(units.begin(), units.end(), [](const LiveUnit& unit) {
             return unit.abilities && !unit.abilities->special.slots.empty();
         });
@@ -784,6 +867,23 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes() const {
                 if (unit.state.purchase_token == 0) continue;
                 sim::detail::append_u64(bytes, unit.state.entity_id);
                 sim::detail::append_u64(bytes, unit.state.purchase_token);
+            }
+        }
+        if (setup.queue_identities && !economy.empty()) {
+            // coordinator-reserved QIDS: retain the counter even after every queued entry leaves.
+            constexpr std::array<std::uint8_t, 4> tag{'Q', 'I', 'D', 'S'};
+            bytes.insert(bytes.end(), tag.begin(), tag.end());
+            sim::detail::append_u32(bytes, 1);
+            sim::detail::append_u32(bytes, 0);
+            sim::detail::append_u64(bytes, ledgers.size());
+            for (const auto& ledger : ledgers) {
+                sim::detail::append_u32(bytes, ledger.player);
+                sim::detail::append_u32(bytes, 0);
+                sim::detail::append_u64(bytes, ledger.next_queue_entry_id);
+                for (const auto& queue : ledger.queues) {
+                    sim::detail::append_u64(bytes, queue.size());
+                    for (const auto& entry : queue) sim::detail::append_u64(bytes, entry.entry_id);
+                }
             }
         }
         return bytes;

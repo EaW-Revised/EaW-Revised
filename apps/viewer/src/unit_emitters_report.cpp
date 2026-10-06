@@ -127,7 +127,8 @@ void UnitEmitters::write_report(std::ostream& output) const {
             output << "null";
         }
         output << ", \"first_age\": " << (row.first_age ? std::to_string(*row.first_age) : std::string("null"))
-               << ", \"presented\": " << row.presented << "}";
+               << ", \"presented\": " << row.presented
+               << ", \"max_visible_quads\": " << row.max_visible_quads << "}";
     }
     output << "], \"start_log_full\": " << (start_log_.size() >= start_log_limit ? "true" : "false");
     output << ", \"engine_brightness\": {";

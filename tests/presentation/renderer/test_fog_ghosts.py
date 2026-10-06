@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from live_session_test_support import CAMERA, CORVETTE, EMPIRE_STATION, LiveSessionRunner, decode_png
+from radar_fog_cases import RadarFogGraphical
 
 
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),

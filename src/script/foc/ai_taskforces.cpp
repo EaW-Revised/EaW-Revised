@@ -167,7 +167,7 @@ void Engine::emit_call(const Plan& plan, const TaskForce& taskforce, std::string
         if (!defines_function(plan.instance, name)) return;
     }
     ScriptEvent out;
-    out.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, (*sequence_)++};
+    out.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, sequence_++};
     out.target = plan.instance;
     out.kind = ScriptEvent::Kind::call;
     out.name = std::move(name);
@@ -189,7 +189,7 @@ void Engine::emit_thread_event(const Plan& plan, const TaskForce& taskforce, std
     parameters.push_back(Value{authoritative::Handle{handle_taskforce, taskforce.id}});
     for (Value& argument : arguments) parameters.push_back(std::move(argument));
     ScriptEvent out;
-    out.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, (*sequence_)++};
+    out.key = authoritative::EventKey{event_tick_, producer_foc_engine, plan.instance, sequence_++};
     out.target = plan.instance;
     out.kind = ScriptEvent::Kind::thread_signal;
     out.name = std::move(name);

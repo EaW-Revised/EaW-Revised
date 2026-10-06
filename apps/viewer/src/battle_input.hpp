@@ -6,6 +6,7 @@
 #include "space_environment.hpp"
 #include "space_populate.hpp"
 #include "world_ui_view.hpp"
+#include "eawr/presentation/audio/command_cues.hpp"
 
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
@@ -77,8 +78,13 @@ public:
         std::vector<sim::EntityId> units;  // the selection it speaks for
         sim::EntityId target{sim::invalid_entity_id};
         std::uint32_t hardpoint{sim::tactical::attack_hull};
+        audio::CommandCue cue{audio::CommandCue::none};
+        std::optional<sim::math::Vec3> destination;
     };
     [[nodiscard]] std::vector<Acknowledgement> take_acknowledgements();
+    // BA-27: mouse and keyboard share the same mode transition and cue.
+    bool command_click(ui::OrderMode mode, bool stop, LiveSessionView& live, ui::CommandOrigin origin);
+    void negative_feedback();
 
     // #425: the selection as the command bar's unit cards (unit_cards.hpp), rebuilt every frame and
     // after input changes the selection. `slots` is the HUD shell's card slot count (24 in FoC).
@@ -101,7 +107,8 @@ public:
     [[nodiscard]] std::span<const ui::BuildButton> build_buttons() const noexcept { return build_buttons_; }
     bool build_click(std::size_t slot, LiveSessionView& live);
     // WR-11/15: a pool press begins placement; release drops on Z=0 and always ends placement.
-    void begin_placement(sim::tactical::TypeId type);
+    void begin_placement(sim::tactical::TypeId type, LiveSessionView& live);
+    void cancel_placement(LiveSessionView& live);
     void placement_move(std::array<float, 2> point) { pointer_ = point; }
     void placement_drop(std::array<float, 2> point, LiveSessionView& live) { left_release(point, {}, live); }
     [[nodiscard]] std::optional<sim::math::Vec3> placement_point() const;
@@ -135,7 +142,10 @@ public:
     // point as a right click on empty space does (MM-11). True when an order was issued.
     [[nodiscard]] bool selected(sim::EntityId entity) const { return selection_.contains(entity); }
     [[nodiscard]] std::optional<std::array<std::array<double, 2>, 4>> ground_corners(double height) const;
-    bool minimap_move(double x, double y, LiveSessionView& live);
+    bool minimap_move(double x, double y, bool double_click, LiveSessionView& live);
+    // OF-01: one local presentation acknowledgement for an admitted destination order.
+    using MoveFeedback = std::function<void(const sim::math::Vec3&, ui::OrderMode, bool, std::uint64_t)>;
+    void set_move_feedback(MoveFeedback feedback) { move_feedback_ = std::move(feedback); }
     // Where a scripted `minimap=x,y` gesture points: the minimap point (x, y from -1 to 1) in
     // viewport pixels.
     void set_minimap_point(std::function<std::optional<std::array<float, 2>>(double, double)> point) {
@@ -160,7 +170,7 @@ private:
     // WSU-38: the craft type of the leader of the local player's squadron `squadron` (its first
     // live craft in roster order, else the squadron's own type), or nothing for another player's.
     [[nodiscard]] std::optional<sim::tactical::TypeId> own_squadron_leader_type(sim::EntityId squadron) const;
-    [[nodiscard]] double now(const LiveSessionView& live) const;
+    [[nodiscard]] double logical_frame(const LiveSessionView& live) const;
     void left_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
     void right_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
     [[nodiscard]] bool key(std::int64_t code, ui::Modifiers modifiers, LiveSessionView& live, SpaceEnvironment& space);
@@ -172,7 +182,9 @@ private:
     // #424: the unit or craft under the pointer, unless the pointer is over a squadron icon.
     void update_hover();
     void acknowledge(Acknowledgement::Kind kind, sim::EntityId target = sim::invalid_entity_id,
-                     std::uint32_t hardpoint = sim::tactical::attack_hull);
+                     std::uint32_t hardpoint = sim::tactical::attack_hull,
+                     std::optional<sim::math::Vec3> destination = std::nullopt);
+    [[nodiscard]] bool local_order_selection(const LiveSessionView& live) const;
     void refresh_cards(const LiveSessionView& live);
     void follow(const LiveSessionView& live, SpaceEnvironment& space);
 
@@ -224,6 +236,9 @@ private:
     std::uint64_t ability_targeted_{};
     std::uint64_t ability_target_cancels_{};
     void cancel_ability_target(const char* why);
+    // CU-12: hover and click share the current simulation's world-point admission.
+    [[nodiscard]] std::optional<sim::math::Vec3> ability_point(
+        const std::array<float, 2> at, const LiveSessionView& live) const;
     bool ability_demo_{};
     std::function<std::optional<std::array<float, 2>>(std::size_t)> ability_point_;
     std::optional<Drag> left_;
@@ -295,6 +310,7 @@ private:
     std::vector<ScriptedPoint> scripted_points_;
     std::vector<std::string> log_;
     std::vector<Acknowledgement> acknowledgements_;
+    MoveFeedback move_feedback_;
     // The drawn camera before a scripted middle gesture and on the frame after it, when the
     // camera has stepped through its events (the report's camera_samples).
     struct CameraSample final {

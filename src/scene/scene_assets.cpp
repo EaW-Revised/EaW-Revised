@@ -71,6 +71,7 @@ std::vector<AttachedEffect> model_proxy_effects(const AssetAccess& access, const
     const assets::Model* model = access.model ? access.model(path) : nullptr;
     if (model == nullptr) {
         facts.particle_system = access.particle_system && access.particle_system(path);
+        if (facts.particle_system && access.sha256) facts.sha256 = access.sha256(path);
         return facts;
     }
     facts.loaded = true;

@@ -115,8 +115,8 @@ The buttons read and write abilities only through two interfaces in
 Since space ability implementation the live view hands `LiveSessionView::Abilities` to both. It reads the latest snapshot's
 ability status ([space abilities](space-abilities.md) AB-50; a squadron's container stands for its
 craft). A unit that is on is active; one that recharges shows the least-recharged holder's dial; one
-held by its gate (a depleted shield, lost engines) is disabled; a cut ability (`HUNT`, AB-03) is
-always disabled. A team ability (`ION_CANNON_SHOT`, space-abilities AB-60) reads the container's own
+held by its gate (a depleted shield, lost engines) is disabled; an unsupported ability is always disabled. Hunt now reads its holders
+under WAB-50 to WAB-56. A team ability (`ION_CANNON_SHOT`, space-abilities AB-60) reads the container's own
 status instead of its craft's. A request becomes one ability command for the group's card units
 through the order scheduler, so it enters the replay; the simulation rejects the units that cannot
 act. A targeted request goes out only with the target AB-11 gave it. The report's
@@ -126,8 +126,8 @@ states so they can be looked at; its requests only add a report line.
 
 ## Unverified / fidelity list
 
-- The retail look of a cut ability's button (`HUNT`) is its normal one; the remake shows it disabled
-  because it cannot act (space-abilities AB-03).
+- Hunt uses its existing icon, hotkey and ordinary ready/active states. A paired retail button
+  capture remains part of the Hunt eye check.
 - The targeting pointer of AB-11 (battle pointer set, battle cursors), the activation and deactivation sounds, the
   tooltip and the hero and land key bindings are not implemented.
 - Whether FoC's targeting also ends on a click on a friendly unit, or keeps waiting, is not traced;

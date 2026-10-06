@@ -85,7 +85,19 @@ orders, as next-tick commands.
   decorations (WSU-15). Unlike the box, click and type selection allow stations (WSU-23);
   deliberate mixed selections retain the first producer's build menu (WSU-24, PU-60).
 - S-5 (GRP-1). Ctrl+Q (select like) selects the own units on screen of the type under the
-  pointer; Ctrl+A selects all. Not implemented yet.
+  pointer; select like is not implemented yet. Ctrl+A selects all (S-5a).
+- S-5a (global unit selection; debug build: default keyboard mapping and select-all action).
+  The default binding is Ctrl+A with neither Shift nor Alt; plain A remains attack mode.
+  It clears the old selection and selects the local player's selectable objects with locomotion
+  behaviour across the battle, without a screen or pointer test. Ships, mobile heroes and mobile
+  transports are eligible by these properties, not by category. Squadrons enter as their containers
+  once, rather than their individual craft (S-7). Stations, structures, decorations, contained
+  objects and special dummy objects do not enter. Neutral and other players' objects do not enter,
+  including allied community property. Retreating objects are excluded in FoC; selection during
+  retreat is not yet verified in the remake. The command does not recenter the camera. A nonempty
+  result requests the ordinary ranked group selection response (battle-audio BA-20, BA-23, BA-24),
+  also when it repeats the same selection; an empty result is silent. This changes presentation
+  state only and issues no simulation order (O-5).
 - S-6. Only the local player's units are selectable.
 - S-7 (battle world UI and squadron selection; debug build: the selection and team code). A fighter or bomber squadron is one unit, its
   team container: clicking, boxing or type-selecting one of its craft selects the squadron, and its
@@ -117,7 +129,7 @@ orders, as next-tick commands.
 - G-2 (GRP-4). A unit belongs to one group at most; storing it in a group takes it out of any
   other.
 - G-3 (GRP-3). Selecting a group selects its members that still stand. Selecting the same group
-  again within one second (the logical frame rate in frames) moves the camera to look at the mean
+  again within 30 logical frames (strictly fewer than the logical frame rate) moves the camera to look at the mean
   X/Y position of those members; zoom, pitch and yaw stay.
 
 ## Tactical overview

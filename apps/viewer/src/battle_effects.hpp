@@ -1,5 +1,7 @@
 #pragma once
 
+#include "presentation_constants.hpp"
+
 #include "eawr/assets/assets.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/live_session.hpp"
@@ -9,6 +11,8 @@
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/presentation/space/projectiles.hpp"
+#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/space/shield_hits.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
@@ -74,6 +78,24 @@ public:
         double pitch_degrees{};  // a squadron craft's pitch (#506); zero for other units
     };
     using UnitLookup = std::function<std::optional<UnitFrame>(sim::EntityId)>;
+    struct ContactBoneFrame final { particles::EmitterFrame frame; bool visible{}; };
+    using BoneLookup = std::function<std::optional<ContactBoneFrame>(sim::EntityId, std::uint32_t)>;
+    struct TerminalSound final {
+        std::string projectile;
+        std::array<double, 3> position{};
+        bool death_payload{};
+    };
+    // WPJ-35/37: consumed once by audio, only after the lifetime effect was created.
+    [[nodiscard]] std::vector<TerminalSound> take_terminal_sounds() {
+        return std::exchange(terminal_sounds_, {});
+    }
+    using ProjectileObserver = std::function<bool(sim::tactical::PlayerId, const sim::math::Vec3&, std::uint64_t)>;
+    void observe_projectiles(const sim::tactical::TacticalSnapshot& previous,
+                             const sim::tactical::TacticalSnapshot& latest, double presented_tick,
+                             ProjectileObserver observer);
+    [[nodiscard]] bool projectile_terminal_admitted(const sim::tactical::CombatEvent& event) const;
+    [[nodiscard]] float projectile_model_opacity(std::size_t ship) const;
+    [[nodiscard]] bool is_projectile_model(std::size_t ship) const { return model_ship_slot_.contains(ship); }
 
     BattleEffects(godot::Node3D& host, const vfs::Vfs& filesystem, const data::Catalog& catalog);
     ~BattleEffects();
@@ -83,6 +105,7 @@ public:
     // Resolves each unit type's weapon slots to a projectile look and its death explosion from
     // the tables and the XML catalog. Never fails the view: what does not resolve is reported.
     void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat);
+    void move_feedback(const sim::math::Vec3& point, ui::OrderMode mode, bool double_click, std::uint64_t tick);
 
     // #456 BP-62: appends `model_slots` placed ships for each projectile type that draws a model
     // (after prepare()), before the population is composed.
@@ -115,7 +138,8 @@ public:
                             const sim::tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at);
     [[nodiscard]] bool frame(std::span<const platform::LiveTickEvents> reached,
         const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest, double alpha,
-        const UnitLookup& units, const FixedCamera& camera, double presented_tick, const SnapshotAt& snapshot_at);
+        const UnitLookup& units, const FixedCamera& camera, double presented_tick, const SnapshotAt& snapshot_at,
+        const BoneLookup& bones = {}, const FixedCamera* laser_camera = nullptr);
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
@@ -147,10 +171,20 @@ private:
         std::array<float, 4> colour{1.0F, 1.0F, 1.0F, 1.0F};
         std::string detonation;        // Projectile_Object_Detonation_Particle
         std::string lifetime_detonation; // Projectile_Lifetime_Detonation_Particle
+        std::string death_explosion;    // Death_Explosions for countdown death (BP-70)
         std::string armor_reduced;     // Projectile_Object_Armor_Reduced_Detonation_Particle
         std::string shield_absorbed;   // Projectile_Absorbed_By_Shields_Particle
         double step_length{};          // the shot's Max_Speed: its frame step (0: unknown)
+        bool hide_when_fogged{};
+        bool immediate_fog{};
     };
+    struct ProjectileVisibility final {
+        space::ProjectileHide hide;
+        sim::tactical::PlayerId owner{};
+        const ProjectileLook* look{};
+    };
+    std::map<std::uint64_t, ProjectileVisibility> projectile_visibility_;
+    ProjectileObserver projectile_observer_;
     struct TypeLooks final {
         std::array<space::Vec3d, 2> beam_origins{};
         std::string energy_owner_particle;
@@ -175,12 +209,15 @@ private:
         // per type and cast against in model space; the type's Scale_Factor.
         bool shield_mesh{};
         space::ShieldCollisionMesh collision;
+        std::vector<std::uint32_t> collision_bones;
+        std::vector<std::uint32_t> hardpoint_contact_bones;
         double scale{1.0};
     };
     struct ParticleType final {
         std::string model_path;   // logical ALO path, empty when unresolved
         std::uint32_t lifetime_frames{};
         bool attached_to_collision{};  // Particle_Attach_To_Collision (BP-18)
+        bool decoration{};            // WPJ-40: only decorations use terminal culls.
         std::optional<particles::SystemDefinition> system;
         std::string cause;
     };
@@ -193,6 +230,16 @@ private:
         bool detached{};
         bool drawn{};
         std::size_t log{};  // its spawn_log_ row, or spawn_log_limit
+        struct Contact final {
+            sim::EntityId owner{};
+            std::uint32_t bone{};
+            particles::EmitterFrame offset;
+            particles::EmitterFrame last;
+            bool hidden{};
+        };
+        std::optional<Contact> contact;
+        std::uint32_t drain_from{};
+        particles::EmitterFrame frame;
     };
     // One spawned effect: the tick of its event, reason:particle, its age when a frame first
     // drew it (none: gone before one did).
@@ -207,11 +254,21 @@ private:
     };
     struct HeroBeamLook {
         Batch batch;
+        Batch sparks;
         std::string texture;
         float width{};
+        std::int32_t frames{};
         particles::Color colour{1.0F, 1.0F, 1.0F, 1.0F};
+        std::map<sim::EntityId, std::pair<sim::EntityId, std::uint64_t>> births;
+        std::array<particles::ParticleVertex, 4> last_quad{};
+        std::uint64_t active_at_release{};
+        std::uint64_t sparks_drawn{};
+        std::uint64_t moving_samples{};
+        float last_spark_fraction{};
     };
     std::array<HeroBeamLook, 2> hero_beams_;
+    std::array<std::string, 4> move_particles_; // move, double click, attack move, guard
+    float move_scale_{1.0F};
     std::map<sim::EntityId, particles::EffectHandle> energy_owner_effects_;
     std::map<std::uint64_t, sim::tactical::TypeId> spawned_projectile_types_;
     std::map<sim::tactical::TypeId, std::string> weaken_particles_;
@@ -222,7 +279,11 @@ private:
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
     // False when the particle backend failed (failure() set).
     [[nodiscard]] bool spawn(const std::string& particle, const std::array<double, 3>& position,
-                             const particles::Basis3& basis, const std::string& reason, std::uint64_t tick);
+                             const particles::Basis3& basis, const std::string& reason, std::uint64_t tick,
+                             sim::EntityId owner = sim::invalid_entity_id, std::uint32_t bone = 0,
+                             bool* created = nullptr);
+    std::vector<TerminalSound> terminal_sounds_;
+    [[nodiscard]] bool follow_contacts(const sim::tactical::TacticalSnapshot& latest);
     [[nodiscard]] bool draw_projectiles(const sim::tactical::TacticalSnapshot& previous,
         const sim::tactical::TacticalSnapshot& latest, double alpha, const UnitLookup& units, const FixedCamera& camera);
     // Runs the effect clock up to `target` samples; each effect takes the samples from its birth.
@@ -243,6 +304,8 @@ private:
 
     godot::Node3D* host_;
     const vfs::Vfs* filesystem_;
+    presentation_constants::Lasers laser_scales_;
+    float max_kite_width_{}, max_beam_width_{};
     const data::Catalog* catalog_;
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
@@ -253,8 +316,23 @@ private:
     std::map<sim::tactical::TypeId, TypeLooks> types_;
     std::map<std::string, ParticleType> particle_types_;
     std::vector<LiveEffect> effects_;
+    BoneLookup contact_bones_;
+    std::uint64_t contact_attached_{}, contact_missing_{}, contact_hidden_{}, contact_removed_{};
+    struct ContactSample final {
+        std::uint64_t sample{};
+        particles::EffectHandle handle{};
+        std::string key;
+        std::uint32_t age{};
+        std::optional<LiveEffect::Contact> contact;
+        particles::EmitterFrame frame;
+        bool bounds{};
+        particles::Vec3 centre;
+        bool detached{};
+    };
+    std::vector<ContactSample> contact_samples_;
     // The last frame of every unit seen, for the explosions of units that left the session.
     std::map<sim::EntityId, UnitFrame> last_seen_;
+    // WNO-29: visible death payloads survive pruning of their destroyed source pose.
     // The type of every unit the session has held (shooters of hits and projectiles may have died).
     std::map<sim::EntityId, sim::tactical::TypeId> entity_types_;
     // The shooter type of each projectile in flight (its shooter may die before it lands).
@@ -295,6 +373,10 @@ private:
     std::uint32_t seed_{1};
     // Report counters.
     std::uint64_t frames_{};
+    std::array<float, 2> effect_clips_{};
+    // First drawn laser: view depth, normalized depth, width factor, world half width.
+    std::optional<std::array<float, 4>> first_kite_depth_;
+    std::optional<std::array<float, 4>> first_beam_depth_;
     std::uint64_t projectiles_drawn_{};
     std::uint64_t projectiles_hidden_{};
     std::uint64_t max_kites_{};
@@ -339,6 +421,7 @@ private:
     std::vector<SpawnRow> spawn_log_;
     std::uint64_t effects_dropped_{};
     std::uint64_t max_live_effects_{};
+    std::uint64_t move_feedback_at_release_{};
     std::vector<std::string> unresolved_;
     std::string failure_;
     bool released_{};

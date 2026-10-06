@@ -207,6 +207,8 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
     reticles_drawn_ = 0;
     tracked_reticles_ = 0;
     reticle_rects_.clear();
+    tooltip_hit_.reset();
+    tooltip_rect_ = {};
     // The unit whose reticles show: the one under the pointer (WU-30), and the unit of a reticle that
     // is still flashing from an order (WU-42), which shows only that reticle.
     struct Shown final {
@@ -256,7 +258,8 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
             if (entry_unit.only_flash && !flashing) continue;
             // WU-30: every targetable hardpoint that still stands.
             if (!hardpoint.targetable || hardpoint.texture.empty()
-                || statuses[index].state == sim::tactical::HardpointState::destroyed) {
+                || statuses[index].state == sim::tactical::HardpointState::destroyed
+                || (unit.hostile && !statuses[index].enabled)) {
                 continue;
             }
             // WU-34: on the attachment point as the ship is drawn, bank and pitch included.
@@ -298,7 +301,53 @@ void WorldUiView::draw_reticles(const Frame& frame, const RID canvas_item) {
                     entry.rect.position.y, entry.rect.position.x + entry.rect.size.x,
                     entry.rect.position.y + entry.rect.size.y});
             }
+            // WU-51: the actual hover, never an attack-order flash, owns the tooltip.
+            if (tracked && *tracked == entry.index && !hardpoint.tooltip.empty()) {
+                tooltip_hit_ = ReticleHit{unit.entity, static_cast<std::uint32_t>(entry.index)};
+                tooltip_health_ = hardpoint.max_health > 0.0F ? std::clamp(health, 0.0F, 1.0F) : 0.0F;
+                const int percent = static_cast<int>(std::floor(tooltip_health_ * 100.0F + 0.5F));
+                const int pixels = ui::font_pixels({tooltip_points_, false, 1.0},
+                    static_cast<std::uint32_t>(frame.viewport[1])).em_height;
+                if (tooltip_line_.is_null()) tooltip_line_.instantiate();
+                if (&hardpoint != tooltip_source_ || percent != tooltip_percent_ || pixels != tooltip_pixels_) {
+                    tooltip_source_ = &hardpoint;
+                    tooltip_percent_ = percent;
+                    tooltip_text_ = hardpoint.tooltip + " - " + std::to_string(percent) + "%";
+                    tooltip_pixels_ = pixels;
+                    tooltip_line_->clear();
+                    tooltip_line_->add_string(String::utf8(tooltip_text_.c_str()), tooltip_font_, pixels);
+                    static_cast<void>(tooltip_line_->get_size());
+                }
+            }
         }
+    }
+    // WU-52/53: one cached text line and health bar, positioned after the reticle pass.
+    if (tooltip_hit_ && frame.pointer && tooltip_font_.is_valid()) {
+        const Vector2 padding(frame.viewport[0] * 0.0035F, frame.viewport[1] * 0.0035F);
+        const Vector2 text_size = tooltip_line_->get_size();
+        const int small_pixels = ui::font_pixels({tooltip_small_points_, false, 1.0},
+            static_cast<std::uint32_t>(frame.viewport[1])).em_height;
+        const float row_height = tooltip_small_font_->get_height(small_pixels);
+        const float bar_width = frame.viewport[0] * 0.1F;
+        const Vector2 content_size(std::max(text_size.x, bar_width), text_size.y + row_height);
+        const Vector2 size = content_size + 2.0F * padding;
+        // WU-53: clamp content extents; the frame adds padding after placement.
+        const Vector2 origin(std::min((*frame.pointer)[0], frame.viewport[0] * 0.98F - content_size.x),
+                             std::min((*frame.pointer)[1] + 32.0F, frame.viewport[1] * 0.98F - content_size.y));
+        const Rect2 rect(origin, size);
+        rendering->canvas_item_add_rect(canvas_item, rect, colour({15, 25, 45}, 240.0F / 255.0F));
+        const float edge = frame.viewport[1] * 0.0014F;
+        const Color border = colour({51, 113, 190}, 200.0F / 255.0F);
+        rendering->canvas_item_add_rect(canvas_item, Rect2(origin, Vector2(size.x, edge)), border);
+        rendering->canvas_item_add_rect(canvas_item, Rect2(origin.x, origin.y + size.y - edge, size.x, edge), border);
+        rendering->canvas_item_add_rect(canvas_item, Rect2(origin, Vector2(edge, size.y)), border);
+        rendering->canvas_item_add_rect(canvas_item, Rect2(origin.x + size.x - edge, origin.y, edge, size.y), border);
+        tooltip_line_->draw(canvas_item, origin + padding, colour({51, 113, 190}));
+        const Vector2 bar_origin = origin + padding + Vector2(0.0F, text_size.y + row_height * 0.3F);
+        rendering->canvas_item_add_rect(canvas_item, Rect2(bar_origin, Vector2(bar_width, row_height * 0.4F)), colour({112, 0, 0}));
+        if (tooltip_health_ > 0.0F) rendering->canvas_item_add_rect(canvas_item,
+            Rect2(bar_origin, Vector2(bar_width * tooltip_health_, row_height * 0.4F)), colour({24, 168, 42}));
+        tooltip_rect_ = {origin.x, origin.y, size.x, size.y};
     }
     max_reticles_ = std::max(max_reticles_, reticles_drawn_);
 }

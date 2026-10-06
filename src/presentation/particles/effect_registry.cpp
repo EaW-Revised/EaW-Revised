@@ -355,13 +355,13 @@ void EffectRegistry::step(Instance& instance, const float delta_seconds, EffectF
         instance.stepped = true;
         return;
     }
-    if (!std::isfinite(delta_seconds) || delta_seconds < 0.0F ||
+    if (!std::isfinite(delta_seconds) || delta_seconds <= 0.0F ||
         delta_seconds > std::numeric_limits<float>::max() - instance.accumulated ||
         instance.accumulated + delta_seconds > std::numeric_limits<float>::max() - instance.cpu.presentation_time()) return;
     instance.accumulated += delta_seconds;
     // PS-38: the first update establishes the transform; thereafter successful
     // submission admits the full saved time, otherwise equality at 0.1 s admits.
-    // Zero-delta attachment generations retain the existing CPU initialization.
+    // PS-42: zero delta cannot initialize or consume a generation.
     if (instance.updated && !instance.was_rendered && instance.accumulated < 0.1F) {
         instance.deferred = delta_seconds > 0.0F;
         instance.cpu.follow_emitter();
@@ -408,11 +408,12 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
         if (detail_.heat || instance.plans[index].phase != DrawPhase::heat)
             build_stream(instance.plans[index], live, camera, stream);
         if (instance.brightness != 1.0F) {
-            // BP-45, as FoC's renderer: the vertex colour times the
-            // brightness (FoC truncates to 8 bits; the stream keeps floats).
+            // PS-23/BP-45: byte channels receive brightness independently.
+            // Out-of-range caller brightness saturates as a presentation safety policy.
             for (ParticleVertex& vertex : stream.vertices) {
-                vertex.color = {vertex.color.x * instance.brightness, vertex.color.y * instance.brightness,
-                                vertex.color.z * instance.brightness, vertex.color.w * instance.brightness};
+                const auto channel=[&](const float value){return
+                    std::clamp(std::trunc(value*255*instance.brightness),0.0F,255.0F)/255;};
+                vertex.color = {channel(vertex.color.x),channel(vertex.color.y),channel(vertex.color.z),channel(vertex.color.w)};
             }
         }
         if (stats == nullptr) continue;

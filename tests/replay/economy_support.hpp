@@ -61,11 +61,13 @@ std::vector<tactical::Event> step_to(tactical::TacticalSession& world, const std
 void test_roster_gate();
 void test_arrival_table();
 void test_income();
+void test_credit_adjustments();
 void test_team_production();
 void test_credit_grant();
 void test_buy();
 void test_refusals();
 void test_cancel();
+void test_cancel_entry();
 void test_station_lost();
 void test_reinforce_ship();
 void test_reinforced_carrier();

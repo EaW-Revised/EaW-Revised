@@ -147,6 +147,27 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         setup.time_buttons.push_back({control, rect, button.rect});
     }
 
+    for (const auto& button : state.shell.order_buttons) {
+        const std::string name = button.name == "c_button00" ? "attack"
+            : button.name == "c_button01" ? "attack_move" : button.name == "c_button02" ? "move"
+            : button.name == "c_button04" ? "stop" : "guard";
+        auto* control = memnew(EawrHudButton);
+        control->set_name(String(button.name.c_str()));
+        control->set_toggle_mode(name != "stop");
+        std::string origin;
+        const auto icon = button_texture(button.name, button.normal, origin);
+        const auto rect = quad(button, icon);
+        // The icon stays above the background and hover/selected art.
+        control->set_texture_normal(button_texture(button.name, button.blank, origin));
+        control->set_texture_hover(button_texture(button.name, button.mouse_over, origin));
+        control->set_texture_pressed(button_texture(button.name, button.pressed, origin));
+        control->set_texture_disabled(button_texture(button.name, button.disabled, origin));
+        control->set_order_icon(icon, button.click_shift);
+        control->set_action([&state, name] { if (state.order_handler) state.order_handler(name); });
+        state.order_buttons.emplace(name, control);
+        setup.time_buttons.push_back({control, rect, button.rect});
+    }
+
     // The planet name: its component font through UI-F3, the text through the map.
     std::optional<data::ui::TextDatabase>& text_database = state.text_database;
     if (auto loaded_text = data::ui::load_language_text_database(filesystem, state.options.language)) {
@@ -288,19 +309,26 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         minimap.rect = *state.shell.minimap;
         minimap.backdrop = state.minimap_settings.backdrop;
         minimap.background = state.minimap_settings.background;
+        // SND-40: clone the authored radar marker's art and scale, without owner tint.
+        if (const auto* warning = catalog.find("radar_blip")) {
+            const auto icons = warning->list(data::ui::Field::icon_texture_name);
+            if (!icons.empty()) minimap.warning_icon = icons.front();
+            minimap.warning_scale = warning->number(data::ui::Field::scale).value_or(1.0F);
+        }
         minimap.texture = [&state](const std::string& name) { return state.command_texture(name, "minimap"); };
         minimap.placement = [hud] { return hud->placement(); };
         state.minimap = memnew(EawrMinimap);
         state.minimap->set_name("EawrMinimap");
         state.hud->add_child(state.minimap);
         state.minimap->setup(std::move(minimap));
+        state.minimap->prepare_orders(filesystem);
         state.minimap->set_look([&state](const model::MinimapPoint point) {
             const auto world = model::minimap_world(state.minimap_extents, point);
             if (state.minimap_look) state.minimap_look(world[0], world[1]);
         });
-        state.minimap->set_move([&state](const model::MinimapPoint point) {
+        state.minimap->set_move([&state](const model::MinimapPoint point, const bool double_click) {
             const auto world = model::minimap_world(state.minimap_extents, point);
-            if (state.minimap_move) state.minimap_move(world[0], world[1]);
+            if (state.minimap_move) state.minimap_move(world[0], world[1], double_click);
         });
     }
     // #453, #459: the battle overlay above the HUD. Texts from the text DB, looks from

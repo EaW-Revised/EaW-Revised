@@ -300,6 +300,17 @@ bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<co
     return found || icon_found;
 }
 
+bool Selection::all(const std::span<const BattleUnit> units) {
+    std::vector<sim::EntityId> next;
+    for (const BattleUnit& unit : units) {
+        // S-5a: global admission has no projection or pointer-sensitivity test.
+        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.selectable || unit.neutral
+            || !unit.locomotion || unit.decoration) continue;
+        next.push_back(unit.entity);
+    }
+    return replace(next);
+}
+
 bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span<const BattleUnit> units,
                                const ScreenRect& viewport) {
     bool added = false;
@@ -361,6 +372,14 @@ void Selection::replace_entity(const sim::EntityId previous, const sim::EntityId
     for (auto& members : groups_) transfer(members);
 }
 
+void Selection::owner_changed(const sim::EntityId entity, const sim::tactical::PlayerId previous,
+    const sim::tactical::PlayerId current, const sim::tactical::PlayerId observer) {
+    if (previous == current || previous != observer) return;
+    std::erase(selected_, entity);
+    for (auto& members : groups_) std::erase(members, entity);
+    group_numbers_.erase(entity);
+}
+
 void Selection::assign_group(const std::size_t group) {
     for (const auto entity : groups_.at(group)) group_numbers_.erase(entity);
     for (auto& members : groups_) std::erase_if(members, [this](const sim::EntityId entity) { return contains(entity); });
@@ -373,13 +392,13 @@ std::optional<std::size_t> Selection::group_of(const sim::EntityId entity) const
     return found == group_numbers_.end() ? std::nullopt : std::optional<std::size_t>(found->second);
 }
 
-std::optional<Vec3f> Selection::recall_group(const std::size_t group, const bool add, const double now_seconds,
+std::optional<Vec3f> Selection::recall_group(const std::size_t group, const bool add, const double logical_frame,
                                              const std::span<const BattleUnit> alive) {
     if (!add) selected_.clear();
-    return selected_group(group, now_seconds, alive);
+    return selected_group(group, logical_frame, alive);
 }
 
-std::optional<Vec3f> Selection::add_to_group(const std::size_t group, const double now_seconds,
+std::optional<Vec3f> Selection::add_to_group(const std::size_t group, const double logical_frame,
                                              const std::span<const BattleUnit> alive) {
     auto& members = groups_.at(group);
     for (const sim::EntityId entity : selected_) {
@@ -389,10 +408,10 @@ std::optional<Vec3f> Selection::add_to_group(const std::size_t group, const doub
         if (std::find(members.begin(), members.end(), entity) == members.end()) members.push_back(entity);
         group_numbers_[entity] = group;
     }
-    return selected_group(group, now_seconds, alive);
+    return selected_group(group, logical_frame, alive);
 }
 
-std::optional<Vec3f> Selection::selected_group(const std::size_t group, const double now_seconds,
+std::optional<Vec3f> Selection::selected_group(const std::size_t group, const double logical_frame,
                                                const std::span<const BattleUnit> alive) {
     double sum_x = 0.0;
     double sum_y = 0.0;
@@ -406,12 +425,13 @@ std::optional<Vec3f> Selection::selected_group(const std::size_t group, const do
         ++count;
     }
     std::optional<Vec3f> focus;
-    if (count > 0 && last_group_ == group && now_seconds - last_group_seconds_ < control_group_double_tap_seconds) {
+    if (count > 0 && last_group_ == group && logical_frame >= last_group_frame_
+        && logical_frame - last_group_frame_ < control_group_double_tap_frames) {
         focus = Vec3f{static_cast<float>(sum_x / static_cast<double>(count)),
                       static_cast<float>(sum_y / static_cast<double>(count)), 0.0F};
     }
     last_group_ = group;
-    last_group_seconds_ = now_seconds;
+    last_group_frame_ = logical_frame;
     return focus;
 }
 

@@ -229,6 +229,11 @@ core::Result<void> Adapter::handle(const RawEvent& event) {
         return handle_button(Device::mouse_button, event);
     case RawKind::mouse_wheel: {
         if (!event.pressed) return core::Result<void>::success();
+        // PI-9: a held middle grab suppresses the wheel, without deferring it.
+        if (reducer_.is_held(static_cast<camera::ActionId>(Action::rotate_grab))) {
+            ++counters_.ignored_ineligible;
+            return core::Result<void>::success();
+        }
         const auto index = find_binding(Device::mouse_wheel, event.code, event.modifiers);
         if (!index) {
             ++counters_.ignored_unbound;

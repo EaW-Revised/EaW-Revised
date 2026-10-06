@@ -81,6 +81,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         tactical::ShotProfile shot;
         shot.damage = weapon.damage && weapon.damage->raw() > 0 ? *weapon.damage : projectile.damage.value_or(Fixed{});
         shot.blast = projectile.blast; // WAD-02/36: independent of instance direct damage
+        shot.damage_delay = projectile.damage_delay;
         shot.damage_type = types.damage(!weapon.damage_type.empty() ? weapon.damage_type : projectile.damage_type);
         shot.speed = *projectile.max_speed;
         shot.max_travel = hardpoint && weapon.range && weapon.range->raw() > 0
@@ -120,7 +121,7 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         if (!hardpoint) shot.energy_per_shot = projectile.energy_per_shot.value_or(Fixed{});
         // MS-01: a MISSILE-category projectile homes, turning at its Max_Rate_Of_Turn.
         shot.homing = same_name(projectile.category, "MISSILE");
-        if (shot.homing) shot.turn_rate = projectile.max_rate_of_turn.value_or(Fixed{});
+        shot.turn_rate = projectile.max_rate_of_turn.value_or(Fixed{}); // WPJ-09/17: direct deflection turns too
         const bool rocket = same_name(projectile.category, "ROCKET");
         if (rocket || projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)) {
             tactical::FlightProfile flight;
@@ -188,10 +189,23 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         tactical::CombatProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
         profile.living_projectile_collision = unit.living_projectile_collision;
+        profile.valid_target = unit.valid_target;
+        profile.special_weapon = unit.special_weapon;
+        profile.star_base = unit.star_base;
         profile.capture_point = unit.capture_point;
         profile.category_bits = unit.category_bits;
         profile.hero = unit.named_hero || unit.generic_hero;
         profile.redirect_damage_to_teammates = unit.redirect_damage_to_teammates;
+        profile.passive_missile_shield_radius = unit.passive_missile_shield_radius.value_or(Fixed{});
+        profile.ranged_target_z_adjust = unit.ranged_target_z_adjust.value_or(Fixed{});
+        for (const auto index : unit.death_projectile_indices) {
+            Weapon payload;
+            payload.projectile_index = index;
+            auto shot = shot_profile(payload, false);
+            if (!shot) return Result::failure(shot.error());
+            if (!shot.value()) return Result::failure(failure(unit.id + ": unresolved Death_Projectiles entry"));
+            profile.death_projectiles.push_back(*shot.value());
+        }
         profile.max_attack_distance = unit.targeting_max_attack_distance;
         profile.min_attack_distance = unit.targeting_min_attack_distance.value_or(Fixed{});
         if (unit.targeting_priority_set_index != no_index) {

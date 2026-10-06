@@ -80,11 +80,15 @@ data::ui::ShellAnchors synthetic_shell() {
     }
     shell.add(anchor("Text_Credits_tactical", {190, 228, 90, 20}));
     shell.add(anchor("b_reinforcement", {240, 125, 30, 30}));
+    std::size_t order = 0;
+    for (const auto name : ui::tactical_order_buttons) {
+        shell.add(anchor(std::string(name), {260.0F + 30.0F * static_cast<float>(order++), 205, 24, 24}));
+    }
     return shell;
 }
 
 data::ui::CommandBarCatalog synthetic_catalog() {
-    const std::string xml = R"(<CommandBarComponents>
+    std::string xml = R"(<CommandBarComponents>
 <CommandBarComponent Name="i_main_commandbar"><Type>Shell</Type><Model_Name>i_galactic_controls.alo</Model_Name>
   <Mega_Texture_Name>MT_CommandBar</Mega_Texture_Name></CommandBarComponent>
 <CommandBarComponent Name="i_main_skirmish"><Type>Shell</Type><Model_Name>i_tactical_controls.alo</Model_Name></CommandBarComponent>
@@ -136,6 +140,16 @@ data::ui::CommandBarCatalog synthetic_catalog() {
   <Blank_Texture_Name>pad.tga</Blank_Texture_Name><Flash_Texture_Name>flash.tga</Flash_Texture_Name>
   <Click_Shift>Yes</Click_Shift><Selected_Alpha>Yes</Selected_Alpha></CommandBarComponent>
 </CommandBarComponents>)";
+    for (const auto name : ui::tactical_order_buttons) {
+        const std::string component = std::string(name);
+        xml.insert(xml.rfind("</CommandBarComponents>"),
+            "<CommandBarComponent Name=\"" + component + "\"><Type>Button</Type>"
+            "<Icon_Texture_Name>" + component + ".tga</Icon_Texture_Name>"
+            "<Mouse_Over_Texture_Name>over.tga</Mouse_Over_Texture_Name>"
+            "<Selected_Texture_Name>selected.tga</Selected_Texture_Name>"
+            "<Blank_Texture_Name>blank.tga</Blank_Texture_Name>"
+            "<Click_Shift>Yes</Click_Shift><Selected_Alpha>Yes</Selected_Alpha></CommandBarComponent>");
+    }
     data::ui::CommandBarCatalog catalog;
     std::vector<core::Diagnostic> diagnostics;
     vfs::AssetRecord record;
@@ -156,6 +170,13 @@ void shell_parts() {
 
     const auto rebel = ui::hud_shell(shell, catalog, ui::HudFaction::rebel);
     expect(rebel.diagnostics.empty(), "the synthetic shell has every P2-20a part");
+    expect(rebel.order_buttons.size() == 5U, "five authored order controls exclude deferred waypoint semantics");
+    for (const auto& button : rebel.order_buttons) {
+        expect(button.name != "c_button03" && button.normal == button.name + ".tga"
+                   && button.mouse_over == "over.tga" && button.pressed == "selected.tga"
+                   && button.blank == "blank.tga" && button.click_shift && button.selected_alpha,
+               "order controls retain their icon, state art and authored pressed flags");
+    }
     expect(rebel.ability_buttons.empty(), "#454: a shell without special_button_NN draws no ability buttons");
     // #530 PU-63, PU-65, PU-66.
     expect(rebel.queue_slots.size() == 10U, "the build queue has its ten slots");
@@ -245,11 +266,11 @@ void shell_parts() {
     data::ui::ShellAnchors bare;
     bare.add(anchor("Rebel_Faceplate_ALT1", {-1, -1, 1078, 284}, "MeshAlpha.fx", "face_rebel.tga", true, -1));
     const auto partial = ui::hud_shell(bare, catalog, ui::HudFaction::empire);
-    expect(partial.diagnostics.size() == 10U && !partial.minimap && partial.queue_slots.empty() && !partial.credits
+    expect(partial.diagnostics.size() == 15U && !partial.minimap && partial.queue_slots.empty() && !partial.credits
                && !partial.reinforcement && !partial.options && !partial.planet_name
-               && partial.panel_buttons.empty(),
+               && partial.panel_buttons.empty() && partial.order_buttons.empty(),
            "a missing faceplate, radar, options button, panel button, planet name, credits text and reinforcements "
-           "button are reported once each; a shell without queue slots shows no queue");
+           "button and five command buttons are reported once each; a shell without queue slots shows no queue");
 
     for (const auto* text : {"empire", "Rebel", "UNDERWORLD"}) expect(ui::hud_faction_from(text).has_value(), "factions parse");
     expect(!ui::hud_faction_from("pirate"), "an unknown faction is refused");

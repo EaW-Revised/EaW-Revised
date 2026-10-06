@@ -86,18 +86,31 @@ which take priority over world meshes (WU-41, WU-23); cursors consume that resul
   hardpoints not already repairing can show `POINTER_REPAIR_HARDPOINT`; that requires
   a repair action and must not be implied by hovering any friendly ship.
 
+- **CU-12** (CU-E2, CU-E4, BARR-01): BARRAGE and WEAKEN_ENEMY arm space-position
+  targeting, using `POINTER_TARGET_SPECIAL_ABILITY_TO_SPACE_POSITION` and its
+  `_INVALID` variant. Empty space can be valid without an enemy under the pointer.
+  Hover and click use one point query. BARRAGE reads logical fog cells, including
+  rejection outside the grid; without a grid it uses published allied sensor ranges.
+  The presentation reveal switch does not bypass this admission. WEAKEN_ENEMY
+  retains the simulation's authored-radius check and zero-point fallback (U-10).
+  Invalid point clicks cancel targeting with refusal feedback and submit no command.
+
 ## Scope
 
 All definitions are loaded, including land/galactic, wait, drag/drop, superweapon,
 beacon, garrison and repair art. Their actions are selected only when input exposes
 those modes; loading art does not add commands. Existing M2 targets are enemy-object
-abilities. Friendly/terrain/position target routing must be supplied by those future
-input modes. CU-09 is only partially implemented: the current input layer classifies
+abilities and world-point BARRAGE/WEAKEN_ENEMY. Friendly/terrain target routing must be
+supplied by future input modes. CU-09 is only partially implemented: the current input layer classifies
 ability hover and clicks by hostility. Simulation's private AB-62 ion-shot admission
 also requires a combat profile, but there is no shared admission query including
 the authored type filter, hyperspace, duel and other applicable restrictions. A
 shared evaluated predicate must cover these before full CU-09 parity can be claimed;
 the ordinary hostile-ship and empty-space GPU pair does not establish that parity
 (legacy EAWR-578). These restrictions must not be invented by the cursor adapter.
+CU-12 matches current simulation point admission. BARRAGE's separate debug-build
+firing predicate checks weapon reach, movement, weapon-hit and turret state; those
+checks do not establish an activation range gate. WEAKEN_ENEMY's U-10 placement
+range remains unverified.
 The adapter uses the ordinary attack ID for hostile hover: FoC's out-of-range
 definition has identical art and click offset, so the cursor adds no range query.
