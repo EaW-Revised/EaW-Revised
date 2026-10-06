@@ -410,15 +410,20 @@ void MapMode::State::sync_production() {
             }
             return 0U;
         };
-        if (production_pool_cache.refresh(*economy)) {
-            const auto pool = presentation::ui::layout_pool(economy->pool, economy->population, economy->population_cap, population_of);
+        // A drop made while paused leaves the pane before its command runs (TM-10).
+        const std::size_t pending = live.pending_reinforcements();
+        if (production_pool_cache.refresh(*economy) || pending != production_pool_pending) {
+            production_pool_pending = pending;
+            const auto pool = presentation::ui::layout_pool(live.reinforcement_pool(),
+                economy->population + live.pending_reinforcement_population(), economy->population_cap, population_of);
             view.pool.clear();
             pool_types.clear();
             for (const auto& slot : pool) {
                 view.pool.push_back({slot.slot, name_of(slot.type), slot.text, slot.enabled});
                 pool_types.push_back(slot.type);
             }
-            view.population = presentation::ui::population_text(economy->population, economy->population_cap);
+            view.population = presentation::ui::population_text(economy->population + live.pending_reinforcement_population(),
+                                                                economy->population_cap);
             view.rows = presentation::ui::pool_rows(pool.size());
         }
     }

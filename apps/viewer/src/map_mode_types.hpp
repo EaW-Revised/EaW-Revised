@@ -173,6 +173,7 @@ struct MapMode::State final {
     std::vector<sim::tactical::TypeId> pool_types;
     EawrProductionPanel::View production_view;
     presentation::ui::PoolLayoutCache production_pool_cache;
+    std::size_t production_pool_pending{};
     presentation::ui::BuildMenuCache production_menu_cache;
     std::array<std::vector<sim::tactical::QueueEntry>, sim::tactical::build_queue_count> production_queues;
     std::uint64_t minimap_syncs{};

@@ -136,6 +136,42 @@ class BattleInputProductionCases:
                 self.assertTrue(result["hud"]["unit_cards"]["drawn"], result["hud"])
 
 
+    def test_paused_drop_leaves_the_reserve_pane(self):
+        # TM-10: a drop made while paused waits for the next tick. Until that tick runs, the pane
+        # leaves the dropped unit out, so a second press on its slot finds it empty: the squadron
+        # is sent once and nothing is rejected on resume (the second drop used to reach the
+        # simulation as not_in_pool, and units arrived where the first drop pointed).
+        first = (STAR_BASE_POSITION[0] + 700.0, STAR_BASE_POSITION[1] - 500.0)
+        second = (STAR_BASE_POSITION[0] + 1000.0, STAR_BASE_POSITION[1] + 440.0)
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-paused-drop-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._run(directory, "paused_drop", (
+                "--eawr-live-step", "10",
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "500:click:hud=b_reinforcement",
+                "--eawr-live-input", "510:click:hud=pause",
+                "--eawr-live-input", "f80:press:hud=r_0000",
+                "--eawr-live-input", f"f85:hover:@{first[0]},{first[1]},0",
+                "--eawr-live-input", f"f90:release:@{first[0]},{first[1]},0",
+                "--eawr-live-input", "f100:press:hud=r_0000",
+                "--eawr-live-input", f"f105:hover:@{second[0]},{second[1]},0",
+                "--eawr-live-input", f"f110:release:@{second[0]},{second[1]},0",
+                "--eawr-live-input", "f120:click:hud=resume"), end_tick=720)
+            self.assertEqual(code, 0, result.get("failure"))
+            battle, live = result["battle_input"], result["live_session"]
+            self.assertEqual(battle["scripted_fired"], 11, battle["log"])
+            self.assertEqual(battle["production"]["placements"], 1, battle["log"])
+            # The second press found the slot empty: one placement began.
+            self.assertEqual(sum(row.startswith("reinforce placing") for row in battle["log"]), 1, battle["log"])
+            requests = live["economy_requests"]
+            self.assertEqual((requests["buys"], requests["reinforcements"], requests["refused"]), (1, 1, 0), requests)
+            self.assertEqual(live["rejected"], [])
+            arrivals = [row for row in live["arrivals"] if row["owner"] == 1]
+            self.assertGreaterEqual(len(arrivals), 2, live["arrivals"])
+            self.assertEqual(live["economy"]["pool"], [], live["economy"])
+            self.assertIs(live["headless_hashes_equal"], True)
+
     def test_station_buys_a_squadron_that_arrives(self):
         # #530 (docs/behaviour/space-purchasing.md PU-60 to PU-68): selecting the Rebel station turns
         # the card slots into its build buttons; the first buys an X-wing squadron (500 credits, 450

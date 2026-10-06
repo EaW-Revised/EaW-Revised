@@ -340,9 +340,50 @@ bool LiveSessionView::reinforce(const tactical::TypeId type, const sim::math::Ve
     intent.type = type;
     intent.destination = point;
     intent.origin = ui::CommandOrigin::world_click;
+    const std::uint64_t tick = order_tick();
     const bool issued = issue_economy(scheduler_.get(), intent);
     ++(issued ? economy_requests_.reinforcements : economy_requests_.refused);
+    if (issued) {
+        std::erase_if(pending_reinforcements_, [this](const PendingReinforcement& drop) { return !reinforcement_pending(drop); });
+        pending_reinforcements_.push_back({tick, type});
+    }
     return issued;
+}
+
+bool LiveSessionView::reinforcement_pending(const PendingReinforcement& drop) const noexcept {
+    // A command stamped for tick t is applied by the step that completes tick t + 1.
+    return !battle_frame_.latest || battle_frame_.latest->completed_tick() <= drop.tick;
+}
+
+std::uint32_t LiveSessionView::population_of(const tactical::TypeId type) const noexcept {
+    for (const auto& menu : economy_.menus) {
+        if (const auto* option = menu.find(type)) return option->population;
+    }
+    return 0U;
+}
+
+std::vector<tactical::TypeId> LiveSessionView::reinforcement_pool() const {
+    const auto* ledger = local_economy();
+    if (ledger == nullptr) return {};
+    std::vector<tactical::TypeId> pool = ledger->pool;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (!reinforcement_pending(drop)) continue;
+        if (const auto found = std::find(pool.begin(), pool.end(), drop.type); found != pool.end()) pool.erase(found);
+    }
+    return pool;
+}
+
+std::uint32_t LiveSessionView::pending_reinforcement_population() const {
+    std::uint32_t population = 0;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (reinforcement_pending(drop)) population += population_of(drop.type);
+    }
+    return population;
+}
+
+std::size_t LiveSessionView::pending_reinforcements() const {
+    return static_cast<std::size_t>(std::count_if(pending_reinforcements_.begin(), pending_reinforcements_.end(),
+        [this](const PendingReinforcement& drop) { return reinforcement_pending(drop); }));
 }
 
 bool LiveSessionView::reinforcement_allowed() const noexcept {
@@ -355,13 +396,19 @@ bool LiveSessionView::reinforcement_allowed() const noexcept {
 
 bool LiveSessionView::reinforcement_room(const tactical::TypeId type) const noexcept {
     const auto* ledger = local_economy();
-    if (ledger == nullptr || std::find(ledger->pool.begin(), ledger->pool.end(), type) == ledger->pool.end()) return false;
-    for (const auto& menu : economy_.menus) {
-        if (const auto* option = menu.find(type)) {
-            return ledger->population <= ledger->population_cap && option->population <= ledger->population_cap - ledger->population;
-        }
+    if (ledger == nullptr) return false;
+    // A unit dropped while paused has left the pool and taken its population (TM-10).
+    std::size_t waiting = 0;
+    std::uint64_t population = ledger->population;
+    for (const PendingReinforcement& drop : pending_reinforcements_) {
+        if (!reinforcement_pending(drop)) continue;
+        if (drop.type == type) ++waiting;
+        population += population_of(drop.type);
     }
-    return false;
+    if (static_cast<std::size_t>(std::count(ledger->pool.begin(), ledger->pool.end(), type)) <= waiting) return false;
+    const std::uint32_t added = population_of(type);
+    return population <= ledger->population_cap && added <= ledger->population_cap - population
+        && std::any_of(economy_.menus.begin(), economy_.menus.end(), [type](const auto& menu) { return menu.find(type) != nullptr; });
 }
 
 void LiveSessionView::placement_preview(const std::optional<tactical::TypeId> type,

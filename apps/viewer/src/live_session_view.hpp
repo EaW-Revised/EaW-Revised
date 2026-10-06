@@ -441,6 +441,12 @@ public:
     bool reinforce(sim::tactical::TypeId type, const sim::math::Vec3& point);
     [[nodiscard]] bool reinforcement_allowed() const noexcept;
     [[nodiscard]] bool reinforcement_room(sim::tactical::TypeId type) const noexcept;
+    // TM-10: a drop made while paused waits for the next tick that runs. Until the snapshot shows
+    // it applied, the reserve pane leaves its unit out and counts its population, so the same
+    // reserve unit cannot be dropped twice.
+    [[nodiscard]] std::vector<sim::tactical::TypeId> reinforcement_pool() const;
+    [[nodiscard]] std::uint32_t pending_reinforcement_population() const;
+    [[nodiscard]] std::size_t pending_reinforcements() const;
     // WR-13: preview pose input only; simulation is queried through its nonblocking platform seam.
     void placement_preview(std::optional<sim::tactical::TypeId> type, std::optional<sim::math::Vec3> point);
     [[nodiscard]] bool placement_valid() const noexcept { return preview_valid_ && reinforcement_allowed(); }
@@ -535,6 +541,13 @@ private:
     std::optional<sim::tactical::TypeId> preview_type_;
     std::optional<sim::math::Vec3> preview_point_;
     bool preview_valid_{};
+    struct PendingReinforcement final {
+        std::uint64_t tick{};  // the tick its command was stamped for
+        sim::tactical::TypeId type{};
+    };
+    std::vector<PendingReinforcement> pending_reinforcements_;
+    [[nodiscard]] bool reinforcement_pending(const PendingReinforcement& drop) const noexcept;
+    [[nodiscard]] std::uint32_t population_of(sim::tactical::TypeId type) const noexcept;
     std::array<std::array<float, 3>, 2> preview_colours_{};
     std::uint64_t preview_frames_{};
     std::uint64_t preview_queries_{};
