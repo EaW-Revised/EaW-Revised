@@ -405,6 +405,50 @@ void test_replacement_attack() {
         expect(replacement != 0, "target fixture actually replaced station");
     }
 }
+// The commands phase inserts a reinforcement into the staged units, which moves them. An attack
+// order later in the same tick reads its target's health and health profile from the staged
+// unit: an upgraded unit keeps its profile in the unit itself, so the targeting view's copy of
+// that pointer no longer names it (a use after free in has_aim_hardpoint before the fix).
+void test_order_after_reinforcement() {
+    t::CombatTable combat;
+    for (const auto type : {10ULL, 40ULL, 41ULL}) {
+        t::CombatProfile profile; profile.type_id = type;
+        profile.max_attack_distance = whole(500);
+        profile.hardpoints = {{0, {}, true}};
+        combat.profiles.push_back(profile);
+    }
+    t::MotionTable motion;
+    motion.rules.arc_degrees = whole(15);
+    motion.rules.expansion_distance = whole(300);
+    t::MotionProfile ship;
+    ship.type_id = 10; ship.max_speed = whole(3); ship.rate_of_turn = whole(2); ship.turn_in_place_slowdown = whole(1);
+    ship.acceleration = decimal("0.05"); ship.deceleration = decimal("0.05");
+    motion.profiles = {ship};
+    auto initial = setup();
+    initial.units[4].position = {whole(3000), {}, {}}; // player 4's ship, out of reach
+    const std::vector<t::SensorProfile> sensors{{10, whole(20000)}, {40, whole(20000)}, {41, whole(20000)}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = t::TacticalSession::create(initial, sensors, durability(), motion, std::nullopt, combat, {}, {}, economy());
+        expect(static_cast<bool>(made), "reinforcement order fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 90))), "buy the hull upgrade");
+        expect(static_cast<bool>(world.submit(buy(0, 1, 1, 1, 10))), "buy a ship to reinforce");
+        expect(static_cast<bool>(world.submit({{22, 1, 2}, {}, t::ReinforcePayload{10, {whole(-2000), {}, {}}}})),
+            "reinforce in the attack's tick");
+        expect(static_cast<bool>(world.submit({{22, 4, 0}, {5}, t::AttackPayload{3}})), "attack the upgraded ship");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        bool upgraded = false;
+        for (unsigned tick = 0; tick < 25; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "reinforcement order fixture steps"); if (!stepped) return;
+            if (tick == 21) upgraded = world.durability_state(3) && world.durability_state(3)->hull == decimal("125");
+        }
+        expect(upgraded, "the target carries its upgrade bonus before the order");
+        const auto state = world.combat_state(5);
+        expect(state && state->direct && state->attack_target == 3, "the order after a reinforcement takes its target");
+        expect(account(world, 1).pool.empty(), "the reinforcement left the pool in the order's tick");
+    }
+}
 void test_destroyed_station() {
     for (const bool ai : {false, true}) {
         auto rules = economy(); rules.players[0].ai = ai;
@@ -770,7 +814,7 @@ int main() {
     test_limits(); test_bonuses_and_completion(); test_level_up(); test_roster_gate(); test_repair_carryover(); test_replay_determinism();
     test_cancel_releases_team_reservation();
     test_teammate_level_up();
-    test_no_upgrade_layout(); test_replacement_attack(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
+    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
     test_staged_source_removal();
     test_upgrade_holder_loss();
     test_respawn_inherits_upgrade();

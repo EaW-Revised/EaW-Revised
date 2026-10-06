@@ -78,7 +78,7 @@
       "path": "src/sim/tactical/session_step_commands.cpp",
       "start": "    const auto apply_ability =",
       "end": "    // Commands phase: serial, in canonical (tick, player, sequence) order.",
-      "sha256_lf": "2aea7cf8f2b5afa5620affd5f6c3749798813b21a3cf0e47e19d9f74894690ff"
+      "sha256_lf": "09047b7f08ada43a520e7ac06cec4b8ed107f046b4eb47433eeb218517fb992b"
     },
     "src/sim/tactical/session_step_combat.cpp#ion_team_service": {
       "path": "src/sim/tactical/session_step_combat.cpp",

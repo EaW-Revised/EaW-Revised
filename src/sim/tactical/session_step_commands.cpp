@@ -1204,9 +1204,14 @@ core::Result<void> session_detail::Tick::commands() {
         own.position = live.state.position;
         own.transform = math::to_matrix(live.state.rotation, live.state.position).value();
         own.combat = &*live.combat;
+        own.durability = live.durability ? &*live.durability : nullptr;
+        own.durability_profile = impl_->health_profile(live);
         enemy.position = target->second.state.position;
         enemy.transform = math::to_matrix(target->second.state.rotation, enemy.position).value();
+        // The view's health pointers predate this phase's reinforcements, whose insertion can move
+        // the staged units; an upgraded unit's profile lives in the unit itself.
         enemy.durability = target->second.durability ? &*target->second.durability : nullptr;
+        enemy.durability_profile = impl_->health_profile(target->second);
         auto admitted = detail::manual_target_admissible(view, own, enemy, payload.hardpoint);
         if (!admitted) return core::Result<RejectReason>::failure(admitted.error());
         if (!admitted.value()) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
@@ -1588,11 +1593,13 @@ core::Result<void> session_detail::Tick::commands() {
                     const auto& target = staged.at(approach);
                     const bool guard = std::holds_alternative<GuardPayload>(command.payload);
                     // The targeting view's health and combat pointers name the units before
-                    // staging moved them; point the target's entry at its staged health.
+                    // staging moved them; point the target's entry at its staged health and that
+                    // health's profile (an upgraded unit keeps its profile in the unit itself).
                     std::optional<detail::CombatUnit> target_view;
                     if (const auto* entry = view.find(approach)) {
                         target_view = *entry;
                         target_view->durability = target.durability ? &*target.durability : nullptr;
+                        target_view->durability_profile = impl_->health_profile(target);
                         target_view->combat = target.combat ? &*target.combat : nullptr;
                     }
                     const auto* ordered_attack = std::get_if<AttackPayload>(&command.payload);
