@@ -3,6 +3,7 @@
 #include "eawr/sim/tactical/damage.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../../src/sim/tactical/combat_internal.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -115,7 +116,7 @@ void test_names_and_validation() {
     expect(tactical::ability_kind("power_to_weapons") == tactical::AbilityKind::power_to_weapons,
         "the Acclamator's lower-case spelling");
     expect(tactical::ability_kind("Spoiler_Lock") == tactical::AbilityKind::spoiler_lock, "any case");
-    expect(tactical::ability_kind("HUNT") == tactical::AbilityKind::none, "HUNT is cut (AB-03)");
+    expect(tactical::ability_kind("HUNT") == tactical::AbilityKind::hunt, "WAB-50: HUNT is modelled");
     expect(tactical::ability_kind("ION_CANNON_SHOT") == tactical::AbilityKind::ion_cannon_shot,
         "ION_CANNON_SHOT is modelled since #561 (AB-60)");
     expect(tactical::to_string(tactical::AbilityKind::turbo) == "TURBO", "TURBO's name");
@@ -893,6 +894,107 @@ void test_hero_damage_modes() {
     }
 }
 
+void test_impact_shooter_bonus() {
+    // WPR-51/WCC-44, EUS-16: instance damage, live shooter bonus and victim defense
+    // are independent. Exercise both weapon fire and an explicit stationary launch.
+    for (const unsigned route : {0U, 1U, 2U}) for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U}) {
+        const bool spawned = route != 0, delayed = route == 2;
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; row.hardpoints.clear(); }
+            tactical::CombatProfile shooter;
+            shooter.type_id = corvette_type; shooter.max_attack_distance = units(700);
+            tactical::WeaponProfile weapon;
+            weapon.range = units(700); weapon.pulse_count = 1;
+            weapon.cone_width = units(175); weapon.cone_height = units(160);
+            weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+            weapon.shot = tactical::ShotProfile{units(10), 0, units(25), units(700), true, true, {}};
+            if (!spawned) shooter.weapons = {weapon};
+            tactical::CombatProfile target;
+            target.type_id = frigate_type;
+            target.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+            tactical::CombatProfile provider; provider.type_id = plain_type;
+            tactical::CombatTable combat; combat.profiles = {shooter, target, provider};
+            tactical::AbilityTable abilities;
+            if (spawned) {
+                tactical::AbilityProfile bomb;
+                bomb.kind = tactical::AbilityKind::harmonic_bomb; bomb.recharge_frames = 100;
+                bomb.spawned = tactical::SpawnedAbilityProfile{};
+                bomb.spawned->type = 99; bomb.spawned->countdown_frames = 5;
+                bomb.spawned->damage_type = 0;
+                bomb.spawned->blast.damage = units(10); bomb.spawned->blast.radius = units(400);
+                bomb.spawned->blast.max_delay = delayed ? decimal("0.2") : Fixed{};
+                abilities.profiles = {unit_of(corvette_type, bomb)};
+            }
+            tactical::EconomyRules economy;
+            tactical::CommandBonusProfile bonus;
+            bonus.type = plain_type; bonus.bonus.applicable = {corvette_type};
+            bonus.bonus.percentages[1] = decimal("0.5");
+            tactical::CommandBonusProfile defense;
+            defense.type = plain_type; defense.slot = 1; defense.bonus.applicable = {frigate_type};
+            defense.bonus.percentages[4] = decimal("0.25");
+            economy.command_bonuses = {bonus, defense};
+            auto initial = setup();
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(300, 0), math::identity_quat(), {}}};
+            if (scenario != 0 && scenario != 4)
+                initial.units.push_back({3, plain_type, 1, at(3000, 0), math::identity_quat(), {}});
+            if (scenario == 5 || scenario == 6)
+                initial.units.push_back({4, plain_type, 2, at(3000, 1000), math::identity_quat(), {}});
+            auto created = tactical::TacticalSession::create(initial,
+                std::vector<tactical::SensorProfile>{{corvette_type, units(1000)}, {frigate_type, units(1000)}},
+                health, {}, std::nullopt, combat, {}, abilities, economy);
+            expect(static_cast<bool>(created), "EUS-16: impact bonus fixture creates");
+            if (!created) { std::cerr << created.error().message << '\n'; continue; }
+            auto world = std::move(created).value();
+            if (spawned) expect(static_cast<bool>(world.submit(command(0, 1, 0, 1,
+                tactical::AbilityPayload{tactical::AbilityKind::harmonic_bomb, tactical::AbilityAction::activate}))),
+                "EUS-16: explicit launch submits");
+            else {
+                expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::AttackPayload{2}))),
+                    "EUS-16: ordinary launch submits");
+                expect(static_cast<bool>(world.submit(command(1, 1, 1, 1, tactical::StopPayload{}))),
+                    "EUS-16: fixture stops after one shot");
+            }
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            unsigned hits = 0;
+            for (unsigned frame = 0; frame < 30; ++frame) {
+                if (frame == 2) {
+                    if (scenario == 2 || scenario == 3 || scenario == 5)
+                        expect(static_cast<bool>(world.stage_remove(scenario == 2 ? 3 : scenario == 3 ? 1 : 4)),
+                            "EUS-16: source/bonus/defense removal before contact succeeds");
+                    if (scenario == 4) expect(static_cast<bool>(world.stage_spawn(
+                        {3, plain_type, 1, at(3000, 0), math::identity_quat(), {}})),
+                        "EUS-16: new damage bonus before contact succeeds");
+                }
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "EUS-16: impact bonus step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                if (frame == 0 && !spawned) {
+                    const auto shots = step.value().snapshot->projectiles();
+                    expect(shots.size() == 1 && shots.front().damage == units(10),
+                        "EUS-16: projectile stores base instance damage without baking shooter bonus");
+                }
+                for (const auto& event : step.value().snapshot->combat_events())
+                    if (event.kind == tactical::CombatEventKind::projectile_hit) ++hits;
+            }
+            const auto final = world.durability_state(2);
+            // EUS-15/WAD-26: queued raw damage drops shooter modifiers; recipient defense
+            // still resolves at delivery. EUS-16 keeps the current bonus for immediate hits.
+            const bool boosted = !delayed && (scenario == 1 || scenario == 4 || scenario == 5 || scenario == 6);
+            const auto amount = scenario == 6 ? decimal(delayed ? "7.5" : "11.25") : units(boosted ? 15 : 10);
+            expect(final && final->hull == Fixed::from_raw(units(3600).raw() - amount.raw()) && (spawned || hits == 1),
+                delayed ? "EUS-15/WAD-26: queued amount drops source bonus and reads current defense"
+                    : "EUS-16: contact uses current bonus once, removed shooter contributes none, current defense survives");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "EUS-16: impact bonus hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
 void test_concentrate_damage() {
     for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
         std::vector<std::string> baseline;
@@ -1506,12 +1608,19 @@ void test_spawned_hero_abilities() {
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             std::vector<std::string> hashes;
             bool reduced_shot = false;
+            std::uint64_t spawned_projectile = 0;
             for (unsigned frame = 0; frame < 7; ++frame) {
                 const auto step = world.step(executor);
                 expect(static_cast<bool>(step), "spawned hero step succeeds");
                 if (!step) { std::cerr << step.error().message << '\n'; break; }
                 hashes.push_back(step.value().state_sha256);
                 const auto spawns = step.value().snapshot->ability_spawns();
+                if (frame == 0 && !spawns.empty()) spawned_projectile = spawns.front().id;
+                expect(std::none_of(step.value().snapshot->combat_events().begin(),
+                    step.value().snapshot->combat_events().end(), [&](const auto& event) {
+                        return event.kind == tactical::CombatEventKind::projectile_expired
+                            && event.target == spawned_projectile;
+                    }), "WHE-62/WAD-07: a stationary ability spawn has only its hero detonation presentation");
                 if (frame == 0) expect(spawns.size() == 1 && spawns.front().type == spawned.type
                     && spawns.front().position == (kind == K::harmonic_bomb || zero ? at(0, 0) : at(100, 0))
                     && !world.ability_state(1)->slots[0].active && world.ability_state(1)->slots[0].ready_tick == 20,
@@ -1817,13 +1926,435 @@ void test_hero_environment_damage_routing() {
     }
 }
 
+void test_hunt_destinations() {
+    const std::optional<std::array<Fixed, 4>> area = std::array{units(-2000), units(-2000), units(2000), units(2000)};
+    const std::vector<tactical::HuntEnemy> enemies = {{at(600, 700, 20), true, false}, {at(-700, -800, 30), false, true}};
+    tactical::CombatRandom sensitive(1036, 0, 1, 0xfffe0006U);
+    auto preferred = tactical::hunt_destination(at(0, 0, 50), area, units(100), true, enemies,
+        [](math::Vec3) { return false; }, sensitive);
+    expect(preferred && preferred.value() == enemies[1].position, "WAB-54: force-sensitive preference without offsets");
+    tactical::CombatRandom fallback(1036, 0, 1, 0xfffe0006U);
+    const std::optional<std::array<Fixed, 4>> inset = std::array{units(-1000), units(-1000), units(1000), units(1000)};
+    const auto clamped = tactical::hunt_destination(at(-4000, -4000), inset, units(500), true, {},
+        [](math::Vec3) { return false; }, fallback);
+    expect(clamped && clamped.value() == at(-750, -750),
+        "WAB-54: adjusted fallback clamps by half the craft's authored reveal range");
+    std::size_t point_checks = 0;
+    bool saw_fog_branch = false;
+    for (std::uint64_t seed = 0; seed < 32 && !saw_fog_branch; ++seed) {
+        tactical::CombatRandom random(seed, 0, 1, 0xfffe0006U);
+        point_checks = 0;
+        const auto chosen = tactical::hunt_destination(at(0, 0, 50), area, units(100), false, enemies,
+            [&](math::Vec3) { ++point_checks; return true; }, random);
+        expect(chosen && chosen.value().z == units(50), "WAB-54: ordinary hunters preserve their height");
+        if (point_checks != 0) {
+            expect(point_checks == 99, "WAB-54: exactly 99 diagonal fog samples");
+            saw_fog_branch = true;
+        } else {
+            expect(chosen && chosen.value().x > enemies[0].position.x && chosen.value().x < units(1000)
+                && chosen.value().y > enemies[0].position.y && chosen.value().y < units(1100),
+                "WAB-54: fogged enemy preferred before positive XY offsets");
+        }
+    }
+    expect(saw_fog_branch, "HUNT contract exercises the fog sampling branch");
+    tactical::CombatRandom no_bounds(1036, 0, 1, 0xfffe0006U);
+    const auto retained = tactical::hunt_destination(at(10, 20, 30), std::nullopt, units(100), true, enemies,
+        [](math::Vec3) { return false; }, no_bounds);
+    expect(retained && retained.value() == at(10, 20, 30), "WAB-54: no bounds keeps the base position");
+}
+
+void test_hunt_ship_order() {
+    tactical::AbilityProfile hunt;
+    hunt.kind = tactical::AbilityKind::hunt;
+    tactical::AbilityTable table;
+    table.profiles = {unit_of(corvette_type, hunt)};
+    const auto created_setup = setup();
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(created_setup, {}, {}, motion(), std::nullopt, {}, {}, table);
+        expect(static_cast<bool>(created), "WAB-52: lone hunter session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        expect(static_cast<bool>(session.submit(command(0, 1, 0, 1, tactical::MovePayload{at(2000, -1500)}))), "ship move submits");
+        expect(static_cast<bool>(session.submit(command(1, 1, 1, 1, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}))), "ship Hunt submits");
+        expect(static_cast<bool>(session.submit(command(32, 1, 2, 1, tactical::AttackPayload{3}))), "replacement attack submits");
+        expect(static_cast<bool>(session.submit(command(33, 1, 3, 1, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::autofire_on}))), "autofire command is recordable");
+        expect(static_cast<bool>(session.submit(command(34, 1, 4, 1, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}))), "ship Hunt restarts");
+        expect(static_cast<bool>(session.submit(command(35, 1, 5, 1, tactical::StopPayload{}))), "ship Stop submits");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::uint64_t tick = 0; tick < 70; ++tick) {
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "lone hunter advances");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            if (tick == 1 || tick == 31) {
+                const auto movement = session.motion_state(1);
+                expect(movement && movement->kind == tactical::MotionKind::path && movement->target == at(2000, -1500),
+                    "WAB-04/53/56: activation and later service preserve a move already under way");
+            }
+            if (tick == 32) {
+                const auto state = session.ability_state(1);
+                expect(state && !state->slots[0].active && state->slots[0].ready_tick == 0,
+                    "WAB-51: attack cancels a lone hunter without recharge");
+            }
+            if (tick == 33) {
+                const auto events = stepped.value().snapshot->events();
+                expect(std::any_of(events.begin(), events.end(), [](const auto& event) {
+                    return event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::ability_unavailable;
+                }), "WAB-50: Hunt has no autofire");
+            }
+            if (tick >= 35) {
+                const auto state = session.ability_state(1);
+                const auto movement = session.motion_state(1);
+                expect(state && !state->slots[0].active && state->slots[0].ready_tick == 0,
+                    "WAB-51: Stop ends a lone hunter without recharge or later patrol restart");
+                expect(movement && movement->kind == tactical::MotionKind::none,
+                    "WAB-05/51: Stop ends the lone hunter's movement");
+            }
+        }
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "lone hunters remain deterministic");
+    }
+}
+
+void test_hunt_session() {
+    tactical::TacticalSetup initial;
+    initial.seed = 1036;
+    initial.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    initial.units = {{10, xwing_squadron, 1, at(-500, 0), math::identity_quat(), {}},
+        {11, xwing_type, 1, at(-500, 0), math::identity_quat(), {}},
+        {12, xwing_type, 1, at(-500, 0), math::identity_quat(), {}}};
+    initial.squadrons = {{10, {11, 12}}};
+    tactical::AbilityProfile hunt;
+    hunt.kind = tactical::AbilityKind::hunt;
+    tactical::AbilityTable table;
+    table.profiles = {unit_of(xwing_type, hunt)};
+    const std::vector<tactical::PlayerCommand> orders = {
+        command(0, 1, 0, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}),
+        command(20, 1, 1, 11, tactical::MovePayload{at(0, 0)}),
+        command(30, 1, 2, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}),
+        command(40, 1, 3, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::deactivate}),
+        command(45, 1, 4, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}),
+        command(50, 1, 5, 10, tactical::GuardPayload{at(0, 0)}),
+        command(55, 1, 6, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}),
+        command(58, 2, 0, 10, tactical::StopPayload{}),
+        command(60, 1, 7, 10, tactical::StopPayload{}),
+        command(65, 1, 8, 10, tactical::AbilityPayload{tactical::AbilityKind::hunt, tactical::AbilityAction::activate}),
+        command(70, 1, 9, 11, tactical::StopPayload{}),
+    };
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(initial, {}, {}, hangar_motion(), std::nullopt, {}, {}, table);
+        expect(static_cast<bool>(created), "WAB-50: hunt squadron session is valid");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        for (const auto& order : orders) expect(static_cast<bool>(session.submit(order)), "hunt command is recordable");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::uint64_t tick = 0; tick < 110; ++tick) {
+            auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "hunt session step succeeds");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            const auto a = session.ability_state(11), b = session.ability_state(12);
+            const bool active = tick < 20 || (tick >= 30 && tick < 40) || (tick >= 45 && tick < 50)
+                || (tick >= 55 && tick < 60) || (tick >= 65 && tick < 70);
+            expect(a && b && a->slots[0].active == active && b->slots[0].active == active,
+                "WAB-50/51: accepted orders and switch-off control the whole squadron; foreign Stop does not");
+            if (tick == 40 || tick == 60 || tick >= 70) {
+                const auto mind = session.squadron_state(10);
+                expect(mind && mind->mode == tactical::SquadronMode::idle,
+                    "WAB-05/51: switch-off and team/member Stop end patrol across later service ticks");
+            }
+            if (tick == 58) {
+                const auto events = stepped.value().snapshot->events();
+                expect(std::any_of(events.begin(), events.end(), [](const auto& event) {
+                    return event.kind == tactical::EventKind::order_rejected
+                        && event.reason == tactical::RejectReason::unit_not_owned;
+                }), "WAB-51: a rejected foreign Stop leaves Hunt running");
+            }
+            if (tick == 0) {
+                const auto units = session.units();
+                const auto container = std::find_if(units.begin(), units.end(), [](const auto& unit) { return unit.entity_id == 10; });
+                expect(container != units.end() && container->order.kind == tactical::OrderKind::attack_move,
+                    "WAB-55: hunt sends the container on an attack-move");
+                expect(a && a->slots[0].expires_tick == 0 && a->slots[0].ready_tick == 0 && !a->slots[0].autofire,
+                    "WAB-50: no duration, recharge or autofire");
+            }
+        }
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "hunt hashes are equal for 1/2/4/8 workers");
+        const auto encoded = tactical::write_replay(session.record());
+        expect(static_cast<bool>(encoded), "HUNT uses the existing ability command encoding");
+        if (!encoded) continue;
+        const auto parsed = tactical::parse_replay(encoded.value());
+        expect(parsed && parsed.value() == session.record(), "HUNT command bytes round trip");
+        if (!parsed) continue;
+        auto playback = tactical::TacticalSession::from_replay(parsed.value(), {}, {}, hangar_motion(), std::nullopt, {}, {}, table);
+        expect(static_cast<bool>(playback), "HUNT opcode 8 round trip creates a session");
+        if (playback) {
+            for (std::size_t tick = 0; tick < hashes.size(); ++tick) {
+                auto step = playback.value().step(executor);
+                expect(step && step.value().state_sha256 == hashes[tick], "HUNT replay matches every live frame");
+            }
+        }
+    }
+}
+
+void test_projectile_defence_producers() {
+    namespace detail = tactical::detail;
+    using Kind = tactical::AbilityKind;
+    expect(tactical::ability_kind("MISSILE_SHIELD") == Kind::missile_shield, "WPJ-17: shield kind binds");
+    expect(tactical::ability_kind("sensor_jamming") == Kind::sensor_jamming, "WHE-32: jammer kind binds");
+    tactical::CombatProfile profile; profile.type_id = 1;
+    tactical::CombatProfile passive = profile; passive.passive_missile_shield_radius = units(7);
+    passive.ranged_target_z_adjust = units(2);
+    tactical::CombatState combat;
+    tactical::DurabilityState dead; dead.hull = {};
+    tactical::MotionTable motion; tactical::MotionProfile mover; mover.type_id = 1;
+    motion.profiles = {mover};
+    const std::vector<tactical::SnapshotPlayer> players{{1, 1, false}, {2, 1, false}, {3, 3, false}, {4, 4, true}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        detail::CombatWorld world; world.relationships = players; world.motion = &motion;
+        world.units.resize(10);
+        for (std::size_t slot = 0; slot < world.units.size(); ++slot) {
+            auto& unit = world.units[slot]; unit.id = slot + 1; unit.type_id = 1;
+            unit.owner = 1; unit.profile = &profile; unit.combat = &combat;
+        }
+        world.units[0].profile = &passive;
+        world.units[3].owner = 2; // another player on the same team
+        world.units[4].owner = 4; // neutral, not allied
+        world.units[5].owner = 3; // enemy
+        world.units[6].position = at(0, 0, 11); // planar inclusion is insufficient
+        world.units[7].combat = nullptr;
+        world.units[8].type_id = 2; // no locomotor
+        world.units[9].durability = &dead;
+        world.units[3].position = at(0, 0, 10); // inclusive spatial boundary
+        std::vector<detail::ProjectileDefenceAbilityInput> inputs(10);
+        inputs[1] = {true, false, units(8), {}};
+        inputs[2] = {false, true, {}, units(10)};
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto prepared = detail::prepare_projectile_defences(world, inputs, executor, std::vector<eawr::sim::EntityId>{3, 2, 1});
+        expect(static_cast<bool>(prepared), "WPJ-17/WHE-32: production copied inputs prepare");
+        if (!prepared) continue;
+        const auto& sources = world.projectile_defences.sources;
+        expect(sources.size() == 3 && sources[0].id == 3 && sources[1].id == 2 && sources[2].id == 1,
+            "WPJ-17: source registration order survives spatial indexing");
+        expect(world.units[0].sensor_jammed && world.units[2].sensor_jammed && world.units[3].sensor_jammed
+            && world.units[4].sensor_jammed, "WHE-32: self, ally and nonenemy neutral receive inclusive 3D stamps");
+        for (std::size_t slot = 5; slot < 10; ++slot)
+            expect(!world.units[slot].sensor_jammed, "WHE-32: enemy, height, no combat, no locomotor and dead gates");
+        tactical::CraftProfile craft; craft.type_id = 2;
+        motion.squadrons.craft = {craft};
+        prepared = detail::prepare_projectile_defences(world, inputs, executor, std::vector<eawr::sim::EntityId>{3, 2, 1});
+        expect(prepared && world.units[8].sensor_jammed, "WHE-32: craft locomotor recipients are included");
+        motion.squadrons.craft.clear();
+        expect(sources.size() == 3, "WHE-32: ordinary recipients are stamped without registering as emitters");
+        expect(sources.size() == 3 && sources[2].adjusted_position.z == units(2), "WPJ-17: copied source uses adjusted height");
+        const auto previous = sources;
+        inputs[1].active_shield = false;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.projectile_defences.sources.size() == 3
+            && !world.projectile_defences.sources[1].active_shield && world.projectile_defences.sources[1].sensor_jammed,
+            "WPJ-17: an inactive declared shield remains eligible while externally jammed");
+        inputs[2].active_jamming = false;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.projectile_defences.sources.size() == 1
+            && world.projectile_defences.sources[0].id == 1, "WPJ-17: deactivation preserves passive source");
+        expect(std::none_of(world.units.begin(), world.units.end(), [](const auto& unit) { return unit.sensor_jammed; }),
+            "WHE-32: deactivation clears every current-frame stamp");
+        expect(previous.size() == 3 && previous[0].sensor_jammed && previous[1].active_shield,
+            "WPJ-17: published records are immutable copies of activation state");
+        inputs[2].active_jamming = true; world.units[2].in_nebula = true;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && !world.units[0].sensor_jammed && !world.units[2].sensor_jammed,
+            "WHE-31: nebula suspends stamping");
+        world.units[2].in_nebula = false; world.units[2].durability = &dead;
+        world.units[0].durability = &dead;
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.projectile_defences.sources.empty() && !world.units[3].sensor_jammed,
+            "WPJ-17/WHE-32: source death removes registration and stamps");
+        world.units[0].durability = nullptr; world.units[2].durability = nullptr;
+        inputs[2].jamming_radius.reset(); world.units[2].profile = &passive;
+        world.units[3].position = at(0, 0, 7);
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && world.units[3].sensor_jammed, "WHE-32: absent jamming radius falls back to passive radius");
+        world.units[3].position = at(0, 0, 8);
+        prepared = detail::prepare_projectile_defences(world, inputs, executor);
+        expect(prepared && !world.units[3].sensor_jammed, "WHE-32: fallback radius excludes beyond-boundary recipient");
+    }
+    tactical::AbilityProfile jammer; jammer.kind = Kind::sensor_jamming;
+    jammer.expiration_frames = 3; jammer.recharge_frames = 6;
+    auto profile_of = unit_of(1, jammer);
+    auto state = tactical::initial_abilities(profile_of);
+    expect(tactical::activate_ability(jammer, state.slots[0], {}, 10).changed, "WHE-31: existing activation slot starts jamming");
+    static_cast<void>(tactical::expire_abilities(profile_of, state, 12));
+    expect(state.slots[0].active, "WHE-31: timer stays active before authored expiry boundary");
+    static_cast<void>(tactical::expire_abilities(profile_of, state, 13));
+    expect(!state.slots[0].active && state.slots[0].ready_tick == 19, "WHE-31: exact expiry starts existing recharge");
+    auto invalid = tactical::AbilityTable{}; jammer.effective_radius = units(-1);
+    invalid.profiles = {unit_of(1, jammer)};
+    expect(!tactical::validate_abilities(invalid), "WPJ-17: invalid authored defence radius is refused");
+}
+
+void test_projectile_defence_transaction() {
+    using Kind = tactical::AbilityKind;
+    const auto order_of = [](const tactical::TacticalSession& session) {
+        const auto bytes = session.canonical_state_bytes();
+        const std::vector<std::uint8_t> tag{'P', 'D', 'E', 'F'};
+        auto position = std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end());
+        std::vector<eawr::sim::EntityId> order;
+        if (position == bytes.end()) return order;
+        auto offset = static_cast<std::size_t>(position - bytes.begin()) + 4;
+        const auto read = [&]() {
+            std::uint64_t value = 0;
+            for (unsigned shift = 0; shift < 64 && offset < bytes.size(); shift += 8)
+                value |= static_cast<std::uint64_t>(bytes[offset++]) << shift;
+            return value;
+        };
+        const auto count = read();
+        if (count > 16) { expect(false, "PDEF test block has bounded source count"); return order; }
+        for (std::uint64_t i = 0; i < count; ++i) order.push_back(read());
+        return order;
+    };
+    class FailVisibility final : public eawr::sim::PartitionExecutor {
+    public:
+        std::size_t worker_count() const noexcept override { return 1; }
+        eawr::core::Result<void> execute(const std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            return eawr::sim::InlineExecutor{}.execute(count, partition);
+        }
+        eawr::core::Result<void> execute_phase(const std::string_view phase, const std::size_t count,
+            const std::function<void(std::size_t)>& partition) const override {
+            if (phase == "visibility") return eawr::core::Result<void>::failure({});
+            return execute(count, partition);
+        }
+    };
+    tactical::AbilityProfile jammer; jammer.kind = Kind::sensor_jamming;
+    jammer.effective_radius = units(100); jammer.expiration_frames = 3;
+    tactical::AbilityProfile shield; shield.kind = Kind::missile_shield; shield.effective_radius = units(100);
+    tactical::AbilityTable abilities; abilities.profiles = {unit_of(corvette_type, jammer),
+        unit_of(frigate_type, shield), unit_of(plain_type, jammer)};
+    tactical::CombatTable combat;
+    for (const auto type : {corvette_type, frigate_type, plain_type}) {
+        tactical::CombatProfile profile; profile.type_id = type; combat.profiles.push_back(profile);
+    }
+    auto initial = setup();
+    initial.units.push_back({4, plain_type, 1, at(0, 0), math::identity_quat(), {}});
+    const std::vector<tactical::PlayerCommand> commands{
+        command(0, 1, 0, 2, tactical::AbilityPayload{Kind::missile_shield, tactical::AbilityAction::activate}),
+        command(0, 1, 1, 1, tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}),
+        command(1, 1, 0, 4, tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}),
+        command(2, 1, 0, 1, tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::deactivate}),
+        command(2, 1, 1, 1, tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}),
+        command(3, 1, 0, 1, tactical::DamagePayload{units(100000), tactical::hull_target})};
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(initial, {}, durability(), motion(), std::nullopt, combat, {}, abilities);
+        expect(static_cast<bool>(created), "PDEF lifecycle session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        for (const auto& item : commands) expect(static_cast<bool>(session.submit(item)), "PDEF lifecycle command submits");
+        expect(order_of(session).empty(), "PDEF is absent before any jammer activation");
+        const auto before = session.canonical_state_bytes();
+        expect(!session.step(FailVisibility{}), "PDEF failed frame reaches post-command failure seam");
+        expect(session.canonical_state_bytes() == before && session.completed_tick() == 0,
+            "PDEF failed frame rolls back registration and ability activation");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        const std::vector<std::vector<eawr::sim::EntityId>> orders{{2, 1}, {2, 1, 4}, {2, 4, 1}, {2, 4}, {}, {}};
+        for (std::size_t frame = 0; frame < orders.size(); ++frame) {
+            session.scramble_storage_for_testing();
+            const auto step = session.step(executor);
+            expect(static_cast<bool>(step), "PDEF lifecycle frame succeeds after retry");
+            if (!step) break;
+            hashes.push_back(step.value().state_sha256);
+            expect(order_of(session) == orders[frame], "PDEF retains activation order, appends reactivation, prunes death/expiry");
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "PDEF transaction hashes equal at 1/2/4/8 workers");
+        const auto encoded = tactical::write_replay(session.record());
+        const auto parsed = encoded ? tactical::parse_replay(encoded.value()) : eawr::core::Result<tactical::TacticalReplay>::failure({});
+        expect(parsed && parsed.value() == session.record(), "WPJ-17/WHE-32: appended kinds round trip through opcode 8");
+        if (!parsed) continue;
+        auto playback = tactical::TacticalSession::from_replay(parsed.value(), {}, durability(), motion(), std::nullopt, combat, {}, abilities);
+        expect(static_cast<bool>(playback), "PDEF lifecycle replay creates");
+        if (playback) for (const auto& hash : hashes) {
+            const auto step = playback.value().step(executor);
+            expect(step && step.value().state_sha256 == hash, "PDEF replay reproduces source ordering at every frame");
+        }
+    }
+    // Creation registers a declared shield immediately, even while inactive.
+    // Exercise both orders in the command batch, including a post-command rollback.
+    for (const bool reinforce_first : {true, false}) {
+        std::vector<std::string> creation_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto creation_setup = setup();
+            tactical::EconomyRules economy;
+            economy.players = {{1, units(100), 25, false, {}, 1, 3}};
+            tactical::BuildOption option;
+            option.type = frigate_type; option.price = units(10);
+            option.build_frames = 1; option.ai_build_frames = 1; option.available = true;
+            economy.menus = {{corvette_type, 1, {option}}};
+            economy.footprints = {{frigate_type, std::nullopt, {}}};
+            auto created = tactical::TacticalSession::create(creation_setup, {}, durability(), motion(),
+                std::nullopt, combat, {}, abilities, economy);
+            expect(static_cast<bool>(created), "PDEF reinforcement ordering session creates");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            expect(static_cast<bool>(session.submit(command(0, 1, 0, 1, tactical::BuyPayload{frigate_type}))),
+                "PDEF reinforcement purchase submits");
+            const auto activate_sequence = reinforce_first ? 1U : 0U;
+            const auto reinforce_sequence = reinforce_first ? 0U : 1U;
+            std::vector<tactical::PlayerCommand> batch{
+                command(2, 1, activate_sequence, 1,
+                    tactical::AbilityPayload{Kind::sensor_jamming, tactical::AbilityAction::activate}),
+                {{2, 1, reinforce_sequence}, {}, tactical::ReinforcePayload{frigate_type, at(0, 0)}}};
+            std::sort(batch.begin(), batch.end(), [](const auto& a, const auto& b) {
+                return a.key.sequence < b.key.sequence;
+            });
+            for (const auto& item : batch) expect(static_cast<bool>(session.submit(item)),
+                "PDEF same-frame creation commands submit in sequence order");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned frame = 0; frame < 3; ++frame) {
+                if (frame == 2) {
+                    const auto before = session.canonical_state_bytes();
+                    expect(!session.step(FailVisibility{}), "PDEF creation frame reaches failure seam");
+                    expect(session.canonical_state_bytes() == before && session.units().size() == 3,
+                        "PDEF creation rollback restores ledger, entity allocation and reinforcement pool");
+                }
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "PDEF creation frame succeeds after retry");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+            }
+            expect(session.units().size() == 4 && session.arrivals().size() == 1,
+                "PDEF fixture creates one reinforcement in the activation frame");
+            const std::vector<eawr::sim::EntityId> expected = reinforce_first
+                ? std::vector<eawr::sim::EntityId>{2, 4, 1} : std::vector<eawr::sim::EntityId>{2, 1, 4};
+            expect(order_of(session) == expected,
+                "PDEF static creation registers at its command position before or after jammer activation");
+            if (workers == 1) creation_reference = hashes;
+            else expect(hashes == creation_reference, "PDEF creation order hashes equal at 1/2/4/8 workers");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
+    test_projectile_defence_producers();
+    test_projectile_defence_transaction();
+    test_impact_shooter_bonus();
     test_hero_environment_damage_routing();
     test_hero_wingmen();
     test_spawned_hero_abilities();
     test_hero_beams();
+    test_hunt_destinations();
+    test_hunt_ship_order();
+    test_hunt_session();
     test_names_and_validation();
     test_hero_damage_modes();
     test_nested_special_handlers();

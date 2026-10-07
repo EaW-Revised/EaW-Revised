@@ -9,33 +9,17 @@
   ],
   "disabled_units": [
     {
-      "unit": "Broadside_Class_Cruiser",
-      "reason": "Projectile blast-area damage is unsupported: Proj_Ship_Diamond_Boron_Missile.",
-      "tooltip": "Weapons with area damage are not supported yet.",
-      "factions": [
-        "Empire"
-      ]
-    },
-    {
       "unit": "Krayt_Class_Destroyer",
-      "reason": "Projectile blast-area damage is unsupported: Proj_Ship_Krayt_Megaweapon_Damage. Unsupported weapon hardpoint: HARD_POINT_WEAPON_SPECIAL.",
-      "tooltip": "Special weapons and area damage are not supported yet.",
+      "reason": "Unsupported weapon hardpoint: HARD_POINT_WEAPON_SPECIAL.",
+      "tooltip": "This ship's weapons are not supported yet.",
       "factions": [
         "Underworld"
       ]
     },
     {
-      "unit": "Marauder_Missile_Cruiser",
-      "reason": "Projectile blast-area damage is unsupported: Proj_Ship_Diamond_Boron_Missile.",
-      "tooltip": "Weapons with area damage are not supported yet.",
-      "factions": [
-        "Rebel"
-      ]
-    },
-    {
       "unit": "The_Peacebringer",
-      "reason": "Projectile blast-area damage is unsupported: Proj_Ship_Krayt_Megaweapon_Damage. Unsupported weapon hardpoint: HARD_POINT_WEAPON_SPECIAL.",
-      "tooltip": "Special weapons and area damage are not supported yet.",
+      "reason": "Unsupported weapon hardpoint: HARD_POINT_WEAPON_SPECIAL.",
+      "tooltip": "This ship's weapons are not supported yet.",
       "factions": [
         "Underworld"
       ]
@@ -53,23 +37,8 @@
       "reason": "Ability handler or authored modifiers are unsupported."
     },
     {
-      "unit": "Broadside_Class_Cruiser",
-      "ability": "BARRAGE",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
       "unit": "Crusader_Gunship",
       "ability": "LASER_DEFENSE",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Darth_Vader_TIE_Fighter_Squadron",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Escort_TIE_Fighter",
-      "ability": "HUNT",
       "reason": "Ability handler or authored modifiers are unsupported."
     },
     {
@@ -105,11 +74,6 @@
     {
       "unit": "Krayt_Class_Destroyer",
       "ability": "SELF_DESTRUCT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Marauder_Missile_Cruiser",
-      "ability": "BARRAGE",
       "reason": "Ability handler or authored modifiers are unsupported."
     },
     {
@@ -153,26 +117,6 @@
       "reason": "Ability handler or authored modifiers are unsupported."
     },
     {
-      "unit": "TIE_Fighter",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "TIE_Fighter_Squadron",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "TIE_Interceptor",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "TIE_Interceptor_Squadron",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
       "unit": "TIE_Phantom",
       "ability": "STEALTH",
       "reason": "Ability handler or authored modifiers are unsupported."
@@ -200,36 +144,6 @@
     {
       "unit": "Vengeance_Frigate",
       "ability": "STEALTH",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z-95_Headhunter_Empire",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z-95_Headhunter_Rebel",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z-95_Headhunter_Underworld",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z95_Headhunter_Empire_Squadron",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z95_Headhunter_Rebel_Squadron",
-      "ability": "HUNT",
-      "reason": "Ability handler or authored modifiers are unsupported."
-    },
-    {
-      "unit": "Z95_Headhunter_Underworld_Squadron",
-      "ability": "HUNT",
       "reason": "Ability handler or authored modifiers are unsupported."
     }
   ],

@@ -48,6 +48,7 @@ struct ShieldSegmentHit final {
     double fraction{};  // along the segment, in (0, 1): a surface at either end is not met
     Vec3d contact{};
     Vec3d normal{};     // the triangle's unit face normal, as wound
+    std::size_t triangle{}; // PS-02: retain the contact mesh's bone alongside this triangle.
 };
 
 // BP-19: FoC's segment test against a collision mesh (Collision3::Collision_Test on each

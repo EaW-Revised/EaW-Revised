@@ -155,9 +155,36 @@ int main() {
     object_weapon_defaults();
     squadron_container_health();
     living_collision_admission();
+    ship_suitability_content();
+    height_adjusted_aim();
     presentation_admission();
     priority_rules();
     content_identity();
+    {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("250", "Select_Test"));
+        const auto assets = models(1.0F);
+        const auto legacy = load(tree.root, assets);
+        write(tree.root / "XML" / "DifficultyAdjustments.xml", R"xml(<Difficulty_Adjustments>
+          <Difficulty_Adjustment Name="Easy_Default"><Credit_Multiplier>0.5</Credit_Multiplier></Difficulty_Adjustment>
+          <Difficulty_Adjustment Name="Normal_Default"><Credit_Multiplier>1</Credit_Multiplier></Difficulty_Adjustment>
+          <Difficulty_Adjustment Name="Hard_Default"><Credit_Multiplier>1.2</Credit_Multiplier></Difficulty_Adjustment>
+        </Difficulty_Adjustments>)xml");
+        const auto normal = load(tree.root, assets);
+        expect(legacy.tables && normal.tables && eawr::units::content_identity(*legacy.tables)
+            == eawr::units::content_identity(*normal.tables), "WPR-12 neutral credit rules retain the Normal replay identity");
+        for (const auto& [difficulty, value] : {std::pair{"Easy_Default", "0.5"}, std::pair{"Hard_Default", "1.2"}}) {
+            const auto alternate = load(tree.root, assets, difficulty);
+            expect(alternate.tables && alternate.tables->ai_credit_multiplier == Fixed::from_decimal(value).value(),
+                "WPR-12 selected difficulty reads its credit multiplier");
+            expect(alternate.tables && normal.tables && eawr::units::content_identity(*alternate.tables)
+                != eawr::units::content_identity(*normal.tables), "WPR-12 alternate credit rules bind a different replay identity");
+        }
+        const auto unknown = load(tree.root, assets, "Unknown_Default");
+        expect(unknown.tables && !unknown.tables->ai_credit_multiplier
+            && has_row(unknown.tables->unresolved, "Unknown_Default", "Credit_Multiplier"),
+            "WPR-12 missing difficulty stays an explicit data gap");
+    }
     {
         eawr::units::UnitTables before;
         before.units.emplace_back();
@@ -194,6 +221,7 @@ int main() {
                "WBP-50: obstacle admission to capture/build queries changes the pad rules identity");
     }
     bind_frame_errors();
+    hunt_tables();
     mass_driver_type();
     collision_extents();
     foc_fleet();

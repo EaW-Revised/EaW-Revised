@@ -4,6 +4,7 @@
 namespace foc_plan_test_support {
 
 bool economy_run = false;
+bool reinforcement_fixture = false;
 struct Content {
     tactical::EconomyRules economy;
     skirmish::SkirmishStart start;
@@ -27,7 +28,9 @@ struct TypeActivity {
 };
 
 struct Run {
+    std::set<eawr::sim::CommandKey> accepted_cash_grants;
     std::size_t purchases{}, reinforcements{}, upgrades{};
+    std::size_t rejected_commands{};
     std::map<tactical::RejectReason, std::size_t> reinforcement_rejections;
     std::uint64_t placement_ns{}, max_placement_ns{}, placement_queries{}, max_placement_queries{};
     std::array<std::uint64_t, 5> placement_rejections{};
@@ -97,7 +100,7 @@ std::string line_of(const foc::PlanEvent& event) {
         event.target + "," + event.event + ",\"" + detail + "\"";
 }
 
-std::optional<Content> load(const std::filesystem::path& root, bool underworld = false) {
+std::optional<Content> load(const std::filesystem::path& root, bool underworld = false, bool bombing_fixture = false) {
     std::vector<eawr::vfs::MountSpec> specs;
     for (const auto& [id, folder] : {std::pair{std::string("expansion"), std::string("corruption")},
                                      std::pair{std::string("base"), std::string("GameData")}}) {
@@ -122,6 +125,12 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
     expect(static_cast<bool>(tables), "FoC unit tables load");
     if (!tables) return std::nullopt;
     auto fixture = skirmish::m2_fixture();
+    // FL-13: this combat fixture needs a complete bombing team on the field;
+    // skirmish stations cannot supply their campaign garrison rows.
+    if (bombing_fixture) {
+        fixture.slots[1].fleet.insert(fixture.slots[1].fleet.end(), {
+            "TIE_Bomber_Squadron", "TIE_Bomber_Squadron", "TIE_Bomber_Squadron", "TIE_Fighter_Squadron"});
+    }
     if (underworld) {
         fixture.slots[1].faction = "Underworld";
         fixture.slots[1].fleet.clear(); // Use the faction's authored starting forces.
@@ -145,6 +154,17 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
         inputs.value().tables = &tables.value();
     }
     expect(inputs.value().map_extents.has_value(), "PG-01: the M2 map declares its extents");
+    if (bombing_fixture) {
+        // FT-01 exercises firing against an enemy. Retail also stalls when
+        // this plan chooses a neutral structure. Omit map-object targets
+        // from this focused scenario, retaining the two fleets and their
+        // station/spawn markers; normal goal scenarios keep the full map.
+        const auto removed = std::erase_if(inputs.value().placements, [](const auto& placement) {
+            return skirmish::is_map_object_placement(placement);
+        });
+        expect(removed > 0, "focused bombing fixture omits competing map-object targets");
+        if (removed == 0) return std::nullopt;
+    }
     auto start = skirmish::build_start(fixture, inputs.value());
     expect(static_cast<bool>(start), "FoC start builds: " + (start ? std::string() : start.error().message));
     if (!start) return std::nullopt;
@@ -161,6 +181,40 @@ std::optional<Content> load(const std::filesystem::path& root, bool underworld =
     content.value().fog = fog.value();
     Content out{std::move(economy).value(), start.value(), std::move(content).value(), skirmish::victory_rules(start.value(), tables.value()),
         skirmish::ai_setup(start.value(), inputs.value(), tables.value()), {}, {}};
+    if (bombing_fixture) {
+        // FT-01/FA-07: an explicit approach fleet keeps this focused flight
+        // scenario independent of campaign station births.
+        const auto target = std::find_if(out.start.units.begin(), out.start.units.end(), [](const auto& unit) {
+            return unit.state.owner == 1 && unit.type == "Corellian_Corvette";
+        });
+        expect(target != out.start.units.end(), "focused bombing fixture has its corvette objective");
+        if (target == out.start.units.end()) return std::nullopt;
+        const auto point = target->state.position;
+        std::size_t group = 0;
+        for (auto& unit : out.start.units) {
+            if (unit.state.owner != 2 || (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit)) continue;
+            using Fixed = eawr::sim::math::Fixed;
+            const auto x = Fixed::from_raw(point.x.raw() + (3000 + 400 * static_cast<std::int64_t>(group / 3)) * Fixed::scale);
+            const auto y = Fixed::from_raw(point.y.raw() + (250 * (static_cast<std::int64_t>(group % 3) - 1)) * Fixed::scale);
+            const auto dx = x.raw() - unit.state.position.x.raw();
+            const auto dy = y.raw() - unit.state.position.y.raw();
+            const auto translate = [&](auto& state) {
+                state.position.x = Fixed::from_raw(state.position.x.raw() + dx);
+                state.position.y = Fixed::from_raw(state.position.y.raw() + dy);
+            };
+            const auto squadron = std::find_if(out.start.setup.squadrons.begin(), out.start.setup.squadrons.end(),
+                [&](const auto& entry) { return entry.container == unit.state.entity_id; });
+            for (auto& state : out.start.setup.units) {
+                if (state.entity_id == unit.state.entity_id || (squadron != out.start.setup.squadrons.end()
+                    && std::binary_search(squadron->members.begin(), squadron->members.end(), state.entity_id))) translate(state);
+            }
+            if (squadron != out.start.setup.squadrons.end()) for (auto& member : out.start.units) {
+                if (std::binary_search(squadron->members.begin(), squadron->members.end(), member.state.entity_id)) translate(member.state);
+            }
+            translate(unit.state);
+            ++group;
+        }
+    }
     for (const char* name : {"MINERAL_EXTRACTOR_PAD", "DEFENSE_SATELLITE_LASER_PAD"}) {
         const auto pad = std::find_if(out.ai.content.types.begin(), out.ai.content.types.end(),
             [&](const auto& type) { return type.name == name; });
@@ -197,6 +251,23 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
         content.content.abilities, economy_run ? content.economy : tactical::EconomyRules{});
     expect(static_cast<bool>(world), "the world is created");
     if (!world) return std::nullopt;
+    std::vector<tactical::PlayerCommand> initial_orders;
+    if (reinforcement_fixture) {
+        const auto station = std::find_if(content.start.units.begin(), content.start.units.end(), [](const auto& unit) {
+            return unit.role == skirmish::UnitRole::station && unit.state.owner == 2;
+        });
+        expect(station != content.start.units.end(), "SAE-10: explicit purchase has an Empire station");
+        if (station == content.start.units.end()) return std::nullopt;
+        // FL-13: stage an ordinary purchase for the position-search regression.
+        // Route it through the script bridge so its sequence precedes the AI's
+        // first command, and keep it in the ordinary replay command record.
+        const auto type = skirmish::type_id("TIE_Interceptor_Squadron");
+        const auto* menu = content.economy.menu(station->state.type_id, skirmish::faction_id("Empire"));
+        const auto* option = menu != nullptr ? menu->find(type) : nullptr;
+        expect(option != nullptr && option->available, "SAE-10: prearranged purchase is in the live station menu");
+        if (option == nullptr || !option->available) return std::nullopt;
+        initial_orders.push_back({{0, 2, 0}, {station->state.entity_id}, tactical::BuyPayload{type}});
+    }
     foc::AiSetup setup = content.ai;
     setup.perception.campaign_game = !economy_run; // Preserve the campaign combat regression.
     setup.journal = std::make_shared<foc::AiJournal>();
@@ -220,10 +291,12 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
     Run out;
     const auto began = std::chrono::steady_clock::now();
     for (std::uint64_t tick = 0; tick < ticks; ++tick) {
-        auto stepped = session.value().step(executor);
+        auto stepped = session.value().step(executor, initial_orders);
+        initial_orders.clear();
         expect(static_cast<bool>(stepped), "step " + std::to_string(tick + 1) + (stepped ? std::string() : ": " + stepped.error().message));
         if (!stepped) return std::nullopt;
         const auto& result = stepped.value();
+        expect(result.refused_input.empty(), "the prearranged purchase reaches the world");
         out.placement_ns += result.world.reinforcement_placement_ns;
         out.max_placement_ns = std::max(out.max_placement_ns, result.world.reinforcement_placement_ns);
         out.placement_queries += result.world.reinforcement_collision_queries;
@@ -248,7 +321,14 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
             }
         }
         for (const auto& event : result.world.snapshot->events()) {
+            if (event.kind == tactical::EventKind::order_rejected) {
+                ++out.rejected_commands;
+                std::cout << "rejected tick " << event.tick << " player " << event.player
+                    << " sequence " << event.sequence << " " << tactical::to_string(event.reason) << '\n';
+            }
             if (event.kind != tactical::EventKind::order_accepted) continue;
+            if (event.order == tactical::OrderKind::credit_grant)
+                out.accepted_cash_grants.insert({event.tick, event.player, event.sequence});
             if (const auto type = types.find(event.unit); type != types.end()) ++out.by_type[type->second].orders[event.player];
         }
         for (const auto& event : result.world.snapshot->combat_events()) {
@@ -385,6 +465,13 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
 // equation, templates and Lua, and remove only other goal-function entries.
 std::optional<Run> focused_goal(const Content& content, const std::string& goal, std::uint64_t ticks) {
     Content focused = content;
+    if (goal == "BOMB_UNIT") {
+        const auto root = environment("EAWR_EAW_GAME_ROOT");
+        if (!root) return std::nullopt;
+        auto arranged = load(*root, false, true);
+        if (!arranged) return std::nullopt;
+        focused = std::move(*arranged);
+    }
     std::size_t kept = 0;
     for (auto& [path, text] : focused.ai.xml) {
         if (path.find("/goalfunctions/") == std::string::npos) continue;
@@ -439,7 +526,9 @@ int run_foc_plan_cases(int argc, char** argv) {
     }
     const std::uint64_t ticks = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 5400;
     const bool underworld = argc > 4 && std::string_view(argv[4]) == "--underworld";
-    economy_run = underworld || (argc > 4 && std::string_view(argv[4]) == "--economy");
+    const bool reinforcement_regression = argc > 4 && std::string_view(argv[4]) == "--reinforce-regression";
+    reinforcement_fixture = reinforcement_regression;
+    economy_run = underworld || reinforcement_regression || (argc > 4 && std::string_view(argv[4]) == "--economy");
     auto content = load(*root, underworld);
     if (!content) return 1;
 
@@ -452,7 +541,62 @@ int run_foc_plan_cases(int argc, char** argv) {
         runs.push_back(std::move(*result));
     }
     const Run& first = runs.front();
+    if (reinforcement_regression) {
+        expect(content->start.setup.seed == 67, "SAE-10: Coruscant regression retains seed 67");
+        for (const auto& result : runs) {
+            expect(result.record.final_tick_count == 3600, "SAE-10: regression reaches tick 3600");
+            expect(result.rejected_commands == 0, "SAE-10: no AI command is rejected");
+            expect(result.reinforcements > 0, "SAE-10: AI actually admits reinforcements");
+            expect(result.hashes == first.hashes && result.commands == first.commands,
+                "SAE-10: regression agrees on 1/2/4/8 workers");
+        }
+        if (argc > 2 && argv[2][0] != 0) {
+            auto bytes = tactical::write_replay(first.record);
+            expect(bytes.has_value(), "SAE-10: AI command record encodes");
+            if (bytes) {
+                const std::filesystem::path path(argv[2]);
+                if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path());
+                std::ofstream replay(path, std::ios::binary);
+                replay.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
+                expect(static_cast<bool>(replay), "SAE-10: AI command record writes");
+            }
+        }
+        const auto replayed = eawr::platform::headless_tick_hashes(first.record, content->content.sensors,
+            content->content.durability, content->content.motion, content->content.combat, content->victory,
+            content->content.fog, content->content.abilities, content->economy);
+        expect(replayed && replayed.value() == first.world_hashes,
+            "SAE-10: recorded ordinary commands reproduce every headless world hash");
+        return failures == 0 ? 0 : 1;
+    }
     if (economy_run) {
+        // WAS-19/30: keep the installed cash equation and Lua; arrange only
+        // its inputs. The Empire owns a level-one station and starts below
+        // 3000 credits, facing a stronger Rebel force in a skirmish.
+        Content cash = *content;
+        for (auto& player : cash.economy.players) player.credits = eawr::sim::math::Fixed::from_raw(1000 * eawr::sim::math::Fixed::scale);
+        std::set<tactical::TypeId> friendly;
+        for (const auto& unit : cash.start.setup.units) if (unit.owner == 2) friendly.insert(unit.type_id);
+        for (auto& type : cash.ai.content.types) if (friendly.contains(type.type_id)) {
+            type.combat_power = {};
+            for (auto& weapon : type.weapons) weapon.combat_power = {};
+        }
+        const auto funded = focused_goal(cash, "SKIRMISH_GENERATE_MAGIC_CASH_DROP_SPACE", 5700);
+        expect(funded.has_value(), "WAS-19: focused installed cash scenario completes");
+        if (!funded) return 1;
+        std::size_t grants = 0;
+        for (const auto& command : funded->record.commands) {
+            const auto* grant = std::get_if<tactical::CreditGrantPayload>(&command.payload);
+            if (grant == nullptr || command.key.player_id != 2) continue;
+            ++grants;
+            expect(command.key.tick > 5400, "WAS-19: no cash aid before game age exceeds 180 seconds");
+            expect(grant->amount == eawr::sim::math::Fixed::from_raw(6000 * eawr::sim::math::Fixed::scale),
+                "WAS-30: the installed magic plan requests exactly 6000 credits");
+            expect(funded->accepted_cash_grants.contains(command.key), "WAS-30: the world accepts the cash grant");
+        }
+        expect(grants == 1, "WAS-19/30: eligible cash plan grants once and sleeps for 120 seconds");
+        expect(std::any_of(funded->journal.plans.begin(), funded->journal.plans.end(), [](const auto& event) {
+            return event.player == 2 && event.plan == "ai_plan_expansiongeneric_generatemagiccashdrop" && event.event == "started";
+        }), "PL-10/40: installed root-level cash plan loads and activates");
         std::uint32_t candidates = 0;
         std::uint64_t search_ns = 0;
         for (const auto& cost : first.journal.costs) {
@@ -697,9 +841,9 @@ int run_foc_plan_cases(int argc, char** argv) {
     for (const auto& [container, target] : bomb.ordered_squadrons) {
         const auto hit = bomb.squadron_first_hit.find(container);
         std::string target_type;
-        for (const auto& unit : content->start.units) {
-            if (unit.state.entity_id != target) continue;
-            if (const auto name = content->names.find(unit.state.type_id); name != content->names.end()) target_type = " (" + name->second + ")";
+        for (const auto& unit : bomb.record.setup.units) {
+            if (unit.entity_id != target) continue;
+            if (const auto name = content->names.find(unit.type_id); name != content->names.end()) target_type = " (" + name->second + ")";
         }
         std::cout << "bombingrun squadron " << container << " ordered at tick " << bomb.ordered_tick.at(container)
                   << " on object " << target << target_type << ": "

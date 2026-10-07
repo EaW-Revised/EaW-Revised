@@ -89,12 +89,23 @@ struct LiveFog {
     std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> values;
 };
 
+// SND-40: immutable attack metadata captured before the snapshot history can evict it.
+// Only authored base types opt in; these presentation values never enter replay hashes.
+struct LiveBaseAttack {
+    sim::EntityId target{};
+    sim::tactical::TypeId type{};
+    sim::tactical::PlayerId owner{};
+    sim::tactical::PlayerId attacker{};
+    sim::math::Vec3 position{};
+};
+
 // The events of one completed tick that the battle view presents (LiveEventLog).
 struct LiveTickEvents {
     std::uint64_t tick{};
     std::vector<sim::tactical::Event> events;
     std::vector<sim::tactical::CombatEvent> combat_events;
     std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
+    std::vector<LiveBaseAttack> base_attacks{};
 };
 
 // What events_after() hands back: the ticks with presented events in (after, through], oldest
@@ -108,11 +119,12 @@ struct LiveEvents {
 
 // The session's presentation event log (#370): the events the battle view consumes, kept apart
 // from the snapshot history so a presentation stall longer than that history still plays every
-// hit and death. Only projectile hits (CombatEventKind::projectile_hit: impact effects),
+// hit and death. Projectile hits and expirations (impact and terminal-pose effects),
 // hardpoint and unit destructions (explosions, death clones) and the spin-aways of killed craft
 // (#447: their start and end explosions) are kept; orders, target
-// acquisitions, shots and victories are not, since the view reads shots and the outcome from
-// the snapshots and the rest not at all. Two bounds, the oldest ticks going first past either:
+// acquisitions, ordinary shots and victories are not, since the view reads shots and the outcome from
+// the snapshots and the rest not at all. SND-40 separately retains sparse base attack metadata
+// for opted-in types, including owner/type/position at notification time. Two bounds, the oldest ticks going first past either:
 // - `ticks`: only the events of the newest `ticks` completed ticks;
 // - `bytes`: the kept records' size, counted as sizeof(LiveTickEvents) per kept tick plus
 //   sizeof(Event) or sizeof(CombatEvent) per kept event (on x64: 56 + 40 or 104 bytes). A
@@ -139,7 +151,8 @@ public:
     // Keeps the presented events of the snapshot's tick, then applies the bounds. Snapshots
     // come in completed-tick order.
     void record(const sim::tactical::TacticalSnapshot& snapshot,
-        std::span<const sim::tactical::AsteroidImpact> asteroid_impacts = {});
+        std::span<const sim::tactical::AsteroidImpact> asteroid_impacts = {},
+        std::span<const sim::tactical::TypeId> base_types = {});
     // The kept ticks in (after, through], and the newest dropped tick in that range, if any.
     [[nodiscard]] LiveEvents after(std::uint64_t after, std::uint64_t through) const;
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
@@ -168,7 +181,7 @@ public:
     // WR-13: nonblocking preview query. Busy simulation returns no verdict; presentation
     // keeps its last preview until the next frame. The authoritative command always rechecks.
     [[nodiscard]] std::optional<bool> reinforcement_point(sim::tactical::PlayerId player,
-        sim::tactical::TypeId type, const sim::math::Vec3& point) const;
+        sim::tactical::TypeId type, const sim::math::Vec3& point, std::optional<sim::math::Fixed> facing_yaw = {}) const;
     // WHE-40: counts retain the logical purchase identity after deployment.
     [[nodiscard]] sim::tactical::ProductionCounts production_counts(sim::tactical::PlayerId player,
         sim::tactical::TypeId type) const;
@@ -198,6 +211,8 @@ public:
         // those records may hold. The defaults keep ten minutes of battle and at most 16 MiB
         // of records (below 22 MiB with the heap's overhead), whatever the event rate.
         std::size_t event_history{LiveEventLog::Bounds{}.ticks};
+        // Sorted authored starbase/orbital types requesting durable SND-40 notifications.
+        std::vector<sim::tactical::TypeId> base_attack_types{};
         std::size_t event_bytes{LiveEventLog::Bounds{}.bytes};
         // Called on the simulation thread right before each step with the tick about to run
         // (UI-07: CommandScheduler::take). Its commands are submitted in order with the keys

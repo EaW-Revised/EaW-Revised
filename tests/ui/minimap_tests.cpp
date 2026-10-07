@@ -85,6 +85,34 @@ void test_settings() {
            "a faction without a readable colour has none");
 }
 
+void test_faction_registry() {
+    test::ui::TempTree tree("radar-factions");
+    test::ui::write_text(tree.root / "XML/RadarMap.xml", "<RadarMap><RadarMapSettings/></RadarMap>");
+    test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants/>");
+    test::ui::write_text(tree.root / "XML/FactionFiles.xml",
+        "<Faction_Files><File>Factions.xml</File><File>Data/XML/extra.xml</File></Faction_Files>");
+    test::ui::write_text(tree.root / "XML/Factions.xml", R"xml(<Factions>
+<Faction Name="Neutral"><Color>100,100,100,255</Color></Faction>
+<Faction Name="Pirates"><Color>255,128,0,255</Color><No_Colorization_Color>1,2,3,255</No_Colorization_Color></Faction>
+</Factions>)xml");
+    test::ui::write_text(tree.root / "XML/extra.xml", R"xml(<Factions>
+<Faction Name="Hutts"><Color>255,128,0,255</Color><No_Colorization_Color>231,221,67,255</No_Colorization_Color></Faction>
+<Faction Name="PIRATES"><Color>9,8,7,255</Color></Faction>
+</Factions>)xml");
+    const std::array mounts{vfs::MountSpec{"synthetic", tree.root, "data", {}}};
+    auto filesystem = vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "WNO-40: faction registry fixture mounts");
+    if (!filesystem) return;
+    const auto settings = ui::minimap_settings(filesystem.value());
+    expect(settings.diagnostics.empty(), "WNO-40: registry includes load without fallback");
+    expect(ui::faction_colour(settings, "Hutts") == data::ui::Rgba8{255,128,0,255}
+        && ui::faction_colour(settings, "Hutts", true) == data::ui::Rgba8{231,221,67,255},
+        "WNO-40/43: an additional faction file supplies ordinary and unassigned colours");
+    expect(ui::faction_colour(settings, "Pirates") == data::ui::Rgba8{9,8,7,255}
+        && !ui::faction_colour(settings, "Pirates", true),
+        "WNO-40: a later definition replaces the complete earlier faction colour input");
+}
+
 // MM-09: the outline's lines stop at the minimap's edge.
 void test_clip() {
     const auto inside = ui::minimap_clip({-0.5, -0.5}, {0.5, 0.5});
@@ -193,7 +221,7 @@ void test_point_and_scale() {
     test::ui::TempTree tree("radar-style");
     test::ui::write_text(tree.root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>objects.xml</File></Game_Object_Files>");
     test::ui::write_text(tree.root / "XML/objects.xml", R"xml(<Objects>
-<Container Name="Fixed"><Is_Visible_On_Radar>Yes</Is_Visible_On_Radar><Radar_Icon_Scale_Space>200</Radar_Icon_Scale_Space></Container>
+<Container Name="Fixed"><Is_Visible_On_Radar>Yes</Is_Visible_On_Radar><Visible_On_Radar_When_Fogged>Yes</Visible_On_Radar_When_Fogged><No_Colorization_Color>11,22,33,255</No_Colorization_Color><Radar_Icon_Scale_Space>200</Radar_Icon_Scale_Space></Container>
 <Container Name="Point"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Icon_Name></Radar_Icon_Name><Radar_Blip_Size>2.9</Radar_Blip_Size></Container>
 <Container Name="Scaled"><Variant_Of_Existing_Type>Fixed</Variant_Of_Existing_Type><Radar_Draw_To_Scale>Yes</Radar_Draw_To_Scale></Container>
 <Container Name="Bad"><Variant_Of_Existing_Type>Point</Variant_Of_Existing_Type><Radar_Blip_Size>NaN</Radar_Blip_Size></Container>
@@ -207,6 +235,9 @@ void test_point_and_scale() {
     if (!loaded) return;
     std::map<std::string, ui::MinimapTypeLooks, std::less<>> types;
     for (const auto name : {"Fixed", "Point", "Scaled", "Bad"}) types[name] = ui::minimap_type_looks(name, &loaded.value().catalog);
+    expect(types["Point"].visible_when_fogged && types["Point"].no_colorization == data::ui::Rgba8{11,22,33,255}
+        && !ui::minimap_type_looks("Absent", &loaded.value().catalog).visible_when_fogged,
+        "WNO-41/43: effective inherited fogged flag and unassigned colour, absent flag defaults false");
     expect(types["Fixed"].icon == "i_radar_default_blip.tga" && !types["Fixed"].draw_to_scale
         && near(types["Fixed"].space_scale, 200), "MM-17: authored scale alone preserves default fixed icon size");
     expect(types["Point"].icon.empty() && near(types["Point"].point_size, 2.9, 1e-6)
@@ -311,6 +342,116 @@ void test_fog_cells() {
     expect(!shared.revealed(-1200.0, 0.0) && !shared.revealed(0.0, 600.0), "shared rows keep grid clipping");
 }
 
+void test_radar_fog_contract() {
+    ui::MinimapTypeLooks type;
+    type.visible = true;
+    const auto looks = [&](std::string_view) -> const ui::MinimapTypeLooks& { return type; };
+    const auto extents = ui::minimap_extents(-1000, 1000, -500, 500);
+    ui::MinimapUnit unit;
+    unit.id = 8;
+    unit.owner_colour = {255, 128, 0, 255};
+    const auto draw = [&] { return ui::minimap_blips(std::span(&unit, 1), looks, extents, {}); };
+    unit.radar.model_hidden = true;
+    expect(draw().empty(), "WNO-41: ordinary hidden model rejects radar");
+    type.visible_when_fogged = true;
+    expect(draw().size() == 1, "WNO-41: true flag bypasses hidden model even for neutral ownership");
+    unit.radar.radar_faded = true;
+    expect(draw().size() == 1, "WNO-41: true flag also bypasses radar fade");
+    type.visible_when_fogged = false;
+    unit.radar.replay = true;
+    expect(draw().size() == 1, "WNO-41: replay bypasses the same early checks");
+    for (const bool replay : {false, true}) {
+        type.visible_when_fogged = true;
+        unit.radar.replay = replay;
+        unit.radar.locally_visible = false;
+        expect(draw().empty(), "WNO-41: flag and replay retain final local visibility gate");
+        unit.radar.interdicted = true;
+        expect(draw().size() == 1, "WNO-41: active interdiction is a separate final admission");
+        unit.radar.interdicted = false;
+        unit.radar.locally_visible = true;
+        for (auto member : {&ui::MinimapLiveState::limbo, &ui::MinimapLiveState::jammed,
+                            &ui::MinimapLiveState::stealthed}) {
+            unit.hostile = true;
+            unit.radar.*member = true;
+            expect(draw().empty(), "WNO-41: flag/replay never bypass limbo, jamming or stealth");
+            unit.radar.*member = false;
+        }
+        unit.in_nebula = true;
+        expect(draw().empty(), "WNO-41: enemy nebula exclusion survives flag/replay");
+        unit.in_nebula = false;
+        type.visible_to_enemy = false;
+        expect(draw().empty(), "WNO-41: enemy-radar permission survives flag/replay");
+        type.visible_to_enemy = true;
+        unit.radar.alive = false;
+        expect(draw().empty(), "WNO-41: dead live identities never survive flag/replay");
+        unit.radar.alive = true;
+    }
+    unit.hostile = false;
+    unit.y = 700;
+    expect(draw().empty(), "WNO-41: noncapital outside playable bounds rejects even inside radar square");
+    unit.radar.capital_layer = true;
+    expect(draw().size() == 1, "WNO-41: capital-layer routing preserves radar square admission");
+    unit.y = 0;
+    unit.selected = true;
+    unit.capture = ui::MinimapCaptureColour{false, {100,100,100,255}, {200,0,100,255}, 0.25};
+    expect(draw().front().colour == data::ui::Rgba8{125,75,100,255}, "WNO-43: progress overrides selected colour");
+    unit.capture->raw_local_fog = true;
+    expect(draw().front().colour == data::ui::Rgba8{100,100,100,255}, "WNO-43: raw fog overrides owner and progress");
+    unit.hostile = true;
+    unit.radar.display_enemies = false;
+    expect(draw().size() == 1, "WNO-41: capture bypasses only enemy-display switch");
+    unit.capture.reset();
+    expect(draw().empty(), "WNO-41: ordinary enemies respect enemy-display switch");
+    unit.hostile = false;
+    unit.selected = false;
+    expect(draw().front().colour == unit.owner_colour, "WNO-40: ordinary Hutt container keeps owner colour");
+    const std::array<ui::MinimapPlayerColour, 5> players{{
+        {1,0,false,{10,20,30,255}}, {2,0,false,{40,50,60,255}},
+        {3,1,false,{70,80,90,255}}, {4,1,false,{100,110,120,255}}, {5,2,true,{100,100,100,255}}}};
+    const data::ui::Rgba8 fallback{1,2,3,255};
+    expect(ui::minimap_community_colour(players, 2, 1, true, fallback) == players[0].colour,
+        "WNO-43: local allied community property uses local colour");
+    expect(ui::minimap_community_colour(players, 4, 1, true, fallback) == players[2].colour,
+        "WNO-43: enemy team uses representative colour");
+    expect(ui::minimap_community_colour(players, 5, 1, true, fallback) == fallback
+        && ui::minimap_community_colour(players, 99, 1, true, fallback) == fallback
+        && ui::minimap_community_colour(players, 2, 1, false, fallback) == fallback,
+        "WNO-43: neutral, unassigned and nonmultiplayer retain fallback");
+    ui::MinimapMemory memory;
+    memory.id = unit.id;
+    memory.owner_colour = players[3].colour;
+    memory.x = 123;
+    memory.y = 321;
+    memory.yaw_degrees = 40;
+    const auto remembered = [&] { return ui::minimap_blips({}, looks, extents, {}, std::span(&memory,1)); };
+    expect(remembered().empty(), "WNO-44: undiscovered identity has no remembered icon");
+    memory.previously_revealed = true;
+    expect(remembered().empty(), "WNO-44: known identity without retained model has no icon");
+    memory.retained_model = true;
+    type.visible_when_fogged = false;
+    auto blips = remembered();
+    expect(blips.size() == 1 && blips[0].remembered && blips[0].colour == memory.owner_colour
+        && blips[0].centre == ui::minimap_point(extents, 123, 321),
+        "WNO-44: stored transform/owner draw independently of live fogged flag");
+    memory.capture_point = true;
+    expect(remembered().front().colour == data::ui::Rgba8{100,100,100,255}, "WNO-44: capture memory is neutral");
+    type.visible = false;
+    expect(remembered().size() == 1 && draw().empty(), "WNO-44: memory does not repeat live radar-type admission");
+    type.visible = true;
+    memory.y = 700;
+    expect(remembered().empty(), "WNO-44: remembered transform must lie inside playable bounds");
+    memory.y = 321;
+    memory.hostile = true;
+    memory.display_enemies = false;
+    expect(remembered().empty(), "WNO-44: capture memory does not bypass enemy-display switch");
+    memory.display_enemies = true;
+    type.visible_to_enemy = false;
+    expect(remembered().empty(), "WNO-44: remembered enemy requires enemy-radar permission");
+    type.visible_to_enemy = true;
+    type.hazard = true;
+    expect(remembered().empty() && draw().empty(), "WNO-40/44: hazards never produce either identity");
+}
+
 } // namespace
 
 int main() {
@@ -334,6 +475,8 @@ int main() {
         expect(settings.nebula == data::ui::Rgba8{255, 255, 255, 64}, "WHZ-71: installed nebula effect RGBA matches FoC");
         expect(settings.field == data::ui::Rgba8{103, 130, 139, 127}, "WHZ-72: installed hazard fill RGBA matches FoC");
         expect(settings.field_border == data::ui::Rgba8{174, 171, 200, 127}, "WHZ-72: installed hazard border RGBA matches FoC");
+        expect(ui::faction_colour(settings, "Hutts") == data::ui::Rgba8{255,128,0,255},
+            "WNO-40: installed expansion Hutt faction supplies ordinary orange radar colour");
     }
     const auto extents = ui::minimap_extents(-1000, 1000, -1000, 1000);
     const ui::MinimapHazard hazard{0, 0, 1000, 600};
@@ -347,6 +490,7 @@ int main() {
         "WHZ-72: rebuilding without registered hazards clears the map");
     expect(ui::minimap_hazards(overlap, extents, {}, 0, 80).empty(), "WHZ-72: invalid drawable dimensions leave retry to the view");
     test_settings();
+    test_faction_registry();
     test_mapping();
     test_blips();
     test_point_and_scale();
@@ -354,6 +498,7 @@ int main() {
     test_clip();
     test_fog();
     test_fog_cells();
+    test_radar_fog_contract();
     if (test::ui::failures() != 0) {
         std::cerr << test::ui::failures() << " minimap check(s) failed\n";
         return 1;

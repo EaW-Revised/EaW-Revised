@@ -352,6 +352,26 @@ void test_event_log_bounds_a_high_event_rate() {
     tactical::CombatEvent shot;
     shot.kind = tactical::CombatEventKind::weapon_fired;
     expect(!LiveEventLog::presented(shot), "an ordinary shot is not presented");
+    tactical::CombatEvent expiry;
+    expiry.kind = tactical::CombatEventKind::projectile_expired;
+    expiry.target = 123; expiry.shooter = 9; expiry.aim = at(20, 30, 40);
+    expiry.outcome = static_cast<std::uint32_t>(tactical::ProjectileExpiryReason::rocket_path_exhausted);
+    expect(LiveEventLog::presented(expiry), "WAD-07: a projectile expiry is presented");
+    const tactical::TacticalSnapshot empty(1, {}, {}, {});
+    const tactical::TacticalSnapshot expired(1, {}, {}, {}, {expiry});
+    expect(empty.sha256() == expired.sha256(), "WAD-07: expiry-only snapshots preserve canonical bytes");
+    auto hit = expiry;
+    hit.kind = tactical::CombatEventKind::projectile_hit;
+    const tactical::TacticalSnapshot ordinary(1, {}, {}, {}, {hit});
+    const tactical::TacticalSnapshot mixed(1, {}, {}, {}, {expiry, hit, expiry});
+    expect(ordinary.sha256() == mixed.sha256(), "WAD-07: expiry events do not change mixed-event count or bytes");
+    LiveEventLog terminal_log({.ticks = 100, .bytes = 4096});
+    terminal_log.record(expired);
+    for (std::uint64_t tick = 2; tick <= 70; ++tick) terminal_log.record(tactical::TacticalSnapshot(tick, {}, {}, {}));
+    const auto terminal = terminal_log.after(0, 70);
+    expect(terminal.ticks.size() == 1 && terminal.ticks.front().combat_events.size() == 1
+        && terminal.ticks.front().combat_events.front() == expiry,
+        "WAD-07: terminal ID, reason and pose survive discarded snapshot history");
     shot.outcome = tactical::fired_ability_shot;
     expect(LiveEventLog::presented(shot), "an ability shot is presented");
     LiveEventLog hazards({.ticks = 5, .bytes = 1024});
@@ -393,6 +413,38 @@ void test_event_log_bounds_a_high_event_rate() {
 
 // #370 re-review 3: the reported loss never runs past the asked range, and a dropped tick
 // outside it is not reported at all.
+void test_event_log_keeps_base_attack_metadata() {
+    using eawr::platform::LiveEventLog;
+    tactical::TacticalInstance target;
+    target.entity_id = 1; target.type_id = 9; target.owner = 1;
+    target.fixed_transform.rows[0][3] = units(12);
+    tactical::TacticalInstance shooter;
+    shooter.entity_id = 2; shooter.type_id = 10; shooter.owner = 2;
+    tactical::CombatEvent shot;
+    shot.kind = tactical::CombatEventKind::weapon_fired; shot.shooter = 2; shot.target = 1;
+    const std::array<tactical::TypeId, 1> bases{9};
+    LiveEventLog log({.ticks = 100, .bytes = 4096});
+    log.record(tactical::TacticalSnapshot(1, {}, {target, shooter}, {}, {shot}), {}, bases);
+    for (std::uint64_t tick = 2; tick <= 70; ++tick) log.record(tactical::TacticalSnapshot(tick, {}, {}, {}), {}, bases);
+    const auto held = log.after(0, 70);
+    expect(held.ticks.size() == 1 && held.ticks.front().base_attacks.size() == 1,
+        "SND-40: sparse base attack survives evicted metadata and empty ticks");
+    if (!held.ticks.empty() && !held.ticks.front().base_attacks.empty()) {
+        const auto& attack = held.ticks.front().base_attacks.front();
+        expect(attack.target == 1 && attack.type == 9 && attack.owner == 1 && attack.attacker == 2
+            && attack.position.x == units(12), "SND-40: retain notification-time ownership, type and position");
+    }
+    const auto bytes = sizeof(eawr::platform::LiveTickEvents) + sizeof(eawr::platform::LiveBaseAttack);
+    expect(log.bytes() == bytes, "SND-40: base metadata counts against the journal byte bound");
+    LiveEventLog excluded({.ticks = 100, .bytes = 4096});
+    excluded.record(tactical::TacticalSnapshot(1, {}, {target, shooter}, {}, {shot}));
+    expect(excluded.size() == 0, "SND-40: ordinary types do not opt into the sparse base journal");
+    LiveEventLog bounded({.ticks = 100, .bytes = bytes - 1});
+    bounded.record(tactical::TacticalSnapshot(1, {}, {target, shooter}, {}, {shot}), {}, bases);
+    expect(bounded.bytes() == 0 && bounded.after(0, 1).lost_through == 1,
+        "SND-40: oversized base notification reports a gap without unbounded retention");
+}
+
 void test_event_log_keeps_sparse_ability_frames() {
     using eawr::platform::LiveEventLog;
     const auto snapshot = [](const std::uint64_t tick, std::vector<tactical::AbilitySpawnState> spawns) {
@@ -898,6 +950,7 @@ int main(const int argc, const char* const argv[]) {
     test_driven_matches_headless(argv[1]);
     test_event_log_outlives_the_history();
     test_event_log_bounds_a_high_event_rate();
+    test_event_log_keeps_base_attack_metadata();
     test_event_log_keeps_sparse_ability_frames();
     test_event_log_gap_stays_in_the_asked_range();
     test_real_time_records_its_replay(argv[1]);

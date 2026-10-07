@@ -3,6 +3,7 @@
 #include "../../src/sim/tactical/blast_internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -469,13 +470,13 @@ std::vector<std::string> hardpoint_trace(const bool shield_damage, const bool de
     const auto secondary = session.durability_state(3);
     expect(detonations == 1 && impacts == 1, "WAD-03/28: direct and split area delivery emit one impact/detonation");
     expect(primary && primary->hardpoints[0] == q(shield_damage ? 1000 : 993)
-        && primary->hardpoints[1] == q(shield_damage ? 1000 : 925)
-        && primary->hardpoints[2] == q(shield_damage ? 943 : 925),
+        && primary->hardpoints[1] == q(shield_damage || delayed ? 1000 : 925)
+        && primary->hardpoints[2] == q(delayed ? (shield_damage ? 943 : 950) : (shield_damage ? 943 : 925)),
         "WAD-20/21/23/24: exclude final direct route; split budget visits other meshes through ordinary shields");
-    expect(primary && primary->shields == q(shield_damage ? 0 : 100),
-        "WAD-24: shield-damaging shares drain sequentially; Krayt bypass keeps shield");
-    expect(secondary && secondary->hull == q(shield_damage ? 950 : 850)
-        && secondary->shields == q(shield_damage ? 0 : 100),
+    expect(primary && primary->shields == q(shield_damage || delayed ? 0 : 100),
+        "WAD-24/26: immediate bypass retains shields; source-less delayed delivery uses ordinary shield routing");
+    expect(secondary && secondary->hull == q(shield_damage || delayed ? 950 : 850)
+        && secondary->shields == q(shield_damage || delayed ? 0 : 100),
         "WAD-18/30: nearby craft receives one ordinary delivery despite direct-target category restriction");
     return rows;
 }
@@ -568,6 +569,259 @@ void test_source_death_between_players() {
         }
     }
 }
+
+template <typename Profile>
+void explicit_delay(Profile& profile, const Fixed delay) {
+    if constexpr (requires { profile.damage_delay; }) profile.damage_delay = delay;
+}
+
+template <typename Profile>
+void death_payloads(Profile& profile, const std::vector<t::ShotProfile>& shots, const Fixed height) {
+    if constexpr (requires { profile.death_projectiles; profile.ranged_target_z_adjust; }) {
+        profile.death_projectiles = shots;
+        profile.ranged_target_z_adjust = height;
+    }
+}
+
+std::vector<std::string> death_payload_trace(const bool empty, const bool chain,
+    const eawr::sim::PartitionExecutor& executor) {
+    Battle battle(false, false);
+    battle.replay.setup.players = {{1, 1, 10, 1}, {2, 1, 20, 1}, {4, 4, 40, 0}};
+    battle.replay.setup.units = {{1, 1, 4, at(0)}, {2, 2, 1, at(50)}, {3, 2, 2, at(60)}};
+    if (chain) battle.replay.setup.units.push_back({4, 1, 4, at(100)});
+    battle.replay.setup.units.front().rotation = {{}, {}, q(1), {}};
+    battle.combat.profiles[0].weapons.clear();
+    battle.combat.profiles[0].collision = t::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+    battle.combat.pad_neutral_factions = {40};
+    battle.health.profiles[0].max_hull = q(20);
+    battle.health.profiles[1].max_hull = q(10000);
+    t::ShotProfile payload;
+    payload.speed = q(6); payload.blast.damage = q(3000); payload.blast.radius = q(400);
+    payload.blast.max_delay = {}; payload.blast.immune_faction = 20;
+    t::FlightProfile flight; flight.lifetime = Fixed{}; payload.flight = flight;
+    explicit_delay(payload, Fixed::from_raw(Fixed::scale / 2));
+    death_payloads(battle.combat.profiles[0], empty ? std::vector<t::ShotProfile>{}
+        : std::vector<t::ShotProfile>{payload}, q(30));
+    battle.replay.commands = {{{0, 1, 0}, {1}, t::DamagePayload{q(20)}}};
+    auto session = battle.make();
+    std::vector<std::string> rows;
+    std::uint64_t detonations{};
+    std::uint64_t damaged_frame{};
+    for (std::uint64_t frame = 0; frame < 40; ++frame) {
+        const auto stepped = session.step(executor);
+        expect(static_cast<bool>(stepped), "WNO-29: container-death session steps");
+        if (!stepped) break;
+        detonations += stepped.value().blast_detonations;
+        if (frame == 0) {
+            expect(!session.durability_state(1), "WCC-72: dead source is removed before detonation");
+            expect(session.projectiles().size() == (empty ? 0U : 1U), "WNO-29: empty/list spawns zero/one payload");
+            if (!session.projectiles().empty()) {
+                const auto& shot = session.projectiles().front();
+                expect(shot.owner == 4 && shot.shooter == 1 && shot.position == at(0, 0, 30)
+                    && shot.step.x == q(-6) && shot.step.y == Fixed{},
+                    "WNO-29/30: dead owner/source/facing/height retained rather than killer owner");
+            }
+        }
+        const auto recipient = session.durability_state(2);
+        const auto rebel = session.durability_state(3);
+        expect(rebel && rebel->hull == q(10000), "WNO-31: allied Rebel remains faction-immune");
+        if (recipient && recipient->hull < q(10000) && damaged_frame == 0) damaged_frame = frame;
+        if (frame < 4) expect(recipient && recipient->hull == q(10000),
+            "WNO-32: explicit delay prevents immediate recipient damage");
+        rows.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+    }
+    const auto recipient = session.durability_state(2);
+    expect(detonations == (empty ? 0U : chain ? 2U : 1U), "WNO-29/31: one detonation per death including Hutt chain");
+    expect(recipient && recipient->hull == q(empty ? 10000 : chain ? 4000 : 7000),
+        "WNO-31/32: non-Rebel damage survives projectile and source removal");
+    if (!empty) expect(damaged_frame >= 4 && damaged_frame <= 16,
+        "WNO-32: first recipient is delivered within randomized 0.125..0.5 second window");
+    if (chain && !empty) expect(!session.durability_state(4), "WNO-31: nearby neutral Hutt container dies from area damage");
+    return rows;
+}
+
+void test_death_payloads() {
+    const eawr::sim::InlineExecutor inline_executor;
+    for (const bool empty : {false, true}) for (const bool chain : {false, true}) {
+        const auto reference = death_payload_trace(empty, chain, inline_executor);
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(death_payload_trace(empty, chain, executor) == reference,
+                "WNO-29/31/32: death, delay and chain state/event bytes match with " + std::to_string(workers) + " workers");
+        }
+    }
+    std::vector<Fixed> choices;
+    for (std::uint64_t seed = 1; seed <= 12; ++seed) {
+        Battle battle(false, false);
+        battle.replay.setup.seed = seed;
+        battle.replay.setup.units = {{1, 1, 1, at(0)}};
+        battle.replay.commands = {{{0, 1, 0}, {1}, t::DamagePayload{q(1000)}}};
+        battle.combat.profiles[0].weapons.clear();
+        t::ShotProfile first; first.speed = q(6); first.blast = payload().blast;
+        auto second = first; second.blast.damage = q(300);
+        auto third = first; third.blast.damage = q(450);
+        death_payloads(battle.combat.profiles[0], {first, second, third}, q(30));
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto session = battle.make();
+            const auto step = session.step(executor);
+            expect(step && session.projectiles().size() == 1, "WNO-29: multiple entries produce exactly one payload");
+            if (!step || session.projectiles().empty()) continue;
+            const auto& projectile = session.projectiles().front();
+            expect(projectile.blast.damage == q(150) || projectile.blast.damage == q(300)
+                || projectile.blast.damage == q(450), "WNO-29: choice comes from authored list");
+            const std::vector<std::string> bytes{step.value().state_sha256, step.value().snapshot->sha256()};
+            if (workers == 1) { reference = bytes; choices.push_back(projectile.blast.damage); }
+            else expect(bytes == reference, "WNO-29: synchronized list selection has equal state/event bytes");
+        }
+    }
+    std::sort(choices.begin(), choices.end());
+    expect(!choices.empty() && choices.front() != choices.back(), "WNO-29: list choice uses the synchronized draw");
+    QueryFixture fixture;
+    fixture.world.seed = 1774; fixture.world.frame = 8;
+    for (eawr::sim::EntityId id = 1; id <= 10; ++id) fixture.add(id, 2, at(50));
+    fixture.build();
+    auto projectile = payload();
+    explicit_delay(projectile, Fixed::from_raw(Fixed::scale / 2));
+    auto prepared = d::prepare_blast(fixture.world, projectile, at(0));
+    expect(static_cast<bool>(prepared), "WNO-32: explicit-delay recipient query succeeds");
+    if (prepared) {
+        std::vector<Fixed> delays;
+        for (const auto& recipient : recipients(prepared.value())) {
+            expect(recipient.delay.raw() >= Fixed::scale / 8 && recipient.delay.raw() <= Fixed::scale / 2,
+                "WAD-26: every delivery delay lies within one quarter to full authored value");
+            delays.push_back(recipient.delay);
+        }
+        std::sort(delays.begin(), delays.end());
+        expect(!delays.empty() && delays.front() != delays.back(),
+            "WNO-32: equal-distance recipients draw separate delays");
+    }
+}
+
+std::vector<std::string> delayed_metadata_trace(const eawr::sim::PartitionExecutor& executor) {
+    Battle battle(false, false);
+    battle.replay.setup.units = {{1, 1, 1, at(0)}, {2, 2, 2, at(100)}};
+    auto& shot = *battle.combat.profiles[0].weapons[0].shot;
+    shot.max_travel = q(25); shot.blast.max_delay = q(1);
+    // DG-23 adds target soft radius to the cap; omit geometry so expiry stays at x=25.
+    battle.combat.profiles[1].collision.reset();
+    shot.shield_damage = false; shot.hitpoint_damage = false; shot.energy_damage = true;
+    auto& recipient = battle.health.profiles[1];
+    recipient.max_shields = q(50); recipient.powered = true; recipient.max_energy = q(50);
+    recipient.armor_type = recipient.shield_armor_type = 0;
+    battle.health.damage->damage_types = battle.health.damage->armor_types = 1;
+    battle.health.damage->armor_mods = {Fixed::from_raw(Fixed::scale / 2)};
+    battle.health.damage->diminishing = {{Fixed{}, q(2)}, {q(1), q(2)}};
+    shot.damage_type = 0;
+    auto session = battle.make();
+    std::vector<std::string> rows;
+    std::optional<std::uint64_t> detonation;
+    bool delivered = false;
+    for (std::uint64_t frame = 0; frame < 70; ++frame) {
+        auto step = session.step(executor);
+        expect(static_cast<bool>(step), "WAD-26: delayed metadata witness steps");
+        if (!step) break;
+        if (step.value().blast_detonations != 0) {
+            detonation = frame;
+            const auto& terminal = step.value().snapshot->combat_events();
+            expect(std::any_of(terminal.begin(), terminal.end(), [](const auto& event) {
+                return event.kind == t::CombatEventKind::projectile_expired && event.aim.x == q(25);
+            }), "WAD-26: distance-delay witness detonates 75 units from its recipient");
+            expect(static_cast<bool>(session.submit({{frame + 1, 1, 1}, {1}, t::DamagePayload{q(1000)}})),
+                "WAD-26: remove source between queue and delivery");
+        }
+        const auto health = session.durability_state(2);
+        if (detonation && frame < *detonation + 11)
+            expect(health && health->hull == q(1000) && health->shields == q(50),
+                "WAD-26: distance-delay record waits for truncated frame count");
+        if (detonation && frame == *detonation + 11) {
+            delivered = true;
+            expect(health && health->hull == q(975) && health->shields == Fixed{}
+                && health->energy == q(50) && !health->last_hit_frame,
+                "WAD-26: retain armor type; discard source flags, energy drain and diminishing context");
+        }
+        rows.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+    }
+    expect(detonation && delivered && !session.durability_state(1),
+        "WAD-26: source-less queued damage survives source removal and truncates 11.25 frames to 11");
+    return rows;
+}
+
+void test_large_distance_delay() {
+    std::vector<std::uint8_t> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        Battle battle(false, true);
+        battle.replay.setup.units = {{1, 1, 1, at(0)}, {2, 2, 2, at(4096)}};
+        auto& shooter = battle.combat.profiles[0];
+        shooter.max_attack_distance = shooter.weapons[0].range = q(5000);
+        auto& shot = *shooter.weapons[0].shot;
+        shot.blast.radius = Fixed::from_raw(1);
+        shot.blast.max_delay = q(1);
+        shot.blast.dropoff = false;
+        battle.combat.profiles[1].collision = t::CollisionBox{at(-4096, -1, -1), at(4096, 1, 1)};
+        auto session = battle.make();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::uint64_t detonation_frame{};
+        bool launched = false;
+        for (; detonation_frame < 30 && session.projectiles().empty(); ++detonation_frame) {
+            const auto launch = session.step(executor);
+            expect(static_cast<bool>(launch), "WAD-17: large-box delay witness steps toward launch");
+            if (!launch) break;
+            launched = !session.projectiles().empty();
+        }
+        expect(launched && session.projectiles().size() == 1 && session.projectiles()[0].position == at(0),
+            "WAD-17: large-box delay witness launches at the origin");
+        if (!launched || session.projectiles().size() != 1) continue;
+        expect(session.request_projectile_explosion(session.projectiles()[0].id),
+            "WAD-17: large-box delay witness requests detonation");
+        const auto step = session.step(executor);
+        expect(step && step.value().blast_detonations == 1,
+            "WAD-17: large-box delay witness detonates once");
+        if (!step) continue;
+        const auto bytes = session.canonical_state_bytes();
+        constexpr std::array<std::uint8_t, 4> tag{'B', 'L', 'S', 'T'};
+        const auto block = std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end());
+        expect(block != bytes.end() && bytes.end() - block >= 68,
+            "WAD-17: overlapping box admits one queued delivery outside the tiny radius");
+        if (block == bytes.end() || bytes.end() - block < 68) continue;
+        const auto read = [&](const std::size_t offset, const std::size_t width) {
+            std::uint64_t value{};
+            for (std::size_t byte = 0; byte < width; ++byte)
+                value |= static_cast<std::uint64_t>(block[static_cast<std::ptrdiff_t>(offset + byte)]) << (byte * 8);
+            return value;
+        };
+        expect(read(4, 4) == 3 && read(12, 8) == 1 && read(28, 8) == 2,
+            "WAD-17: BLST v3 retains the large-box recipient");
+        expect(read(44, 8) == (std::uint64_t{1} << 60),
+            "WAD-17: admitted centre distance produces representable delay raw 2^60");
+        expect(read(20, 8) == detonation_frame + 2061584302080ULL,
+            "WAD-26: large delay truncates to 2061584302080 frames without overflow");
+        const auto health = session.durability_state(2);
+        expect(health && health->hull == q(1000), "WAD-17: distant delivery remains pending");
+        if (workers == 1) reference = bytes;
+        else expect(bytes == reference, "WAD-17: large-delay canonical queue matches on 1/2/4/8 workers");
+    }
+}
+
+void test_delayed_metadata() {
+    const eawr::sim::InlineExecutor inline_executor;
+    const auto reference = delayed_metadata_trace(inline_executor);
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(delayed_metadata_trace(executor) == reference,
+            "WAD-26: retained metadata, source loss and due ticks have equal 1/2/4/8 bytes");
+    }
+    Battle direct(false, false);
+    direct.replay.final_tick_count = 100;
+    explicit_delay(*direct.combat.profiles[0].weapons[0].shot, Fixed::from_raw(Fixed::scale / 2));
+    const auto direct_reference = trace(direct, inline_executor, false, true);
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(trace(direct, executor, false, true) == direct_reference,
+            "WAD-26: direct and secondary explicit delays survive source loss with equal worker bytes");
+    }
+}
 } // namespace
 
 int main() {
@@ -576,6 +830,9 @@ int main() {
     test_source_death_between_players(); test_hardpoint_selection_and_routing(); test_hardpoint_session_determinism();
     test_shield_generator_split();
     test_rocket_blast_determinism();
+    test_death_payloads();
+    test_delayed_metadata();
+    test_large_distance_delay();
     if (failures) return 1;
     std::cout << "blast contracts passed (WAD, workers 1/2/4/8, detonation-only work)\n";
     return 0;

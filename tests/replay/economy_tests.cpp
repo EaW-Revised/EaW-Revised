@@ -245,6 +245,67 @@ void test_determinism() {
     expect(!events.empty() && events.back().reason == tactical::RejectReason::no_economy, "refused: no economy");
 }
 
+void test_rotated_reinforcement() {
+    auto content = rules();
+    for (auto& menu : content.menus) for (auto& option : menu.options)
+        option.build_frames = option.ai_build_frames = 1;
+    const auto table = arrival_lane_motion();
+    auto command = reinforce(3, human, 1, ship_type, at(-2850, 0));
+    std::get<tactical::ReinforcePayload>(command.payload).facing_yaw = units(180);
+    const tactical::TacticalReplay replay{setup(), 160, {buy(0, human, 0, human_station, ship_type), command}};
+    const auto written = tactical::write_replay(replay);
+    expect(static_cast<bool>(written), "WR-X01: explicit-facing replay writes");
+    if (!written) return;
+    const auto parsed = tactical::parse_replay(written.value());
+    expect(parsed && parsed.value() == replay, "WR-X01: explicit yaw and position round-trip through opcode 26");
+    if (!parsed) return;
+    for (const auto yaw : {units(0), units(90), Fixed::from_raw(359 * one + one / 2)}) {
+        auto varied = replay;
+        auto& payload = std::get<tactical::ReinforcePayload>(varied.commands.back().payload);
+        payload.facing_yaw = yaw;
+        payload.pool_token = 7;
+        const auto bytes = tactical::write_replay(varied);
+        expect(static_cast<bool>(bytes), "WR-X01: rotated reserved command writes");
+        if (bytes) {
+            const auto restored = tactical::parse_replay(bytes.value());
+            expect(restored && restored.value() == varied, "WR-X01: zero/fractional yaw and reserved pool token survive serialization");
+        }
+    }
+    for (const auto yaw : {units(-1), units(360)}) {
+        auto invalid = replay;
+        std::get<tactical::ReinforcePayload>(invalid.commands.back().payload).facing_yaw = yaw;
+        expect(!tactical::write_replay(invalid), "WR-X01: noncanonical facing is rejected at the command boundary");
+    }
+    std::vector<std::string> expected;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::from_replay(parsed.value(), sensors, {}, table, std::nullopt,
+            {}, {}, {}, content);
+        expect(static_cast<bool>(created), "WR-X01: recorded facing creates a session");
+        if (!created) return;
+        auto world = std::move(created).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> trace;
+        while (world.completed_tick() < replay.final_tick_count) {
+            if (workers != 1) world.scramble_storage_for_testing();
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "WR-X01: rotated reinforcement replay steps");
+            if (!step) return;
+            trace.push_back(step.value().state_sha256 + ',' + step.value().snapshot->sha256());
+            if (world.completed_tick() == 4) {
+                expect(ledger(world, human)->pool.empty() && world.arrivals().size() == 1,
+                    "WR-X01: authoritative lane query accepts reversed facing past the same blocker");
+                if (!world.arrivals().empty()) {
+                    const auto& arrival = world.arrivals().begin()->second;
+                    expect(arrival.direction.x.raw() < -one + 10 && std::abs(arrival.direction.y.raw()) < 10,
+                        "WR-X01: arrival lane flies along the command's facing");
+                }
+            }
+        }
+        if (expected.empty()) expected = trace;
+        expect(trace == expected, "WR-X01: recorded facing hashes agree for 1/2/4/8 workers and scrambled storage");
+    }
+}
+
 void test_reserved_reinforcement() {
     std::vector<std::string> baseline;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
@@ -329,14 +390,25 @@ void test_validation() {
 using namespace economy_test_support;
 
 int main() {
+    expect(tactical::reinforcement_prevention_blocks(at(0, 0), units(5), at(2, 3, 1000)),
+        "WR-22: prevention is planar and rejects the circle interior");
+    expect(!tactical::reinforcement_prevention_blocks(at(0, 0), units(5), at(3, 4)),
+        "WR-22: equality at a prevention radius is allowed");
+    expect(!tactical::reinforcement_prevention_blocks(at(0, 0), Fixed{}, at(0, 0)),
+        "WR-22: a nonpositive radius never blocks");
+    const std::optional<std::array<Fixed, 4>> bounds{{units(-10), units(-20), units(10), units(20)}};
+    expect(tactical::reinforcement_inside_bounds(bounds, at(-10, 20)), "WR-23: playable bounds include equality");
+    expect(!tactical::reinforcement_inside_bounds(bounds, at(11, 0)), "WR-23: outside playable bounds is refused");
     test_roster_gate();
     test_arrival_table();
     test_income();
+    test_credit_adjustments();
     test_team_production();
     test_buy();
     test_credit_grant();
     test_refusals();
     test_cancel();
+    test_cancel_entry();
     test_station_lost();
     test_reinforce_ship();
     test_reinforced_carrier();
@@ -350,6 +422,7 @@ int main() {
     test_determinism();
     test_validation();
     test_reserved_reinforcement();
+    test_rotated_reinforcement();
     if (failures != 0) {
         std::cerr << failures << " economy check(s) failed\n";
         return 1;

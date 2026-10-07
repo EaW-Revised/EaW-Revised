@@ -204,6 +204,7 @@ struct HudShell {
     // The time panel's buttons in shell order, drawn as art only (their
     // behaviour is decision D7 and later tickets).
     std::vector<HudShellButton> panel_buttons;
+    std::vector<HudShellButton> order_buttons;
     std::optional<HudShellText> planet_name;
     // #425: the unit card slots in component order (s_select_00, 01, ...; a column is two slots)
     // and the column borders (special_border_00, 01, ...). Empty when the shell has none.
@@ -250,6 +251,8 @@ struct HudReinforcePane {
 // The time panel's buttons, in draw order.
 inline constexpr std::array<std::string_view, 4> tactical_panel_buttons{
     "b_droid_help_tactical", "b_story_arc_t", "b_play_pause_t", "b_fast_forward_t"};
+inline constexpr std::array<std::string_view, 5> tactical_order_buttons{
+    "c_button00", "c_button01", "c_button02", "c_button04", "c_button05"};
 
 // Never fails: a part the shell or catalogue lacks is left out with one
 // EAWR-UI-0320 warning.

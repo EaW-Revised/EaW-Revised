@@ -271,11 +271,7 @@ core::Result<void> session_detail::Tick::projectile_inputs() {
             }
             const auto source = live_unit(moving, event.shooter);
             if (source != nullptr && source->upgrade_bonuses[1].raw() != 0) {
-                // WCC-44: the shooter damage term, followed by target defense at impact.
-                const auto boosted = math::multiply(projectile.value().damage,
-                    math::Fixed::from_raw(math::Fixed::scale + source->upgrade_bonuses[1].raw()));
-                if (!boosted) return core::Result<void>::failure(boosted.error());
-                projectile.value().damage = boosted.value();
+                // Retain the separate delayed-area input; immediate delivery uses EUS-16 below.
                 projectile.value().source_damage_factor = math::Fixed::from_raw(
                     math::Fixed::scale + source->upgrade_bonuses[1].raw());
             }
@@ -340,6 +336,7 @@ core::Result<void> session_detail::Tick::impacts() {
     auto& killed = impacts_.value().killed.emplace();
     auto& pending_blast_damage = impacts_.value().pending_blast_damage.emplace(impl_->pending_blast_damage);
     const auto deliver_redirected = [&](const EntityId id, Hit hit, const PlayerId killer) -> core::Result<void> {
+        if (damage_blocked()) return core::Result<void>::success();
         const auto recipient = staged.find(id);
         if (recipient == staged.end() || !recipient->second.durability) return core::Result<void>::success();
         const auto arriving = arrivals.find(id);
@@ -365,7 +362,9 @@ core::Result<void> session_detail::Tick::impacts() {
     };
     // WAD-21/25: each prepared share enters ordinary damage in authored order, so state
     // changes (shield-generator loss, last-hit frame) are visible to later deliveries.
-    const auto deliver_area = [&](const Projectile& projectile, const detail::BlastRecipient& recipient) -> core::Result<void> {
+    const auto deliver_area = [&](const Projectile& projectile, const detail::BlastRecipient& recipient,
+                                  const bool delayed = false) -> core::Result<void> {
+        if (damage_blocked()) return core::Result<void>::success();
         const auto target = staged.find(recipient.id);
         if (target == staged.end() || !target->second.durability) return core::Result<void>::success();
         const auto arriving = arrivals.find(recipient.id);
@@ -375,11 +374,22 @@ core::Result<void> session_detail::Tick::impacts() {
         const auto modifier = math::Fixed::from_raw((defense == craft_defense.end() ? 0 : defense->second.raw())
             + (target->second.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
             + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
-        auto hit = detail::area_hit(projectile, recipient, modifier);
+        // WPR-51/WCC-44, EUS-16: immediate delivery resolves the retained shooter now.
+        // EUS-15/WAD-26: queued metadata contributes no shooter damage modifier.
+        const auto source = staged.find(projectile.shooter);
+        const auto factor = delayed ? math::Fixed::from_raw(math::Fixed::scale) : math::Fixed::from_raw(math::Fixed::scale
+            + (source == staged.end() ? 0 : source->second.upgrade_bonuses[1].raw()));
+        auto hit = detail::area_hit(projectile, recipient, modifier, factor);
         if (!hit) return core::Result<void>::failure(hit.error());
+        if (delayed) {
+            // WAD-26/WFO-14: queued damage has a type/owner/selector, without a live source
+            // or the original projectile's flags, area context or shooter modifiers.
+            hit.value().projectile = false;
+            hit.value().area = false;
+            hit.value().kind = HitKind::delayed;
+        }
         hit.value().take_damage_multiplier = target->second.take_damage_mode;
         // WHE-51: modes are current at delivery; a removed shooter contributes identity.
-        const auto source = staged.find(projectile.shooter);
         if (source != staged.end()) hit.value().cause_damage_multiplier = source->second.cause_damage_mode;
         auto redirected = redirect_damage(recipient.id, hit.value(), [&](const EntityId id, Hit share) {
             return deliver_redirected(id, share, projectile.owner);
@@ -403,17 +413,33 @@ core::Result<void> session_detail::Tick::impacts() {
         }
         return core::Result<void>::success();
     };
-    // U-04 project policy: retain source metadata, round positive delay up to the next frame,
-    // and deliver due entries in (due frame, creation order) before this tick's new impacts.
+    // WAD-26/WFO-14: deliver stored metadata independently of projectile/shooter lifetime.
+    // The phase service retains the project ordering in due-frame/creation order.
     std::stable_sort(pending_blast_damage.begin(), pending_blast_damage.end(),
         [](const auto& left, const auto& right) { return left.due < right.due; });
     auto blast_due_end = pending_blast_damage.begin();
     while (blast_due_end != pending_blast_damage.end() && blast_due_end->due <= tick) {
-        auto delivered = deliver_area(blast_due_end->source, blast_due_end->recipient);
+        Projectile metadata;
+        metadata.owner = blast_due_end->owner;
+        metadata.damage_type = blast_due_end->damage_type;
+        metadata.internal_damage_misc = blast_due_end->internal_damage_misc;
+        auto delivered = deliver_area(metadata, blast_due_end->recipient, true);
         if (!delivered) return core::Result<void>::failure(delivered.error());
         ++blast_due_end;
     }
     pending_blast_damage.erase(pending_blast_damage.begin(), blast_due_end);
+    const auto queue_damage = [&](const Projectile& source, const detail::BlastRecipient& recipient) {
+        if (recipient.amount.raw() == 0) return;
+        // WAD-26: truncation with a one-frame minimum, not upward rounding.
+        // Split Q24 seconds first: WAD-17 distance delay can exceed the authored maximum.
+        const auto seconds = recipient.delay.raw() / math::Fixed::scale;
+        const auto fraction = recipient.delay.raw() % math::Fixed::scale;
+        const auto frames = std::max<std::uint64_t>(1, static_cast<std::uint64_t>(
+            seconds * logical_frames_per_second
+                + fraction * logical_frames_per_second / math::Fixed::scale));
+        pending_blast_damage.push_back({tick + frames, source.owner, source.damage_type,
+            source.internal_damage_misc, recipient});
+    };
     const auto deliver_blast = [&](const std::size_t index) -> core::Result<void> {
         if (index >= blasts.size() || !blasts[index]) return core::Result<void>::success();
         const auto player_count = std::max(blasts[index]->players.size(), blasts_without_source[index]
@@ -430,10 +456,7 @@ core::Result<void> session_detail::Tick::impacts() {
                     auto delivered = deliver_area(flights[index]->projectile, recipient);
                     if (!delivered) return delivered;
                 } else {
-                    const auto frames = static_cast<std::uint64_t>(recipient.delay.raw() / math::Fixed::scale)
-                        * logical_frames_per_second + static_cast<std::uint64_t>((recipient.delay.raw() % math::Fixed::scale
-                        * logical_frames_per_second + math::Fixed::scale - 1) / math::Fixed::scale);
-                    pending_blast_damage.push_back({tick + frames, flights[index]->projectile, recipient});
+                    queue_damage(flights[index]->projectile, recipient);
                 }
             }
             if (group.capped) return core::Result<void>::success();
@@ -444,10 +467,12 @@ core::Result<void> session_detail::Tick::impacts() {
     projectiles.reserve(flights.size() + launched.size());
     for (std::size_t flight_index = 0; flight_index < flights.size(); ++flight_index) {
         auto& flight = flights[flight_index];
+        bool ability_spawn = false;
         if (flight->expired) {
             const auto spawn = std::lower_bound(impl_->ability_spawns.begin(), impl_->ability_spawns.end(), flight->projectile.id,
                 [](const auto& entry, const std::uint64_t id) { return entry.id < id; });
             if (spawn != impl_->ability_spawns.end() && spawn->id == flight->projectile.id) {
+                ability_spawn = true;
                 spawn->detonated = true;
                 const auto* profile = impl_->spawn_profile(spawn->type);
                 if (profile && profile->weaken.on_detonation) for (const auto id : flights_->weaken_recipients[flight_index]) {
@@ -461,11 +486,22 @@ core::Result<void> session_detail::Tick::impacts() {
                 projectiles.push_back(flight->projectile);
             }
             if (flight->expired) {
+                const auto& projectile = flight->projectile;
+                // WAD-04/07: a miss expires once at its terminal pose, independently of
+                // blast damage and particle availability. Generic removal emits nothing.
+                // WHE-62: stationary ability spawns already publish their countdown
+                // detonation metadata; do not present that terminal twice.
+                if (!ability_spawn) combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_expired,
+                    projectile.shooter, projectile.weapon, projectile.id, no_hardpoint,
+                    flight->from, projectile.position, static_cast<std::uint32_t>(flight->expiry_reason),
+                    projectile.target});
                 auto delivered = deliver_blast(flight_index);
                 if (!delivered) return core::Result<void>::failure(delivered.error());
             }
             continue;
         }
+        // WCC-40: a pending result spends the projectile without delivering a hit.
+        if (damage_blocked()) continue;
         const auto target = staged.find(*flight->hit);
         if (target == staged.end() || !target->second.durability) {
             auto delivered = deliver_blast(flight_index);
@@ -499,8 +535,23 @@ core::Result<void> session_detail::Tick::impacts() {
         modifier = math::Fixed::from_raw(modifier.raw() + arrival_defense.raw()
             + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
         auto primary_amount = detail::primary_damage(projectile);
-        if (projectile.damage.raw() == 0 && projectile.blast.enabled()) {
-            auto caused = math::multiply(primary_amount, projectile.source_damage_factor);
+        if (projectile.damage_delay.raw() > 0) {
+            CombatRandom random(impl_->setup.seed, tick, projectile.id, projectile_damage_delay_slot);
+            const auto delay = detail::projectile_delivery_delay(projectile, {}, random);
+            if (!delay) return core::Result<void>::failure(delay.error());
+            queue_damage(projectile, {*flight->hit, primary_amount, delay.value(), hardpoint});
+            combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+                projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
+                flight->from, flight->contact, 0, projectile.target});
+            auto delivered = deliver_blast(flight_index);
+            if (!delivered) return core::Result<void>::failure(delivered.error());
+            continue;
+        }
+        const auto source = staged.find(projectile.shooter);
+        if (source != staged.end() && source->second.upgrade_bonuses[1].raw() != 0) {
+            // EUS-16: instance damage stays unmodified in flight, including explicit launches.
+            auto caused = math::multiply(primary_amount, math::Fixed::from_raw(math::Fixed::scale
+                + source->second.upgrade_bonuses[1].raw()));
             if (!caused) return core::Result<void>::failure(caused.error());
             primary_amount = caused.value();
         }
@@ -508,7 +559,6 @@ core::Result<void> session_detail::Tick::impacts() {
             projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
             projectile.internal_damage_misc, modifier, projectile.energy_damage};
         hit.take_damage_multiplier = target->second.take_damage_mode;
-        const auto source = staged.find(projectile.shooter);
         if (source != staged.end()) hit.cause_damage_multiplier = source->second.cause_damage_mode;
         auto redirected = redirect_damage(*flight->hit, hit, [&](const EntityId id, Hit share) {
             return deliver_redirected(id, share, projectile.owner);
@@ -623,7 +673,7 @@ core::Result<void> session_detail::Tick::impacts() {
             impl_->release_beam(source->second, AbilityKind::energy_weapon, tick);
             continue;
         }
-        if (!service.due || !damage_rules || !target->second.durability) continue;
+        if (!service.due || !damage_rules || !target->second.durability || damage_blocked()) continue;
         const auto* nested = impl_->beam_profile(source->second, AbilityKind::energy_weapon);
         const auto& profile = *impl_->abilities.find(source->second.state.type_id);
         const auto& state = source->second.abilities->slots[*ability_slot(profile, AbilityKind::energy_weapon)];

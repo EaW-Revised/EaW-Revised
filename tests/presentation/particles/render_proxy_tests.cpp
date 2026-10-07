@@ -46,15 +46,17 @@ void test_mesh_registry_boundary(){
     const auto second=registry.spawn(system,17,1,std::move(fresh));
     expect(bool(second),"second effect owns its own geometry and cursor");
     if(!second)return;
-    const auto a0=registry.advance(first.value(),0,test_camera());
-    expect(a0&&a0.value().advance.spawned==1&&close(backend.last[1].vertices[0].position.x,2),
+    // PS-14: seed 17 shuffles two vertices as [1,0] before capacity-one admission.
+    // PS-10/PS-42: a positive initial update and strict later interval entry.
+    const auto a0=registry.advance(first.value(),std::numeric_limits<float>::min(),test_camera());
+    expect(a0&&a0.value().advance.spawned==1&&close(backend.last[1].vertices[0].position.x,8),
         "first effect emits the original caller-destroyed vertex");
-    const auto a1=registry.advance(first.value(),1,test_camera());
+    const auto a1=registry.advance(first.value(),1.001F,test_camera());
     expect(a1&&close(backend.last[1].vertices[0].position.x,8),
-        "first effect cursor advances after prior particle death");
-    const auto b0=registry.advance(second.value(),0,test_camera());
-    expect(b0&&close(backend.last[2].vertices[0].position.x,2),
-        "second effect begins at vertex zero independently");
+        "first effect reshuffles after prior particle death");
+    const auto b0=registry.advance(second.value(),std::numeric_limits<float>::min(),test_camera());
+    expect(b0&&close(backend.last[2].vertices[0].position.x,8),
+        "second effect repeats the same independently seeded shuffled subset");
     expect(!registry.set_mesh_frame(first.value(),{{std::numeric_limits<float>::quiet_NaN(),0,0},{}}),
         "non-finite mesh frame update fails explicitly");
     expect(!registry.set_frame(first.value(),{{std::numeric_limits<float>::infinity(),0,0},{}}),
@@ -63,29 +65,29 @@ void test_mesh_registry_boundary(){
         "emitter frame can update independently");
     expect(bool(registry.set_mesh_frame(first.value(),{{10,0,0},{}})),
         "checked mesh frame update succeeds");
-    const auto a2=registry.advance(first.value(),1,test_camera());
-    expect(a2&&close(backend.last[1].vertices[0].position.x,12),
+    const auto a2=registry.advance(first.value(),1.001F,test_camera());
+    expect(a2&&close(backend.last[1].vertices[0].position.x,18),
         "mesh update applies to future emission without adopting emitter origin");
     expect(!registry.set_mesh_frame(0,{}),"invalid mesh handle is rejected");
     expect(bool(registry.release(first.value()))&&bool(registry.release(second.value()))&&
         backend.live.empty()&&backend.created==backend.destroyed,
         "mesh effect release destroys each backend resource");
     const auto restarted=registry.spawn(system,17,1,test_mesh_binding());
-    expect(restarted&&registry.advance(restarted.value(),0,test_camera())&&
-        close(backend.last[3].vertices[0].position.x,2),
+    expect(restarted&&registry.advance(restarted.value(),std::numeric_limits<float>::min(),test_camera())&&
+        close(backend.last[3].vertices[0].position.x,8),
         "restarted effect repeats the fixed-seed initial vertex");
     auto random=mesh_system(particles::MeshSpawnMode::random_vertex);
     random.emitters[0].lifetime=0.5F;
     const auto random_first=registry.spawn(random,531,1,test_mesh_binding());
     expect(bool(random_first),"random mesh effect spawns for restart test");
     if(random_first){
-        const auto h0=registry.advance(random_first.value(),0,test_camera());
-        const auto h1=registry.advance(random_first.value(),1,test_camera());
+        const auto h0=registry.advance(random_first.value(),std::numeric_limits<float>::min(),test_camera());
+        const auto h1=registry.advance(random_first.value(),1.001F,test_camera());
         expect(h0&&h1,"random mesh effect advances for restart test");
         static_cast<void>(registry.release(random_first.value()));
         const auto replay=registry.spawn(random,531,1,test_mesh_binding());
-        const auto r0=registry.advance(replay.value(),0,test_camera());
-        const auto r1=registry.advance(replay.value(),1,test_camera());
+        const auto r0=registry.advance(replay.value(),std::numeric_limits<float>::min(),test_camera());
+        const auto r1=registry.advance(replay.value(),1.001F,test_camera());
         expect(r0&&r1&&h0.value().hash==r0.value().hash&&h1.value().hash==r1.value().hash,
             "same seed and binding reproduce random mesh streams after release and restart");
     }
@@ -100,7 +102,7 @@ void test_mesh_root_precedence(){
         "mesh creator keeps precedence while parent metadata remains validated");
     if(!loaded)return;
     particles::CpuSystem cpu(loaded.value(),17,16,test_mesh_binding());
-    expect(cpu.advance(0).spawned==3,
+    expect(cpu.advance(std::numeric_limits<float>::min()).spawned==3,
         "mesh creator registers as root rather than attaching one instance per parent");
     const auto mesh_particle=std::find_if(cpu.particles().begin(),cpu.particles().end(),
         [](const particles::Particle& particle){return particle.emitter_index==1;});
@@ -177,10 +179,11 @@ void test_proxy_mesh_binding(){
     particles::CpuSystem normal_cpu(normal_system,31,6,selected.value().binding);
     // particle-mesh-emission: the debug build leaves every-vertex samples
     // at the vertex; the normalized size-dependent offset is for random modes.
-    expect(bool(normal_cpu.set_mesh_frame(mesh))&&normal_cpu.advance(0).spawned==6&&
-        close(normal_cpu.particles()[0].position.x,4)&&
-        close(normal_cpu.particles()[0].position.y,22)&&
-        close(normal_cpu.particles()[0].position.z,33),
+    // PS-14: seed 31 gives [1,3,5,4,2,0]; its first vertex is transformed by the owner frame.
+    expect(bool(normal_cpu.set_mesh_frame(mesh))&&normal_cpu.advance(std::numeric_limits<float>::min()).spawned==6&&
+        close(normal_cpu.particles()[0].position.x,-5)&&
+        close(normal_cpu.particles()[0].position.y,28)&&
+        close(normal_cpu.particles()[0].position.z,36),
         "every-vertex point uses owner source-Z-up affine frame without offset or skinning");
 
     host.bones[2].relative_transform[11]=2.0F;
@@ -209,7 +212,7 @@ void test_proxy_mesh_binding(){
         expect(bool(registry.set_frame(handle.value(),emitter))&&
             bool(registry.set_mesh_frame(handle.value(),mesh)),
             "independent animated frames reach registry before advance");
-        const auto advanced=registry.advance(handle.value(),static_cast<float>(step),test_camera());
+        const auto advanced=registry.advance(handle.value(),(step==0?std::numeric_limits<float>::min():1.001F),test_camera());
         expect(advanced&&advanced.value().advance.spawned==6&&
             advanced.value().particles==static_cast<std::size_t>(6*(step+1)),
             "owner movement changes new births while older mesh particles survive");
@@ -222,7 +225,8 @@ void test_proxy_mesh_binding(){
         "animated proxy registry releases all backend resources");
 }
 
-// Recorded with PL-01 post-load ages and the same system, seed, step and
+// Recorded with PL-01 post-load ages and PS-11 sphere direction, PS-23 bytes,
+// PS-29 bins and PS-10 residual births, using the same system, seed, step and
 // camera; the no-detach stream remains pinned independently of detach behavior.
 // Sampling uses the platform's sin/cos, so the bits are pinned per C runtime
 // and architecture. Only MSVC x64 and glibc x86-64 (GCC 14 and Clang 18
@@ -231,11 +235,11 @@ void test_proxy_mesh_binding(){
 // baseline it has not recorded.
 void test_no_detach_golden_unchanged() {
 #if defined(_WIN32) && defined(_M_X64) && !defined(_M_ARM64EC)
-    constexpr const char* final_golden = "d1cbead3f59f5146";
-    constexpr const char* chain_golden = "39f4cc5e303257f0";
+    constexpr const char* final_golden = "7f47b45d379a3a4d";
+    constexpr const char* chain_golden = "74ddc93c33a1f5f5";
 #elif defined(__GLIBC__) && defined(__x86_64__)
-    constexpr const char* final_golden = "03fb1d1dfcd1d392";
-    constexpr const char* chain_golden = "7fa117da0d55b1fd";
+    constexpr const char* final_golden = "3bc5ad82471fe990";
+    constexpr const char* chain_golden = "016754b07df2448d";
 #else
     constexpr const char* final_golden = nullptr;
     constexpr const char* chain_golden = nullptr;
@@ -256,8 +260,9 @@ void test_no_detach_golden_unchanged() {
         std::cout << "no-detach golden not recorded for this C runtime/architecture; invariants only\n";
         return;
     }
+    std::cout << "presentation golden final=" << particles::hex64(hashes.back()) << " chain=" << particles::hex64(chain) << "\n";
     expect(particles::hex64(hashes.back()) == final_golden && particles::hex64(chain) == chain_golden,
-           "no-detach fixed-seed stream matches the post-load age golden");
+           "no-detach fixed-seed stream matches the sourced particle walk golden");
 }
 
 particles::SystemDefinition draining_system(const bool leave_particles) {

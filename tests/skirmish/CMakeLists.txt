@@ -44,6 +44,9 @@ add_test(NAME foc_plan_battle COMMAND foc_plan_tests)
 set_tests_properties(foc_plan_battle PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME foc_ai_economy COMMAND foc_plan_tests 12000 "" "" --economy)
 set_tests_properties(foc_ai_economy PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+add_test(NAME foc_ai_reinforce_position COMMAND foc_plan_tests 3600
+    "${CMAKE_CURRENT_BINARY_DIR}/reinforce-position.eawr-replay" "" --reinforce-regression)
+set_tests_properties(foc_ai_reinforce_position PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME foc_ai_underworld COMMAND foc_plan_tests 12000 "" "" --underworld)
 set_tests_properties(foc_ai_underworld PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 

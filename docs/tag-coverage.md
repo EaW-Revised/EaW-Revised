@@ -139,7 +139,10 @@ reads it.
 - `sim_headless --skirmish m2 --game-root <install> --tag-trace-out <file.json>` writes the trace of the M2 start.
 
 **Not traced.** The viewer's own loaders and the tactical AI's XML reader keep no source locations, so the scene check does
-not judge rows that cite viewer, presentation or script code.
+not judge rows that cite viewer, presentation or script code. The M2 start trace also ends before AI service initialization;
+adding locations to that reader alone would not include its loads in this command. The
+[fighter and AI coverage audit](behaviour/tag-coverage-fighters-ai.md) records the existing AI constant consumers and
+the source of each scope or deferral decision. It is a static consumer audit, not a runtime trace receipt.
 
 ## Running it
 
@@ -148,6 +151,7 @@ python tools/inventory/tag_registry.py check                 # the gate, no game
 python tools/inventory/tag_registry.py check-data --game-root <install>
 python tools/inventory/tag_registry.py format                # canonical layout of statuses.json
 python tools/inventory/tag_registry.py render                # out/tag-coverage/statuses.md: counts, partial rows, top todo
+python tools/inventory/tag_registry_reclassify_ground.py --game-xml <effective Data/XML> [--write]  # todo rows only ground/galactic objects carry -> land-or-galactic
 sim_headless --skirmish m2 --game-root <install> --tag-trace-out <abs>/out/tag-coverage/m2-tag-trace.json
 python tools/inventory/tag_coverage.py scene --game-root <install> --trace <abs>/out/tag-coverage/m2-tag-trace.json \
     --statuses docs/tag-coverage/statuses.json --out <abs>/out/tag-coverage

@@ -47,7 +47,8 @@ public:
     // One rendered frame, before it is drawn: the local player's fog cells of the newest snapshot
     // (or, without them, the local team's sensors over the camera's target bounds, FW-07),
     // advanced by the presented ticks since the last frame.
-    void frame(const LiveSessionView& live, const std::optional<camera::SourceTargetBounds>& bounds);
+    void frame(const LiveSessionView& live, const std::optional<camera::SourceTargetBounds>& bounds,
+        bool pane_open = false, bool dragging = false);
     void release();
     // The report's "live_fog" member, followed by ",\n".
     void write_report(std::ostream& output) const;
@@ -70,6 +71,12 @@ private:
     godot::Ref<godot::ImageTexture> grid_;
     godot::Ref<godot::ImageTexture> reinforce_grid_;
     bool deploy_overlay_{};
+    bool force_deploy_overlay_{};
+    std::shared_ptr<const sim::tactical::TacticalSnapshot> overlay_snapshot_;
+    std::shared_ptr<const platform::LiveFog> overlay_fog_;
+    std::size_t prevention_circles_{};
+    std::size_t blocked_points_{};
+    std::vector<std::string> overlay_samples_;
     std::string reinforce_grid_source_;
     godot::Ref<godot::ImageTexture> cells_;
     godot::Ref<godot::Shader> shader_;

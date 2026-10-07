@@ -223,7 +223,9 @@ class BattleInputCardCases:
             self.assertEqual(tooltip["slot"], 0)
             self.assertTrue(tooltip["text"], tooltip)
             # This suite runs without a font cache (engine-font warnings); every card texture resolves.
-            self.assertFalse([line for line in hud["diagnostics"] if "EAWR-UI-0322" in line], hud["diagnostics"])
+            card_icons = {card["icon"] for card in drawn.values()}
+            self.assertFalse([line for line in hud["diagnostics"] if "EAWR-UI-0322" in line
+                              and any(icon in line for icon in card_icons)], hud["diagnostics"])
 
             first = by_slot[0]
             group = sorted(member for card in cards["cards"] if card["ability"] == first["ability"]
@@ -446,7 +448,75 @@ class BattleInputCardCases:
             self.assertTrue(off["live_session"]["headless_hashes_equal"])
 
 
+    def test_hunt_button_toggles(self):
+        # WAB-50/55: the Empire's own squadron exposes a usable Hunt icon and untimed mark.
+        empire_camera = CAMERA.parent / "coruscant-empire-live-session-camera.xml"
+        selected = ("--eawr-live-player", "2", "--eawr-live-ai", "off",
+                    "--eawr-lighting", "sh", "--eawr-environment", "map",
+                    "--eawr-shadows", "on", "--eawr-live-input", f"20:click:icon={TIE_SQUADRON}")
+        with tempfile.TemporaryDirectory(prefix="eawr-hunt-button-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, ready = self._run(directory, "hunt-ready", selected, camera=empire_camera, end_tick=60)
+            self.assertEqual(code, 0, ready.get("failure"))
+            buttons = ready["hud"]["ability_buttons"]["buttons"]
+            self.assertEqual(len(buttons), 1, buttons)
+            self.assertEqual(buttons[0]["name"], "HUNT", buttons)
+            self.assertFalse(buttons[0]["disabled"], buttons)
+            self.assertFalse(buttons[0]["autofire"], buttons)
+            self.assertEqual(buttons[0]["recharge"], 1, buttons)
+            self.assertEqual(ready["hud"]["ability_buttons"]["textures_missing"], 0)
+            code, active = self._run(directory, "hunt-active", (
+                *selected, "--eawr-live-input", "30:click:ability=0"), camera=empire_camera, end_tick=60)
+            self.assertEqual(code, 0, active.get("failure"))
+            requests = active["live_session"]["ability_requests"]
+            self.assertEqual((requests["issued"], requests["refused"]), (1, 0), requests)
+            marks = active["hud"]["ability_buttons"]["marks"]
+            self.assertTrue(marks, active["hud"]["ability_buttons"])
+            self.assertTrue(all(mark["icon"] == buttons[0]["icon"] and mark["dial"] is None
+                                and not mark["autofire"] for mark in marks), marks)
+            code, stopped = self._run(directory, "hunt-stopped", (
+                *selected, "--eawr-live-input", "30:click:ability=0", "--eawr-live-input", "50:key:H+shift"),
+                camera=empire_camera, end_tick=60)
+            self.assertEqual(code, 0, stopped.get("failure"))
+            requests = stopped["live_session"]["ability_requests"]
+            self.assertEqual((requests["issued"], requests["refused"]), (2, 0), requests)
+            self.assertEqual(stopped["hud"]["ability_buttons"]["marks"], [])
+            # WAB-51: both ordinary Stop inputs cancel Hunt without an ability command.
+            for label, gesture in (("hunt-stop-button", "50:click:hud=stop"),
+                                   ("hunt-stop-key", "50:key:S")):
+                code, ordered = self._run(directory, label, (
+                    *selected, "--eawr-live-input", "30:click:ability=0",
+                    "--eawr-live-input", gesture), camera=empire_camera, end_tick=100)
+                self.assertEqual(code, 0, ordered.get("failure"))
+                requests = ordered["live_session"]["ability_requests"]
+                self.assertEqual((requests["issued"], requests["refused"]), (1, 0), requests)
+                self.assertEqual(ordered["battle_input"]["orders"], 1)
+                self.assertIn("stop", ordered["battle_input"]["log"])
+                self.assertEqual(ordered["live_session"]["rejected"], [])
+                self.assertEqual(ordered["hud"]["ability_buttons"]["marks"], [])
+                self.assertIs(ordered["live_session"]["headless_hashes_equal"], True)
+            for result in (ready, active, stopped):
+                self.assertIs(result["live_session"]["headless_hashes_equal"], True)
+
     def test_ability_buttons_draw_and_request(self):
+        from tools.inventory.census_catalog import Catalog, abilities, tokens, value
+
+        catalog = Catalog(os.environ["EAWR_EAW_GAME_ROOT"])
+
+        def authored_autofire(card, name):
+            obj = catalog.resolve(card["type"])
+            # AB-15/60: ion is the team's own slot; other squadron slots use craft data.
+            if card["squadron"]:
+                source = (value(obj, "Create_Team_Type") or "Team") if name == "ION_CANNON_SHOT" else (
+                    tokens(value(obj, "Squadron_Units"))[0])
+                obj = catalog.resolve(source)
+            matches = [ability for ability in abilities(obj)[0] if ability["type"] == name]
+            self.assertEqual(len(matches), 1, (card, name))
+            fields = {key.lower(): values for key, values in matches[0]["fields"].items()}
+            supported = fields.get("supports_autofire", ["false"])[-1]
+            # AB-45: the human owner's fresh-profile creation preference is enabled.
+            return supported.strip().lower() in ("yes", "true", "1")
+
         # #454 (docs/behaviour/foc-ability-buttons.md): the box's selection gets one button per
         # ability group under its border, with the engine's icons; a left release requests the ability
         # and a right release autofire, FoC's default keys press the buttons. Since #76 the buttons read
@@ -465,17 +535,24 @@ class BattleInputCardCases:
             self.assertEqual(drawn["components"], 24)
             self.assertEqual(len(drawn["buttons"]), len(groups), drawn)
             self.assertEqual(drawn["textures_missing"], 0, drawn)
+            expected_marks = []
             for button in drawn["buttons"]:
                 self.assertTrue(button["icon"].startswith("i_sa_"), button)
-                # AB-03: only the cut HUNT is always disabled; ION_CANNON_SHOT reads the squadron
-                # container's own ready slot since #561 (space-abilities AB-60).
-                self.assertEqual(button["disabled"], button["name"] == "HUNT", button)
-                self.assertFalse(button["autofire"], button)
+                # WAB-50: HUNT is ready alongside the power modes and the team ion shot.
+                self.assertFalse(button["disabled"], button)
+                members = [card for card in cards["cards"] if card["ability"] == button["ability"]]
+                defaults = [authored_autofire(card, button["name"]) for card in members]
+                self.assertTrue(defaults, button)
+                self.assertEqual(button["autofire"], all(defaults), button)
+                for card, enabled in zip(members, defaults):
+                    if enabled:
+                        expected_marks.append({"slot": card["slot"], "second": button["second"],
+                                               "icon": button["icon"], "dial": None, "autofire": True})
                 self.assertEqual(button["recharge"], 1)
                 # AB-01: the button of a group spanning columns a..b is special_button_(a + b).
                 columns = [card["slot"] // 2 for card in cards["cards"] if card["ability"] == button["ability"]]
                 self.assertEqual(button["component"], min(columns) + max(columns) + (1 if button["second"] else 0))
-            self.assertEqual(drawn["marks"], [])
+            self.assertCountEqual(drawn["marks"], expected_marks)
 
             code, clicked = self._run(directory, "ability-click", (
                 *boxed, "--eawr-live-input", "30:click:ability=0", "--eawr-live-input", "35:rclick:ability=0",

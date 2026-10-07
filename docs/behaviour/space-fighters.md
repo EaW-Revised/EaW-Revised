@@ -51,9 +51,12 @@
   row: at most its count alive at once, and its count plus the matching
   `Reserve_Spawned_Units_Tech_0` count (0 when absent) to launch in all; a negative reserve never
   runs out. The first service may launch at once.
-- **FL-03** (research E75-03) A service launches only when the next-spawn frame has come and a
+- **FL-03** (research E75-03, EWSL-05/07) A service launches only when the next-spawn frame has come and a
   fighter bay stands: a destroyed destroyable bay no longer launches, and a spawner without a
-  standing bay launches nothing. A spawner with `DEFEND` active launches nothing (no M2 unit has it).
+  standing bay launches nothing. The space eligibility check does not reject a disabled bay:
+  a bay restored disabled at 0.1 health by a station upgrade can launch both authored and free
+  pending companies. Its weapon remains disabled under the weapon hardpoint rules.
+  A spawner with `DEFEND` active launches nothing (no M2 unit has it).
 - **FL-04** (research E75-03, E75-05) The entry is chosen from a random start in cyclic order: the
   first entry with fewer squadrons alive than its count and some left to launch. Launching
   increments its alive count and uses one of its left (an unlimited entry stays unlimited).
@@ -92,6 +95,38 @@
   units outside the tactical population list; only the reinforced carrier uses population.
   The remake stages carrier IDs at birth and registers them through the starting-unit initializer,
   then applies the arrival gate in the partitioned hangar service. FL-11's reserve cut still applies.
+
+- **FL-13** (debug build, skirmish-garrison evidence ESG-01 to ESG-06) (legacy EAWR-1198)
+  Garrison spawning has an object flag, independent of the authored starting and reserve rows.
+  Creating a generic `SPAWN_SQUADRON` object enables it. Creating a station from a multiplayer
+  skirmish station marker disables it on that station; map bases and carriers retain their flag.
+  Station upgrades copy the old object's flag to the replacement. Disabled stations service
+  their hangars but never select an authored starting or reserve entry, so upgrading cannot
+  create a campaign garrison. The faction's free skirmish starting squadrons remain separate
+  units and survive station upgrades. A separate player pending-reinforcement path handles
+  depletion of those starting squadrons (FL-14).
+  The remake retains the flag in entity storage, records false values in replay extension 3,
+  and binds them through the sparse `GSPN` canonical state block.
+
+- **FL-14** (debug build, free-garrison evidence EFG-01 to EFG-06) (legacy EAWR-1685)
+  Free skirmish starting companies register their actual objects with their player: a squadron
+  registers its craft, excluding its team container; a generic company registers its object.
+  Removing the last registered object starts `Garrison_Reinforcement_Delay_Seconds` only when
+  no pending reinforcements or delay already exist. Partial depletion and losses of authored
+  carrier garrisons do not start it. When the delay expires, the player copies the faction's
+  `Space_Skirmish_AI_Default_Forces` into its pending list in authored order, including repeats.
+  The player timer pass follows object/hangar service (WSL evaluation order); a queue that
+  matures this frame cannot launch until a subsequent eligible hangar service. This includes
+  a zero-delay full depletion that coincides with a due hangar pass.
+  An intact space `STARBASE` bay considers the first allied player's pending list after its
+  authored garrison availability. It removes the first template and uses ordinary bay launch
+  and hangar cadence (FL-01, FL-05, FL-06). The born objects belong to that player and register
+  for subsequent depletion; these births use no purchase credits, pool or population shares.
+  Pending forces wait for an eligible bay and survive station upgrades. Quit players do not
+  replenish. The stock playable factions author 20 seconds; timing is unverified by capture.
+  The remake partitions player timer/registration updates, then commits claims in stable
+  station-ID order. Optional replay extension 5 and canonical `GARR` retain the binding,
+  registered live IDs, timer and pending queue; recordings without a binding retain their bytes.
 
 ### Flight
 
@@ -423,8 +458,10 @@ publishes each squadron's cell in the snapshot; the world UI draws the icons fro
   is gone the squadron idles where its leader flies. A face order changes nothing.
 - **FO-04** (debug build: the attack order, the team-member choice, the team's nearest member
   and the turret's aim) An attack on a craft of a squadron targets the squadron's team container.
-  Every attacker, a ship or another squadron's craft, fires at the squadron's live craft nearest
-  itself (the least spatial distance, the first in team order on a tie). The craft is chosen afresh
+  A unit's own weapon fires at the squadron's live craft nearest its muzzle, or nearest the
+  shooter's own squadron centre when the shooter belongs to a squadron (WWP-49), with no aimed
+  hardpoint. Distance is spatial, with the first in team order on a tie. Weapon hardpoints follow
+  the separate WWP-19 selection rule. The craft is chosen afresh
   at every use: FoC stores the container as the attack target and keeps no chosen craft, so an
   attacker moves to another craft as soon as that one is nearer (C-12). The one exception is a
   shooter's special-ability attack target, which FoC keeps while it is a member of the team; M2

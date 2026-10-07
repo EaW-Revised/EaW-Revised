@@ -61,8 +61,9 @@ struct Change {
 
 // int(range / cell + 0.5) for range >= 10 units (V-13), capped at the grid's width plus
 // height: a larger circle around a cell of the grid covers it whole.
-[[nodiscard]] std::int32_t radius_cells(const math::Fixed range, const FogRules& rules) noexcept {
-    const auto magnitude = static_cast<std::uint64_t>(std::max(range.raw(), minimum_range_raw));
+[[nodiscard]] std::int32_t radius_cells(const math::Fixed range, const FogRules& rules,
+    const bool minimum = true) noexcept {
+    const auto magnitude = static_cast<std::uint64_t>(std::max(range.raw(), minimum ? minimum_range_raw : 0));
     const auto cell = static_cast<std::uint64_t>(rules.cell_size.raw());
     const auto rounded = magnitude / cell + (2U * (magnitude % cell) >= cell ? 1U : 0U);
     return static_cast<std::int32_t>(
@@ -179,6 +180,9 @@ core::Result<void> validate_fog_rules(const FogRules& rules) {
     if (rules.ramp_down_step == 0 || rules.ramp_down_step > first_ramp_value) {
         return invalid("fog rules: the ramp-down step is 1 to 238");
     }
+    for (const auto& circle : rules.dense_circles) {
+        if (circle.radius.raw() < 0) return invalid("fog rules: dense circle radius must be nonnegative");
+    }
     return core::Result<void>::success();
 }
 
@@ -189,6 +193,18 @@ FogCells::FogCells(const FogRules& rules, const std::span<const Player> players)
     values_.assign(players_.size(), std::vector<ValueRow>(rules.cells_tall, value_row));
     holds_.assign(players_.size(), std::vector<HoldRow>(rules.cells_tall, hold_row));
     flat_values_.resize(players_.size());
+    auto dense = std::make_shared<std::vector<std::uint8_t>>(
+        static_cast<std::size_t>(rules.cells_wide) * rules.cells_tall, 0U);
+    // V-22: initialized once, shared by all players and retained tick views.
+    for (const auto& area : rules.dense_circles) {
+        const auto column = clamp_cell(cells_from(rules.map_left.raw(), area.centre.x.raw(), rules.cell_size.raw()), rules.cells_wide);
+        const auto row = clamp_cell(cells_from(area.centre.y.raw(), rules.map_top.raw(), rules.cell_size.raw()), rules.cells_tall);
+        for (const auto& span : circle(column, row, radius_cells(area.radius, rules, false), rules)) {
+            for (auto x = span.first; x <= span.last; ++x)
+                (*dense)[static_cast<std::size_t>(span.row) * rules.cells_wide + static_cast<std::size_t>(x)] = 1U;
+        }
+    }
+    dense_ = std::move(dense);
 }
 
 core::Result<void> FogCells::advance(const std::uint64_t tick, const bool service,
@@ -198,19 +214,47 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     // slots (V-12). A revealer marks when it has no circle yet or has moved at least one cell
     // width in the plane since it last marked.
     std::vector<std::optional<Anchor>> marks(revealers.size());
+    std::vector<std::uint8_t> invalid_multiplier(revealers.size(), 0U);
     const auto cell = static_cast<std::uint64_t>(rules_.cell_size.raw());
     const auto one_cell = math::detail::multiply_u64(cell, cell);
+    // V-22: the normal disc contributes only normal cells; the smaller disc only dense
+    // cells. Use the same selection to release holds, even after the revealer disappears.
+    const auto coverage = [&](const Anchor& anchor) {
+        if (rules_.dense_circles.empty()) return circle(anchor.column, anchor.row, anchor.radius, rules_);
+        const auto small = circle(anchor.column, anchor.row, anchor.dense_radius, rules_);
+        std::vector<Span> selected;
+        for (const auto& span : circle(anchor.column, anchor.row, anchor.radius, rules_)) {
+            const auto inner = std::find_if(small.begin(), small.end(), [&](const Span& s) { return s.row == span.row; });
+            std::int32_t start = -1;
+            for (auto column = span.first; column <= span.last; ++column) {
+                const bool accept = (*dense_)[static_cast<std::size_t>(span.row) * rules_.cells_wide
+                    + static_cast<std::size_t>(column)] == 0U
+                    || (inner != small.end() && column >= inner->first && column <= inner->last);
+                if (accept && start < 0) start = column;
+                if (!accept && start >= 0) { selected.push_back({span.row, start, column - 1}); start = -1; }
+            }
+            if (start >= 0) selected.push_back({span.row, start, span.last});
+        }
+        return selected;
+    };
+
+    std::vector<Change> staged_changes(revealers.size());
     const auto decided = executor.execute_phase("fog-reveal", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, revealers.size());
         for (auto index = range.begin; index < range.end; ++index) {
             const auto& revealer = revealers[index];
+            if (revealer.dense_multiplier.raw() < 0 || revealer.dense_multiplier.raw() > math::Fixed::scale) {
+                invalid_multiplier[index] = 1U;
+                continue;
+            }
             const auto found = anchors_->find(revealer.id);
             if (found != anchors_->end()) {
                 const auto dx = distance_along(revealer.position.x.raw(), found->second.x.raw());
                 const auto dy = distance_along(revealer.position.y.raw(), found->second.y.raw());
                 auto moved = math::detail::multiply_u64(dx, dx);
                 static_cast<void>(math::detail::add_magnitude(moved, math::detail::multiply_u64(dy, dy)));
-                if (math::detail::compare(moved, one_cell) < 0) {
+                // V-23: ownership transfer refreshes even a stationary reveal source.
+                if (found->second.owner == revealer.owner && math::detail::compare(moved, one_cell) < 0) {
                     continue;
                 }
             }
@@ -223,12 +267,21 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
                 revealer.position.x,
                 revealer.position.y,
                 revealer.owner,
+                radius_cells(math::multiply(math::Fixed::from_raw(std::max(revealer.range.raw(), minimum_range_raw)),
+                    revealer.dense_multiplier).value(), rules_, false),
             };
+            auto& change = staged_changes[index];
+            change.owner = revealer.owner;
+            change.marked = coverage(*marks[index]);
+            if (found != anchors_->end()) change.released = coverage(found->second);
         }
     });
     if (!decided) {
         return decided;
     }
+    if (std::find(invalid_multiplier.begin(), invalid_multiplier.end(), 1U) != invalid_multiplier.end())
+        return invalid("fog revealer: dense multiplier must be in [0, 1]");
+
 
     // Serial, in ascending ID: the circles to release (revealers gone or re-marking) and mark.
     auto anchors = *anchors_;
@@ -243,7 +296,7 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
             continue;
         }
         const auto& gone = iterator->second;
-        changes.push_back(Change{gone.owner, circle(gone.column, gone.row, gone.radius, rules_), {}});
+        changes.push_back(Change{gone.owner, coverage(gone), {}});
         iterator = anchors.erase(iterator);
     }
     for (std::size_t index = 0; index < revealers.size(); ++index) {
@@ -251,9 +304,12 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
             continue;
         }
         const auto& mark = *marks[index];
-        Change change{mark.owner, {}, circle(mark.column, mark.row, mark.radius, rules_)};
-        if (const auto held = anchors.find(revealers[index].id); held != anchors.end()) {
-            change.released = circle(held->second.column, held->second.row, held->second.radius, rules_);
+        auto change = std::move(staged_changes[index]);
+        const auto previous = anchors.find(revealers[index].id);
+        if (previous != anchors.end() && previous->second.owner != mark.owner) {
+            // V-23: release the old team's holds before marking the new team's circle.
+            changes.push_back(Change{previous->second.owner, std::move(change.released), {}});
+            change.released.clear();
         }
         anchors.insert_or_assign(revealers[index].id, mark);
         changes.push_back(std::move(change));
@@ -273,8 +329,7 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     // V-19: each flash's cell, in the order given; a player outside the table sees none.
     struct FlashCell {
         std::size_t player{};
-        std::int32_t column{};
-        std::int32_t row{};
+        std::vector<Span> spans;
     };
     std::vector<FlashCell> flash_cells;
     for (const auto& flash : flashes) {
@@ -283,9 +338,10 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
         if (to == players_.end()) {
             continue;
         }
-        flash_cells.push_back(FlashCell{static_cast<std::size_t>(to - players_.begin()),
+        flash_cells.push_back(FlashCell{static_cast<std::size_t>(to - players_.begin()), circle(
             clamp_cell(cells_from(rules_.map_left.raw(), flash.position.x.raw(), rules_.cell_size.raw()), rules_.cells_wide),
-            clamp_cell(cells_from(flash.position.y.raw(), rules_.map_top.raw(), rules_.cell_size.raw()), rules_.cells_tall)});
+            clamp_cell(cells_from(flash.position.y.raw(), rules_.map_top.raw(), rules_.cell_size.raw()), rules_.cells_tall),
+            radius_cells(flash.radius, rules_, false), rules_)});
     }
     std::vector<bool> serviced(players_.size(), false);
     for (std::size_t player = 0; player < players_.size(); ++player) {
@@ -359,8 +415,11 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
             }
         }
         for (const auto& flash : flash_cells) {
-            if (static_cast<std::size_t>(flash.row) < band.begin || static_cast<std::size_t>(flash.row) >= band.end) continue;
-            write_value(flash.player, static_cast<std::size_t>(flash.row), static_cast<std::size_t>(flash.column), held_value);
+            for (const auto& span : flash.spans) {
+                if (!in_band(span)) continue;
+                for (auto column = span.first; column <= span.last; ++column)
+                    write_value(flash.player, static_cast<std::size_t>(span.row), static_cast<std::size_t>(column), held_value);
+            }
         }
     });
     if (!applied) {
@@ -375,13 +434,32 @@ core::Result<void> FogCells::advance(const std::uint64_t tick, const bool servic
     return core::Result<void>::success();
 }
 
-bool FogCells::revealed(const std::size_t player_index, const math::Vec3& position) const noexcept {
-    const auto column = cells_from(rules_.map_left.raw(), position.x.raw(), rules_.cell_size.raw());
-    const auto row = cells_from(position.y.raw(), rules_.map_top.raw(), rules_.cell_size.raw());
-    if (!column || !row || *column >= rules_.cells_wide || *row >= rules_.cells_tall) {
+template <typename Rows>
+bool point_revealed(const FogRules& rules, const Rows& rows, const math::Vec3& position) noexcept {
+    if (rules.cell_size.raw() <= 0) return false;
+    const auto column = cells_from(rules.map_left.raw(), position.x.raw(), rules.cell_size.raw());
+    const auto row = cells_from(position.y.raw(), rules.map_top.raw(), rules.cell_size.raw());
+    if (!column || !row || *column >= rules.cells_wide || *row >= rules.cells_tall
+        || *row >= rows.size() || !rows[static_cast<std::size_t>(*row)]
+        || *column >= rows[static_cast<std::size_t>(*row)]->size()) {
         return false;
     }
-    return (*values_[player_index][static_cast<std::size_t>(*row)])[static_cast<std::size_t>(*column)] != 0U;
+    return (*rows[static_cast<std::size_t>(*row)])[static_cast<std::size_t>(*column)] != 0U;
+}
+
+bool FogCells::revealed(const std::size_t player_index, const math::Vec3& position) const noexcept {
+    return point_revealed(rules_, values_[player_index], position);
+}
+
+bool fog_point_revealed(const FogRules& rules,
+    const std::span<const std::shared_ptr<const std::vector<std::uint8_t>>> rows,
+    const math::Vec3& position) noexcept {
+    return point_revealed(rules, rows, position);
+}
+
+bool FogCells::revealed(const std::size_t player_index, const std::span<const math::Vec3> samples) const noexcept {
+    for (const auto& sample : samples) if (revealed(player_index, sample)) return true;
+    return false;
 }
 
 core::Result<void> FogCells::reveal_all(const PlayerId player, const PartitionExecutor& executor) {
@@ -426,7 +504,11 @@ void FogCells::append_state(std::vector<std::uint8_t>& bytes) const {
         sim::detail::append_u64(bytes, id);
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(anchor.column));
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(anchor.row));
-        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(anchor.radius));
+        // V-22: each radius fits in 16 bits; maps without dense circles keep the legacy
+        // encoding. Dense maps retain both radii because future hold release reads both.
+        const auto radii = static_cast<std::uint32_t>(anchor.radius)
+            | (rules_.dense_circles.empty() ? 0U : static_cast<std::uint32_t>(anchor.dense_radius) << 16U);
+        sim::detail::append_u32(bytes, radii);
         sim::detail::append_u32(bytes, anchor.owner);
         sim::detail::append_i64(bytes, anchor.x.raw());
         sim::detail::append_i64(bytes, anchor.y.raw());

@@ -10,7 +10,8 @@ namespace {
 
 } // namespace
 
-void ViewerHost::_ready() {
+// Exceptions must not escape a GDExtension callback into the engine.
+void ViewerHost::_ready() try {
     mute_lane_audio_output();
     set_process(true);
     // UI-07: a text control taking focus cancels held world input (UI-I3).
@@ -98,7 +99,12 @@ void ViewerHost::_ready() {
         skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
             options_->game_root, options_->mod_root, options_->report_path, options_->capture_path,
             options_->profile, options_->cache_shaders});
-        if (!skirmish_setup_->ready(*this)) { stop(2); return; }
+        if (!skirmish_setup_->ready(*this)) {
+            status_message_ = skirmish_setup_->failure();
+            static_cast<void>(write_report("failed"));
+            stop(2);
+            return;
+        }
         skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
         set_process_input(true);
         set_process_unhandled_input(true);
@@ -242,5 +248,11 @@ void ViewerHost::_ready() {
         static_cast<void>(write_report("failed"));
         stop(2);
     }
+} catch (const std::exception& error) {
+    status_message_ = std::string("Viewer startup failed: ") + error.what() +
+        ". Check read permissions for this account and verify or repair the FoC installation.";
+    UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
+    if (options_) static_cast<void>(write_report("failed"));
+    stop(2);
 }
 } // namespace eawr::presentation::godot_backend

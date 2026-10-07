@@ -25,7 +25,8 @@ class BattleInputSourceCases:
         for forbidden in ("submit(", "platform::", "tactical/session.hpp", "->take("):
             self.assertNotIn(forbidden, source)
         self.assertIn("input->world_command(pick, ui::CommandOrigin::world_click, ", source)
-        self.assertIn("input->stop(ui::CommandOrigin::hotkey)", source)
+        self.assertIn("command_click(ui::OrderMode::none, true, live, ui::CommandOrigin::hotkey)", source)
+        self.assertIn("input->stop(origin)", source)
 
 
     def test_world_layer_goes_before_the_camera(self):
@@ -86,7 +87,7 @@ class BattleInputSourceCases:
         # The rules live in the engine-free model; the view resolves art and draws.
         for rule in ("ui::bar_visibility(", "ui::bar_scale(", "ui::bar_level(", "ui::health_bar_colour(",
                      "ui::hardpoint_reticle_tint(", "ui::selection_circle_side(", "ui::bar_anchor_lift(",
-                     "ui::bar_candidate(", "ui::combat_grid_slot(", "ui::combat_cell_point(",
+                     "ui::bar_candidate(", "icon_grid_.position(", "ui::combat_cell_point(",
                      "ui::hardpoint_reticle_rect(", "ui::hardpoint_reticle_anchor("):
             self.assertIn(rule, source)
         # UI-07: the world UI never reaches the session.

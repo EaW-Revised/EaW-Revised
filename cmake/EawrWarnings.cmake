@@ -13,6 +13,8 @@ else()
             -Wall
             -Wextra
             -Wpedantic
+            # Cross-platform float determinism (presentation and sim): never fuse a*b+c into FMA (GCC on aarch64 does by default).
+            -ffp-contract=off
     )
     if(EAWR_WARNINGS_AS_ERRORS)
         target_compile_options(eawr_project_warnings INTERFACE -Werror)

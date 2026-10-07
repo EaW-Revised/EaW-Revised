@@ -67,6 +67,7 @@ public:
         std::string type;
         double progress{1.0};
         std::optional<std::string> percent;
+        std::uint64_t entry_id{};
         bool operator==(const QueueView&) const = default;
     };
     struct PoolView final {
@@ -93,12 +94,16 @@ public:
     void setup(Setup setup);
     void show(const View& view, double seconds = 0.0);
     // A right release on queued component `component` (tqueueNN).
-    void set_cancel(std::function<void(std::size_t component)> cancel) { cancel_ = std::move(cancel); }
+    void set_cancel(std::function<void(std::size_t component, std::uint64_t entry_id)> cancel) { cancel_ = std::move(cancel); }
     // A left press on pool slot `slot` of the open pane.
     void set_pick(std::function<void(std::size_t slot)> pick) { pick_ = std::move(pick); }
-    void set_drag(std::function<void(godot::Vector2)> move, std::function<void(godot::Vector2)> drop) {
+    void set_open(std::function<void()> open) { open_ = std::move(open); }
+    void set_drag(std::function<void(godot::Vector2)> move, std::function<void(godot::Vector2)> drop,
+                  std::function<void()> cancel, std::function<void(double)> wheel = {}) {
         drag_move_ = std::move(move);
         drag_drop_ = std::move(drop);
+        drag_cancel_ = std::move(cancel);
+        drag_wheel_ = std::move(wheel);
     }
     [[nodiscard]] bool pane_open() const noexcept { return pane_open_; }
     void set_pane_open(bool open);
@@ -120,10 +125,13 @@ private:
     enum class Hit : std::uint8_t { queue, reinforce, close, pool };
     std::function<void(godot::Vector2)> drag_move_;
     std::function<void(godot::Vector2)> drag_drop_;
+    std::function<void()> drag_cancel_;
+    std::function<void(double)> drag_wheel_;
     bool dragging_pool_{};
     struct Target final {
         Hit kind{Hit::queue};
         std::size_t index{};
+        std::uint64_t entry_id{};
     };
     [[nodiscard]] godot::Rect2 screen(const data::ui::ReferenceRect& rect) const;
     [[nodiscard]] godot::Rect2 pane_screen(const data::ui::ReferenceRect& rect) const;
@@ -145,8 +153,9 @@ private:
     Setup setup_;
     View view_;
     bool pane_open_{};
-    std::function<void(std::size_t)> cancel_;
+    std::function<void(std::size_t, std::uint64_t)> cancel_;
     std::function<void(std::size_t)> pick_;
+    std::function<void()> open_;
     std::optional<Target> pressed_;
     bool pressed_right_{};
     bool hovered_reinforce_{};

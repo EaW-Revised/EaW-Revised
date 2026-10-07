@@ -43,6 +43,7 @@ bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
     // AB-66/WAD-38: retain override shots so the view associates their projectile look;
     // ordinary shots and acquisitions stay out.
     return event.kind == tactical::CombatEventKind::projectile_hit
+        || event.kind == tactical::CombatEventKind::projectile_expired
         || (event.kind == tactical::CombatEventKind::weapon_fired
             && (event.outcome & (tactical::fired_ability_shot | tactical::fired_barrage_shot)) != 0U);
 }
@@ -50,11 +51,13 @@ bool LiveEventLog::presented(const tactical::CombatEvent& event) noexcept {
 std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
     return sizeof(LiveTickEvents) + record.events.size() * sizeof(tactical::Event)
         + record.combat_events.size() * sizeof(tactical::CombatEvent)
-        + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact);
+        + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact)
+        + record.base_attacks.size() * sizeof(LiveBaseAttack);
 }
 
-void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std::span<const tactical::AsteroidImpact> asteroid_impacts) {
-    LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}};
+void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std::span<const tactical::AsteroidImpact> asteroid_impacts,
+    const std::span<const tactical::TypeId> base_types) {
+    LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}, {}};
     bool ability_input = false;
     for (const tactical::Event& event : snapshot.events()) {
         if (presented(event)) kept.events.push_back(event);
@@ -63,6 +66,18 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
     }
     for (const tactical::CombatEvent& event : snapshot.combat_events()) {
         if (presented(event)) kept.combat_events.push_back(event);
+        if (event.kind != tactical::CombatEventKind::weapon_fired || base_types.empty()) continue;
+        const auto find = [&](const sim::EntityId id) -> const tactical::TacticalInstance* {
+            const auto instances = snapshot.instances();
+            const auto found = std::lower_bound(instances.begin(), instances.end(), id,
+                [](const auto& instance, const sim::EntityId value) { return instance.entity_id < value; });
+            return found != instances.end() && found->entity_id == id ? &*found : nullptr;
+        };
+        const auto* target = find(event.target);
+        const auto* shooter = find(event.shooter);
+        if (!target || !shooter || !std::binary_search(base_types.begin(), base_types.end(), target->type_id)) continue;
+        kept.base_attacks.push_back({target->entity_id, target->type_id, target->owner, shooter->owner,
+            {target->fixed_transform.rows[0][3], target->fixed_transform.rows[1][3], target->fixed_transform.rows[2][3]}});
     }
     // WHE-61/62: a countdown can expire without a combat event. Remember its sparse
     // presentation frame while the metadata is alive; bomb metadata may vanish on expiry.
@@ -77,7 +92,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
     ability_due_ticks_.erase(ability_due_ticks_.begin(), ability_due_ticks_.upper_bound(tick));
     // WHE-63: accepted instant commands likewise need their frame retained, without
     // adding an authoritative event or scanning every unit for presentation state.
-    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty()) {
+    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty() || !kept.base_attacks.empty()) {
         if (record_bytes(kept) > bounds_.bytes) {
             // Larger than the whole bound: dropped at once, the older ticks kept.
             if (!dropped_from_) dropped_from_ = kept.tick;
@@ -86,6 +101,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
             kept.events.shrink_to_fit();
             kept.combat_events.shrink_to_fit();
             kept.asteroid_impacts.shrink_to_fit();
+            kept.base_attacks.shrink_to_fit();
             bytes_ += record_bytes(kept);
             records_.push_back(std::move(kept));
         }
@@ -294,10 +310,10 @@ public:
     }
 
     std::optional<bool> reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
-        const sim::math::Vec3& point) const {
+        const sim::math::Vec3& point, const std::optional<sim::math::Fixed> facing_yaw) const {
         const std::unique_lock lock(session_mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return std::nullopt;
-        const auto valid = world().reinforcement_point(player, type, point);
+        const auto valid = world().reinforcement_point(player, type, point, nullptr, facing_yaw);
         return valid && valid.value();
     }
 
@@ -524,7 +540,7 @@ private:
                     fog_history_.push_front(std::move(fog));
                     if (fog_history_.size() > options_.history) fog_history_.pop_back();
                 }
-                event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts);
+                event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts, options_.base_attack_types);
                 // #558: presentation-only wall-clock cost, never read by the simulation.
                 // #957: a scripted tick's AI step and Lua service are their own phases; "step" is the rest.
                 LiveTickCost cost{tick.value().completed_tick, step_ms + fog_ms, {{"step", step_ms}, {"fog", fog_ms}}};
@@ -691,7 +707,9 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
 }
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
 std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
-    const sim::math::Vec3& point) const { return impl_->reinforcement_point(player, type, point); }
+    const sim::math::Vec3& point, const std::optional<sim::math::Fixed> facing_yaw) const {
+    return impl_->reinforcement_point(player, type, point, facing_yaw);
+}
 
 tactical::ProductionCounts LiveSession::production_counts(const tactical::PlayerId player, const tactical::TypeId type) const {
     return impl_->production_counts(player, type);

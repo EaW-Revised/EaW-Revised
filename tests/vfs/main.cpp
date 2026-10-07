@@ -12,6 +12,12 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 namespace {
 
 int failures = 0;
@@ -320,6 +326,43 @@ int main(const int argc, char** argv) {
         expect(!collision_result && collision_result.error().code == diagnostic_codes::loose_case_collision,
                "same-layer loose case collision fails deterministically");
     }
+
+    // An unavailable native source remains a typed I/O failure with enough
+    // information for a player to locate and repair it.
+    const auto unavailable = fixture.root / "unavailable/Config.meg";
+    const auto missing_probe = probe_meg_archive(unavailable, "fixture:Config.meg");
+    expect(!missing_probe && missing_probe.error().code == diagnostic_codes::native_io,
+           "missing archive is a typed native I/O error");
+    if (!missing_probe) {
+        expect(missing_probe.error().message.find("Config.meg") != std::string::npos &&
+               missing_probe.error().message.find("read permissions") != std::string::npos &&
+               missing_probe.error().message.find("repair") != std::string::npos,
+               "archive I/O error names the source and explains permissions/repair");
+    }
+#ifdef _WIN32
+    const auto denied_root = fixture.root / "unreadable";
+    const auto denied_archive = denied_root / "Config.meg";
+    write_bytes(denied_archive, one_entry_meg("DATA/XML/required.xml", "required"));
+    const std::array denied_mounts{MountSpec{"fixture", denied_root, "data",
+        {ArchiveSpec{denied_archive, "fixture:Config.meg", {}}}}};
+    // A share-denied handle exercises the same native open failure as an ACL
+    // without changing permissions or requiring administrator privileges.
+    const HANDLE locked = CreateFileW(denied_archive.c_str(), GENERIC_READ, 0, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    expect(locked != INVALID_HANDLE_VALUE, "scratch archive can be locked against readers");
+    if (locked != INVALID_HANDLE_VALUE) {
+        const auto denied_probe = probe_meg_archive(denied_archive, "fixture:Config.meg");
+        const auto denied_mount = Vfs::mount(denied_mounts);
+        expect(!denied_probe && denied_probe.error().code == diagnostic_codes::native_io,
+               "unreadable archive probe returns typed I/O error");
+        expect(!denied_mount && denied_mount.error().code == diagnostic_codes::native_io &&
+               denied_mount.error().message.find("Config.meg") != std::string::npos,
+               "mount of unreadable archive preserves the file diagnostic");
+        CloseHandle(locked);
+    }
+    const auto recovered = Vfs::mount(denied_mounts);
+    expect(static_cast<bool>(recovered), "archive mounts after read access is restored");
+#endif
 
     vfs_mod_chain();
 

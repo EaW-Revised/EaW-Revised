@@ -4,6 +4,7 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/sim/tactical/victory.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -214,19 +215,19 @@ struct Fixture {
 [[nodiscard]] std::vector<Fixture> fixtures() {
     std::vector<Fixture> list;
     // VF-1 victory: the Pirates' star base and container, then the Empire's ship, fall first and
-    // decide nothing; the Empire's star base decides at tick 5; the Rebel's loss later changes
-    // nothing (VT-09).
+    // decide nothing; the Empire's star base decides at tick 5; the Rebel's later damage is
+    // blocked (VT-09, WCC-40).
     list.push_back({"victory",
         {setup(), 12,
             {damage(2, 1, 0, {5, 6}), damage(3, 1, 1, {4}), damage(5, 1, 2, {3}), damage(8, 1, 3, {1})}},
         1, 5, 3});
     // VF-2 defeat: the Rebel's star base falls at tick 4; the Empire wins.
     list.push_back({"defeat", {setup(), 10, {damage(4, 2, 0, {1})}}, 2, 4, 1});
-    // VF-3 simultaneous: both star bases fall in one command. Its units are hit in list order, so
-    // the Rebel's (1) is destroyed first and the Empire wins (VT-08, VT-09).
+    // VF-3: the command lists both bases; only the Rebel's (1) falls. Pending victory
+    // immediately blocks damage to the Empire's base (VT-02, WCC-40).
     list.push_back({"simultaneous", {setup(), 10, {damage(6, 1, 0, {1, 3})}}, 2, 6, 1});
     // VF-4 simultaneous, other order: two commands in one tick run in (player, sequence) order,
-    // so the Empire's star base (hit by player 1) falls first and the Rebel wins.
+    // so only the Empire's star base (hit by player 1) falls and the Rebel wins.
     list.push_back({"simultaneous-ordered", {setup(), 10, {damage(6, 1, 0, {3}), damage(6, 2, 0, {1})}}, 1, 6, 3});
     // VF-5 undecided: only ships and non-playable objects fall; no outcome.
     list.push_back({"undecided", {setup(), 10, {damage(2, 1, 0, {4, 5, 6}), damage(3, 2, 0, {2})}}, std::nullopt, 0, 0});
@@ -240,6 +241,7 @@ struct Trace {
     std::size_t quit_events{};
     std::vector<tactical::PlayerQuit> quits;
     std::vector<tactical::BattleLoss> losses;
+    std::vector<eawr::sim::EntityId> survivors;
 };
 
 [[nodiscard]] Trace run(const tactical::TacticalReplay& replay, const eawr::sim::PartitionExecutor& executor,
@@ -266,6 +268,7 @@ struct Trace {
     trace.quits.assign(quits.begin(), quits.end());
     const auto losses = session.snapshot()->losses();
     trace.losses.assign(losses.begin(), losses.end());
+    for (const auto& instance : session.snapshot()->instances()) trace.survivors.push_back(instance.entity_id);
     return trace;
 }
 
@@ -286,7 +289,12 @@ void test_fixtures(const std::filesystem::path& directory, const bool update) {
         } else {
             expect(!outcome && reference.victory_events == 0, fixture.name + ": no outcome");
         }
-        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}}) {
+        if (fixture.name == "simultaneous" || fixture.name == "simultaneous-ordered" || fixture.name == "victory") {
+            const auto standing_base = fixture.deciding_unit == 1 ? 3U : 1U;
+            expect(std::find(reference.survivors.begin(), reference.survivors.end(), standing_base) != reference.survivors.end(),
+                fixture.name + ": WCC-40 keeps the later-hit star base standing");
+        }
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             expect(run(fixture.replay, executor, false, m2_rules()).rows == reference.rows,
                 fixture.name + ": " + std::to_string(workers) + " workers match");
@@ -338,6 +346,254 @@ void test_nonplayable_base_remaining() {
     const auto trace = run(replay, executor, false, rules({1}, {1}));
     expect(!trace.outcome && trace.victory_events == 0,
         "destroying the last contender base leaves only a non-playable base and awards no winner");
+}
+
+void test_pending_damage() {
+    tactical::WeaponProfile weapon;
+    weapon.range = units(500);
+    // A sub-frame spawn delay starts both weapons ready; stop orders limit the volley.
+    weapon.min_recharge_hundredths = 1;
+    weapon.max_recharge_hundredths = 1;
+    weapon.category_restrictions = 1;
+    weapon.opportunity_when_idle = false;
+    weapon.opportunity_when_targeting = true;
+    weapon.shot = tactical::ShotProfile{units(3000), tactical::no_type_index, units(100), units(500), true, true, {}};
+    tactical::CombatProfile shooter;
+    shooter.type_id = ship_type;
+    shooter.category_bits = 1;
+    shooter.max_attack_distance = units(500);
+    shooter.weapons = {weapon};
+    tactical::CombatProfile base;
+    base.type_id = station_type;
+    base.category_bits = 2;
+    base.collision = tactical::CollisionBox{{units(-10), units(-10), units(-10)}, {units(10), units(10), units(10)}};
+    tactical::CombatTable combat;
+    constexpr tactical::TypeId protected_ship_type = 60;
+    auto protected_ship = base;
+    protected_ship.type_id = protected_ship_type;
+    combat.profiles = {shooter, base, protected_ship};
+    auto health = durability();
+    health.damage = tactical::DamageRules{};
+    health.damage->shield_recharge_frames = 90;
+    health.profiles[1].max_shields = units(100);
+    auto protected_health = health.profiles[0];
+    protected_health.type_id = protected_ship_type;
+    protected_health.max_shields = units(100);
+    health.profiles.push_back(protected_health);
+    const std::vector<tactical::SensorProfile> sensors{{ship_type, units(2000)}, {station_type, units(2000)},
+        {protected_ship_type, units(2000)}};
+
+    const auto exercise = [&](const bool delayed, const tactical::VictoryRules& selected,
+                              const eawr::sim::PartitionExecutor& executor, const bool scramble) {
+        auto battle = setup();
+        // Shooter 2 launches the lower projectile ID at the Rebel base; shooter 4 aims at the Empire base.
+        battle.units = {unit(1, station_type, 1, -100), unit(2, ship_type, 2, -200),
+            unit(3, station_type, 2, delayed ? 1000 : 100), unit(4, ship_type, 1, 0)};
+        battle.units[2].position.y = units(delayed ? 1000 : 100);
+        battle.units[3].position.y = units(100);
+        const eawr::sim::EntityId protected_target = delayed ? 5U : 3U;
+        if (delayed) {
+            battle.units.push_back(unit(5, protected_ship_type, 2, 300));
+            battle.units.back().position.y = units(100);
+        }
+        const tactical::TacticalReplay replay{battle, 8,
+            {{{0, 1, 0}, {4}, tactical::AttackPayload{protected_target}}, {{0, 2, 0}, {2}, tactical::AttackPayload{1}},
+                {{1, 1, 1}, {4}, tactical::StopPayload{}}, damage(1, 1, 2, {protected_target}, 10),
+                {{1, 2, 1}, {2}, tactical::StopPayload{}}, damage(4, 1, 3, {protected_target})}};
+        auto created = tactical::TacticalSession::from_replay(replay, sensors, health, {}, {}, combat, selected);
+        expect(static_cast<bool>(created), "pending projectile fixture creates");
+        std::vector<std::string> hashes;
+        if (!created) return hashes;
+        auto session = std::move(created).value();
+        std::size_t losses = 0;
+        bool later_in_flight = false;
+        for (std::uint64_t frame = 0; frame < replay.final_tick_count; ++frame) {
+            if (scramble) session.scramble_storage_for_testing();
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "pending projectile fixture steps");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256 + ',' + stepped.value().snapshot->sha256());
+            const auto& snapshot = *stepped.value().snapshot;
+            for (const auto& event : snapshot.events()) losses += event.kind == tactical::EventKind::unit_destroyed;
+            if (frame == 0) {
+                std::string volley = "two shooters launch in ID order at their opposite targets; actual";
+                for (const auto& projectile : session.projectiles()) {
+                    volley += " id=" + std::to_string(projectile.id) + " shooter=" + std::to_string(projectile.shooter)
+                        + " target=" + std::to_string(projectile.target);
+                }
+                expect(session.projectiles().size() == 2 && session.projectiles()[0].target == 1
+                    && session.projectiles()[1].target == protected_target
+                    && session.projectiles()[0].id < session.projectiles()[1].id,
+                    volley);
+            }
+            if (frame == 1 && !delayed) {
+                expect(losses == (selected.condition == tactical::VictoryCondition::none ? 2U : 1U),
+                    "the two projectiles reach both bases in the same deciding tick");
+            }
+            if (selected.condition == tactical::VictoryCondition::none) continue;
+            if (session.outcome()) {
+                expect(session.outcome()->winner == 2 && session.outcome()->deciding_unit == 1
+                    && session.outcome()->decided_tick == 1,
+                    "VT-02: the first projectile decides for the Empire");
+                const auto standing = std::find_if(snapshot.instances().begin(), snapshot.instances().end(),
+                    [&](const auto& instance) { return instance.entity_id == protected_target; });
+                expect(standing != snapshot.instances().end(), "WCC-40: the later-hit Empire unit stands");
+                if (standing != snapshot.instances().end()) {
+                    expect(standing->durability && standing->durability->hull == units(delayed ? 600 : 2400)
+                        && standing->durability->shields == units(100),
+                        "WCC-40: later projectiles and scripted damage leave hull and shields unchanged");
+                }
+                if (delayed && !session.projectiles().empty()) later_in_flight = true;
+            }
+        }
+        if (selected.condition != tactical::VictoryCondition::none) {
+            expect(session.outcome() && losses == 1, "pending victory allows only the deciding station destruction");
+            expect(session.projectiles().empty(), "blocked projectiles keep flying and are spent on contact");
+            expect(!delayed || later_in_flight, "the countdown case actually has a projectile in flight");
+        } else {
+            expect(losses == 2, "without victory rules both stations can be damaged and destroyed");
+        }
+        return hashes;
+    };
+    const eawr::sim::InlineExecutor inline_executor;
+    for (const bool delayed : {false, true}) {
+        const auto reference = exercise(delayed, m2_rules(), inline_executor, false);
+        exercise(delayed, {}, inline_executor, false);
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(exercise(delayed, m2_rules(), executor, true) == reference,
+                "pending damage hashes match at 1/2/4/8 workers with scrambled storage");
+        }
+    }
+}
+
+void test_pending_environment_damage() {
+    constexpr tactical::TypeId hero_type = 9;
+    constexpr tactical::TypeId protected_type = 60;
+    constexpr tactical::TypeId field_type = 70;
+    const auto decimal = [](const char* text) { return Fixed::from_decimal(text).value(); };
+    for (const bool all_units : {false, true}) {
+        const auto relevant_type = all_units ? ship_type : station_type;
+        for (const bool routed : {false, true}) {
+            for (const bool enabled : {false, true}) {
+                std::vector<std::string> reference;
+                for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+                    for (const bool scramble : {false, true}) {
+                        auto battle = setup();
+                        battle.units = routed
+                            ? std::vector<tactical::UnitState>{unit(1, hero_type, 1, 0), unit(2, container_type, 1, 0),
+                                unit(3, relevant_type, 1, 0), unit(5, protected_type, 1, 0),
+                                unit(7, relevant_type, 2, 0), unit(10, field_type, 3, 0)}
+                            : std::vector<tactical::UnitState>{unit(1, relevant_type, 1, 0),
+                                unit(3, relevant_type, 2, 0), unit(10, field_type, 3, 0)};
+                        if (routed) battle.squadrons = {{2, {1, 3, 5}}};
+                        auto health = durability();
+                        health.profiles.insert(health.profiles.begin(), {hero_type, units(600), {}, false, {}});
+                        health.profiles.push_back({protected_type, units(600), {}, false, {}});
+                        health.damage = tactical::DamageRules{};
+                        health.damage->shield_recharge_frames = 30;
+                        health.damage->asteroid_damage = units(routed ? 6000 : 3000);
+                        health.damage->asteroid_rate = units(1);
+                        tactical::MotionTable motion;
+                        motion.rules = {units(15), units(300)};
+                        motion.avoidance = tactical::AvoidanceRules{units(24), decimal("0.2"), units(100), decimal("0.8"), units(15),
+                            decimal("0.66"), decimal("1.2"), decimal("0.25"), decimal("1.7"), decimal("0.5"), decimal("0.5"),
+                            3500, 6, 90, 45, units(50)};
+                        if (routed) {
+                            tactical::CraftProfile craft;
+                            craft.max_speed = decimal("5.4");
+                            craft.min_speed = decimal("1.8");
+                            craft.rate_of_turn = craft.lift = craft.roll_rate = units(6);
+                            craft.thrust = decimal("0.2");
+                            craft.bank_angle = units(70);
+                            craft.strafe_distance = units(200);
+                            for (const auto type : {hero_type, relevant_type, protected_type}) {
+                                craft.type_id = type;
+                                motion.squadrons.craft.push_back(craft);
+                            }
+                            motion.squadrons.squadrons = {{container_type, {hero_type, relevant_type, protected_type},
+                                {{}, {}, {}}, units(1000), units(200), units(300), units(20)}};
+                        }
+                        tactical::Footprint victim;
+                        victim.type_id = relevant_type;
+                        victim.layer = tactical::SpaceLayer::capital;
+                        victim.radius = units(10);
+                        victim.asteroid_damage = true;
+                        victim.locomotor = false;
+                        if (routed) {
+                            auto hero = victim;
+                            hero.type_id = hero_type;
+                            motion.footprints.push_back(hero);
+                        }
+                        motion.footprints.push_back(victim);
+                        tactical::Footprint field;
+                        field.type_id = field_type;
+                        field.layer = tactical::SpaceLayer::static_object;
+                        field.radius = units(100);
+                        field.obstacle = true;
+                        field.asteroid_field = true;
+                        motion.footprints.push_back(field);
+                        tactical::CombatTable combat;
+                        if (routed) {
+                            tactical::CombatProfile hero;
+                            hero.type_id = hero_type;
+                            hero.redirect_damage_to_teammates = true;
+                            combat.profiles.push_back(hero);
+                        }
+                        tactical::CombatProfile profile;
+                        profile.type_id = relevant_type;
+                        combat.profiles.push_back(profile);
+                        auto selected = m2_rules();
+                        if (all_units) {
+                            selected.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+                            selected.relevant_types = {ship_type};
+                            selected.controlled_players = selected.installed_players = {1, 2};
+                        }
+                        if (!enabled) selected = {};
+                        auto created = tactical::TacticalSession::create(battle, {}, health, motion,
+                            std::nullopt, combat, selected);
+                        expect(static_cast<bool>(created), "environmental pending-victory fixture validates");
+                        if (!created) { std::cerr << created.error().message << '\n'; continue; }
+                        auto session = std::move(created).value();
+                        const eawr::platform::ThreadWorkerAdapter executor(workers);
+                        std::vector<std::string> rows;
+                        for (std::size_t frame = 0; frame < 2; ++frame) {
+                            if (scramble) session.scramble_storage_for_testing();
+                            const auto stepped = session.step(executor);
+                            expect(static_cast<bool>(stepped), "environmental pending-victory tick completes");
+                            if (!stepped) break;
+                            rows.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+                            if (!enabled) {
+                                expect(!session.outcome() && !session.durability_state(routed ? 7 : 3),
+                                    "disabled victory rules allow later environmental destruction");
+                                if (routed) expect(!session.durability_state(5), "disabled victory permits every routed share");
+                                continue;
+                            }
+                            expect(session.outcome() && session.outcome()->winner == 2
+                                && session.outcome()->deciding_unit == (routed ? 3U : 1U)
+                                && session.outcome()->decided_tick == 0,
+                                "VT-02: first environmental destruction immediately decides victory");
+                            const auto standing = session.durability_state(routed ? 7 : 3);
+                            expect(standing && standing->hull == units(all_units ? 600 : 2400),
+                                "WCC-40: later environmental source leaves the opposing unit unchanged");
+                            if (routed) {
+                                const auto recipient = session.durability_state(5);
+                                expect(recipient && recipient->hull == units(600),
+                                    "WCC-40/WHE-64: the next share of the deciding routed hit is blocked");
+                            }
+                            expect(stepped.value().asteroid_impacts.size() == (frame == 0 ? 1U : 0U),
+                                "pending victory publishes only the deciding asteroid impact");
+                            expect(stepped.value().snapshot->losses().size() == 1,
+                                "the environmental destruction hook records the deciding loss exactly once");
+                        }
+                        if (reference.empty()) reference = rows;
+                        else expect(rows == reference,
+                            "environmental damage hashes agree at 1/2/4/8 workers and both storage orders");
+                    }
+                }
+            }
+        }
+    }
 }
 
 // VT-12: a staged removal is the recorder's deletion, not a destruction.
@@ -611,6 +867,8 @@ int main(int argc, char** argv) {
     test_all_units_rules();
     test_fixtures(argv[1], update);
     test_nonplayable_base_remaining();
+    test_pending_damage();
+    test_pending_environment_damage();
     test_staging();
     test_all_units_sessions();
     test_conversion();

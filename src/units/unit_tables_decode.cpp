@@ -151,6 +151,9 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.id = object->effective.object_id;
         unit.xml_type = object->effective.type_name;
         unit.variant_chain = object->effective.chain;
+        unit.valid_target = flag(*object, "Is_Valid_Target", false).value_or(true);
+        unit.special_weapon = has_behavior(*object, "SPECIAL_WEAPON");
+        unit.star_base = has_behavior(*object, "DUMMY_STAR_BASE");
         // WAD-38: the target marker is content, without a hull or locomotor.
         // Its collision model remains an ordinary projectile recipient.
         if (iequals(unit.id, "Dummy_Barrage_Target") && has_behavior(*object, "MARKER")) {
@@ -204,6 +207,10 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.generic_hero = flag(*object, "Is_Generic_Hero", false).value_or(false);
         unit.display_contained_hero_bars = flag(*object, "Display_Contained_Hero_Grab_Bars", false).value_or(false);
         unit.redirect_damage_to_teammates = flag(*object, "Redirect_Damage_To_Teammates", false).value_or(false);
+        unit.death_projectiles = tokens(object->text("Death_Projectiles"));
+        if (!unit.death_projectiles.empty()) {
+            for (const auto& projectile : unit.death_projectiles) want_projectile(projectile);
+        }
         unit.capture_point = has_behavior(*object, "CAPTURE_POINT");
         unit.build_pad = has_behavior(*object, "TACTICAL_BUILD_OBJECTS");
         unit.under_construction = has_behavior(*object, "TACTICAL_UNDER_CONSTRUCTION");
@@ -390,8 +397,10 @@ void Loader::load_projectile(const std::string& id) {
         Projectile projectile;
         projectile.id = object->effective.object_id;
         bool spawned = false;
+        bool death_payload = false;
         bool fired = false;
         for (const auto& unit : tables_.units) {
+            for (const auto& entry : unit.death_projectiles) death_payload |= iequals(entry, projectile.id);
             for (const auto* list : {&unit.abilities, &unit.team_abilities}) for (const auto& ability : *list) {
                 spawned |= iequals(ability.spawned_object, projectile.id);
                 fired |= iequals(ability.projectile_override, projectile.id);
@@ -418,7 +427,8 @@ void Loader::load_projectile(const std::string& id) {
             projectile.rocket_curve_offset = object->fixed("Projectile_Rocket_Curve_Offset", report_, false);
             projectile.rocket_straight_distance = object->fixed("Projectile_Rocket_Straight_Distance", report_, false);
         }
-        if (projectile.category.empty() && !spawned_only)
+        // WNO-30: the created death payload has flight/lifetime but no authored category.
+        if (projectile.category.empty() && !spawned_only && !(death_payload && !fired))
             report_.missing(projectile.id, "Projectile_Category", {}, "required tag is absent");
         projectile.does_shield_damage = flag(*object, "Projectile_Does_Shield_Damage", true).value_or(false);
         projectile.does_energy_damage = flag(*object, "Projectile_Does_Energy_Damage", false).value_or(false);
@@ -462,6 +472,7 @@ void Loader::load_projectile(const std::string& id) {
         projectile.blast.max_delay = object->fixed("Max_Secs_For_AE_Delayed_Damage", report_, false)
             .value_or(projectile.blast.max_delay);
         projectile.blast_immune_faction = object->text("Projectile_Blast_Area_Immune_Faction");
+        projectile.damage_delay = object->fixed("Projectile_Damage_Delay_Secs", report_, false).value_or(Fixed{});
         if (!projectile.blast_immune_faction.empty()) {
             auto faction = resolve(*input_.catalog, projectile.blast_immune_faction, data::Category::faction,
                 projectile.id, "blast immune faction", report_);

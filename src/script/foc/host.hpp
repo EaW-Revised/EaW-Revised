@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -123,6 +124,7 @@ struct WorldView {
     std::uint64_t tick{};
     std::vector<ViewUnit> units; // ascending ID
     std::vector<ViewPlayer> players; // ascending ID
+    std::vector<tactical::CaptureCandidate> capture_candidates; // prepared with the unit rows
 
     [[nodiscard]] const ViewUnit* find(sim::EntityId id) const {
         const auto found = std::lower_bound(units.begin(), units.end(), id,
@@ -137,7 +139,15 @@ struct WorldView {
     }
 };
 
-inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSession& world, const tactical::TacticalSnapshot& snapshot) {
+// WNO-11/13: forced object queries consume requester-specific raw fog, including AI.
+inline bool object_fogged(const WorldView& view, const ViewUnit& unit, tactical::PlayerId player) {
+    const ViewPlayer* viewer = view.player(player);
+    return viewer == nullptr || viewer->snapshot_index >= 64 ||
+        (unit.visible_to & (std::uint64_t{1} << viewer->snapshot_index)) == 0;
+}
+
+inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSession& world, const tactical::TacticalSnapshot& snapshot,
+    const sim::PartitionExecutor* executor = nullptr) {
     auto view = std::make_shared<WorldView>();
     view->tick = world.completed_tick();
     const auto snapshot_players = snapshot.players();
@@ -161,7 +171,15 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
         if (whole.raw() <= 0) return LuaNumber(0);
         return numeric::from_fixed(part) / numeric::from_fixed(whole);
     };
-    for (const tactical::UnitState& unit : world.units()) {
+    const auto units = world.units();
+    view->units.resize(units.size());
+    view->capture_candidates.resize(units.size());
+    const sim::InlineExecutor inline_executor;
+    const auto prepared = (executor != nullptr ? *executor : inline_executor).execute_phase("ai-world-view",
+        sim::tick_partition_count, [&](const std::size_t partition) {
+      const auto range = sim::partition_range(partition, units.size());
+      for (auto index = range.begin; index < range.end; ++index) {
+        const tactical::UnitState& unit = units[index];
         ViewUnit entry;
         entry.id = unit.entity_id;
         entry.type = unit.type_id;
@@ -207,8 +225,12 @@ inline std::shared_ptr<const WorldView> build_view(const tactical::TacticalSessi
             entry.formation_target = formation->second.first;
             entry.formation_moving = formation->second.second;
         }
-        view->units.push_back(entry);
-    }
+        view->units[index] = std::move(entry);
+        view->capture_candidates[index] = {{unit.entity_id, unit.owner, unit.position}, unit.type_id,
+            !world.arrivals().contains(unit.entity_id)};
+      }
+    });
+    if (!prepared) throw std::runtime_error("AI world view preparation failed: " + prepared.error().message);
     return view;
 }
 
@@ -237,6 +259,7 @@ struct Host {
     std::shared_ptr<const WorldView> view;
     // The goal system engine (#449); null when only the freestore runs. The bindings only read it.
     const ai::Engine* engine{};
+    std::map<tactical::PlayerId, math::Fixed> credit_changes; // current barrier's ordered wallet changes
 
     [[nodiscard]] const AiType* type(tactical::TypeId id) const {
         const auto found = types.find(id);
@@ -246,6 +269,13 @@ struct Host {
         if (!snapshot) return nullptr;
         for (const auto& account : snapshot->economy()) if (account.player == id) return &account;
         return nullptr;
+    }
+    [[nodiscard]] math::Fixed credits(tactical::PlayerId id) const {
+        const auto* account = economy(id);
+        if (account == nullptr) return {};
+        const auto change = credit_changes.find(id);
+        return math::Fixed::from_raw(account->credits.raw()
+            + (change != credit_changes.end() ? change->second.raw() : 0));
     }
     [[nodiscard]] bool neutral(tactical::PlayerId id) const {
         const auto found = players.find(id);

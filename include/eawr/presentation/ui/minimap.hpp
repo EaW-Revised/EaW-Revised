@@ -49,6 +49,7 @@ struct MinimapSettings {
     data::ui::Rgba8 field_border{174, 171, 200, 127}; // Space_Asteroid_Field_Border_Color
     // MM-07: Factions.xml `Color` per faction name, for owners without a lobby colour.
     std::vector<std::pair<std::string, data::ui::Rgba8>> faction_colours;
+    std::vector<std::pair<std::string, data::ui::Rgba8>> faction_no_colorization;
     std::vector<core::Diagnostic> diagnostics;
 };
 // Any root may be null (the file is missing); its values keep FoC's.
@@ -56,7 +57,8 @@ struct MinimapSettings {
                                                const data::XmlNode* factions = nullptr);
 [[nodiscard]] MinimapSettings minimap_settings(const vfs::Vfs& filesystem);
 // A faction's colour (any case), or nothing.
-[[nodiscard]] std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, std::string_view faction);
+[[nodiscard]] std::optional<data::ui::Rgba8> faction_colour(const MinimapSettings& settings, std::string_view faction,
+    bool no_colorization = false);
 
 // MM-06: what an object type shows on the minimap (its XML, with the engine's defaults).
 struct MinimapTypeLooks {
@@ -71,6 +73,8 @@ struct MinimapTypeLooks {
     double space_scale{2.0};                         // Radar_Icon_Scale_Space
     bool hazard{};                                  // WHZ-70: field, storm or nebula
     std::uint8_t hazard_kind{};                      // presentation report: field 1, storm 2, nebula 4
+    bool visible_when_fogged{};                     // WNO-41: only the two early presentation gates
+    std::optional<data::ui::Rgba8> no_colorization;
 };
 [[nodiscard]] MinimapTypeLooks minimap_type_looks(std::string_view type, const data::Catalog* objects);
 
@@ -97,7 +101,39 @@ struct MinimapPoint {
 [[nodiscard]] MinimapPoint minimap_point(const MinimapExtents& extents, double x, double y) noexcept;
 [[nodiscard]] std::array<double, 2> minimap_world(const MinimapExtents& extents, MinimapPoint point) noexcept;
 
-// A unit the local player sees in the frame (own, allied or a visible enemy).
+// WNO-41: copied presentation admission, independent of selection and targeting.
+struct MinimapLiveState {
+    bool alive{true};
+    bool limbo{};
+    bool capital_layer{};
+    bool model_hidden{};
+    bool radar_faded{};
+    bool replay{};
+    bool locally_visible{true};
+    bool interdicted{};
+    bool jammed{};
+    bool stealthed{};
+    bool display_enemies{true};
+};
+struct MinimapCaptureColour {
+    bool raw_local_fog{};
+    data::ui::Rgba8 old_colour{100, 100, 100, 255};
+    data::ui::Rgba8 new_colour{100, 100, 100, 255};
+    double progress{};
+};
+struct MinimapPlayerColour {
+    sim::tactical::PlayerId player{};
+    sim::tactical::TeamId team{};
+    bool neutral{};
+    data::ui::Rgba8 colour;
+};
+[[nodiscard]] data::ui::Rgba8 minimap_community_colour(std::span<const MinimapPlayerColour> players,
+    sim::tactical::PlayerId owner, sim::tactical::PlayerId local, bool multiplayer,
+    data::ui::Rgba8 fallback) noexcept;
+[[nodiscard]] data::ui::Rgba8 minimap_capture_colour(const MinimapCaptureColour& capture,
+    data::ui::Rgba8 neutral) noexcept;
+
+// A live radar candidate; never a selection or targeting input.
 struct MinimapUnit {
     sim::EntityId id{};
     std::string type;
@@ -110,6 +146,22 @@ struct MinimapUnit {
     bool in_nebula{};     // WHZ-70/MM-12: suppress hostile blips independently of fog bypass
     std::array<double, 2> world_half_size{}; // model's world bounds, before the radar scale
     bool team{};         // MM-17: a model-free team's extent is the authored radar scale itself
+    MinimapLiveState radar{};
+    std::optional<MinimapCaptureColour> capture{};
+};
+
+// WNO-44: stored identity and transform, with no live admission/selection fields.
+struct MinimapMemory {
+    sim::EntityId id{};
+    std::string type;
+    data::ui::Rgba8 owner_colour{255, 255, 255, 255};
+    bool hostile{};
+    bool capture_point{};
+    bool previously_revealed{};
+    bool retained_model{};
+    bool display_enemies{true};
+    double x{}, y{}, yaw_degrees{};
+    std::array<double, 2> world_half_size{};
 };
 
 // MM-15: live members in team order, including members hidden by fog.
@@ -134,6 +186,7 @@ struct MinimapBlip {
     bool rotate_icon{};
     data::ui::Rgba8 colour{255, 255, 255, 255};
     std::uint32_t point_pixels{1}; // MM-16: only the truncated size 2 produces a 2x2 block
+    bool remembered{};
 };
 struct MinimapPixelRect {
     std::uint32_t x{}, y{}, width{}, height{};
@@ -148,7 +201,7 @@ struct MinimapPixelRect {
 // type is hidden from enemy radars, are left out, as is a unit outside the world square.
 [[nodiscard]] std::vector<MinimapBlip> minimap_blips(std::span<const MinimapUnit> units,
     const std::function<const MinimapTypeLooks&(std::string_view type)>& looks, const MinimapExtents& extents,
-    const MinimapSettings& settings);
+    const MinimapSettings& settings, std::span<const MinimapMemory> memories = {});
 
 struct MinimapHazard {
     double x{}, y{};

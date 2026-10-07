@@ -2,7 +2,7 @@
 """Exercise the sim_headless tick-zero contract of the pinned FoC skirmish (P2-04, #67).
 
 Without the game, the committed m2-start replay is decoded here from its header and setup
-tables alone (docs/replay-format.md, replay v3: v2 plus the squadron table), and its tick-zero state hash is recomputed
+tables alone (docs/replay-format.md, replay v3/v5: squadrons and optional GSPN/GARR), and its tick-zero state hash is recomputed
 with the frozen EAWRTST encoding. That independent hash must equal the pinned value and the
 census sim_headless writes from the replay, with 1, 2 and 4 workers. With
 EAWR_EAW_GAME_ROOT set, `sim_headless --skirmish m2` must also rebuild the same replay bytes
@@ -22,9 +22,9 @@ import sys
 import tempfile
 
 FIXTURE = "m2-start.eawr-replay"
-FIXTURE_SHA256 = "c402b0220188836495d0ebcc9d5eb9cb9c3592d88e773c7f3d575d4bbf21067a"
-TICK_ZERO_STATE = "9c52d81b8736b411c16cbcb68af561e5d8106cd108946a888a946c162b240b6e"
-CONTENT_IDENTITY = "9cc71553878e93b6dcc5a5c70662227ff2e294a8e8feeb77b6cf64eec67384d5"
+FIXTURE_SHA256 = "4f8925a9b650f2539895047ccffd0338c57a5926ef8eb214f297e7cad0c3e4aa"
+TICK_ZERO_STATE = "8e6f2dbdb28a4ede544df23ab6550b7e6ee837ca9040e2a2b2d8760dcb74fa8a"
+CONTENT_IDENTITY = "9736d7d8e41e66b5a5ee2a74a8b5b3e3d08d6c794365ab3dc419ce5100eae559"
 FINAL_TICKS = 30
 
 
@@ -39,18 +39,71 @@ def crc32_upper(name: str) -> int:
 
 
 def decode_setup(data: bytes) -> dict:
-    """Replay-v3 header and setup tables (v2 plus squadrons, #271, #75), decoded without the
-    production reader."""
+    """Decode setup independently, including FL-13/14's optional garrison headers."""
     if len(data) < 104 or data[:8] != b"EAWRPLY\x00":
         raise ValueError("not a replay")
     (version, header_size, rules, math_version, bits, numerator, denominator, seed, final_ticks,
      players, reserved, units, commands) = struct.unpack_from("<HHIIIIIQQIIQQ", data, 8)
     identity = data[72:104]
     squadrons = reserved
-    if (version, header_size, rules, math_version, bits, numerator, denominator) != (
-            3, 104, 1, 1, 24, 1, 30) or squadrons == 0:
-        raise ValueError("unexpected replay-v3 header")
-    offset = 104
+    if (rules, math_version, bits, numerator, denominator) != (1, 1, 24, 1, 30) or squadrons == 0:
+        raise ValueError("unexpected replay setup header")
+    disabled_garrisons = []
+    free_garrisons = []
+    if version == 3 and header_size == 104:
+        pass
+    elif version == 5 and 108 <= header_size <= len(data):
+        count = struct.unpack_from("<I", data, 104)[0]
+        offset = 108
+        previous_tag = 0
+        for _ in range(count):
+            if offset + 4 > header_size:
+                raise ValueError("truncated replay header extension")
+            tag, length = struct.unpack_from("<HH", data, offset)
+            offset += 4
+            # Frozen M2 supports only GSPN (FL-13) and GARR (FL-14).
+            if tag <= previous_tag or tag not in (3, 5) or length == 0 or offset + length > header_size:
+                raise ValueError("unexpected garrison header extension")
+            if tag == 3:
+                if length % 8:
+                    raise ValueError("invalid GSPN length")
+                disabled_garrisons = list(struct.unpack_from(f"<{length // 8}Q", data, offset))
+                if disabled_garrisons[0] == 0 or any(a >= b for a, b in zip(disabled_garrisons, disabled_garrisons[1:])):
+                    raise ValueError("garrison IDs must be nonzero and strictly increasing")
+            else:
+                end = offset + length
+                cursor = offset
+                def read(fmt):
+                    nonlocal cursor
+                    size = struct.calcsize(fmt)
+                    if cursor + size > end:
+                        raise ValueError("truncated GARR binding")
+                    row = struct.unpack_from(fmt, data, cursor)
+                    cursor += size
+                    return row
+                garrison_version, player_count = read("<II")
+                if garrison_version != 1 or not 1 <= player_count <= 64:
+                    raise ValueError("invalid GARR header")
+                previous_player = 0
+                for _ in range(player_count):
+                    player, delay, templates_count, registered_count = read("<IIII")
+                    if player <= previous_player or not 1 <= templates_count <= 1024 or registered_count > (end - cursor) // 8:
+                        raise ValueError("invalid GARR counts or player order")
+                    templates = list(read(f"<{templates_count}Q"))
+                    registered = list(read(f"<{registered_count}Q"))
+                    if not all(templates) or any(id == 0 for id in registered) or any(a >= b for a, b in zip(registered, registered[1:])):
+                        raise ValueError("invalid GARR template or registered IDs")
+                    free_garrisons.append((player, delay, templates, registered))
+                    previous_player = player
+                if cursor != end:
+                    raise ValueError("trailing GARR bytes")
+            previous_tag = tag
+            offset += length
+        if count == 0 or offset != header_size:
+            raise ValueError("malformed replay header extension size")
+    else:
+        raise ValueError("unexpected replay setup version or header size")
+    offset = header_size
     player_rows = []
     for _ in range(players):
         player_rows.append(struct.unpack_from("<IIQII", data, offset))
@@ -59,6 +112,8 @@ def decode_setup(data: bytes) -> dict:
     for _ in range(units):
         unit_rows.append(struct.unpack_from("<QQII3q4q", data, offset))
         offset += 80
+    if not set(disabled_garrisons).issubset({row[0] for row in unit_rows}):
+        raise ValueError("garrison extension references an absent unit")
     squadron_rows = []
     for _ in range(squadrons):
         container, count, zero = struct.unpack_from("<QII", data, offset)
@@ -67,10 +122,17 @@ def decode_setup(data: bytes) -> dict:
         offset += 16
         squadron_rows.append((container, list(struct.unpack_from(f"<{count}Q", data, offset))))
         offset += 8 * count
+    commandable = {row[0] for row in player_rows if row[3] & 1}
+    owners = {row[0]: row[2] for row in unit_rows}
+    containers = {row[0] for row in squadron_rows}
+    for player, _, _, registered in free_garrisons:
+        if player not in commandable or any(owners.get(id) != player or id in containers for id in registered):
+            raise ValueError("GARR binding has an invalid player or initial object")
     if commands != 0 or len(data) != offset:
         raise ValueError("the replay holds more than its header and setup")
     return {"seed": seed, "final_ticks": final_ticks, "identity": identity, "players": player_rows,
-            "units": unit_rows, "squadrons": squadron_rows}
+            "units": unit_rows, "squadrons": squadron_rows, "disabled_garrisons": disabled_garrisons,
+            "free_garrisons": free_garrisons}
 
 
 def tick_zero_state(setup: dict) -> str:
@@ -83,6 +145,17 @@ def tick_zero_state(setup: dict) -> str:
     data += struct.pack("<Q", len(setup["units"]))
     for row in sorted(setup["units"]):
         data += struct.pack("<QQII3q4q", *row) + struct.pack("<QII3qQ", 0, 0, 0, 0, 0, 0, 0)
+    # FL-13: the sparse GSPN state block follows units and precedes squadron state.
+    if setup.get("disabled_garrisons"):
+        ids = setup["disabled_garrisons"]
+        data += b"GSPN" + struct.pack("<IIQ", 1, 0, len(ids)) + struct.pack(f"<{len(ids)}Q", *ids)
+    if setup.get("free_garrisons"):
+        data += b"GARR" + struct.pack("<IIQ", 1, 0, len(setup["free_garrisons"]))
+        for player, delay, templates, registered in setup["free_garrisons"]:
+            data += struct.pack("<IIQ", player, delay, len(templates)) + struct.pack(f"<{len(templates)}Q", *templates)
+            data += struct.pack("<Q", len(registered)) + struct.pack(f"<{len(registered)}Q", *registered)
+            # At tick zero no refill timer or pending templates exist.
+            data += struct.pack("<IIQQ", 0, 0, 0, 0)
     # Live squadrons (#271): SQDN, the count, and per container its craft.
     if setup["squadrons"]:
         data += b"SQDN" + struct.pack("<Q", len(setup["squadrons"]))
@@ -232,10 +305,10 @@ def check_game(program: str, fixtures: pathlib.Path, work: pathlib.Path, replay_
         if line not in listing:
             errors.append(f"listing lacks: {line}")
     players = census["players"]
-    if [player["ai_combat_power"]["all_launched"] for player in players[:2]] != [14575, 11045]:
+    if [player["ai_combat_power"]["all_launched"] for player in players[:2]] != [13525, 10075]:
         errors.append("SK-24: all-launched AI_Combat_Power")
-    if any(launch["simulated"] for launch in census["launches"]) or len(census["launches"]) != 6:
-        errors.append("SK-23: six launch rows, none simulated")
+    if any(launch["simulated"] for launch in census["launches"]) or len(census["launches"]) != 2:
+        errors.append("SK-23: 2 launch rows, none simulated")
     if census["tick_zero"]["sensor_profiles"] < 13:
         errors.append("#68/#271: the fixture census must retain the original 13 sensor profiles "
                       "alongside the higher-level production closure")

@@ -73,3 +73,12 @@ the emitter frame and the owner mesh bone's `model_asset` gives the separate
 mesh frame. Both are already source Z-up, so neither is converted through the
 render basis. The dry camera fit, fitted-camera replay probe and graphical
 registry all receive this binding and both frame updates before advancing.
+
+
+PS-14 in the [particle walk](walks/particles.md) supersedes storage-order
+every-vertex selection: each admitted batch shuffles the complete bound vertex
+list across submeshes, cycles that permutation for larger bursts, and selects
+its admitted prefix under the emitter's independent reserve. The local seed
+repeats the permutation; its random stream is a project choice. Flattened
+vertex locations and permutation scratch are allocated at construction, so
+steady-state batches allocate nothing. Dynamic energy belongs to PS-17.

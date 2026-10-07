@@ -189,8 +189,12 @@ public:
                 OpportunityCandidate candidate;
                 candidate.id = id;
                 candidate.suitable = target != nullptr && target->profile != nullptr
+                    && target->profile->valid_target // R-08: valid-type admission precedes turret pointing
                     && owner_.hostile(*target) && owner_.visible_to_me(*target);
-                candidate.eligible = target != nullptr && !owner_.restricted(weapon, *target);
+                // R-08: pads can be hostile and visible while living projectiles cannot hit
+                // them. Reject them before priority and aim so they cannot retain the weapon.
+                candidate.eligible = target != nullptr && target->profile != nullptr
+                    && target->profile->living_projectile_collision && !owner_.restricted(weapon, *target);
                 candidate.priority = target != nullptr ? owner_.priority(*target) : std::nullopt;
                 result.push_back(candidate);
             }

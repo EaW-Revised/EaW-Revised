@@ -35,6 +35,7 @@ private:
     core::Result<void> commit_survivors();
     core::Result<void> pad_lifecycle();
     core::Result<void> fighters();
+    core::Result<void> station_upgrades();
     core::Result<void> economy();
     core::Result<void> hangars();
     core::Result<void> bonuses();
@@ -42,6 +43,7 @@ private:
     core::Result<void> commit();
     core::Result<TacticalTick> finish();
     void mark(std::string_view section, bool begin) const;
+    void register_jammer(EntityId source, bool active);
     const LiveUnit* survivor(const EntityId id);
     static math::Vec3 roster_offset(const SquadronFrame& frame, const EntityId craft);
     static LiveUnit* live_unit(std::vector<LiveUnit>& units, const EntityId id);
@@ -54,6 +56,7 @@ private:
     [[nodiscard]] Event destruction_event(const std::uint64_t tick, const EventKind kind, const UnitState& unit,
         const std::uint32_t hardpoint = 0, const PlayerId killer = 0);
     void track_victory_change(const UnitState* before, const UnitState* after, bool evaluate);
+    [[nodiscard]] bool damage_blocked() const { return pending_outcome_.has_value(); }
     [[nodiscard]] static Order order_for(const CommandPayload& payload, const std::uint64_t tick);
     [[nodiscard]] static std::optional<math::Vec3> point_move(const CommandPayload& payload);
     [[nodiscard]] static EntityId approach_target_of(const CommandPayload& payload);
@@ -85,18 +88,11 @@ private:
     Impl* impl_;
     const PartitionExecutor& executor;
     const std::uint64_t tick;
-    struct VictoryObject {
-        EntityId unit{};
-        TypeId type{};
-        PlayerId owner{};
-    };
-    struct VictoryChange {
-        std::optional<VictoryObject> before;
-        std::optional<VictoryObject> after;
-        bool evaluate{};
-    };
-    // Sparse notifications, ordered with the existing lifecycle commits (WBF-31).
-    std::vector<VictoryChange> victory_changes_;
+    // Transactional victory state, updated by sparse ordered lifecycle hooks (VT-02).
+    std::vector<StarbaseEntry> pending_starbases_;
+    std::optional<BattleOutcome> pending_outcome_;
+    std::optional<Event> pending_victory_event_;
+    std::optional<core::Diagnostic> victory_error_;
     std::vector<BattleLoss> pending_losses_;
     std::vector<BattleProduction> pending_productions_;
     std::vector<BattleEconomyCue> pending_economy_cues_;
@@ -107,6 +103,8 @@ private:
     std::vector<PlayerQuit> pending_quits_; // notification order; processed after this frame
     std::vector<PlayerId> pending_reveals_; // V-20: applied to the transactional fog copy
     std::map<PlayerId, ManualPlayerClock> manual_clocks_; // transactional tick copy
+    std::vector<EntityId> projectile_defence_order_; // ordered activation notifications, committed only on success
+    std::vector<EntityId> created_static_defences_; // creation notifications within this frame
     std::vector<Event> manual_feedback_;
     struct Metrics {
         std::optional<std::uint64_t> initial_emplacements;
@@ -228,6 +226,7 @@ private:
         std::optional<std::vector<DeathSpin>> spins;
         std::optional<std::vector<Squadron>> squadrons;
         std::optional<detail::MapStage<SpawnerState>> spawners;
+        std::optional<std::vector<Impl::FreeGarrisonState>> free_garrisons;
     };
     std::optional<Fighters> fighters_;
     struct Bonuses {

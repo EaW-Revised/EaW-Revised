@@ -34,6 +34,53 @@ void test_spawn_is_instant() {
     expect(drawn.size() == 2 && drawn[0] == 1 && drawn[1] == 2, "only the shown units are drawn");
 }
 
+void test_projectile_observer_hide() {
+    space::ProjectileHide shot;
+    bool fog_clear = false;
+    int queries = 0;
+    const auto query = [&] { ++queries; return fog_clear; };
+    shot.advance(0, false, false, query);
+    expect(!shot.drawn(), "WPJ-38: visible endpoints do not admit a fogged projectile");
+    for (int tick = 1; tick < 30; ++tick) shot.advance(tick, false, false, query);
+    expect(queries == 1, "WPJ-38: settled projectiles query once per 30 logical frames");
+    fog_clear = true;
+    shot.advance(30, false, false, query);
+    expect(queries == 2 && shot.opacity() > 0 && shot.opacity() < 0.1F,
+           "a revealed projectile starts easing at its recheck, independently of the source");
+    shot.advance(31, false, false, query);
+    expect(queries == 3 && shot.drawn(), "active transitions keep servicing before 30 frames");
+    fog_clear = false;
+    shot.advance(32, false, false, query);
+    expect(queries == 4 && !shot.revealed(), "a transition rechecks a fog boundary immediately");
+    for (int tick = 33; tick < 100; ++tick) shot.advance(tick, false, false, query);
+    expect(!shot.drawn(), "hidden flight stops drawing after its transition");
+    fog_clear = true;
+    space::ProjectileHide immediate;
+    immediate.advance(0, false, true, query);
+    expect(immediate.opacity() == 1.0F && immediate.drawn(), "visible initialization is immediate");
+    fog_clear = false;
+    immediate.advance(1, false, true, query);
+    expect(immediate.drawn(), "WPJ-39: immediate mode preserves the settled service timer");
+    immediate.advance(30, false, true, query);
+    expect(!immediate.drawn(), "WPJ-39: Last_State_Visible_Under_FOW hides immediately when serviced");
+    fog_clear = true;
+    immediate.advance(60, false, true, query);
+    expect(immediate.opacity() == 1.0F && immediate.drawn(), "immediate mode reveals immediately when serviced");
+    expect(space::ProjectileHide::model_visible(0.025), "WPJ-39: equality at 0.025 remains drawn");
+    expect(!space::ProjectileHide::model_visible(std::nextafter(0.025, 0.0)),
+           "WPJ-39: values strictly below 0.025 hide");
+    space::ProjectileHide delayed;
+    delayed.advance(0, true, false, query);
+    fog_clear = true;
+    delayed.advance(30, true, false, query);
+    expect(!delayed.drawn(), "WPJ-38: delayed appearance stays in limbo");
+    delayed.advance(31, false, false, query);
+    expect(delayed.drawn() && delayed.opacity() == 1.0F,
+           "appearance queries current fog without a stale pre-delay transition");
+    delayed.advance(31, false, false, [] { return false; });
+    expect(delayed.drawn(), "a paused presentation does not change projectile admission");
+}
+
 // FW-16, FW-17: a unit already held before that is revealed later eases up from zero instead of
 // popping, and a unit that loses visibility eases down instead of vanishing.
 void test_reveal_and_hide_ease() {
@@ -188,6 +235,7 @@ int main() {
     for (int frame = 0; frame < 30; ++frame) nebula.service(false);
     expect(nebula.value() < 0.01F, "WHZ-71: exit converges below the material threshold");
     test_spawn_is_instant();
+    test_projectile_observer_hide();
     test_reveal_and_hide_ease();
     test_flip_before_settling_does_not_restart();
     test_destroyed_unit_is_forgotten_at_once();

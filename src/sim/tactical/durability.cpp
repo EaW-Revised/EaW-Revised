@@ -347,8 +347,8 @@ core::Result<RepairOutcome> repair_frame(
         return core::Result<RepairOutcome>::success(outcome);
     }
     const auto& hardpoint = profile.hardpoints[index];
-    // HR-02, HR-03: a destroyed or unrepairable hardpoint stops; so does a player who cannot pay.
-    if (!hardpoint.destroyable || state.hardpoints[index].raw() <= 0 || hardpoint.repair_amount_per_frame.raw() <= 0
+    // WSL-41/42: zero authored amount still pays; full and destroyed slots stop without a debit.
+    if (!hardpoint.destroyable || state.hardpoints[index].raw() <= 0 || state.hardpoints[index] >= hardpoint.max_health
         || hardpoint.repair_cost_per_frame > credits) {
         return core::Result<RepairOutcome>::success(outcome);
     }
@@ -376,6 +376,26 @@ core::Result<RepairOutcome> repair_frame(
     // HR-05: the repair ends when the hardpoint is back at full health.
     outcome.stopped = raised == hardpoint.max_health.raw();
     return core::Result<RepairOutcome>::success(outcome);
+}
+
+std::vector<std::vector<PlayerId>> reserve_hardpoint_repairs(
+    const DurabilityProfile& profile, const DurabilityState& state, const std::span<RepairBudget> budgets) {
+    std::vector<std::vector<PlayerId>> paid(state.repairing_players.size());
+    for (std::size_t slot = 0; slot < state.repairing_players.size(); ++slot) {
+        const auto& authored = profile.hardpoints[slot];
+        auto health = state.hardpoints[slot].raw();
+        if (health <= 0 || !authored.destroyable || health >= authored.max_health.raw()) continue;
+        for (const auto payer : state.repairing_players[slot]) {
+            const auto account = std::find_if(budgets.begin(), budgets.end(),
+                [&](const RepairBudget& budget) { return budget.player == payer; });
+            if (account == budgets.end() || account->credits < authored.repair_cost_per_frame) continue;
+            account->credits = math::Fixed::from_raw(account->credits.raw() - authored.repair_cost_per_frame.raw());
+            paid[slot].push_back(payer);
+            health = std::min(health + authored.repair_amount_per_frame.raw(), authored.max_health.raw());
+            if (health == authored.max_health.raw()) break;
+        }
+    }
+    return paid;
 }
 
 std::string_view to_string(const HardpointRole role) noexcept {

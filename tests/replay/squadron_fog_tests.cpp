@@ -551,7 +551,108 @@ void test_determinism() {
 
 } // namespace
 
+void test_reveal_owner_transfer() {
+    const std::vector<tactical::Player> players{{rebel, 0, 1, tactical::player_flag_commandable},
+        {empire, 1, 2, tactical::player_flag_commandable}, {13, 1, 2, tactical::player_flag_commandable}};
+    auto rules = coruscant();
+    rules.dense_circles = {{at(0, 0), units(1000)}};
+    std::vector<std::uint8_t> reference;
+    for (const auto workers : std::vector<std::size_t>{1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        tactical::FogCells cells(rules, players);
+        std::vector<tactical::FogRevealer> revealers{{1, rebel, at(0, 0), units(275)},
+            {2, rebel, at(100, 0), units(275)}};
+        expect(cells.advance(0, false, revealers, executor).has_value(), "V-23: old owner marks overlapping sources");
+        const auto retained = cells.value_rows(1);
+        revealers[0].owner = empire;
+        expect(cells.advance(1, false, revealers, executor).has_value(), "V-23: stationary source changes owner");
+        expect(cells.revealed(1, at(0, 0)) && cells.revealed(2, at(0, 0)),
+            "V-23: new owner and ally receive the dense circle immediately");
+        expect((*retained[65])[65] == 0, "V-23: transfer preserves previously retained fog rows");
+        for (std::uint64_t tick = 2; tick <= 240; ++tick)
+            expect(cells.advance(tick, true, revealers, executor).has_value(), "V-23: transfer linger service succeeds");
+        expect(!cells.revealed(0, at(-100, 0)) && cells.revealed(0, at(100, 0)),
+            "V-23: old team's released-only cells expire while overlapping holds remain");
+        // Transfer while moving exercises old-circle release with different coverage.
+        revealers[0].owner = rebel;
+        revealers[0].position = at(500, 0);
+        expect(cells.advance(241, false, revealers, executor).has_value(), "V-23: moving source transfers back");
+        expect(cells.revealed(0, at(500, 0)), "V-23: return transfer marks the current position");
+        for (std::uint64_t tick = 242; tick <= 480; ++tick)
+            expect(cells.advance(tick, true, revealers, executor).has_value(), "V-23: return transfer releases old holds");
+        expect(!cells.revealed(1, at(0, 0)) && !cells.revealed(2, at(0, 0)),
+            "V-23: former new-team holds expire without leaks or underflow");
+        std::vector<std::uint8_t> bytes;
+        cells.append_state(bytes);
+        if (reference.empty()) reference = bytes;
+        else expect(bytes == reference, "V-23: transfer state equals across 1/2/4/8 workers");
+    }
+}
+
+void test_dense_and_multisample() {
+    const std::vector<tactical::Player> players{{rebel, 0, 1, tactical::player_flag_commandable},
+        {empire, 1, 2, tactical::player_flag_commandable}};
+    auto rules = coruscant();
+    rules.dense_circles = {{at(400, 0), units(200)}, {at(400, 0), units(200)}};
+    std::vector<std::uint8_t> reference;
+    for (const auto workers : std::vector<std::size_t>{1, 2, 4, 8}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        tactical::FogCells cells(rules, players);
+        const std::vector<tactical::FogRevealer> revealers{{1, rebel, at(0, 0), units(1200), Fixed::from_raw(one / 5)}};
+        expect(static_cast<bool>(cells.advance(0, false, revealers, executor)), "V-22: dense reveal succeeds");
+        expect(cells.revealed(0, at(200, 0)) && !cells.revealed(0, at(300, 0)),
+            "V-22: dense destination cells use the rounded reduced radius");
+        expect(cells.revealed(0, at(800, 0)) && !cells.revealed(1, at(800, 0)),
+            "V-22: normal cells retain full range, enemy grids remain separate");
+        const std::vector<tactical::FogFlash> flashes{{empire, at(400, 0), units(200)}};
+        expect(static_cast<bool>(cells.advance(1, false, revealers, executor, flashes)), "V-19: box flash succeeds");
+        expect(cells.revealed(1, at(200, 0)) && cells.revealed(1, at(600, 0)) && !cells.revealed(1, at(700, 0)),
+            "V-19: flash covers its circle including dense cells and no extra cells");
+        const auto saved = cells.value_rows(0);
+        expect(static_cast<bool>(cells.advance(2, false, {}, executor)), "V-22: destroyed revealer releases both ranges");
+        for (std::uint64_t tick = 3; tick <= 230; ++tick)
+            expect(static_cast<bool>(cells.advance(tick, true, {}, executor)), "V-22: released coverage regrows");
+        expect(!cells.revealed(0, at(200, 0)) && !cells.revealed(0, at(800, 0)) && !cells.revealed(1, at(400, 0)),
+            "V-22/V-19: dense, normal and flashed cells all expire without leaked holds");
+        expect((*saved[65])[67] == 255, "V-22: retained rows remain immutable");
+        std::vector<std::uint8_t> state;
+        cells.append_state(state);
+        if (reference.empty()) reference = state;
+        else expect(state == reference, "V-22: 1/2/4/8 workers produce identical canonical fog");
+        tactical::FogCells defaults(rules, players);
+        const std::vector<tactical::FogRevealer> default_revealers{{1, rebel, at(0, 0), units(1200)}};
+        expect(static_cast<bool>(defaults.advance(0, false, default_revealers, executor))
+            && defaults.revealed(0, at(500, 0)), "V-22: missing multiplier defaults to one half");
+    }
+
+    tactical::TacticalSetup setup;
+    setup.players = players;
+    setup.units = {unit(1, tartan_type, rebel, at(0, 0)), unit(2, enemy_type, empire, at(1400, 0))};
+    tactical::SensorProfile station{enemy_type, Fixed{}};
+    station.reveals = false;
+    station.multisample = true;
+    station.half_extents = {units(250), units(50)};
+    const std::vector<tactical::SensorProfile> table{station, {tartan_type, units(1200)}};
+    for (const auto workers : std::vector<std::size_t>{1, 2, 4, 8}) {
+        auto session = tactical::TacticalSession::create(setup, table, {}, {}, coruscant()).value();
+        expect(session.snapshot()->visible_entities(rebel).size() == 2,
+            "V-21: station centre outside reveal circle is visible through a box sample");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(static_cast<bool>(session.step(executor)) && session.snapshot()->visible_entities(rebel).size() == 2,
+            "V-21: partitioned visibility uses the box samples after tick zero");
+    }
+    auto centre_only = table;
+    centre_only[0].multisample = false;
+    auto hidden = tactical::TacticalSession::create(setup, centre_only, {}, {}, coruscant()).value();
+    expect(hidden.snapshot()->visible_entities(rebel).size() == 1, "V-16: unflagged type still samples only its position");
+    setup.units[1].rotation = tactical::yaw_rotation(units(90)).value();
+    auto turned = tactical::TacticalSession::create(setup, table, {}, {}, coruscant()).value();
+    expect(turned.snapshot()->visible_entities(rebel).size() == 1, "V-21: rectangular sample box follows yaw");
+}
+
 int main() {
+    test_reveal_owner_transfer();
+    test_dense_and_multisample();
     test_validation();
     test_replay();
     test_squadron_exact();

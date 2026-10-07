@@ -148,7 +148,9 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
     }
     const std::vector<std::string> paths = selected_plans();
     for (const std::string& path : paths) {
-        const std::string loader = "require(\"" + plan_stem(path) + "\")\n"
+        // L-03a / ML-33: require substitutes the request verbatim. Keep the
+        // admitted logical directory so root-level AI plans resolve too.
+        const std::string loader = "require(\"" + path.substr(0, path.size() - 4) + "\")\n"
             "PlanDefinitionLoad = true\n"
             "Base_Definitions()\n"
             "_EAWR_Plan(Category, TaskForce, IgnoreTarget, MagicPlan, AllowFreeStoreUnits, AllowEngagedUnits,\n"

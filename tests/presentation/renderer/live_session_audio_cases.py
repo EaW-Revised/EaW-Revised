@@ -9,12 +9,911 @@ from live_session_test_support import (
     ROOT, S28, S28_LIVE_TICKS, STATION,
     decode_png, hit_rows_per_tick, json, os,
     pathlib, re, read, shutil,
-    source_text, strict_json, subprocess, sys,
+    source_text, strict_json, subprocess, sys, squadron_members,
     tempfile, time, unittest,
 )
 
 
 class LiveSessionAudioCases:
+    def test_station_upgrade_announces_owner_faction_once(self):
+        import struct
+        import xml.etree.ElementTree as ET
+        import zlib
+        from tools.inventory.corpus import Corpus
+        from test_live_team_colour import command
+        from test_pad_capture import replay_units
+
+        # WPR-52 / EUS-25: mixed-faction allies are covered by the isolated
+        # announcement contract; stock teams and replay loading allow one faction per team.
+        with tempfile.TemporaryDirectory(prefix="eawr-upgrade-announcer-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text(
+                "<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+            upgrades = ET.fromstring(corpus.read_effective("foc", "data/xml/upgradeobjects.xml").data)
+            upgrade = next(node for node in upgrades if node.get("Name") == "RS_Level_Two_Starbase_Upgrade")
+            upgrade.find("Tactical_Build_Time_Seconds").text = "1"
+            ET.ElementTree(upgrades).write(xml / "upgradeobjects.xml", encoding="utf-8")
+            factions = ET.fromstring(corpus.read_effective("foc", "data/xml/factions.xml").data)
+            rebel = next(node for node in factions if node.get("Name") == "Rebel")
+            # Distinct authored events make the owner and relationship observable,
+            # including the allied field which stock data may leave empty.
+            fields = {"own": "SFXEvent_Starbase_Upgraded", "enemy": "SFXEvent_Starbase_Enemy_Upgraded"}
+            events = {"own": "RHD_Upgrade_Complete", "enemy": "RHD_Upgrade_Progress"}
+            for relation, field in fields.items():
+                node = rebel.find(field)
+                if node is None: node = ET.SubElement(rebel, field)
+                node.text = events[relation]
+            ET.ElementTree(factions).write(xml / "factions.xml", encoding="utf-8")
+            common = ("--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off",
+                      "--eawr-live-step", "3", "--eawr-live-reveal", "on")
+            seed = directory / "seed.eawr-replay"
+            code, initial = self._run(directory, "seed", (*common, "--eawr-live-ticks", "1",
+                "--eawr-live-replay-out", str(seed)))
+            self.assertEqual(code, 0, initial.get("failure"))
+            station = next(row for row in replay_units(seed)
+                           if row[1] == zlib.crc32(b"SKIRMISH_REBEL_STAR_BASE_1"))
+            data = bytearray(seed.read_bytes())
+            self.assertEqual(struct.unpack_from("<Q", data, 64)[0], 0)
+            struct.pack_into("<Q", data, 40, 120)
+            struct.pack_into("<Q", data, 64, 1)
+            data += command(10, station[2], 1, 9,
+                            struct.pack("<Q", zlib.crc32(b"RS_LEVEL_TWO_STARBASE_UPGRADE")), (station[0],))
+            upgraded_hash = None
+            for relation, local in (("own", 1), ("enemy", 2), ("empty", 2)):
+                with self.subTest(relation=relation):
+                    replay = directory / f"{relation}.eawr-replay"
+                    fixture = bytearray(data)
+                    if relation == "empty":
+                        rebel.find(fields["enemy"]).text = ""
+                        ET.ElementTree(factions).write(xml / "factions.xml", encoding="utf-8")
+                    replay.write_bytes(fixture)
+                    code, result = self._run(directory, relation, (*common, "--eawr-live-player", str(local),
+                        "--eawr-live-ticks", "120"),
+                        session=("--eawr-live-session", "replay", "--eawr-live-replay", str(replay)))
+                    self.assertEqual(code, 0, result.get("failure"))
+                    live = result["live_session"]
+                    self.assertTrue(live["headless_hashes_equal"])
+                    self.assertEqual(live["rejected"], [])
+                    if relation == "own":
+                        self.assertEqual(live["economy"]["tech_level"], 2)
+                        upgraded_hash = live["final_state_sha256"]
+                    else:
+                        self.assertEqual(live["final_state_sha256"], upgraded_hash)
+                    requested = result["battle_audio"]["requested"]
+                    upgrades_heard = {key: value for key, value in requested.items()
+                                      if key.startswith("station_upgraded:")}
+                    expected = {} if relation == "empty" else {"station_upgraded:" + events[relation]: 1}
+                    self.assertEqual(upgrades_heard, expected)
+
+    def test_sfx_lifecycle_delays_repeats_and_authored_chain(self):
+        import math
+        import struct
+        import wave
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-sfx-lifecycle-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text(
+                "<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+            tree = ET.fromstring(corpus.read_effective("foc", "data/xml/sfxeventsgui.xml").data)
+            for name, fields in (
+                ("LifecycleStages", {
+                    "Is_3D": "No", "Play_Count": "2", "Max_Instances": "1", "Play_Sequentially": "Yes",
+                    "Pre_Samples": "life-pre.wav", "Samples": "life-main.wav", "Post_Samples": "life-post.wav",
+                    "Min_Predelay": "80", "Max_Predelay": "80", "Min_Postdelay": "100", "Max_Postdelay": "100",
+                    "Min_Volume": "70", "Max_Volume": "70", "Min_Pan2D": "25", "Max_Pan2D": "25",
+                    "Chained_SFXEvent": "LifecycleChain"}),
+                ("LifecycleChain", {"Is_3D": "No", "Samples": "life-chain.wav", "Max_Instances": "1"}),
+            ):
+                node = ET.SubElement(tree, "SFXEvent", Name=name)
+                for tag, value in fields.items():
+                    ET.SubElement(node, tag).text = value
+            ET.ElementTree(tree).write(xml / "sfxeventsgui.xml", encoding="utf-8")
+            tree = ET.fromstring(corpus.read_effective("foc", "data/xml/spaceunitscorvettes.xml").data)
+            corvette = next(node for node in tree if node.get("Name") == "Corellian_Corvette")
+            corvette.find("SFXEvent_Move").text = "LifecycleStages"
+            ET.ElementTree(tree).write(xml / "spaceunitscorvettes.xml", encoding="utf-8")
+            for stage, hz in (("pre", 440), ("main", 660), ("post", 880), ("chain", 1100)):
+                sound = xml.parent / f"Audio/SFX/life-{stage}.wav"
+                sound.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(sound), "wb") as stream:
+                    stream.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+                    stream.writeframes(b"".join(struct.pack("<h", int(3000 * math.sin(2 * math.pi * hz * i / 22050)))
+                                                for i in range(2205)))
+            code, report = self._run(directory, "lifecycle", (
+                "--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                "--eawr-live-ticks", "200", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                "--eawr-live-input", f"10:click:unit={CORVETTE}",
+                "--eawr-live-input", "30:rclick:@-5000,5900,0", "--eawr-live-input", "31:rclick:@-5100,5900,0"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            audio = report["battle_audio"]
+            self.assertEqual(audio["requested"].get("response_move:LifecycleStages"), 2, audio)
+            self.assertEqual(audio["results"].get("response_move"), {"playing": 1, "instance_limit": 1}, audio)
+            rows = [row for row in audio["ability_starts"] if row["event"] in ("LifecycleStages", "LifecycleChain")]
+            self.assertEqual([row["sample"] for row in rows],
+                             ["life-pre.wav", "life-main.wav", "life-post.wav"] * 2 + ["life-chain.wav"], audio)
+            for earlier, later in ((rows[2], rows[3]), (rows[5], rows[6])):
+                self.assertGreaterEqual(later["tick"] - earlier["tick"], 6, audio)
+            self.assertEqual(audio["allocations"]["response_move"]["admitted"], 1, audio)
+            self.assertEqual(audio["allocations"]["response_move"]["allocated"], 6, audio)
+            self.assertEqual(audio["requested"].get("authored_chain:LifecycleChain"), 1, audio)
+
+    def test_game_pause_preserves_spatial_loops_2d_loops_and_speech(self):
+        import math
+        import struct
+        import wave
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-audio-pause-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+            tree = ET.fromstring(corpus.read_effective("foc", "data/xml/sfxeventsgui.xml").data)
+            for name, spatial, localized, loop in (("PauseSpatial", True, True, True),
+                                                    ("PauseSpatialIdle", True, True, True),
+                                                    ("PauseLoop2D", False, False, True),
+                                                    ("PauseLocalized2D", False, True, False),
+                                                    ("PauseOneShot", True, False, False)):
+                node = ET.SubElement(tree, "SFXEvent", Name=name)
+                for tag, value in (("Is_3D", "Yes" if spatial else "No"),
+                                   ("Localize", "Yes" if localized else "No"),
+                                   ("Play_Count", "-1" if loop else "1"), ("Max_Instances", "1"),
+                                   ("Samples", "pause-tone.wav")):
+                    ET.SubElement(node, tag).text = value
+            ET.ElementTree(tree).write(xml / "sfxeventsgui.xml", encoding="utf-8")
+            tree = ET.fromstring(corpus.read_effective("foc", "data/xml/spaceunitscorvettes.xml").data)
+            corvette = next(node for node in tree if node.get("Name") == "Corellian_Corvette")
+            # SND-03: idle/moving use distinct events so switching never requests a duplicate attached loop.
+            fields = {"SFXEvent_Engine_Idle_Loop": "PauseSpatialIdle", "SFXEvent_Engine_Moving_Loop": "PauseSpatial",
+                      "SFXEvent_Select": "PauseLoop2D", "SFXEvent_Move": "PauseLocalized2D", "SFXEvent_Ambient_Moving": "PauseOneShot",
+                      "SFXEvent_Ambient_Moving_Min_Delay_Seconds": "1", "SFXEvent_Ambient_Moving_Max_Delay_Seconds": "1"}
+            for tag, value in fields.items():
+                node = corvette.find(tag)
+                if node is None: node = ET.SubElement(corvette, tag)
+                node.text = value
+            ET.ElementTree(tree).write(xml / "spaceunitscorvettes.xml", encoding="utf-8")
+            tree = ET.fromstring(corpus.read_effective("foc", "data/xml/squadrons.xml").data)
+            squadron = next(node for node in tree if node.get("Name") == "Rebel_X-Wing_Squadron")
+            node = squadron.find("Build_Speech_Underway")
+            if node is None: node = ET.SubElement(squadron, "Build_Speech_Underway")
+            node.text = "Speech_Death_Star_Build_Underway"
+            ET.ElementTree(tree).write(xml / "squadrons.xml", encoding="utf-8")
+            sound = xml.parent / "Audio/SFX/pause-tone.wav"
+            sound.parent.mkdir(parents=True)
+            with wave.open(str(sound), "wb") as stream:
+                stream.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+                stream.writeframes(b"".join(struct.pack("<h", int(1500 * math.sin(2 * math.pi * 440 * i / 22050)))
+                                            for i in range(22050 * 10)))
+            arguments = (
+                "--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1", "--eawr-live-ticks", "150",
+                "--eawr-live-order", f"15:move:{CORVETTE}@-4500,5600,0",
+                "--eawr-live-input", f"f5:click:unit={CORVETTE}", "--eawr-live-input", "f12:click:unit=1",
+                "--eawr-live-input", "f20:click:card=0", "--eawr-live-input", f"f25:click:unit={CORVETTE}",
+                "--eawr-live-input", "f30:rclick:@-4500,5600,0", "--eawr-live-input", "f40:click:hud=pause",
+                "--eawr-live-input", "f60:click:hud=resume", "--eawr-live-input", "f75:click:hud=pause",
+                "--eawr-live-input", "f90:click:hud=resume")
+            code, report = self._run(directory, "pause", arguments, engine_args=("--quit-after", "600"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            audio = report["battle_audio"]
+            pause = audio["pause"]
+            self.assertEqual(pause["transitions"], 4, pause)
+            self.assertFalse(pause["active"], pause)
+            self.assertGreater(pause["spatial"], 0, pause)
+            self.assertGreater(pause["loops_2d"], 0, pause)
+            self.assertGreater(pause["speech"], 0, pause)
+            self.assertGreater(pause["voice_frames"], pause["spatial"] + pause["loops_2d"], pause)
+            self.assertGreater(pause["speech_frames"], pause["speech"], pause)
+            self.assertLess(pause["position_drift"], 0.05, pause)
+            starts = audio["ability_starts"]
+            loop = [row for row in starts if row["event"] == "PauseLoop2D"]
+            self.assertEqual(len(loop), 1, loop)
+            self.assertEqual(loop[0]["bus"], "EAWR_SFX")
+            spatial = [row for row in starts if row["event"] == "PauseSpatial"]
+            self.assertTrue(spatial, starts)
+            self.assertTrue(all(row["bus"] == "EAWR_Voice" and row["position"] for row in spatial), spatial)
+            one_shots = [row for row in starts if row["event"] == "PauseOneShot"]
+            self.assertTrue(one_shots, starts)
+            self.assertTrue(all(row["bus"] == "EAWR_SFX" and row["position"] for row in one_shots), one_shots)
+            localized = [row for row in starts if row["event"] == "PauseLocalized2D"]
+            self.assertEqual(len(localized), 1, localized)
+            self.assertEqual(localized[0]["bus"], "EAWR_Voice")
+            self.assertIsNone(localized[0]["position"])
+            speech = [row for row in audio["announcement_starts"] if row["reason"].startswith("speech_")]
+            self.assertEqual(len(speech), 1, speech)
+            for row in audio["allocations"].values():
+                self.assertEqual(row["requested"], row["admitted"] + row["refused"], row)
+                self.assertEqual(row["samples_requested"], row["allocated"] + row["samples_failed"], row)
+                self.assertLessEqual(row["audible"], row["allocated"], row)
+            # Engine frame-limit exit exercises paused teardown and emits a lifecycle
+            # trace; it does not write the ordinary completed-capture report.
+            completed = subprocess.run([
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(ROOT / "apps/viewer/project"), "--quit-after", "320", "--",
+                "--eawr-map", CORUSCANT, "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                "--eawr-populate", "--eawr-map-camera-config", str(CAMERA), "--eawr-live-session", "m2",
+                *arguments, "--eawr-live-input", "f120:click:hud=pause"],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=180, check=False)
+            (directory / "paused-teardown.log").write_text(completed.stdout, encoding="utf-8")
+            self.assertEqual(completed.returncode, 0, completed.stdout[-4000:])
+            self.assert_map_teardown_before_host_destruction(completed.stdout)
+            ticks = re.search(r"finish: (\d+) ticks", completed.stdout)
+            self.assertIsNotNone(ticks, completed.stdout[-4000:])
+            self.assertGreater(int(ticks.group(1)), 60)
+            self.assertLess(int(ticks.group(1)), 150, "final pause held the simulation before teardown")
+            self.assertNotIn("ObjectDB instances leaked", completed.stdout)
+
+    def test_ability_payload_barrage_confirmation(self):
+        self._ability_payload_case("Broadside_Class_Cruiser", "Empire", "BARRAGE", "Unit_Barrage_Interdictor", point_cursor=True)
+
+    def test_ability_payload_concentrate_confirmation(self):
+        self._ability_payload_case("Home_One", "Rebel", "CONCENTRATE_FIRE", "Unit_Barrage_Ackbar")
+
+    def test_ability_payload_stock_selection_overlap_refuses_confirmation(self):
+        self._ability_payload_case("Home_One", "Rebel", "CONCENTRATE_FIRE", "Unit_Barrage_Ackbar", isolated=False)
+
+    def test_ability_payload_energy_confirmation(self):
+        self._ability_payload_case("Accuser_Star_Destroyer", "Empire", "ENERGY_WEAPON", "Unit_Energy_Blast_Piett")
+
+    def test_ability_payload_tractor_confirmation(self):
+        self._ability_payload_case("Admonitor_Star_Destroyer", "Empire", "TRACTOR_BEAM", "Unit_Tractor_Beam_Thrawn")
+
+    def test_ability_payload_weaken_confirmation_does_not_double_spawn(self):
+        self._ability_payload_case("Sundered_Heart", "Rebel", "WEAKEN_ENEMY", "Unit_Energy_Flux_Antilles", point_cursor=True)
+
+    def test_ability_payload_scripted_weaken_attaches_to_source(self):
+        self._ability_payload_case("Sundered_Heart", "Rebel", "WEAKEN_ENEMY", "Unit_Energy_Flux_Antilles", scripted=True)
+
+    def test_ability_payload_harmonic_authored_spatial_cue(self):
+        # Stock harmonic bomb has no cue; an overlay proves BA-54 without inventing a default.
+        self._ability_payload_case("Slave_I", "Empire", "HARMONIC_BOMB", "Unit_Point_Laser_Fire", scripted=True, overlay=True)
+
+    def _ability_payload_case(self, hero, faction, kind, cue, scripted=False, overlay=False, isolated=True, point_cursor=False):
+        import struct
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-ability-payload-") as temporary:
+            directory = pathlib.Path(temporary)
+            mod_args = ()
+            if overlay or (not scripted and isolated):
+                xml = directory / "mod/Data/XML"
+                xml.mkdir(parents=True)
+                (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+                filename = ("spaceunitscorvettes.xml" if kind == "BARRAGE" else
+                            "units_hero_empire_thrawn.xml" if kind == "TRACTOR_BEAM" else "uniqueunits.xml")
+                authored = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective("foc", "data/xml/" + filename)
+                tree = ET.fromstring(authored.data)
+                obj = next(node for node in tree if node.get("Name") == hero)
+                ability = next(node for node in obj.findall("Unit_Abilities_Data/Unit_Ability")
+                               if node.findtext("Type", "").strip() == kind)
+                if overlay:
+                    node = ability.find("SFXEvent_Target_Ability")
+                    if node is None: node = ET.SubElement(ability, "SFXEvent_Target_Ability")
+                    node.text = cue
+                if not scripted:
+                    # Selection speech shares the stock ability cue's overlap channel.
+                    # Isolate ability admission without changing any ability/event policy.
+                    node = obj.find("SFXEvent_Select")
+                    if node is None: node = ET.SubElement(obj, "SFXEvent_Select")
+                    node.text = ""
+                ET.ElementTree(tree).write(xml / filename, encoding="utf-8")
+                mod_args = ("--eawr-mod-root", str(xml.parent.parent))
+            seed = directory / "seed.eawr-replay"
+            target_type = "Nebulon_B_Frigate"
+            args = ("--eawr-skirmish-slot", f"1:{faction}:0:human", "--eawr-skirmish-slot", "2:Rebel:1:human",
+                    "--eawr-skirmish-fleet", f"1:{hero}", "--eawr-skirmish-fleet", f"2:{target_type}",
+                    "--eawr-live-ai", "off", "--eawr-live-reveal", "on", "--eawr-live-player", "1",
+                    "--eawr-live-step", "1", "--eawr-live-ticks", "8", "--eawr-live-replay-out", str(seed), *mod_args)
+            code, roster = self._run(directory, "roster", args, session=("--eawr-live-session", "skirmish"))
+            self.assertEqual(code, 0, roster.get("failure"))
+            fleet = roster["live_session"]["start_fleet"]
+            source = next(row["entity"] for row in fleet if row["type"] == hero)
+            target = next(row["entity"] for row in fleet if row["type"] == target_type)
+            data = bytearray(seed.read_bytes())
+            self.assertEqual(data[:8], b"EAWRPLY\0")
+            self.assertEqual(struct.unpack_from("<Q", data, 64)[0], 0)
+            header = struct.unpack_from("<H", data, 10)[0]
+            players = struct.unpack_from("<I", data, 48)[0]
+            count = struct.unpack_from("<Q", data, 56)[0]
+            source_x = -800 if kind == "BARRAGE" else -400
+            for index in range(count):
+                offset = header + players * 24 + index * 80
+                entity = struct.unpack_from("<Q", data, offset)[0]
+                if entity not in (source, target): continue
+                struct.pack_into("<7q", data, offset + 24, (source_x if entity == source else 400) << 24,
+                                 -1500 << 24, 0, 0, 0, 0, 1 << 24)
+            struct.pack_into("<Q", data, 40, 100)
+            replay = directory / "payload.eawr-replay"
+            replay.write_bytes(data)
+            if scripted:
+                destination = ",on,400,-1500,0" if kind == "WEAKEN_ENEMY" else ",on"
+                inputs = ("--eawr-live-order", f"35:ability:{source}@{kind}{destination}")
+            else:
+                # Read the actual displayed button instead of depending on hotkey bindings.
+                # Initial roster is unselected; select once to query authored buttons.
+                code, selected = self._run(directory, "selected", (
+                    "--eawr-live-replay", str(replay), "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                    "--eawr-live-player", "1", "--eawr-live-step", "1", "--eawr-live-ticks", "25",
+                    "--eawr-live-input", f"20:click:unit={source}", *mod_args),
+                    session=("--eawr-live-session", "replay"),
+                    camera=ROOT / "apps/viewer/project/config/coruscant-hero-beams-camera.xml")
+                self.assertEqual(code, 0, selected.get("failure"))
+                buttons = selected["hud"]["ability_buttons"]["buttons"]
+                button = next(i for i, row in enumerate(buttons) if row["name"] == kind)
+                self.assertFalse(buttons[button]["disabled"], buttons[button])
+                aim = "@400,-1500,0" if kind in ("WEAKEN_ENEMY", "BARRAGE") else f"unit={target}"
+                if point_cursor: aim = "@0,-1500,0"
+                inputs = ("--eawr-live-input", f"20:click:unit={source}",
+                          "--eawr-live-input", f"30:click:ability={button}",
+                          *(("--eawr-live-input", "35:hover:@0,-1500,0") if point_cursor else ()),
+                          "--eawr-live-input", f"{45 if point_cursor else 35}:click:{aim}")
+            code, result = self._run(directory, "payload", (
+                "--eawr-live-replay", str(replay), "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                "--eawr-live-player", "1", "--eawr-live-step", "1", "--eawr-live-ticks", "90",
+                "--eawr-live-audio-pace", "on", *inputs, *mod_args), session=("--eawr-live-session", "replay"),
+                camera=ROOT / "apps/viewer/project/config/coruscant-hero-beams-camera.xml")
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["live_session"]["rejected"], [])
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+            if point_cursor:
+                samples = result["battle_input"]["cursor_samples"]
+                self.assertTrue(any(row["id"] == "POINTER_TARGET_SPECIAL_ABILITY_TO_SPACE_POSITION"
+                                    and row["hover"] == "empty" for row in samples), samples)
+                # CU-12: logical fog/radius refusal agrees with hover, even with reveal art on.
+                invalid = "@0,4000,0" if kind == "BARRAGE" else "@2000,-1500,0"
+                for name, point in (("invalid-point", invalid), ("outside-map", "@100000,-1500,0")):
+                    code, refused = self._run(directory, name, (
+                        "--eawr-live-replay", str(replay), "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                        "--eawr-live-player", "1", "--eawr-live-step", "1", "--eawr-live-ticks", "60",
+                        "--eawr-live-input", f"20:click:unit={source}",
+                        "--eawr-live-input", f"30:click:ability={button}",
+                        "--eawr-live-input", f"35:hover:{point}",
+                        "--eawr-live-input", f"45:click:{point}", *mod_args),
+                        session=("--eawr-live-session", "replay"),
+                        camera=ROOT / "apps/viewer/project/config/coruscant-hero-beams-camera.xml")
+                    self.assertEqual(code, 0, refused.get("failure"))
+                    invalid_samples = refused["battle_input"]["cursor_samples"]
+                    self.assertTrue(any(row["id"] == "POINTER_TARGET_SPECIAL_ABILITY_TO_SPACE_POSITION_INVALID"
+                                        for row in invalid_samples), invalid_samples)
+                    self.assertEqual(refused["battle_input"]["ability_bar"]["targeted"], 0)
+                    self.assertFalse(refused["battle_input"]["ability_bar"]["targeting"])
+                    self.assertTrue(any("invalid ability point" in line for line in refused["battle_input"]["log"]))
+                    self.assertEqual(refused["live_session"]["rejected"], [])
+                    self.assertTrue(refused["live_session"]["headless_hashes_equal"])
+                    self.assertNotIn("ability_target:" + cue, refused["battle_audio"]["requested"])
+            audio = result["battle_audio"]
+            rows = [row for row in audio["ability_starts"] if row["event"] == cue
+                    and row["reason"] in ("ability_target", "ability_spawn")]
+            if not isolated:
+                self.assertEqual(audio["requested"].get("ability_target:" + cue), 1)
+                self.assertEqual(audio["results"].get("ability_target"), {"overlap": 1})
+                self.assertEqual(rows, [])
+                self.assertTrue(any(row["reason"] == "response_select" for row in audio["ability_starts"]))
+                return
+            self.assertEqual(len(rows), 1, {"starts": rows, "requested": audio["requested"], "results": audio["results"]})
+            self.assertEqual(rows[0]["reason"], "ability_spawn" if scripted else "ability_target")
+            self.assertEqual(rows[0]["attached"], source)
+            if kind != "HARMONIC_BOMB": self.assertLess(abs(rows[0]["position"][0] - source_x), 50)
+            self.assertGreater(rows[0]["volume"], 0)
+            self.assertTrue(rows[0]["sample"])
+            self.assertGreaterEqual(rows[0]["tick"], 34)
+
+    def test_base_under_attack_uses_mode_cooldown_and_authored_radar(self):
+        import struct
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-base-warning-") as temporary:
+            directory = pathlib.Path(temporary)
+            corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+            seed_xml = directory / "seed-mod/Data/XML"
+            seed_xml.mkdir(parents=True)
+            (seed_xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            for filename in ("spaceunitsfrigates.xml", "starbases.xml"):
+                tree = ET.fromstring(corpus.read_effective("foc", "data/xml/" + filename).data)
+                for field in tree.iter():
+                    if field.tag.startswith(("Starting_Spawned_Units_Tech_", "Reserve_Spawned_Units_Tech_")):
+                        field.text = " "
+                ET.ElementTree(tree).write(seed_xml / filename, encoding="utf-8")
+            seed = directory / "seed.eawr-replay"
+            code, roster = self._run(directory, "roster", (
+                "--eawr-mod-root", str(seed_xml.parents[1]),
+                "--eawr-live-ai", "off", "--eawr-live-ticks", "8", "--eawr-map-timed-frames", "1",
+                "--eawr-live-replay-out", str(seed)))
+            self.assertEqual(code, 0, roster.get("failure"))
+            replay = bytearray(seed.read_bytes())
+            self.assertEqual(replay[:8], b"EAWRPLY\0")
+            self.assertEqual(struct.unpack_from("<Q", replay, 64)[0], 0)
+            header = struct.unpack_from("<H", replay, 10)[0]
+            players = struct.unpack_from("<I", replay, 48)[0]
+            count = struct.unpack_from("<Q", replay, 56)[0]
+            # Isolate a hostile ship firing at an unselected base. No damage injection
+            # is required to announce the attack; remove its attacker later to expire radar.
+            for index in range(count):
+                offset = header + players * 24 + index * 80
+                entity, kind, owner = struct.unpack_from("<QQI", replay, offset)
+                x, y = (0, -1500) if entity == STATION else (600, -1500) if entity == ACCLAMATOR else (
+                    (-9000 if owner == 1 else 9000), -9000)
+                struct.pack_into("<7q", replay, offset + 24, x << 24, y << 24, 0, 0, 0, 0, 1 << 24)
+            struct.pack_into("<Q", replay, 40, 750)
+            path = directory / "base.eawr-replay"
+            path.write_bytes(replay)
+            for name, delay, authored in (("stock", 60, True), ("short", 2, True), ("blank", 2, False)):
+                xml = directory / name / "Data/XML"
+                xml.mkdir(parents=True)
+                (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+                tree = ET.fromstring(corpus.read_effective("foc", "data/xml/audio.xml").data)
+                tree.find("Delay_Between_Space_Base_Attack_Announcement_Seconds").text = str(delay)
+                ET.ElementTree(tree).write(xml / "audio.xml", encoding="utf-8")
+                # Keep carrier/station replenishment from adding new attackers after
+                # the staged ship is removed; their initial replay teams stay distant.
+                for filename in ("spaceunitsfrigates.xml", "starbases.xml"):
+                    shutil.copyfile(seed_xml / filename, xml / filename)
+                if not authored:
+                    tree = ET.fromstring(corpus.read_effective("foc", "data/xml/factions.xml").data)
+                    rebel = next(node for node in tree if node.get("Name") == "Rebel")
+                    rebel.find("SFXEvent_Space_Base_Under_Attack_Announcement").text = " "
+                    ET.ElementTree(tree).write(xml / "factions.xml", encoding="utf-8")
+                code, report = self._run(directory, name, (
+                    "--eawr-mod-root", str(xml.parents[1]), "--eawr-live-replay", str(path),
+                    "--eawr-live-player", "1", "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                    "--eawr-live-ticks", "710", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                    "--eawr-live-order", f"1:attack:{ACCLAMATOR}@{STATION}",
+                    "--eawr-live-order", f"450:damage:{ACCLAMATOR}@1000000"),
+                    session=("--eawr-live-session", "replay"))
+                self.assertEqual(code, 0, report.get("failure"))
+                self.assertTrue(report["live_session"]["headless_hashes_equal"])
+                audio = report["battle_audio"]
+                warnings = audio["base_warning"]
+                self.assertEqual(warnings["delay_frames"], delay * 30)
+                rows = warnings["rows"]
+                self.assertTrue(rows, audio)
+                self.assertTrue(all(row["target"] == STATION and row["radar"] == authored for row in rows), rows)
+                self.assertTrue(all(b["tick"] - a["tick"] >= delay * 30 for a, b in zip(rows, rows[1:])), rows)
+                if name == "stock": self.assertEqual(len(rows), 1, rows)
+                else: self.assertGreater(len(rows), 1, rows)
+                self.assertEqual(audio["requested"].get("base_under_attack:RHD_Space_Station_Under_Attack", 0), len(rows) if authored else 0)
+                requested = sum(value for key, value in audio["requested"].items() if key.startswith("base_under_attack:"))
+                self.assertEqual(requested, len(rows) if authored else 0, audio)
+                self.assertEqual(warnings["radar_active"], 0, warnings)
+                self.assertEqual(report["hud"]["minimap"]["warning_icon"], "i_radar_focus.tga")
+                self.assertTrue(report["hud"]["minimap"]["warning_texture_available"])
+                self.assertEqual(report["hud"]["minimap"]["warnings"], 0)
+
+            # The attack ends before the first post-stall frame; snapshot history
+            # cannot recover its original warning tick. The bounded journal must.
+            paired = []
+            for name, stall in (("paced", ()), ("stalled", ("--eawr-live-stall", "start:500"))):
+                code, report = self._run(directory, name, (
+                    "--eawr-mod-root", str(directory / "stock"), "--eawr-live-replay", str(path),
+                    "--eawr-live-player", "1", "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                    "--eawr-live-ticks", "710", "--eawr-live-audio-pace", "off", "--eawr-map-timed-frames", "1",
+                    "--eawr-live-order", f"1:attack:{ACCLAMATOR}@{STATION}",
+                    "--eawr-live-order", f"450:damage:{ACCLAMATOR}@1000000", *stall),
+                    session=("--eawr-live-session", "replay"))
+                self.assertEqual(code, 0, report.get("failure"))
+                self.assertTrue(report["live_session"]["headless_hashes_equal"])
+                self.assertEqual(report["live_session"]["event_gaps"], [])
+                paired.append(report)
+            self.assertEqual(paired[0]["live_session"]["completed_ticks"], paired[1]["live_session"]["completed_ticks"])
+            first = paired[0]["battle_audio"]["base_warning"]
+            second = paired[1]["battle_audio"]["base_warning"]
+            self.assertTrue(first["rows"], first)
+            self.assertLess(first["rows"][0]["tick"], 450)
+            self.assertEqual(first["rows"], second["rows"])
+            self.assertEqual(first["countdown"], second["countdown"])
+
+    def test_reinforcement_feedback_tracks_open_place_invalid_drop_and_submit(self):
+        self._reinforcement_feedback_case(False)
+
+    def test_reinforcement_feedback_prefers_authored_fleet_move(self):
+        self._reinforcement_feedback_case(True)
+
+    def _reinforcement_feedback_case(self, fleet_move):
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-reinforcement-audio-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            source = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective("foc", "data/xml/factions.xml")
+            self.assertIsNotNone(source)
+            tree = ET.fromstring(source.data)
+            rebel = next(node for node in tree if node.get("Name") == "Rebel")
+            cancelled = rebel.find("Reinforcements_Cancelled_SFXEvent").text.strip()
+            # Stock pick-land-zone is blank; exercise the consumer with an existing GUI event.
+            rebel.find("Reinforcements_Pick_Landing_Zone_SFXEvent").text = "GUI_Bad_Sound"
+            ET.ElementTree(tree).write(xml / "factions.xml", encoding="utf-8")
+            if fleet_move:
+                source = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective("foc", "data/xml/squadrons.xml")
+                self.assertIsNotNone(source)
+                tree = ET.fromstring(source.data)
+                # Build slot zero is the X-wing squadron in the staged Rebel station.
+                squadron = next(node for node in tree if node.get("Name") == "Rebel_X-Wing_Squadron")
+                for field in list(squadron):
+                    if field.tag == "SFXEvent_Command_Fleet_Move": squadron.remove(field)
+                ET.SubElement(squadron, "SFXEvent_Command_Fleet_Move").text = "GUI_Toggle_Shields_On"
+                ET.ElementTree(tree).write(xml / "squadrons.xml", encoding="utf-8")
+            gestures = (
+                "10:click:unit=1", "20:click:card=0", "500:click:hud=b_reinforcement",
+                "510:press:hud=r_0000", "515:hover:@-3811,4460,0", "520:release:@-3811,4460,0",
+                "535:press:hud=r_0000", "540:rclick:@-3111,3960,0",
+                "550:click:hud=r_close", "600:click:hud=b_reinforcement", "750:press:hud=r_0000",
+                "755:hover:@-3111,3960,0", "760:release:@-3111,3960,0")
+            # Let the authored pane line finish: stock en-route uses ordinary HUD overlap admission.
+            code, report = self._run(directory, "feedback", (
+                "--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off", "--eawr-live-ticks", "850",
+                "--eawr-live-step", "1", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                *(part for row in gestures for part in ("--eawr-live-input", row))))
+            self.assertEqual(code, 0, report.get("failure"))
+            live = report["live_session"]
+            self.assertTrue(live["headless_hashes_equal"])
+            self.assertEqual(live["economy_requests"]["reinforcements"], 1, live)
+            self.assertEqual(live["economy_requests"]["refused"], 1, live)
+            self.assertEqual(live["rejected"], [])
+            audio = report["battle_audio"]
+            self.assertTrue(audio["muted"])
+            self.assertEqual(audio["requested"].get("reinforcement_pane:RHD_Choose_Reinforcements"), 2, audio)
+            self.assertEqual(audio["requested"].get("reinforcement_placement:GUI_Bad_Sound"), 3, audio)
+            # A failed drop and an explicit right-click cancel each request the authored cue.
+            # Ordinary HUD overlap may refuse playback while the pane line is still playing.
+            self.assertEqual(audio["requested"].get("reinforcement_cancelled:" + cancelled), 2, audio)
+            enroute = "GUI_Toggle_Shields_On" if fleet_move else "RHD_Reinforcements_En_Route"
+            self.assertEqual(audio["requested"].get("reinforcement_enroute:" + enroute), 1, audio)
+            if fleet_move:
+                self.assertNotIn("reinforcement_enroute:RHD_Reinforcements_En_Route", audio["requested"])
+            starts = [row for row in audio["ability_starts"] if row["reason"].startswith("reinforcement_")
+                      and row["reason"] != "reinforcement_cancelled"]
+            self.assertEqual([row["reason"] for row in starts], [
+                "reinforcement_pane", "reinforcement_placement", "reinforcement_placement", "reinforcement_pane",
+                "reinforcement_placement", "reinforcement_enroute"], starts)
+            self.assertTrue(all(row["tick"] > 760 for row in starts if row["reason"] == "reinforcement_enroute"))
+
+    def test_ship_engine_loops_use_stock_zero_threshold_and_do_not_retry(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-engine-stock-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, report = self._run(directory, "stock", (
+                "--eawr-live-ai", "off", "--eawr-live-ticks", "150", "--eawr-live-step", "1",
+                "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            audio = report["battle_audio"]
+            self.assertTrue(audio["muted"])
+            self.assertEqual(audio["engines"]["idle_speed"], 0)
+            # SND-67: ordinary stopped service selects moving with the stock zero threshold.
+            for kind in ("nebulon", "corvette", "calamari", "acclamator"):
+                starts = {key: count for key, count in audio["requested"].items()
+                          if key.startswith("engine_moving:") and kind in key.lower()}
+                self.assertTrue(starts, (kind, audio))
+                self.assertTrue(all(count == 1 for count in starts.values()), starts)
+            self.assertGreater(audio["engines"]["stops"], 0)
+            self.assertGreater(audio["engines"]["fade_updates"], 0)
+            self.assertLessEqual(audio["engines"]["sources"], len(report["live_session"]["start_fleet"]))
+            self.assertEqual(audio["voices_3d"], 32)
+            self.assertLessEqual(audio["max_voices"], 48)
+
+    def test_ship_engine_switches_follow_authored_threshold_and_attached_pose(self):
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        with tempfile.TemporaryDirectory(prefix="eawr-engine-switch-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "mod/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            source = Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective("foc", "data/xml/gameconstants.xml")
+            self.assertIsNotNone(source)
+            tree = ET.fromstring(source.data)
+            tree.find("SpaceIdleMovementSpeed").text = "0.5"
+            ET.ElementTree(tree).write(xml / "gameconstants.xml", encoding="utf-8")
+            code, report = self._run(directory, "switch", (
+                "--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off", "--eawr-live-ticks", "300",
+                "--eawr-live-step", "1", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                "--eawr-live-order", f"45:move:{NEBULON}@-4500,5600,0",
+                "--eawr-live-order", f"180:stop:{NEBULON}"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            self.assertEqual(report["live_session"]["rejected"], [])
+            audio = report["battle_audio"]
+            self.assertEqual(audio["engines"]["idle_speed"], 0.5)
+            self.assertEqual(audio["requested"].get("engine_idle:Unit_Nebulon_Idle_Engine_Loop"), 2, audio)
+            self.assertEqual(audio["requested"].get("engine_moving:Unit_Nebulon_Moving_Engine_Loop"), 1, audio)
+            self.assertGreater(audio["attached_moves"], 0)
+            self.assertGreater(audio["engines"]["fade_updates"], 0)
+
+    def test_fogged_ship_engine_loops_are_admitted_and_muted(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-engine-fog-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, report = self._run(directory, "fog", (
+                "--eawr-live-ai", "off", "--eawr-live-reveal", "off", "--eawr-live-ticks", "150",
+                "--eawr-live-step", "1", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            audio = report["battle_audio"]
+            self.assertGreater(audio["engines"]["hidden_updates"], 0, audio)
+            self.assertTrue(any(row["reason"].startswith("engine_") and row["volume"] == 0
+                                for row in audio["ability_starts"]), audio)
+            self.assertFalse(any(results.get("hidden", 0) for reason, results in audio["results"].items()
+                                 if reason.startswith("engine_")), audio)
+
+    def test_offscreen_enemy_ai_ability_toggles_are_silent(self):
+        # BA-50/52: faction effects use the enemy table; unit voices require a local press.
+        with tempfile.TemporaryDirectory(prefix="eawr-enemy-ai-toggle-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, report = self._run(directory, "enemy-ai", (
+                "--eawr-skirmish-slot", "1:Rebel:0:ai",
+                "--eawr-skirmish-slot", "2:Empire:1:human",
+                "--eawr-live-player", "2", "--eawr-live-ai", "on",
+                "--eawr-live-reveal", "off", "--eawr-live-step", "1",
+                "--eawr-live-ticks", "600"), session=("--eawr-live-session", "skirmish"),
+                camera=ROOT / "apps/viewer/project/config/coruscant-empire-live-session-camera.xml")
+            self.assertEqual(code, 0, report.get("failure"))
+            live = report["live_session"]
+            self.assertIn(1, live["ai"]["players"], live["ai"])
+            self.assertTrue(live["headless_hashes_equal"])
+            self.assertGreater(live["hidden_units"], 0, live)
+            self.assertEqual(live["ability_requests"]["issued"], 0, live)
+            audio = report["battle_audio"]
+            toggles = [row for row in audio["abilities"] if row.startswith("toggle Rebel ")]
+            self.assertTrue(toggles, audio)
+            self.assertTrue(all(" enemy <none>" in row for row in toggles), toggles)
+            self.assertFalse(any(key.startswith(("ability_toggle:", "ability_voice:"))
+                                 for key in audio["requested"]), audio)
+
+    def _command_audio_overlay(self, directory, assists=False):
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+
+        xml = directory / "mod/Data/XML"
+        xml.mkdir(parents=True)
+        (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+        corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+        source = corpus.read_effective("foc", "data/xml/audio.xml")
+        self.assertIsNotNone(source)
+        audio = ET.fromstring(source.data)
+        # The stock six fields are blank. Prove each consumer using an existing GUI sample.
+        for suffix in ("Attack", "Attack_Move", "Move", "Stop", "Guard"):
+            audio.find("SFXEvent_Command_Bar_" + suffix).text = "GUI_Bad_Sound"
+        ET.ElementTree(audio).write(xml / "audio.xml", encoding="utf-8")
+        if assists:
+            for filename, name, fields in (
+                ("spaceunitsfrigates.xml", "Nebulon_B_Frigate",
+                 {"SFXEvent_Group_Move": "Unit_Move_Nebulon", "SFXEvent_Group_Attack": "Unit_Attack_Nebulon"}),
+                ("spaceunitscorvettes.xml", "Corellian_Corvette",
+                 {"SFXEvent_Assist_Move": "Unit_Move_Corvette", "SFXEvent_Assist_Attack": "Unit_Attack_Corvette"}),
+            ):
+                source = corpus.read_effective("foc", "data/xml/" + filename)
+                self.assertIsNotNone(source)
+                tree = ET.fromstring(source.data)
+                ship = next(node for node in tree if node.get("Name") == name)
+                for key, value in fields.items():
+                    for item in list(ship):
+                        if item.tag == key: ship.remove(item)
+                    ET.SubElement(ship, key).text = value
+                ET.ElementTree(tree).write(xml / filename, encoding="utf-8")
+        return xml.parents[1]
+
+    def test_command_cues_on_arm_disarm_execute_and_empty_stop(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-command-cues-") as temporary:
+            directory = pathlib.Path(temporary)
+            mod = self._command_audio_overlay(directory)
+            inputs = (
+                "30:click:hud=attack", "60:key:A", "90:key:A", "120:click:hud=attack",
+                "150:click:hud=move", "180:key:M", "210:key:M", "240:click:hud=move",
+                "270:key:T", "300:click:hud=attack_move", "330:click:hud=attack_move", "360:key:T",
+                "390:key:G", "420:click:hud=guard", "450:click:hud=guard", "480:key:G",
+                "510:click:hud=stop", "540:key:S", f"570:click:unit={NEBULON}",
+                "690:click:hud=move", "720:rclick:@-4500,5600,0", "810:click:hud=stop", "930:key:S",
+            )
+            script = tuple(part for row in inputs for part in ("--eawr-live-input", row))
+            code, report = self._run(directory, "command-cues", (
+                "--eawr-mod-root", str(mod), "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                "--eawr-live-ticks", "1050", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1", *script))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            self.assertEqual(report["live_session"]["rejected"], [])
+            audio = report["battle_audio"]
+            expected = {"attack": [30, 90], "move": [150, 210, 690], "attack_move": [270, 330],
+                        "guard": [390, 450], "stop": [510, 540, 810, 930]}
+            mouse_cues = {30, 150, 330, 450, 510, 690, 810}
+            starts = audio["ability_starts"]
+            for mode, ticks in expected.items():
+                reason = "command_" + mode
+                self.assertEqual(audio["requested"].get(reason + ":GUI_Bad_Sound"), len(ticks), audio)
+                emitted = [row["tick"] for row in starts if row["reason"] == reason]
+                self.assertEqual(len(emitted), len(ticks), starts)
+                # Godot queues the GUI callback through one more update than a key event.
+                # SND-08/18: admission queues initialization, then the following service
+                # allocates the first sample. Both services precede its start timestamp.
+                queued_services = 2
+                for actual, wanted in zip(emitted, ticks):
+                    request_tick = wanted + (2 if wanted in mouse_cues else 1)
+                    self.assertEqual(actual, request_tick + queued_services)
+            self.assertEqual(sum(n for key, n in audio["requested"].items() if key.startswith("response_stop:")), 2)
+            self.assertEqual(sum(n for key, n in audio["requested"].items() if key.startswith("response_move:")), 1)
+            self.assertFalse(any(row["reason"].startswith("command_") and row["tick"] == 721 for row in starts))
+
+    def test_order_button_hud_input_parser_rejects_unknown_and_modifiers(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-order-hud-parser-") as temporary:
+            for name, gesture in (("unknown", "1:click:hud=unknown_order"),
+                                  ("modified", "1:click:hud=move+shift")):
+                with self.subTest(name=name):
+                    code, report = self._run(pathlib.Path(temporary), name,
+                                            ("--eawr-live-ticks", "8", "--eawr-live-input", gesture))
+                    self.assertEqual(code, 2)
+                    self.assertIn("--eawr-live-input expects", report["failure"])
+
+    def test_negative_feedback_cooldown_invalid_target_and_silent_cancel(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-command-refusal-") as temporary:
+            directory = pathlib.Path(temporary)
+            # DEFEND can deactivate while active, but a second activation during recharge is refused.
+            code, report = self._run(directory, "refusal", (
+                "--eawr-live-ai", "off", "--eawr-live-step", "1", "--eawr-live-ticks", "450",
+                "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                "--eawr-live-input", f"10:click:unit={NEBULON}",
+                "--eawr-live-input", "120:click:ability=0", "--eawr-live-input", "150:click:ability=0",
+                "--eawr-live-input", "180:click:ability=0", "--eawr-live-input", "240:key:O+shift"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            audio = report["battle_audio"]
+            self.assertEqual(audio["requested"].get("negative_feedback:GUI_Bad_Sound"), 2, audio)
+            starts = [row["tick"] for row in audio["ability_starts"] if row["reason"] == "negative_feedback"]
+            self.assertEqual(len(starts), 2, audio)
+            # Refusal feedback is requested one tick after the scripted input.
+            # SND-08/18: initialization and first-sample allocation take two queued services.
+            queued_services = 2
+            for actual, wanted in zip(starts, (180, 240)):
+                request_tick = wanted + 1
+                self.assertEqual(actual, request_tick + queued_services)
+            # A ready Y-wing target press on empty terrain is refused once; explicit cancels are silent.
+            code, report = self._run(directory, "target-refusal", (
+                "--eawr-live-ai", "off", "--eawr-live-step", "1", "--eawr-live-ticks", "400",
+                "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                "--eawr-live-input", "10:click:icon=4", "--eawr-live-input", "120:click:ability=0",
+                "--eawr-live-input", "150:click:@-4500,5600,0", "--eawr-live-input", "210:key:I+shift",
+                "--eawr-live-input", "240:key:Escape", "--eawr-live-input", "270:key:I+shift",
+                "--eawr-live-input", "300:rclick:@-4500,5600,0"))
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            self.assertEqual(report["battle_audio"]["requested"].get("negative_feedback:GUI_Bad_Sound"), 1, report)
+            self.assertEqual(report["live_session"]["ability_requests"]["issued"], 0, report)
+
+    def test_response_assist_waits_for_primary_and_refused_primary_adds_none(self):
+        from space_hazard_cases import focused_camera, place_ship
+
+        with tempfile.TemporaryDirectory(prefix="eawr-assist-response-") as temporary:
+            directory = pathlib.Path(temporary)
+            mod = self._command_audio_overlay(directory, assists=True)
+            replay = directory / "assist.eawr-replay"
+            code, seed = self._run(directory, "seed", (
+                "--eawr-mod-root", str(mod), "--eawr-live-ai", "off", "--eawr-live-ticks", "8",
+                "--eawr-live-replay-out", str(replay), "--eawr-map-timed-frames", "1"))
+            self.assertEqual(code, 0, seed.get("failure"))
+            # Separate the two physical pick meshes; their stock spawn projections overlap.
+            place_ship(replay, CORVETTE, -5500, 5300)
+            place_ship(replay, NEBULON, -4500, 5300)
+            place_ship(replay, MC80, -8000, 8000)
+            camera = focused_camera(directory, seed, -5000, 5300)
+            code, report = self._run(directory, "assist", (
+                "--eawr-mod-root", str(mod), "--eawr-live-ai", "off", "--eawr-live-step", "1",
+                "--eawr-live-ticks", "600", "--eawr-live-audio-pace", "on", "--eawr-map-timed-frames", "1",
+                "--eawr-live-input", f"10:click:unit={NEBULON}",
+                "--eawr-live-input", f"30:click:unit={CORVETTE}+shift",
+                "--eawr-live-input", "210:rclick:@-5000,5900,0", "--eawr-live-input", "211:rclick:@-5100,5900,0"),
+                session=("--eawr-live-session", "replay", "--eawr-live-replay", str(replay)), camera=camera)
+            self.assertEqual(code, 0, report.get("failure"))
+            self.assertTrue(report["live_session"]["headless_hashes_equal"])
+            self.assertEqual(report["live_session"]["rejected"], [])
+            audio = report["battle_audio"]
+            self.assertEqual(audio["requested"].get("response_move:Unit_Move_Nebulon"), 2, audio)
+            self.assertEqual(audio["results"].get("response_move"), {"playing": 1, "instance_limit": 1}, audio)
+            self.assertEqual(audio["requested"].get("response_assist_move:Unit_Move_Corvette"), 1, audio)
+            primary = next(row for row in audio["ability_starts"] if row["reason"] == "response_move")
+            assist = next(row for row in audio["ability_starts"] if row["reason"] == "response_assist_move")
+            self.assertGreater(assist["tick"], primary["tick"] + 3, audio)
+
+    def test_removed_assist_source_cancels_pending_move_and_attack(self):
+        from space_hazard_cases import focused_camera, place_ship
+
+        with tempfile.TemporaryDirectory(prefix="eawr-assist-source-removal-") as temporary:
+            directory = pathlib.Path(temporary)
+            mod = self._command_audio_overlay(directory, assists=True)
+            replay = directory / "source-removal.eawr-replay"
+            code, seed = self._run(directory, "seed", (
+                "--eawr-mod-root", str(mod), "--eawr-live-ai", "off", "--eawr-live-ticks", "8",
+                "--eawr-live-replay-out", str(replay), "--eawr-map-timed-frames", "1"))
+            self.assertEqual(code, 0, seed.get("failure"))
+            place_ship(replay, CORVETTE, -5500, 5300)
+            place_ship(replay, NEBULON, -4500, 5300)
+            place_ship(replay, MC80, -8000, 8000)
+            place_ship(replay, ACCLAMATOR, -5000, 6500)
+            camera = focused_camera(directory, seed, -5000, 5800)
+            for kind, gesture, primary_event, assist_event in (
+                ("move", "210:rclick:@-5000,5900,0", "Unit_Move_Nebulon", "Unit_Move_Corvette"),
+                ("attack", f"210:rclick:unit={ACCLAMATOR}", "Unit_Attack_Nebulon", "Unit_Attack_Corvette"),
+            ):
+                for removed in (False, True):
+                    with self.subTest(kind=kind, removed=removed):
+                        removal = ("--eawr-live-order", f"220:damage:{CORVETTE}@1000000") if removed else ()
+                        code, report = self._run(directory, f"{kind}-{removed}", (
+                            "--eawr-mod-root", str(mod), "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                            "--eawr-live-step", "1", "--eawr-live-ticks", "450", "--eawr-live-audio-pace", "on",
+                            "--eawr-map-timed-frames", "1", "--eawr-live-input", f"10:click:unit={NEBULON}",
+                            "--eawr-live-input", f"30:click:unit={CORVETTE}+shift",
+                            "--eawr-live-input", gesture, *removal),
+                            session=("--eawr-live-session", "replay", "--eawr-live-replay", str(replay)), camera=camera)
+                        self.assertEqual(code, 0, report.get("failure"))
+                        self.assertTrue(report["live_session"]["headless_hashes_equal"])
+                        self.assertEqual(report["live_session"]["rejected"], [])
+                        audio = report["battle_audio"]
+                        self.assertEqual(audio["requested"].get(f"response_{kind}:{primary_event}"), 1, audio)
+                        self.assertEqual(audio["results"].get("response_" + kind), {"playing": 1}, audio)
+                        primary = next(row for row in audio["ability_starts"] if row["reason"] == "response_" + kind)
+                        self.assertLess(primary["tick"], 220)
+                        self.assertEqual(audio["requested"].get(f"response_assist_{kind}:{assist_event}", 0),
+                                         0 if removed else 1, audio)
+                        if removed:
+                            self.assertNotIn(CORVETTE, [row["entity"] for row in report["live_session"]["own_units"]])
+                        else:
+                            assist = next(row for row in audio["ability_starts"]
+                                          if row["reason"] == "response_assist_" + kind)
+                            self.assertGreater(assist["tick"], 220, audio)
+
+    def test_environment_move_responses_use_live_hazard_footprints(self):
+        from space_hazard_cases import focused_camera, place_ship
+
+        for name, map_name, mask, event in (
+            ("asteroid", "data/art/maps/_mp_space_bespin.ted", 1, "Unit_Asteroids_Nebulon"),
+            ("nebula", "data/art/maps/_mp_space_endor.ted", 4, "Unit_Nebula_Nebulon"),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="eawr-environment-cue-") as temporary:
+                directory = pathlib.Path(temporary)
+                replay = directory / "fresh.eawr-replay"
+                code, seed = self._run(directory, "seed", (
+                    "--eawr-skirmish-players", "3,4", "--eawr-skirmish-slot", "3:Rebel:1:human",
+                    "--eawr-skirmish-slot", "4:Empire:0:ai", "--eawr-skirmish-fleet", "3:Nebulon_B_Frigate",
+                    "--eawr-skirmish-fleet", "4:none", "--eawr-live-replay-out", str(replay),
+                    "--eawr-live-ai", "off", "--eawr-live-ticks", "8", "--eawr-map-timed-frames", "1"),
+                    session=("--eawr-live-session", "skirmish"), camera=None, map_name=map_name)
+                self.assertEqual(code, 0, seed.get("failure"))
+                hazard = next(row for row in seed["hud"]["minimap"]["hazards"] if row[4] & mask)
+                ship = next(row["entity"] for row in seed["live_session"]["start_fleet"]
+                            if row["player"] == 3 and row["type"].lower() == "nebulon_b_frigate")
+                x, y = hazard[:2]
+                place_ship(replay, ship, x - hazard[2] - 400, y)
+                # Keep both the outside speaker and the field destination on screen.
+                camera = focused_camera(directory, seed, x - (hazard[2] + 400) / 2, y)
+                code, report = self._run(directory, name, (
+                    "--eawr-live-player", "3", "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                    "--eawr-live-step", "1", "--eawr-live-ticks", "450", "--eawr-live-audio-pace", "on",
+                    "--eawr-map-timed-frames", "1", "--eawr-live-input", f"10:click:unit={ship}",
+                    # Move mode orders through the neutral asteroid mesh under its centre.
+                    "--eawr-live-input", "150:key:M",
+                    "--eawr-live-input", f"180:rclick:@{x},{y},0"),
+                    session=("--eawr-live-session", "replay", "--eawr-live-replay", str(replay)),
+                    camera=camera, map_name=map_name)
+                self.assertEqual(code, 0, report.get("failure"))
+                self.assertTrue(report["live_session"]["headless_hashes_equal"])
+                self.assertEqual(report["battle_audio"]["requested"].get(f"response_move_{name}:{event}"), 1, report)
+                self.assertTrue(any(row["reason"] == "response_move_" + name
+                                    for row in report["battle_audio"]["ability_starts"]), report)
+
     def test_fighter_flybys_require_a_path_and_use_stock_cadence_and_pitch(self):
         with tempfile.TemporaryDirectory(prefix="eawr-fighter-flyby-") as temporary:
             directory = pathlib.Path(temporary)
@@ -193,7 +1092,22 @@ class LiveSessionAudioCases:
             self.assertTrue(any(not row["hidden"] for row in moving), moving)
             self.assertTrue(any(row["hidden"] for row in moving), moving)
             self.assertGreater(audio["ambient"]["hidden_updates"], 0, audio)
-            self.assertGreater(audio["results"].get("ambient_moving", {}).get("hidden", 0), 0, audio)
+            # SND-04/11: attached fog zeros gain, rather than supplying the separate
+            # explicit visibility object that refuses an event at admission.
+            self.assertEqual(audio["results"].get("ambient_moving", {}).get("hidden", 0), 0, audio)
+            starts = [row for row in audio["ability_starts"]
+                      if row["reason"] == "ambient_moving" and row["attached"] in fighter_ids]
+            visible_starts, hidden_starts = [], []
+            for start in starts:
+                requests = [row for row in moving
+                            if row["unit"] == start["attached"] and row["tick"] <= start["tick"]]
+                self.assertTrue(requests, start)
+                latest = max(requests, key=lambda row: row["tick"])
+                (hidden_starts if latest["hidden"] else visible_starts).append(start)
+            self.assertTrue(any(row["volume"] > 0 for row in visible_starts), starts)
+            self.assertTrue(hidden_starts, starts)
+            for start in hidden_starts:
+                self.assertEqual(start["volume"], 0, start)
 
     def test_sighting_announcements_are_once_per_type_and_battle(self):
         import xml.etree.ElementTree as ET
@@ -233,10 +1147,12 @@ class LiveSessionAudioCases:
             self.assertEqual(audio["requested"].get("sighting_type:GUI_Toggle_Shields_On"), 1, audio)
             self.assertEqual(sum(n for key, n in audio["requested"].items() if key.startswith("sighting_enemy:")), 1, audio)
             starts = [row for row in audio["announcement_starts"] if row["reason"].startswith("sighting_")]
-            self.assertEqual([row["reason"] for row in starts], ["sighting_type", "sighting_enemy"], starts)
+            # SND-18: 2D head insertion precedes the native distance sort.
+            # Equal-distance 2D tie order is unverified; require both same-tick starts.
+            self.assertCountEqual([row["reason"] for row in starts], ["sighting_type", "sighting_enemy"], starts)
             # A flagged friendly type is eligible too. The enemy on a later
             # roster entry announces independently, including in the same tick.
-            self.assertLessEqual(starts[0]["tick"], starts[1]["tick"])
+            self.assertEqual(starts[0]["tick"], starts[1]["tick"])
             self.assertFalse(audio["announcements"]["standalone_intro"])
             self.assertFalse(audio["announcements"]["skirmish_hero_respawn"])
             self.assertFalse(any("intro" in key or "respawn" in key for key in audio["requested"]))
@@ -363,10 +1279,14 @@ class LiveSessionAudioCases:
             self.assertEqual(requested.get("response_stop:Unit_Stop_Nebulon"), 1, requested)
             self.assertEqual(requested.get("response_guard:Unit_Guard_Nebulon"), 1, requested)
             starts = report["battle_audio"]["ability_starts"]
+            # Input acknowledgements reach audio on the following update.
+            # SND-08/18: initialization and first-sample allocation take two services.
+            queued_services = 2
             for reason, tick in (("response_stop", 420), ("response_guard", 550)):
                 rows = [row for row in starts if row["reason"] == reason]
                 self.assertEqual(len(rows), 1, starts)
-                self.assertAlmostEqual(rows[0]["tick"], tick, delta=2)
+                request_tick = tick + 1
+                self.assertEqual(rows[0]["tick"], request_tick + queued_services)
 
     def test_reticle_attack_plays_the_speakers_hardpoint_line(self):
         # The established M2 reticle route; selection settles before the attack response.
@@ -394,8 +1314,12 @@ class LiveSessionAudioCases:
             self.assertFalse(any(key.startswith("response_attack:") for key in requested), requested)
             starts = [row for row in report["battle_audio"]["ability_starts"] if row["reason"] == "response_attack_hardpoint"]
             self.assertEqual(len(starts), 2, report["battle_audio"])
-            self.assertAlmostEqual(starts[0]["tick"], 3000, delta=2)
-            self.assertAlmostEqual(starts[1]["tick"], 3120, delta=2)
+            # Reticle input acknowledgements reach audio on the following update.
+            # SND-08/18: initialization and first-sample allocation take two services.
+            queued_services = 2
+            for start, tick in zip(starts, (3000, 3120)):
+                request_tick = tick + 1
+                self.assertEqual(start["tick"], request_tick + queued_services)
 
     def test_production_and_hyperspace_emit_authored_cues_once(self):
         # BA-60/62: ordinary unit production and every arriving craft, at frame 35.
@@ -558,17 +1482,20 @@ class LiveSessionAudioCases:
         # first roster member the audio system last stood next to -- a dead craft stays in that
         # position map until its destruction event reaches the report, a tick or more after it
         # actually leaves the tactical snapshot. This run kills the Y-wing squadron's first two
-        # craft (#424, test_battle_input.py: squadron 4, craft 46-48 in roster order) before the
+        # craft (#424, test_battle_input.py: squadron 4, resolved from the live roster) before the
         # icon is clicked. Every M2 squadron is one craft type, so a leader-agnostic roster walk
         # would happen to land on the same sound anyway; the regression this guards is a dropped
         # response (the resolution falling through to the team container's own, missing fields), not
         # a wrong one.
         y_wing_squadron = 4
-        y_wings = (46, 47, 48)
         spread = ("--eawr-live-order", "1:move:5@-4450,5050,0", "--eawr-live-order", "1:move:2@-5450,5250,0",
                   "--eawr-live-order", "1:move:3@-4650,4250,0")
         with tempfile.TemporaryDirectory(prefix="eawr-live-squadron-leader-death-") as temporary:
             directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "leader-roster", ("--eawr-live-ticks", "1"))
+            self.assertEqual(code, 0, probe.get("failure"))
+            y_wings = squadron_members(probe, y_wing_squadron, "Y-Wing_Squadron")
+            self.assertEqual(len(y_wings), 3)
             code, result = self._run(directory, "y-wing-leader-death", (
                 *spread, "--eawr-hud", "off", "--eawr-live-ticks", "90",
                 "--eawr-live-order", f"15:damage:{y_wings[0]}@100000",
@@ -682,7 +1609,7 @@ class LiveSessionAudioCases:
             self.assertIn("expired TURBO", log)
             self.assertIn("expired DEFEND", log)
             self.assertFalse(any(row.startswith("toggle") and " off " in row for row in log), log)
-            starts = sound["ability_starts"]
+            starts = [row for row in sound["ability_starts"] if row["reason"] == "ability_toggle"]
             self.assertFalse(any(row["event"].endswith("_Off") for row in starts), starts)
             self.assertEqual(sorted(row["event"] for row in starts), ["GUI_Toggle_Shields_On", "GUI_Toggle_Turbo_On"])
             requested = sound["requested"]
@@ -706,7 +1633,7 @@ class LiveSessionAudioCases:
             self.assertEqual([row for row in log if row.startswith("toggle")],
                              ["toggle Rebel TURBO on GUI_Toggle_Turbo_On", "toggle Rebel TURBO off GUI_Toggle_Turbo_Off"], log)
             self.assertFalse(any(row.startswith("expired") for row in log), log)
-            starts = sound["ability_starts"]
+            starts = [row for row in sound["ability_starts"] if row["reason"] == "ability_toggle"]
             self.assertEqual([row["event"] for row in starts], ["GUI_Toggle_Turbo_On", "GUI_Toggle_Turbo_Off"], starts)
             self.assertAlmostEqual(starts[1]["tick"], 170, delta=4)
 
@@ -723,4 +1650,4 @@ class LiveSessionAudioCases:
             sound = result["battle_audio"]
             self.assertEqual([row for row in sound["abilities"] if row.startswith("toggle")],
                              ["toggle Rebel TURBO on enemy <none>", "toggle Rebel TURBO off enemy <none>"], sound["abilities"])
-            self.assertEqual(sound["ability_starts"], [])
+            self.assertEqual([row for row in sound["ability_starts"] if row["reason"] == "ability_toggle"], [])

@@ -138,10 +138,8 @@ runs the six cases through `sim_headless --scenario` (S-26 and S-27 with 1, 2, 4
 and checks the recorded behaviour: idle shooters keep yaw 0 and only the recorded hardpoints
 fire; the ordered Tartan holds yaw 0 through tick 32, turns 0.84 degrees per frame the short
 way from tick 33, settles at the recorded tick within 0.01 degrees of the recorded heading
-without translating, and fires all five hardpoints. The runner does not apply `hold_fire` or
-`invulnerable`, so participation is counted before the shooter dies, and the fire windows
-are checked except those a death can break (a window with a minimum that ends after the
-first death); the test prints the ones that then fail.
+without translating, and fires all five hardpoints. The runner applies `hold_fire` and
+`invulnerable` (DG-40), so every recorded fire window is checked.
 
 <a id="acclamator-launcher-arcs-516"></a>
 
@@ -196,12 +194,9 @@ pwsh <recorder>/tools/behaviour_recorder/Invoke-BehaviourRecording.ps1 `
 The batch is `out/rec-516-stations/behaviour-recorder-20260928-204744-2dd7ba/` (private evidence):
 all nine runs have 1,200 samples and no recorder errors. The fire windows were added after
 recording from the real per-hardpoint shot counts; eight of nine cases match the remake exactly.
-S-40 (bearing -30) matches only while the target is intact: retail's target is invulnerable, but
-the scenario runner does not apply that flag (legacy EAWR-575). The station shoots away the target's nearest
-hardpoint, and `hp_empire_station_one_02` then aims at the next one, just inside its cone, and
-fires from tick 812. `EXPECTED_FAIL` in `test_attack_turn_traces.py` takes that hardpoint's fire
-windows out of the check, and requires it to stay silent until the target first loses hull. It
-fails once the hardpoint stops firing, so the entry is removed with the invulnerable and hold-fire staging flags. The
+S-40 (bearing -30) now keeps the invulnerable target's initial hull, shield and hardpoints
+through the full recording. All fire windows are checked: `hp_empire_station_one_02`
+stays silent while `00` and `01` fire, with no expected-fail exclusion (DG-40). The
 measured behaviour, the full per-hardpoint table and the owner's answer are in the
 [weapon fire note](../../docs/behaviour/space-weapon-fire.md#level-1-station-arcs-s-34-to-s-42-516-follow-up);
 `fidelity_attack_turn_scenario_traces` runs all nine cases.

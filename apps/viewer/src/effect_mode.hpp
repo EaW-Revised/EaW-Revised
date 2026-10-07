@@ -1,5 +1,7 @@
 #pragma once
 
+#include "presentation_constants.hpp"
+
 #include <godot_cpp/classes/node3d.hpp>
 
 #include <cstdint>
@@ -35,7 +37,7 @@ public:
         std::string animation_path;
         std::uint32_t seed{20260922U};
         std::uint32_t frames{60};
-        float delta_seconds{1.0F / 30.0F};
+        float delta_seconds{presentation_constants::logical_frame_seconds};
         std::uint32_t capacity{8192};
         std::filesystem::path report_path;
         std::filesystem::path capture_path;

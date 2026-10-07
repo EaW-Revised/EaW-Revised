@@ -129,6 +129,18 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             live.push_back(new_unit(unit, 0));
         }
         rebuild(live, false);
+        // Partial-table sessions retain setup bindings; only bound hangars can consume them.
+        const bool creation_tables = !motion.squadrons.spawners.empty();
+        for (const auto& binding : source.free_garrisons) {
+            for (const auto type : binding.templates) {
+                if (creation_tables && motion.squadrons.find_squadron(type) == nullptr && motion.find(type) == nullptr
+                    && durability.find(type) == nullptr) {
+                    initialization_error = detail::diagnostic(diagnostic_codes::invalid_setup,
+                        "free garrison template has no bound creation profile");
+                }
+            }
+            free_garrisons.push_back({binding, binding.registered, std::nullopt, {}});
+        }
         bind_squadrons(live);
         if (!economy.command_bonuses.empty()) {
             auto ledger = update_command_ledger(live, 0, InlineExecutor{});

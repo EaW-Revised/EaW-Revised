@@ -59,6 +59,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
         return found != survivors.end() && found->state.entity_id == id ? &*found : nullptr;
     };
     std::vector<EntityId> replaced_children;
+    std::optional<core::Diagnostic> transfer_error;
     // WBP-27/28: ordered child-death notification, distinct from bare detach.
     const auto child_died = [&](const EntityId parent_id, PadState& state) -> bool {
         auto* parent = pad_survivor(parent_id);
@@ -74,15 +75,30 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             replaced_children.push_back(parent_id);
         } else {
             const auto before = parent->state;
-            parent->state.owner = impl_->economy.pads.neutral;
+            // WNO-23/42: surviving-pad reclamation is also a real ownership transfer.
+            // This notification visits only the child-death event and held bonus objects.
+            std::map<EntityId, TypeId> containers;
+            for (const auto& account : staging_->ledgers.value()) for (const auto& held : account.completed) {
+                if (const auto* host = pad_survivor(held.station)) containers.emplace(held.station, host->state.type_id);
+            }
+            std::vector<CombatBonuses> categories(impl_->bonus_categories.size());
+            const auto bonuses = impl_->command_bonuses_for(*parent, impl_->command_ledger,
+                staging_->ledgers.value(), containers, categories, nullptr, true, impl_->economy.pads.neutral);
+            if (const auto changed = impl_->transfer_owner(*parent, impl_->economy.pads.neutral, bonuses); !changed) {
+                transfer_error = changed.error();
+                return false;
+            }
             track_victory_change(&before, &parent->state, true);
+            if (before.owner != parent->state.owner)
+                events.push_back(Event{tick, EventKind::pad_captured, parent->state.owner, before.owner, parent_id});
             state.target = impl_->economy.pads.neutral;
             state.progress = {};
             state.cooldown_start = profile->rebuild_frames != 0 ? tick : 0;
             state.cooldown_until = profile->rebuild_frames != 0 ? tick + profile->rebuild_frames : 0;
             const auto instance = std::lower_bound(instances.begin(), instances.end(), parent_id,
                 [](const TacticalInstance& entry, const EntityId id) { return entry.entity_id < id; });
-            if (instance != instances.end() && instance->entity_id == parent_id) instance->owner = parent->state.owner;
+            if (instance != instances.end() && instance->entity_id == parent_id)
+                *instance = impl_->instance_for(*parent, instance->fixed_transform, tick + 1);
         }
         return profile->destroy_when_child_dies;
     };
@@ -169,6 +185,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
     }
     // WHZ-52/WBP-29/49: only actual deaths schedule; UC replacement and detach do not.
     // This serial queue visits death/creation events, never the whole live world.
+    if (transfer_error) return core::Result<void>::failure(*transfer_error);
     for (const auto& dead : killed) {
         const auto replacement = respawn_after_death(dead, impl_->economy.pads);
         if (!replacement) continue;
@@ -192,21 +209,172 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
     return core::Result<void>::success();
 }
 
-core::Result<void> session_detail::Tick::economy() {
+core::Result<void> session_detail::Tick::station_upgrades() {
     auto& minds = craft_prep_.value().minds.value();
-    auto& arrivals = staging_.value().arrivals.value();
     auto& ledgers = staging_.value().ledgers.value();
-    auto& shares = staging_.value().shares.value();
     auto& earners = staging_.value().earners.value();
     auto& next_id = staging_.value().next_id.value();
     const auto& frame = tracked_.value().frame.value();
-    auto& production_census_visits = tracked_.value().production_census_visits.value();
     auto& events = impacts_.value().events.value();
     auto& projectiles = impacts_.value().projectiles.value();
     auto& instances = systems_.value().instances.value();
     auto& survivors = surviving_.value().survivors.value();
     auto& spawners = fighters_.value().spawners.value();
     const auto& squadron_table = impl_->motion.squadrons;
+    const auto increase_tech = [&](const PlayerId owner) {
+        for (auto& account : ledgers) {
+            if (!impl_->allied(owner, account.player)) continue;
+            const auto maximum = impl_->economy.player(account.player)->max_tech;
+            if (account.tech_level < maximum) ++account.tech_level;
+        }
+    };
+    // WSL-31/WFO-31: service held objects before the late queues can create more.
+    // The initial WSL-31 deadline is creation + an inclusive 0..2 draw. Traversal
+    // has already ended at creation, so the first eligible service is 1 or 2 frames later.
+    // WPR-52: ordered lifecycle commit over held upgrades, not a new live-world sweep.
+    for (auto& account : ledgers) {
+        for (std::size_t index = 0; index < account.completed.size();) {
+            const auto held = account.completed[index];
+            const auto* upgrade = impl_->economy.upgrade(held.type);
+            if (upgrade == nullptr || !upgrade->level_up) { ++index; continue; }
+            if (!held.level_up_service_frame || tick < *held.level_up_service_frame) { ++index; continue; }
+            const auto* previous = survivor(held.station);
+            if (previous == nullptr) { account.completed.erase(account.completed.begin() + static_cast<std::ptrdiff_t>(index)); continue; }
+            const auto old = *previous;
+            const auto* menu = impl_->economy.menu(old.state.type_id, impl_->player_of(old.state.owner)->faction_id);
+            if (menu == nullptr || menu->next_level == 0
+                || impl_->economy.disabled_types.contains(held.type)
+                || impl_->economy.disabled_types.contains(menu->next_level)) {
+                // WSL-31/32: the first eligible service attempts once, even without a next type.
+                account.completed.erase(account.completed.begin() + static_cast<std::ptrdiff_t>(index));
+                continue;
+            }
+            if (next_id == invalid_entity_id || next_id == std::numeric_limits<EntityId>::max()) {
+                return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::resource_limit, "station replacement ID space exhausted"));
+            }
+            // 1. New type, same owner, position and facing; it receives a fresh stable ID.
+            const auto replacement_id = next_id++;
+            auto replacement = impl_->new_unit(UnitState{replacement_id, menu->next_level, old.state.owner,
+                old.state.position, old.state.rotation, {}}, tick);
+            replacement.state.garrison_enabled = old.state.garrison_enabled; // FL-13: upgrades preserve the object flag
+            // 2. Carry hardpoints by list index; disabled/destroyed become disabled at 0.1.
+            if (replacement.durability && old.durability) {
+                carry_station_hardpoints(*impl_->health_profile(old), *old.durability, *replacement.durability);
+            }
+            // WPR-53 (project): references follow the logical station; invalid slots fall back to hull.
+            const auto* replacement_health = impl_->health_profile(replacement);
+            const auto transfer = [&](EntityId& target, std::uint32_t& hardpoint) {
+                if (target != held.station) return;
+                target = replacement_id;
+                if (hardpoint != no_hardpoint && (replacement_health == nullptr
+                    || !damage_target_valid(*replacement_health, hardpoint))) hardpoint = no_hardpoint;
+            };
+            std::vector<SquadronState*> squadron_refs;
+            for (const auto& [id, mind] : minds) {
+                if (mind.target == held.station || mind.escorted == held.station) squadron_refs.push_back(&minds.at(id));
+            }
+            const auto transferred = executor.execute_phase("station-references", tick_partition_count,
+                [&](const std::size_t partition) {
+                    const auto units = partition_range(partition, survivors.size());
+                    for (auto slot = units.begin; slot < units.end; ++slot) {
+                        auto& unit = survivors[slot];
+                        transfer(unit.state.order.target, unit.state.order.hardpoint);
+                        if (unit.combat) {
+                            transfer(unit.combat->attack_target, unit.combat->attack_hardpoint);
+                            for (auto& weapon : unit.combat->weapons) {
+                                if (weapon.opportunity.target == held.station) weapon.opportunity.target = replacement_id;
+                            }
+                        }
+                        if (unit.abilities) for (auto& ability : unit.abilities->slots) transfer(ability.target, ability.target_hardpoint);
+                    }
+                    const auto squads = partition_range(partition, squadron_refs.size());
+                    for (auto slot = squads.begin; slot < squads.end; ++slot) {
+                        auto& mind = *squadron_refs[slot];
+                        transfer(mind.target, mind.target_hardpoint);
+                        if (mind.escorted == held.station) mind.escorted = replacement_id;
+                    }
+                    const auto shots = partition_range(partition, projectiles.size());
+                    for (auto slot = shots.begin; slot < shots.end; ++slot) {
+                        auto& shot = projectiles[slot];
+                        transfer(shot.target, shot.target_hardpoint);
+                        if (shot.shooter == held.station) shot.shooter = replacement_id;
+                    }
+                });
+            if (!transferred) return core::Result<void>::failure(transferred.error());
+            // 3/4. Move held objects and every allied queue entry, then raise allied tech.
+            account.completed.erase(account.completed.begin() + static_cast<std::ptrdiff_t>(index));
+            for (auto& ledger : ledgers) {
+                for (auto& object : ledger.completed) if (object.station == held.station) object.station = replacement_id;
+                if (impl_->allied(old.state.owner, ledger.player)) for (auto& queue : ledger.queues) {
+                    for (auto& entry : queue) if (entry.station == held.station) entry.station = replacement_id;
+                }
+            }
+            increase_tech(account.player);
+            // 5. Removal without a destruction event: no kill, explosion or victory test.
+            track_victory_change(&old.state, &replacement.state, false);
+            std::erase_if(survivors, [&](const LiveUnit& unit) { return unit.state.entity_id == held.station; });
+            std::erase_if(instances, [&](const TacticalInstance& unit) { return unit.entity_id == held.station; });
+            survivors.push_back(std::move(replacement));
+            instances.push_back(impl_->instance_for(survivors.back(),
+                math::to_matrix(old.state.rotation, old.state.position).value(), tick + 1));
+            std::erase_if(earners, [&](const auto& earner) {
+                return earner.first == held.station && impl_->economy.stream(menu->next_level) == nullptr;
+            });
+            for (auto& earner : earners) if (earner.first == held.station) earner.first = replacement_id;
+            // WPR-56 (project), FL-02/08: reconcile by squadron type, never by an old entry index.
+            const auto* new_hangar = squadron_table.find_spawner(menu->next_level);
+            const auto* old_hangar = squadron_table.find_spawner(old.state.type_id);
+            // WFO-12: a station born during object service waits for a subsequent traversal.
+            auto next_hangar = initial_spawner(impl_->setup.seed, frame + 1, replacement_id);
+            if (new_hangar != nullptr) {
+                next_hangar.ready = true;
+                next_hangar.next_spawn_frame = frame;
+                for (const auto& entry : new_hangar->entries) {
+                    auto remaining = entry.reserve < 0 ? unlimited_reserve : entry.reserve + entry.starting;
+                    const auto prior = spawners.find(held.station);
+                    if (remaining != unlimited_reserve && old_hangar != nullptr && prior != spawners.end() && prior->second.ready) {
+                        const auto match = std::find_if(old_hangar->entries.begin(), old_hangar->entries.end(),
+                            [&](const SpawnEntryProfile& previous_entry) { return previous_entry.squadron == entry.squadron; });
+                        if (match != old_hangar->entries.end() && match->reserve != unlimited_reserve) {
+                            const auto slot = static_cast<std::size_t>(match - old_hangar->entries.begin());
+                            if (slot < prior->second.entries.size()) remaining = std::max(0,
+                                remaining - (match->reserve + match->starting - prior->second.entries[slot].remaining));
+                        }
+                    }
+                    next_hangar.entries.push_back({0, remaining});
+                }
+            }
+            for (const auto& [id, previous_mind] : minds) {
+                if (previous_mind.spawner != held.station) continue;
+                auto& mind = minds.at(id);
+                const auto match = new_hangar != nullptr ? std::find_if(new_hangar->entries.begin(), new_hangar->entries.end(),
+                    [&](const SpawnEntryProfile& entry) { return entry.squadron == mind.squadron_type; }) : std::vector<SpawnEntryProfile>::const_iterator{};
+                if (new_hangar == nullptr || match == new_hangar->entries.end()) {
+                    mind.spawner = invalid_entity_id; mind.entry = 0;
+                } else {
+                    mind.spawner = replacement_id;
+                    mind.entry = static_cast<std::uint32_t>(match - new_hangar->entries.begin());
+                    ++next_hangar.entries[mind.entry].alive;
+                }
+            }
+            if (const auto prior = spawners.find(held.station); prior != spawners.end()) spawners.erase(prior);
+            if (new_hangar != nullptr) spawners.emplace(replacement_id, std::move(next_hangar));
+            // 6. The presentation event moves selection and provides the faction sound trigger.
+            events.push_back(Event{tick, EventKind::station_replaced, old.state.owner, replacement_id, held.station});
+        }
+    }
+
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::economy() {
+    auto& arrivals = staging_.value().arrivals.value();
+    auto& ledgers = staging_.value().ledgers.value();
+    auto& shares = staging_.value().shares.value();
+    auto& earners = staging_.value().earners.value();
+    auto& next_id = staging_.value().next_id.value();
+    auto& production_census_visits = tracked_.value().production_census_visits.value();
+    auto& survivors = surviving_.value().survivors.value();
     // #530 economy service (PU-02 to PU-05, PU-16, PU-18): serial per economy player, after the
     // frame's commands and destructions. It visits the few income stations, queue entries and
     // population shares, never every unit.
@@ -299,12 +467,11 @@ core::Result<void> session_detail::Tick::economy() {
         const auto* player = impl_->economy.player(ledger.player);
         for (const auto& payment : payments) {
             if (payment.owner != ledger.player && (!payment.split || !impl_->allied(payment.owner, ledger.player))) continue;
-            const auto balance = math::add(ledger.credits, math::Fixed::from_raw(payment.amount));
+            const auto balance = change_credits(ledger, *player, math::Fixed::from_raw(payment.amount));
             if (!balance) return core::Result<void>::failure(balance.error());
-            ledger.credits = balance.value();
         }
         // PU-18: an entry whose station is gone or no longer offers its type is dropped.
-        service_production(ledger, *player, tick,
+        const auto produced = service_production(ledger, *player, tick,
             [&](const QueueEntry& entry) {
                 const auto* station = survivor(entry.station);
                 const auto* option = station != nullptr ? impl_->build_option(*station, ledger.player, entry.type) : nullptr;
@@ -328,7 +495,13 @@ core::Result<void> session_detail::Tick::economy() {
                         upgrade_ids_exhausted = true;
                         return;
                     }
-                    ledger.completed.back().object = next_id++;
+                    auto& held = ledger.completed.back();
+                    held.object = next_id++;
+                    if (upgrade->level_up) {
+                        // WSL-31: code interval 2; initial deadline includes both endpoints.
+                        CombatRandom phase(impl_->setup.seed, tick, held.object, station_upgrade_phase_slot);
+                        held.level_up_service_frame = tick + phase.uniform(0, 2);
+                    }
                 }
                 // WPR-22 steps 4 and 5, before the next queue entry becomes front.
                 if (upgrade->removes_previous != 0) for (auto& account : ledgers) {
@@ -342,6 +515,7 @@ core::Result<void> session_detail::Tick::economy() {
                 }
                 if (upgrade->increments_tech) increase_tech(ledger.player, true);
             });
+        if (!produced) return produced;
     }
 
     if (upgrade_ids_exhausted) {
@@ -352,131 +526,6 @@ core::Result<void> session_detail::Tick::economy() {
     // ordinary services in the next traversal. Activation never repays earlier frames.
     const auto activated_modifiers = impl_->service_income_modifiers(ledgers, survivors, earners, tick, executor, true);
     if (!activated_modifiers) return activated_modifiers;
-    // WPR-52: service only held upgrade objects, in player/completion order.
-    for (auto& account : ledgers) {
-        for (std::size_t index = 0; index < account.completed.size();) {
-            const auto held = account.completed[index];
-            const auto* upgrade = impl_->economy.upgrade(held.type);
-            if (upgrade == nullptr || !upgrade->level_up) { ++index; continue; }
-            const auto* previous = survivor(held.station);
-            if (previous == nullptr) { account.completed.erase(account.completed.begin() + static_cast<std::ptrdiff_t>(index)); continue; }
-            const auto old = *previous;
-            const auto* menu = impl_->economy.menu(old.state.type_id, impl_->player_of(old.state.owner)->faction_id);
-            if (menu == nullptr || menu->next_level == 0
-                || impl_->economy.disabled_types.contains(held.type)
-                || impl_->economy.disabled_types.contains(menu->next_level)) { ++index; continue; }
-            if (next_id == invalid_entity_id || next_id == std::numeric_limits<EntityId>::max()) {
-                return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::resource_limit, "station replacement ID space exhausted"));
-            }
-            // 1. New type, same owner, position and facing; it receives a fresh stable ID.
-            const auto replacement_id = next_id++;
-            auto replacement = impl_->new_unit(UnitState{replacement_id, menu->next_level, old.state.owner,
-                old.state.position, old.state.rotation, {}}, tick);
-            // 2. Carry hardpoints by list index; disabled/destroyed become disabled at 0.1.
-            if (replacement.durability && old.durability) {
-                carry_station_hardpoints(*impl_->health_profile(old), *old.durability, *replacement.durability);
-            }
-            // WPR-53 (project): references follow the logical station; invalid slots fall back to hull.
-            const auto* replacement_health = impl_->health_profile(replacement);
-            const auto transfer = [&](EntityId& target, std::uint32_t& hardpoint) {
-                if (target != held.station) return;
-                target = replacement_id;
-                if (hardpoint != no_hardpoint && (replacement_health == nullptr
-                    || !damage_target_valid(*replacement_health, hardpoint))) hardpoint = no_hardpoint;
-            };
-            std::vector<SquadronState*> squadron_refs;
-            for (const auto& [id, mind] : minds) {
-                if (mind.target == held.station || mind.escorted == held.station) squadron_refs.push_back(&minds.at(id));
-            }
-            const auto transferred = executor.execute_phase("station-references", tick_partition_count,
-                [&](const std::size_t partition) {
-                    const auto units = partition_range(partition, survivors.size());
-                    for (auto slot = units.begin; slot < units.end; ++slot) {
-                        auto& unit = survivors[slot];
-                        transfer(unit.state.order.target, unit.state.order.hardpoint);
-                        if (unit.combat) {
-                            transfer(unit.combat->attack_target, unit.combat->attack_hardpoint);
-                            for (auto& weapon : unit.combat->weapons) {
-                                if (weapon.opportunity.target == held.station) weapon.opportunity.target = replacement_id;
-                            }
-                        }
-                        if (unit.abilities) for (auto& ability : unit.abilities->slots) transfer(ability.target, ability.target_hardpoint);
-                    }
-                    const auto squads = partition_range(partition, squadron_refs.size());
-                    for (auto slot = squads.begin; slot < squads.end; ++slot) {
-                        auto& mind = *squadron_refs[slot];
-                        transfer(mind.target, mind.target_hardpoint);
-                        if (mind.escorted == held.station) mind.escorted = replacement_id;
-                    }
-                    const auto shots = partition_range(partition, projectiles.size());
-                    for (auto slot = shots.begin; slot < shots.end; ++slot) {
-                        auto& shot = projectiles[slot];
-                        transfer(shot.target, shot.target_hardpoint);
-                        if (shot.shooter == held.station) shot.shooter = replacement_id;
-                    }
-                });
-            if (!transferred) return core::Result<void>::failure(transferred.error());
-            // 3/4. Move held objects and every allied queue entry, then raise allied tech.
-            account.completed.erase(account.completed.begin() + static_cast<std::ptrdiff_t>(index));
-            for (auto& ledger : ledgers) {
-                for (auto& object : ledger.completed) if (object.station == held.station) object.station = replacement_id;
-                if (impl_->allied(old.state.owner, ledger.player)) for (auto& queue : ledger.queues) {
-                    for (auto& entry : queue) if (entry.station == held.station) entry.station = replacement_id;
-                }
-            }
-            increase_tech(old.state.owner, false);
-            // 5. Removal without a destruction event: no kill, explosion or victory test.
-            track_victory_change(&old.state, &replacement.state, false);
-            std::erase_if(survivors, [&](const LiveUnit& unit) { return unit.state.entity_id == held.station; });
-            std::erase_if(instances, [&](const TacticalInstance& unit) { return unit.entity_id == held.station; });
-            survivors.push_back(std::move(replacement));
-            instances.push_back(impl_->instance_for(survivors.back(),
-                math::to_matrix(old.state.rotation, old.state.position).value(), tick + 1));
-            std::erase_if(earners, [&](const auto& earner) {
-                return earner.first == held.station && impl_->economy.stream(menu->next_level) == nullptr;
-            });
-            for (auto& earner : earners) if (earner.first == held.station) earner.first = replacement_id;
-            // WPR-56 (project), FL-02/08: reconcile by squadron type, never by an old entry index.
-            const auto* new_hangar = squadron_table.find_spawner(menu->next_level);
-            const auto* old_hangar = squadron_table.find_spawner(old.state.type_id);
-            auto next_hangar = initial_spawner(impl_->setup.seed, frame, replacement_id);
-            if (new_hangar != nullptr) {
-                next_hangar.ready = true;
-                next_hangar.next_spawn_frame = frame;
-                for (const auto& entry : new_hangar->entries) {
-                    auto remaining = entry.reserve < 0 ? unlimited_reserve : entry.reserve + entry.starting;
-                    const auto prior = spawners.find(held.station);
-                    if (remaining != unlimited_reserve && old_hangar != nullptr && prior != spawners.end() && prior->second.ready) {
-                        const auto match = std::find_if(old_hangar->entries.begin(), old_hangar->entries.end(),
-                            [&](const SpawnEntryProfile& previous_entry) { return previous_entry.squadron == entry.squadron; });
-                        if (match != old_hangar->entries.end() && match->reserve != unlimited_reserve) {
-                            const auto slot = static_cast<std::size_t>(match - old_hangar->entries.begin());
-                            if (slot < prior->second.entries.size()) remaining = std::max(0,
-                                remaining - (match->reserve + match->starting - prior->second.entries[slot].remaining));
-                        }
-                    }
-                    next_hangar.entries.push_back({0, remaining});
-                }
-            }
-            for (const auto& [id, previous_mind] : minds) {
-                if (previous_mind.spawner != held.station) continue;
-                auto& mind = minds.at(id);
-                const auto match = new_hangar != nullptr ? std::find_if(new_hangar->entries.begin(), new_hangar->entries.end(),
-                    [&](const SpawnEntryProfile& entry) { return entry.squadron == mind.squadron_type; }) : std::vector<SpawnEntryProfile>::const_iterator{};
-                if (new_hangar == nullptr || match == new_hangar->entries.end()) {
-                    mind.spawner = invalid_entity_id; mind.entry = 0;
-                } else {
-                    mind.spawner = replacement_id;
-                    mind.entry = static_cast<std::uint32_t>(match - new_hangar->entries.begin());
-                    ++next_hangar.entries[mind.entry].alive;
-                }
-            }
-            if (const auto prior = spawners.find(held.station); prior != spawners.end()) spawners.erase(prior);
-            if (new_hangar != nullptr) spawners.emplace(replacement_id, std::move(next_hangar));
-            // 6. The presentation event moves selection and provides the faction sound trigger.
-            events.push_back(Event{tick, EventKind::station_replaced, old.state.owner, replacement_id, held.station});
-        }
-    }
 
     return core::Result<void>::success();
 }

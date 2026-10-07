@@ -58,7 +58,7 @@ public:
     [[nodiscard]] CombatBonuses command_bonuses_for(const LiveUnit& unit, const CommandLedger& ledger,
         const std::vector<PlayerEconomy>& accounts, const std::map<EntityId, TypeId>& containers,
         const std::span<CombatBonuses> categories, const UnitStage* effect_world = nullptr,
-        bool targeted_effects = true) const;
+        bool targeted_effects = true, std::optional<PlayerId> owner = std::nullopt) const;
     [[nodiscard]] core::Result<void> apply_command_bonuses(std::vector<LiveUnit>& live, const CommandLedger& ledger,
         const std::vector<PlayerEconomy>& accounts, const EntityId first, const PartitionExecutor& executor) const;
     struct IncomeServiceRef {
@@ -96,9 +96,11 @@ public:
         const std::vector<LiveUnit>& live) const;
 
     // WPR-51: a changed maximum adds its delta to current hull/shield/energy; hardpoints scale.
-    enum class BonusAdjustment { legacy, gain, loss };
+    enum class BonusAdjustment { legacy, gain, loss, ownership };
     [[nodiscard]] core::Result<void> apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses,
         BonusAdjustment adjustment = BonusAdjustment::legacy) const;
+    [[nodiscard]] core::Result<void> transfer_owner(LiveUnit& unit, PlayerId owner,
+        const CombatBonuses& bonuses) const;
 
     [[nodiscard]] ProductionCounts production_counts(const PlayerId buyer, const TypeId type,
         const std::vector<PlayerEconomy>& accounts, const bool committed = false) const;
@@ -201,7 +203,8 @@ public:
     [[nodiscard]] core::Result<void> launch(const LiveUnit& spawner, const SpawnerProfile& profile,
         const SpawnDecision& decision, const std::uint64_t frame, EntityId& next, std::vector<LiveUnit>& survivors,
         std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
-        detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders) const;
+        detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
+        TypeId free_type = 0, PlayerId free_owner = 0, std::vector<EntityId>* registered = nullptr) const;
 
     // Publishes the snapshot of the staged units at the completed tick, with the given events.
     void publish_staged(const std::vector<LiveUnit>& live, std::vector<Event> events,
@@ -257,7 +260,7 @@ public:
     [[nodiscard]] core::Result<bool> placement_valid(const PlayerId player, const TypeId type, const math::Vec3& point,
         const UnitStage& staged, const std::uint64_t tick,
         const CollisionWorld* collisions = nullptr, TacticalSession::PlacementWork* work = nullptr,
-        const std::vector<UnitState>* prevention_units = nullptr) const;
+        const std::vector<UnitState>* prevention_units = nullptr, std::optional<math::Fixed> facing_yaw = {}) const;
 
     // PL-05: the world box a unit blocks in an arrival's free-space search, from its type's placement
     // box and the yaw of its rotation; a type with no box never blocks (PL-02).
@@ -276,7 +279,7 @@ public:
     // Own-team players always see a unit (V-04). Other players see it by the retail fog cells
     // when the session is bound to fog rules (V-11 to V-17), else by the exact range test.
     [[nodiscard]] std::uint64_t visible_to(const SensorField& field, const FogCells* cells, const PlayerId owner,
-        const math::Vec3& position) const;
+        const math::Vec3& position, TypeId type = {}, math::Quat rotation = math::identity_quat()) const;
 
     // `now`: the tick the snapshot's readers act at (the completed tick it is published with).
     [[nodiscard]] TacticalInstance instance_for(const LiveUnit& unit, const math::Mat3x4& transform, const std::uint64_t now) const;
@@ -412,7 +415,7 @@ public:
     // its collision box (FoC: its model's), or FoC's box for an object without a model: its
     // position to 0.1 beyond on each axis. None for a unit without a combat profile.
     [[nodiscard]] core::Result<std::optional<detail::CollectionTrees::Member>> collection_member(
-        LiveUnit& unit) const;
+        LiveUnit& unit, bool projectile = false) const;
 
     [[nodiscard]] std::vector<std::uint8_t> canonical_bytes() const;
 
@@ -462,7 +465,9 @@ public:
     std::vector<Projectile> projectiles; // in flight, ascending ID (#74)
     struct PendingBlastDamage {
         std::uint64_t due{};
-        Projectile source;
+        PlayerId owner{};
+        std::uint32_t damage_type{no_type_index};
+        bool internal_damage_misc{true};
         detail::BlastRecipient recipient;
     };
     std::vector<PendingBlastDamage> pending_blast_damage;
@@ -478,6 +483,13 @@ public:
     std::map<EntityId, CraftState> crafts;     // #75: squadron craft that fly by a craft profile
     std::map<EntityId, SquadronState> minds;   // #75: by container, squadrons of a known type
     std::map<EntityId, SpawnerState> spawners; // #75: hangars of SPAWN_SQUADRON units
+    struct FreeGarrisonState {
+        FreeGarrisonSetup setup;
+        std::vector<EntityId> registered;
+        std::optional<std::uint64_t> due_frame;
+        std::vector<TypeId> pending;
+    };
+    std::vector<FreeGarrisonState> free_garrisons; // FL-14: player order, committed only after successful ticks
     std::vector<DeathSpin> spins;              // #447: killed craft spinning away, ascending ID
     detail::CollectionTrees collection;        // #469: the candidate order of target scans
     detail::CollectionTrees projectile_collection; // DG-30: owned projectile-collidable history
@@ -491,6 +503,7 @@ public:
     std::map<PlayerId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
     std::vector<PlayerCommand> executed;
     std::map<PlayerId, ManualPlayerClock> manual_clocks; // WAD-40: shared across stations
+    std::vector<EntityId> projectile_defence_order; // coordinator-reserved PDEF; empty implies static creation order
     std::shared_ptr<const TacticalSnapshot> current_snapshot;
     std::uint64_t registry_emplacement_count{};
     std::function<void(std::string_view, bool)> commit_observer;

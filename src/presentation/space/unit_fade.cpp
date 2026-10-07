@@ -39,6 +39,42 @@ void ease(double& value, double& velocity, const double target, const double smo
 
 UnitFade::UnitFade(const UnitFadeLooks looks) : looks_(looks) {}
 
+void ProjectileHide::advance(const double tick, const bool limbo, const bool immediate, const Query& visible) {
+    if (limbo || !std::isfinite(tick) || (started_ && tick < last_tick_)) return;
+    if (!started_) {
+        started_ = true;
+        target_ = visible && visible();
+        value_ = target_ ? 1.0 : 0.0;
+        last_tick_ = checked_tick_ = tick;
+        return;
+    }
+    double frames = tick - last_tick_;
+    if (frames == 0.0) return;
+    last_tick_ = tick;
+    // WPJ-38: the sourced settled boundary is an absolute difference < 0.0001.
+    const bool transitioning = std::abs(value_ - (target_ ? 1.0 : 0.0)) >= 0.0001;
+    // Settled objects poll every 30 logical frames; moving transitions service
+    // every presented frame. Query work is bounded independently of catch-up.
+    if (transitioning || tick - checked_tick_ >= 30.0) {
+        target_ = visible && visible();
+        checked_tick_ = tick;
+    } else return;
+    // A newly changed settled target starts this service, not 30 frames ago.
+    if (!transitioning) frames = std::min(frames, 1.0);
+    const double target = target_ ? 1.0 : 0.0;
+    if (immediate) {
+        value_ = target;
+        velocity_ = 0.0;
+        return;
+    }
+    // WPJ-39 (debug build EUS-02): the hide service shares the unit presentation
+    // ease with a quarter-second smoothing time and initially zero velocity.
+    const double seconds = 1.0 / static_cast<double>(sim::tactical::logical_frames_per_second);
+    ease(value_, velocity_, target, UnitFadeLooks{}.smooth_seconds, seconds, std::floor(frames));
+    ease(value_, velocity_, target, UnitFadeLooks{}.smooth_seconds, seconds * (frames - std::floor(frames)));
+    value_ = std::clamp(value_, 0.0, 1.0);
+}
+
 void NebulaBlend::service(const bool contact) {
     ease(value_, velocity_, contact_ ? 1.0 : 0.0, 0.15,
         1.0 / static_cast<double>(sim::tactical::logical_frames_per_second));

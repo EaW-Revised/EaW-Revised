@@ -257,6 +257,14 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   squadron's first live craft's (squadron-icon height and evidence corrections), so the grid doesn't drop to 0 when its first craft dies.
   Unverified: which of the squadron's objects FoC takes the type from. The rows' direction
   (downward) is unverified.
+  **Deliberate deviation, owner 2026-10-06** (legacy EAWR-1733): the remake retains
+  each icon's slot in a four-column grid and retains the initial anchor height
+  until the cell has no joined squadrons, instead of FoC's count-dependent
+  re-pack. Vacancies fill without moving occupied slots; a return recovers its
+  old slot while it remains vacant. This avoids leave/rejoin jumps even when
+  occupancy crosses a square-root boundary. [WSU-36](walks/sensors-ui.md#squadron-icons-render-frame)
+  defines the slot lifetime and small-fight layout; the retail rule above is
+  unchanged as evidence.
 - WU-27. Project policy (unverified): the remake draws an icon's centre where FoC sets the icon's
   drag position; FoC's grid starts at the space map's box, which the remake does not load, so its
   grid starts at the world origin and has no edges; since the squadron dogfight pairing and chase work the sim flies the dogfights over
@@ -334,8 +342,31 @@ by this path: AO-02 sets the texture directly through the ability art lookup. Th
   then toggling between half and full size every three, whether or not the pointer is over the unit.
   The flash ends early when the hardpoint is destroyed. The cursor keeps its plain attack look (no
   hardpoint cursor).
-- Not drawn: the hovered hardpoint's tooltip ("Proton Torpedo Launcher - 100%" with a bar, retail
-  footage); fidelity list.
+- WU-51 (debug build; retail station-upgrade hover). A targetable reticle under the pointer
+  immediately shows its hardpoint's `Tooltip_Text`, resolved through the game's text database,
+  followed by ` - N%`. N is the nearest integer to 100 times current health divided by maximum
+  health, clamped to 0..100 (zero when maximum health is nonpositive). The world-reticle path
+  does not read `Tooltip_Delay`; that tag belongs to other tooltip paths. A flash alone does
+  not open a tooltip. Destroyed hardpoints have no reticle or tooltip. A disabled hardpoint
+  retained by a station level-up is still standing and shows the friendly grey repair reticle
+  and its tooltip, including 0%; enemies' disabled hardpoints have no reticle. Fog and invisible
+  enemy stealth suppress the owning unit and tooltip through the ordinary world UI admission.
+- WU-52 (debug build). The title uses `Tool_Tip_Font_Name` and `Tool_Tip_Font_Size`;
+  the health-bar row uses the height of `Tool_Tip_Small_Font_Name` and `Tool_Tip_Small_Font_Size`.
+  Effective data selects Arial at 7 and 5 points. The title and border are (51,113,190),
+  with border alpha 200; the background is (15,25,45), alpha 240. Below the title is a
+  health bar 0.1 of screen width, 0.4 of the small font row high, centred vertically in
+  that row: green (24,168,42) for the filled part and dark red (112,0,0) for the remainder.
+- WU-53 (debug build). The tooltip starts at pointer X and pointer Y + 32 pixels. Placement
+  clamps using the unpadded content width and height at 0.98 of screen width and height.
+  The frame then adds 0.0035 of screen width/height padding on each side, so its outer right
+  and bottom edges can extend two padding margins beyond that limit. The border is 0.0014
+  of screen height thick.
+  The remake shapes one cached title when its name, integer percentage or font size changes,
+  selecting the tooltip within the existing reticle pass, with no additional unit scan.
+  Missing text uses the established UI-T3 key fallback and records a diagnostic; missing font
+  data keeps the project's 7/5-point fallback. The current battle UI uses the English text
+  database, like its default tactical HUD language.
 
 ## Cases
 

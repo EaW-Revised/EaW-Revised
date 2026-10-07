@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <list>
 #include <map>
 #include <optional>
 #include <span>
@@ -39,8 +41,12 @@ struct SfxEvent final {
     int max_volume{100};
     int min_pitch{100};
     int max_pitch{100};
+    int min_pan{50};
+    int max_pan{50};
     int min_predelay_ms{};
     int max_predelay_ms{};
+    int min_postdelay_ms{};
+    int max_postdelay_ms{};
     double saturation_distance{300.0};  // Volume_Saturation_Distance
     double loop_fade_in_seconds{};
     double loop_fade_out_seconds{};
@@ -98,6 +104,31 @@ struct Space3D final {
 // slider times the master's (BA-45).
 inline constexpr double default_volume_slider = 0.75;
 
+// SND-60: Localize chooses the gain category independently of spatial mode or VO flags.
+struct MixLevels final {
+    double master{default_volume_slider};
+    double sfx{default_volume_slider};
+    double speech{default_volume_slider};
+    double music{default_volume_slider};
+};
+[[nodiscard]] double category_gain(const SfxEvent& event, const MixLevels& levels) noexcept;
+// SND-13: ordinary 2D one-shots continue through game pause.
+[[nodiscard]] bool pauses_with_game(const SfxEvent& event, bool spatial) noexcept;
+
+// SND-16/17: caller-supplied mode facts; default skirmish enables every category.
+struct Admission final {
+    bool localized{true};
+    bool unit_response{true};
+    bool hud{true};
+    bool ambient{true};
+    bool speech_stream{};
+    bool cinematic{};
+    bool story_cinematic{};
+    bool tutorial_tactical{};
+    bool demo_dialog{};
+    const SfxEvent* negative_feedback{};
+};
+
 // The gain of a 3D sample `distance` from the listener (BA-11): full inside the minimum distance
 // (Volume_Saturation_Distance times the mode factor, at least 1), then Miles' inverse-distance
 // rolloff min / (min + rolloff * (d - min)), silent past the maximum distance.
@@ -138,6 +169,14 @@ struct Start final {
         hidden,           // the object is fogged for the local player
         no_samples,       // the event names no sample
         no_voice,         // every voice busy with more important or nearer sounds
+        category_disabled,
+        cinematic_feedback,
+        hud_speech,
+        tutorial_hud,
+        demo_dialog,
+        delete_pending,
+        zero_gain,
+        attached_loop,
     };
     Result result{Result::playing};
     std::size_t voice{};                         // valid when playing
@@ -145,6 +184,8 @@ struct Start final {
     std::string sample;                          // the sample name chosen
     double volume{1.0};                          // Min_Volume..Max_Volume / 100
     double pitch{1.0};                           // Min_Pitch..Max_Pitch / 100
+    double pan{0.5};                             // Min_Pan2D..Max_Pan2D / 100
+    bool admitted{};                            // event gates passed, even if allocation fails
 };
 [[nodiscard]] std::string_view to_string(Start::Result result) noexcept;
 
@@ -154,17 +195,23 @@ struct Start final {
 class Voices final {
 public:
     static constexpr std::size_t voices_3d = 32;
-    static constexpr std::size_t voices_2d = 16;  // BA-09: the 2D pool size is not modelled
+    static constexpr std::size_t voices_2d = 16;  // SND-07
 
     struct Request final {
         const SfxEvent* event{};
         std::optional<Vec3> position;  // 3D events: where it plays
         bool hidden{};                 // the object it belongs to is fogged for the local player
+        bool forced{};
+        bool delete_pending{};
+        std::optional<double> started_at{}; // backend clock; omitted callers use admission sequence
     };
-    Start start(const Request& request, const Vec3& listener, Random& random);
+    Start start(const Request& request, const Vec3& listener, Random& random, const Admission& admission = {});
+    // SND-18: allocation after event admission, with values already drawn for this loop.
+    Start allocate(const Request& request, const Vec3& listener, Start sample);
     void finished(std::size_t voice);
     // SP-03: attached sounds move with their source; BA-05/BA-09 cull at that current position.
     void set_position(std::size_t voice, const Vec3& position);
+    void set_fading(std::size_t voice);
     // The voice's event, while it plays.
     [[nodiscard]] const SfxEvent* playing(std::size_t voice) const;
     [[nodiscard]] std::size_t playing_count() const;
@@ -175,10 +222,92 @@ private:
     struct Voice final {
         const SfxEvent* event{};
         Vec3 position{};
+        double started_at{};
+        bool fading{};
     };
     std::array<Voice, voices_3d + voices_2d> voices_{};
     std::map<const SfxEvent*, std::size_t> sequential_;
+    std::uint64_t starts_{};
 };
+
+// SND-03/05/08/09/18: presentation events outlive their current backend sample.
+// A service call makes at most one stage transition per retained event.
+class EventQueue final {
+public:
+    EventQueue() = default;
+    EventQueue(const EventQueue&) = delete;
+    EventQueue& operator=(const EventQueue&) = delete;
+    using Handle = std::uint64_t;
+    enum class Stage : std::uint8_t { initialize, predelay, pre, main, post, postdelay, complete, done };
+    struct Request final {
+        Voices::Request voice;
+        std::uint64_t attachment{};
+        bool continuous_main{}; // construction ownership, independent of authored finite loops
+    };
+    struct Accepted final {
+        Start::Result result{Start::Result::playing};
+        std::optional<Handle> handle;
+    };
+    struct Sample final {
+        Handle handle{};
+        Request request;
+        Start values;
+        Stage stage{Stage::main};
+        bool continuous{};
+    };
+    struct Chain final {
+        const SfxEvent* event{};
+        std::uint64_t attachment{};
+        bool runtime{};
+        bool attack{};
+    };
+    struct Backend final {
+        std::function<Start(const Sample&)> start;
+        std::function<bool(std::size_t)> playing;
+        std::function<void(std::size_t)> stop;
+        std::function<void(std::size_t)> fading;
+    };
+    Accepted admit(const Request& request, Random& random, const Admission& admission = {});
+    std::vector<Chain> service(double elapsed_ms, bool paused, const Vec3& listener, Random& random,
+                              const SfxRegistry& registry, const Backend& backend);
+    void stop(Handle handle, const Backend& backend, double fade_seconds = 0.0);
+    void detach(std::uint64_t source, const Backend& backend);
+    void set_position(Handle handle, const Vec3& position);
+    void chain(Handle handle, const SfxEvent* event, bool attack, std::uint64_t source);
+    void cancel_missing_chains(const std::function<bool(std::uint64_t)>& alive);
+    [[nodiscard]] bool active(Handle handle) const;
+    [[nodiscard]] double fade(Handle handle) const;
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+    [[nodiscard]] std::size_t instances(const SfxEvent* event) const;
+    [[nodiscard]] std::uint64_t completed_loops() const noexcept { return completed_loops_; }
+private:
+    struct Entry final {
+        Handle handle{};
+        Request request;
+        Stage stage{Stage::initialize};
+        std::optional<std::size_t> voice;
+        Start values;
+        double delay_ms{};
+        double postdelay_ms{};
+        int completed{};
+        bool fading{};
+        double fade_ms{};
+        double fade_remaining_ms{};
+        const SfxEvent* chained{};
+        bool attack{};
+        std::uint64_t chain_source{};
+    };
+    struct Cursors final { std::size_t pre{}, main{}, post{}; };
+    Entry* find(Handle handle);
+    std::list<Entry> entries_; // 2D head, 3D tail; spatial service orders by distance
+    std::map<Handle, Entry*> handles_;
+    std::map<const SfxEvent*, Cursors> cursors_;
+    Handle next_{1};
+    std::uint64_t completed_loops_{};
+};
+
+// SND-11: ordinary 2D/fixed-position playback does not use this multiplier.
+[[nodiscard]] double attached_gain(bool silent, bool model_hidden, bool fogged, bool story_cinematic) noexcept;
 
 // --- Unit responses -----------------------------------------------------------------------------
 
@@ -207,12 +336,26 @@ struct MusicEvent final {
 };
 [[nodiscard]] MusicEvent parse_music_event(std::string_view name, std::span<const Field> fields);
 
+// SND-54: first opposing-faction override, including an authored blank, else default.
+[[nodiscard]] std::string tactical_music_event(std::span<const Field> fields, bool won,
+                                              std::string_view opposing_faction);
+
+// SND-72: normalized envelope; ending streams fade from their retained level.
+struct MusicFade final {
+    double level{};
+    double slope{};
+    bool ending{};
+    void begin(double seconds);
+    void retire(double seconds);
+    void advance(double seconds);
+};
+
 // The battle's music mode (BA-41 to BA-43): ambient until a weapon fires with a local player's unit
 // as firer or target, battle from then until `peace_ticks` pass without one, then ambient again.
 // Each event plays its files in order, from where it last stopped, looping.
 class MusicDirector final {
 public:
-    enum class Mode : std::uint8_t { none, ambient, battle };
+    enum class Mode : std::uint8_t { none, ambient, battle, victory, defeat };
     struct Cue final {
         const MusicEvent* event{};
         std::string file;
@@ -226,6 +369,7 @@ public:
     std::optional<Cue> tick(bool attack, Random& random);
     // The playing track ended: the event's next file, when it loops.
     std::optional<Cue> track_ended();
+    std::optional<Cue> result(bool exact_local_winner, const MusicEvent* event);
     [[nodiscard]] Mode mode() const noexcept { return mode_; }
 
 private:

@@ -57,6 +57,7 @@ struct ScenarioUnit {
     bool observed{};     // spawn "observed": binds to a unit the session creates (#75)
     bool apply_initial_pose{}; // observed craft already present at tick zero: recorded world pose
     bool hold_fire{};    // staging "hold_fire": the recorder's Prevent_All_Fire (#536)
+    bool invulnerable{}; // staging Make_Invulnerable(true), space-damage DG-40
 };
 
 struct ScenarioHardpoint {

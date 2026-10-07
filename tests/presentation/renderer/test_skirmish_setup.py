@@ -7,10 +7,14 @@ import shutil
 from pathlib import Path
 import subprocess
 import struct
+import sys
 import tempfile
 import unittest
 import zipfile
 import xml.etree.ElementTree as ET
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_replay_cases import canonical_replay_header
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -364,12 +368,25 @@ class SkirmishSetupGpu(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="replay-policy-") as temporary:
             output = Path(temporary)
             replay = output / "policy.eawr-replay"
-            source = bytearray((ROOT / "tests/skirmish/fixtures/m2-start.eawr-replay").read_bytes())
-            # Independent v5 encoding: v3 squadron header plus one four-flag record.
+            recorded = (ROOT / "tests/skirmish/fixtures/m2-start.eawr-replay").read_bytes()
+            header, setup_start = canonical_replay_header(recorded, 3)
+            source = bytearray(header + recorded[setup_start:])
+            # Keep recorded setup metadata while replacing the four-flag policy record.
             self.assertEqual(int.from_bytes(source[8:10], "little"), 3)
             source[8:10] = (5).to_bytes(2, "little")
-            source[10:12] = (116).to_bytes(2, "little")
-            source[104:104] = bytes([1, 0, 0, 0, 1, 0, 4, 0, 3, 0, 0, 0])
+            extensions = [struct.pack("<HHI", 1, 4, 3)]
+            if setup_start > len(header):
+                count = struct.unpack_from("<I", recorded, len(header))[0]
+                offset = len(header) + 4
+                for _ in range(count):
+                    tag, length = struct.unpack_from("<HH", recorded, offset)
+                    end = offset + 4 + length
+                    if tag != 1:
+                        extensions.append(recorded[offset:end])
+                    offset = end
+            metadata = struct.pack("<I", len(extensions)) + b"".join(extensions)
+            source[10:12] = (len(header) + len(metadata)).to_bytes(2, "little")
+            source[len(header):len(header)] = metadata
             replay.write_bytes(source)
             report = output / "policy-replay.json"
             result = subprocess.run([

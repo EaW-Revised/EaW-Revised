@@ -52,8 +52,9 @@ core::Result<tactical::EconomyRules> economy_rules(
     const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor");
     const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration");
     const auto collision_distance = scalar("Space_Reinforcement_Collision_Check_Distance");
-    const auto start_tech = scalar("MP_Default_Start_Tech_Level");
-    const auto max_tech = scalar("MP_Default_Max_Tech_Level");
+    if (start.match.start_tech < 0 || start.match.max_tech < start.match.start_tech) {
+        return Result::failure(failure("invalid lobby tech levels"));
+    }
     if (!credits || !build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
         return Result::failure(failure("needs MP_Default_Credits, Tactical_Build_Time_Multiplier and the "
                                        "Space_Elevated_Vulnerability constants"));
@@ -71,6 +72,9 @@ core::Result<tactical::EconomyRules> economy_rules(
     // PU-01, PU-21, PU-34: the lobby players.
     for (const auto& player : start.players) {
         if (!player.lobby) continue;
+        if (!player.human && !tables.ai_credit_multiplier) {
+            return Result::failure(failure("AI credits require selected difficulty data"));
+        }
         const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
             [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
         if (faction == inputs.factions.end() || !faction->space_unit_cap) {
@@ -84,8 +88,9 @@ core::Result<tactical::EconomyRules> economy_rules(
         }
         rules.players.push_back(tactical::EconomyPlayer{
             player.player.player_id, *credits, *faction->space_unit_cap, !player.human, marker->yaw_degrees});
-        rules.players.back().start_tech = start_tech ? static_cast<std::uint32_t>(start_tech->raw() / Fixed::scale) : 0;
-        rules.players.back().max_tech = max_tech ? static_cast<std::uint32_t>(max_tech->raw() / Fixed::scale) : 0;
+        rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
+        rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
+        rules.players.back().credit_multiplier = tables.ai_credit_multiplier.value_or(Fixed::from_raw(Fixed::scale));
     }
     std::sort(rules.players.begin(), rules.players.end(),
         [](const tactical::EconomyPlayer& left, const tactical::EconomyPlayer& right) { return left.player < right.player; });

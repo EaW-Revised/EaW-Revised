@@ -69,7 +69,7 @@ void BattleInput::replay(const LiveSessionView::ScriptedInput& scripted) {
         for (const bool pressed : {true, false}) {
             Ref<InputEventMouseButton> event;
             event.instantiate();
-            event->set_button_index(MOUSE_BUTTON_WHEEL_DOWN);
+            event->set_button_index(scripted.key == "in" ? MOUSE_BUTTON_WHEEL_UP : MOUSE_BUTTON_WHEEL_DOWN);
             event->set_pressed(pressed);
             event->set_factor(1.0F);
             event->set_position(Vector2(viewport_[0] * 0.5F, viewport_[1] * 0.5F));

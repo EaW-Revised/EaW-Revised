@@ -1,5 +1,6 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../../src/sim/tactical/session_types.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -118,6 +119,204 @@ public:
         return execute(count, run);
     }
 };
+void test_transfer_boundary() {
+    // WNO-23/42: exercise upgrade notifications and capture completion in a live session.
+    for (const bool claim : {false, true}) {
+        std::vector<std::vector<std::uint8_t>> states;
+        std::vector<std::vector<std::uint8_t>> snapshots;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto start = setup();
+            start.units.back().owner = claim ? 4 : 1;
+            if (!claim) start.units.front().position = at(2000);
+            start.units.push_back({4, 40, 3, at(5000), m::identity_quat(), {}});
+            auto content = rules();
+            content.pads.capture.front().build_pad = false;
+            for (auto& menu : content.menus) {
+                menu.station_producer = true;
+                menu.options.front().kind = t::BuildKind::unit;
+            }
+            // The upgrade is held by an allied owner, not the capturing player.
+            content.players.back().population_cap = 10;
+            t::StationMenu station;
+            station.station = 40; station.faction = 300;
+            t::BuildOption upgrade;
+            upgrade.type = 90; upgrade.kind = t::BuildKind::upgrade;
+            upgrade.queue = t::BuildQueue::upgrades; upgrade.price = q(10);
+            upgrade.build_frames = 1; upgrade.ai_build_frames = 1; upgrade.available = true;
+            station.options.push_back(upgrade);
+            content.menus.push_back(station);
+            const auto half = Fixed::from_raw(one / 2);
+            content.upgrades = {{90, false, false, 0, {{1, {20}, {half, {}, {}, half, {}, {}}}}}};
+            auto health = durability();
+            health.profiles[1].max_hull = q(100);
+            health.profiles[1].hardpoints = {{t::HardpointRole::weapon, true, q(100)}};
+            const std::vector<t::SensorProfile> sensors{{20, q(1000)}};
+            auto made = t::TacticalSession::create(start, sensors, health, {}, {}, {}, {}, {}, content);
+            expect(static_cast<bool>(made), "WNO-42 transfer fixture creates");
+            if (!made) continue;
+            auto value = std::move(made).value();
+            expect(value.submit({{0, 3, 0}, {4}, t::BuyPayload{90}}).has_value(), "allied upgrade submits");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            steps(value, 8, executor);
+            expect(value.durability_state(3)->hull == q(claim ? 100 : 150),
+                "ordinary bonus gain adds maximum delta before transfer");
+            expect(value.submit({{8, 1, 1}, {3}, t::DamagePayload{q(claim ? 50 : 75)}}).has_value(),
+                "wound transferred point to half health");
+            expect(value.submit({{8, 1, 2}, {3}, t::DamagePayload{q(claim ? 50 : 75), 0}}).has_value(),
+                "wound transferred hardpoint to half health");
+            while (value.completed_tick() < 40) {
+                const auto result = value.step(executor);
+                expect(static_cast<bool>(result), "WNO-42 capture boundary step");
+                if (!result) break;
+                const auto tick = value.completed_tick();
+                const auto frame_events = result.value().snapshot->events();
+                if (workers == 1) {
+                    states.push_back(value.canonical_state_bytes());
+                    snapshots.push_back(result.value().snapshot->canonical_bytes());
+                } else {
+                    expect(value.canonical_state_bytes() == states[tick - 9], "WNO-42 1/2/4/8 state bytes");
+                    expect(result.value().snapshot->canonical_bytes() == snapshots[tick - 9],
+                        "WNO-42 1/2/4/8 snapshot and event bytes");
+                }
+                if (tick == 31) {
+                    expect(value.units()[2].owner == (claim ? 4U : 1U)
+                        && value.durability_state(3)->hull == q(claim ? 50 : 75),
+                        "WNO-23 transfer waits for the eighth four-frame service");
+                    expect(value.durability_state(3)->hardpoints[0] == q(claim ? 50 : 75),
+                        "WNO-42 hardpoint retains its wound before transfer");
+                    expect(value.build_allowed(1, 3, 30) == !claim && value.build_allowed(3, 3, 30) == !claim,
+                        "WNO-23 producer permissions use pre-transfer owner before completion");
+                }
+                if (tick == 32) {
+                    expect(value.units()[2].owner == (claim ? 1U : 4U)
+                        && value.durability_state(3)->hull == q(claim ? 75 : 50),
+                        "WNO-42 50/100 to 75/150 and reverse at capture completion");
+                    // On loss WHE-19 clamps to 75/100, then HS-04 removes
+                    // (75 - 50) * 75/100 because the restored hull is 50/100.
+                    const auto hardpoint = claim ? q(75) : Fixed::from_raw(225 * one / 4);
+                    expect(value.durability_state(3)->hardpoints[0] == hardpoint,
+                        "WNO-42 hardpoint notifications precede ordinary hull constraint");
+                    expect(std::count_if(frame_events.begin(), frame_events.end(), [](const auto& event) {
+                        return event.kind == t::EventKind::pad_captured;
+                    }) == 1, "WNO-23 one transfer event on completion");
+                    expect(value.production_counts(claim ? 1U : 4U, 20).owned_player == 1,
+                        "WNO-23 current-owner ownership index follows transfer");
+                    expect(value.build_allowed(1, 3, 30) == claim && value.build_allowed(3, 3, 30) == claim,
+                        "WNO-23 owner and allied producer permissions change at completion");
+                    const auto seen = std::find_if(result.value().snapshot->instances().begin(),
+                        result.value().snapshot->instances().end(), [](const auto& instance) { return instance.entity_id == 2; });
+                    expect(seen != result.value().snapshot->instances().end()
+                        && ((seen->visible_to & 1U) != 0) == claim, "WNO-23 reveal uses the new owner on completion");
+                }
+                if (tick >= 32) expect(value.durability_state(3)->hull == q(claim ? 75 : 50),
+                    "WNO-42 later services do not restore or apply owner bonuses twice");
+            }
+        }
+    }
+}
+
+void test_transfer_state() {
+    t::session_detail::LiveUnit converted;
+    converted.state = {3, 20, 1, at(0), m::identity_quat(), {t::OrderKind::attack, 0, {}, 2}};
+    converted.combat.emplace();
+    converted.combat->attack_target = 2; converted.combat->attack_hardpoint = 0; converted.combat->direct = true;
+    t::WeaponState weapon;
+    weapon.opportunity = {2, 17}; weapon.countdown = 19;
+    weapon.manual.emplace(); weapon.manual->target = 2;
+    weapon.manual->requesting_player = 1; weapon.manual->assigned_frame = 11;
+    weapon.manual->yaw = q(30);
+    converted.combat->weapons.push_back(weapon);
+    unsigned notifications{};
+    const auto notify = [&](const auto& unit) {
+        ++notifications;
+        expect(unit.state.owner == 3 && unit.state.order.kind == t::OrderKind::none
+            && unit.combat->attack_target == 2, "WNO-23 new owner notifies before target cleanup");
+        return eawr::core::Result<void>::success();
+    };
+    expect(t::session_detail::transfer_owner(converted, 1, notify).has_value() && notifications == 0
+        && converted.combat->attack_target == 2 && converted.combat->weapons[0].manual->requesting_player == 1
+        && converted.combat->weapons[0].manual->assigned_frame == 11, "WNO-23 same owner does not notify or clear");
+    const std::vector<t::SnapshotPlayer> relationships{{1, 0, false}, {2, 1, false}, {3, 0, false}};
+    expect(t::players_hostile(relationships, 3, 2), "WNO-42 old target stays hostile to converted owner");
+    expect(t::session_detail::transfer_owner(converted, 3, notify).has_value() && notifications == 1
+        && converted.combat->attack_target == 0 && !converted.combat->direct
+        && converted.combat->attack_hardpoint == t::no_hardpoint
+        && converted.combat->weapons[0].opportunity.target == 0 && converted.combat->weapons[0].manual->target == 0
+        && converted.combat->weapons[0].manual->requesting_player == 0
+        && converted.combat->weapons[0].manual->assigned_frame == 0,
+        "WNO-42 transfer clears all targets even when still hostile");
+    expect(converted.combat->weapons[0].countdown == 19
+        && converted.combat->weapons[0].opportunity.last_scan_frame == 17
+        && converted.combat->weapons[0].manual->yaw == q(30),
+        "WNO-42 transfer retains weapon service clocks");
+    auto start = setup();
+    start.units.front().position = at(2000);
+    start.units[1].type_id = 50; start.units[1].position = at(200);
+    start.units[1].rotation = {Fixed{}, Fixed{}, q(1), Fixed{}};
+    start.units.back().owner = 1;
+    start.units.push_back({4, 40, 3, at(5000), m::identity_quat(), {}});
+    auto content = rules();
+    content.pads.influence.push_back({50, false});
+    t::StationMenu station;
+    station.station = 40; station.faction = 300;
+    t::BuildOption upgrade;
+    upgrade.type = 90; upgrade.kind = t::BuildKind::upgrade; upgrade.queue = t::BuildQueue::upgrades;
+    upgrade.price = q(10); upgrade.build_frames = upgrade.ai_build_frames = 1; upgrade.available = true;
+    station.options.push_back(upgrade); content.menus.push_back(station);
+    const auto half = Fixed::from_raw(one / 2);
+    content.upgrades = {{90, false, false, 0, {{1, {20}, {half, {}, {}, half, {}, {}}}}}};
+    auto health = durability();
+    health.profiles[1].max_hull = health.profiles[1].max_shields = q(100);
+    t::DurabilityProfile shooter_health; shooter_health.type_id = 50; shooter_health.max_hull = q(100);
+    health.profiles.push_back(shooter_health);
+    t::DamageRules damage;
+    damage.shield_recharge_frames = 10000;
+    damage.diminishing = {{q(0), q(1)}, {q(1), q(1)}};
+    health.damage = damage;
+    t::WeaponProfile gun;
+    gun.range = q(1000); gun.pulse_count = 1; gun.cone_width = gun.cone_height = q(180);
+    t::CombatTable combat;
+    t::CombatProfile point; point.type_id = 20; point.category_bits = 1;
+    point.max_attack_distance = q(1000); point.weapons.push_back(gun);
+    point.collision = t::CollisionBox{at(-5, -5, -5), at(5, 5, 5)};
+    t::CombatProfile shooter = point; shooter.type_id = 50;
+    shooter.priority_set = 0;
+    shooter.weapons[0].shot = t::ShotProfile{q(75), t::no_type_index, q(100), q(1000), false, true, {}};
+    combat.profiles = {point, shooter};
+    // Manual attacks remain admitted while automatic scans exclude the wounded point.
+    combat.priority_sets = {{{{20, std::nullopt}}, q(1)}};
+    const std::vector<t::SensorProfile> sensors{{20, q(2000)}, {50, q(2000)}};
+    auto made = t::TacticalSession::create(start, sensors, health, {}, {}, combat, {}, {}, content);
+    expect(static_cast<bool>(made), "WNO-42 armed/shielded point fixture creates");
+    if (!made) { std::cerr << made.error().message << '\n'; return; }
+    auto value = std::move(made).value();
+    eawr::sim::InlineExecutor executor;
+    expect(value.submit({{0, 3, 0}, {4}, t::BuyPayload{90}}).has_value(), "shield owner bonus submits");
+    expect(value.submit({{8, 1, 1}, {3}, t::DamagePayload{q(75)}}).has_value(), "half shield wound submits");
+    expect(value.submit({{8, 1, 2}, {3}, t::AttackPayload{2}}).has_value(), "old point attack submits");
+    expect(value.submit({{8, 2, 0}, {2}, t::AttackPayload{3}}).has_value(), "one shield-bypassing hull hit submits");
+    expect(value.submit({{9, 2, 1}, {2}, t::StopPayload{}}).has_value(), "hull shooter stops after one shot");
+    steps(value, 31, executor);
+    expect(value.durability_state(3)->hull == q(75) && value.durability_state(3)->shields == q(75),
+        "WNO-42 point has half hull and shields before neutralization");
+    expect(value.combat_state(3)->attack_target == 2, "WNO-42 armed point retains old target before transfer");
+    steps(value, 32, executor);
+    expect(value.durability_state(3)->hull == q(50) && value.durability_state(3)->shields == q(50),
+        "WNO-42 neutralization preserves both half fractions");
+    expect(value.combat_state(3)->attack_target == 0 && !value.combat_state(3)->direct
+        && value.units()[2].order.kind == t::OrderKind::none
+        && value.combat_state(3)->weapons[0].opportunity.target == 0,
+        "WNO-42 object order and weapon targets leave on transfer");
+    expect(value.stage_spawn({0, 10, 1, at(0), m::identity_quat(), {}}).has_value(), "claim influence arrives");
+    steps(value, 64, executor);
+    expect(value.durability_state(3)->hull == q(75) && value.durability_state(3)->shields == q(75),
+        "WNO-42 wounded armed point claim restores both half fractions");
+    expect(value.submit({{64, 1, 3}, {3}, t::AttackPayload{2}}).has_value(), "new owner attack submits");
+    steps(value, 72, executor);
+    expect(value.combat_state(3)->attack_target == 2 && value.durability_state(3)->hull == q(75),
+        "WNO-23 same-owner capture services retain target and fractions");
+}
+
 void test_capture() {
     auto content = rules();
     const auto& profile = content.pads.capture.front();
@@ -206,6 +405,30 @@ void test_capture() {
             [](const auto& event) { return event.kind == t::EventKind::pad_captured; }),
         "U-BP-1 live-pad policy: lethal damage prevents same-frame capture");
 }
+void test_captured_pad_reveals_for_build() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto start = setup();
+        start.units[0].position = at(310);
+        start.units[1].position = at(1500);
+        auto content = rules();
+        content.pads.capture.front().radius = q(550);
+        const std::vector<t::SensorProfile> sensors{{10, q(1000), Fixed::from_raw(one / 5)}, {20, q(275)}};
+        t::FogRules fog{q(-2000), q(2000), q(100), 40, 40};
+        fog.dense_circles = {{at(0), q(1000)}};
+        auto value = t::TacticalSession::create(start, sensors, durability(), {}, fog, {}, {}, {}, content).value();
+        expect(!value.fog_cells()->revealed(0, at(10)), "V-22: scout cannot reveal the dense pad cell before capture");
+        steps(value, 32, executor);
+        expect(value.units().back().owner == 1, "WNO-35: stationary pad captures beyond scout dense sight");
+        expect(value.fog_cells()->revealed(0, at(10)) && value.fog_cells()->revealed(2, at(10)),
+            "V-23: captured pad reveals its own cell to owner and ally");
+        expect(value.submit({{610, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "WBP-09: captured-pad build submits");
+        steps(value, 611, executor);
+        expect(value.pads().at(3).under_construction != 0 && value.ledgers()[0].credits == q(900),
+            "WBP-09/V-23: captured pad builds and debits once without scout proximity changes");
+    }
+}
+
 void test_ship_class_capture() {
     // WBP-04/50/51: capture eligibility does not depend on the ship layer.
     for (const auto layer : {t::SpaceLayer::corvette, t::SpaceLayer::frigate, t::SpaceLayer::capital}) {
@@ -672,6 +895,26 @@ void test_sale() {
     }
 }
 
+void test_ai_sale_credits() {
+    for (const auto multiplier : {"0.5", "1.2"}) {
+        auto content = rules();
+        content.players.front().ai = true;
+        content.players.front().credit_multiplier = Fixed::from_decimal(multiplier).value();
+        content.pad_sales = {{40, Fixed::from_raw(one / 2)}};
+        content.menus.front().options.front().price = q(875);
+        content.pads.construction.front().price = q(875);
+        auto start = setup(); start.units.back().owner = 1;
+        auto value = session(start, content);
+        eawr::sim::InlineExecutor executor;
+        expect(value.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value(), "WPR-12 AI sale fixture builds");
+        steps(value, 31, executor);
+        expect(value.submit({{31, 1, 1}, {5}, t::PadSellPayload{}}).has_value(), "WPR-12 AI sale records");
+        steps(value, 32, executor);
+        expect(value.ledgers().front().credits == m::add(q(1000),
+            m::multiply(q(438), content.players.front().credit_multiplier).value()).value(),
+            "WPR-12/WBP-31: sale rounds its proceeds first, then applies the positive AI multiplier");
+    }
+}
 void test_sale_victory() {
     auto content = rules();
     content.pad_sales = {{40, Fixed::from_raw(one / 2)}};
@@ -1051,8 +1294,15 @@ void test_respawn() {
     auto cooldown = rules(); cooldown.pads.capture.front().rebuild_frames = 15;
     auto surviving = session(start, cooldown);
     expect(surviving.submit({{0, 1, 0}, {3}, t::PadBuildPayload{30}}).has_value()
-        && surviving.submit({{1, 1, 1}, {4}, t::DamagePayload{q(1000), t::attack_hull}}).has_value(), "surviving pad cooldown fixture");
-    steps(surviving, 2, executor);
+        && surviving.submit({{0, 1, 1}, {3}, t::DamagePayload{q(150)}}).has_value()
+        && surviving.submit({{1, 1, 2}, {4}, t::DamagePayload{q(1000), t::attack_hull}}).has_value(), "surviving wounded pad cooldown fixture");
+    steps(surviving, 1, executor);
+    const auto reclaimed = surviving.step(executor);
+    expect(reclaimed && std::any_of(reclaimed.value().snapshot->events().begin(), reclaimed.value().snapshot->events().end(),
+        [](const auto& event) { return event.kind == t::EventKind::pad_captured && event.unit == 3
+            && event.sequence == 1 && event.player == 4; }), "WNO-23 child-death reclamation notifies previous owner");
+    expect(surviving.durability_state(3)->hull == q(150) && surviving.durability_state(3)->shields == Fixed{},
+        "WNO-42 surviving unshielded pad keeps its wounded fraction");
     expect(surviving.units().back().owner == 4 && surviving.pads().at(3).cooldown_until == 16
         && t::pad_cooldown_progress(surviving.pads().at(3), 1).raw() == 0
         && t::pad_cooldown_progress(surviving.pads().at(3), 16) == q(1)
@@ -1198,6 +1448,9 @@ void test_determinism() {
 }
 }
 int main() {
+    test_captured_pad_reveals_for_build();
+    test_transfer_boundary();
+    test_transfer_state();
     test_capture();
     test_ship_class_capture();
     test_capture_allocations();
@@ -1211,6 +1464,7 @@ int main() {
     test_modifier_removal();
     test_modifier_rollback();
     test_sale();
+    test_ai_sale_credits();
     test_sale_victory();
     test_respawn();
     test_bulk_child_death_work();

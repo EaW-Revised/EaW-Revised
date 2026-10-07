@@ -1,6 +1,83 @@
 #include "economy_support.hpp"
 
+#include <limits>
+
 namespace economy_test_support {
+
+void test_credit_adjustments() {
+    for (const auto text : {"0.5", "1.0", "1.2"}) {
+        const auto multiplier = Fixed::from_decimal(text).value();
+        auto content = rules();
+        for (auto& player : content.players) player.credit_multiplier = multiplier;
+        const auto adjusted = [&](const Fixed amount) { return math::multiply(amount, multiplier).value(); };
+        auto player = content.players[1];
+        tactical::PlayerEconomy account;
+        account.credits = units(10);
+        expect(static_cast<bool>(tactical::change_credits(account, player, units(-11))) && account.credits == Fixed{},
+            "WPR-12: excessive debit floors at zero without difficulty scaling");
+        expect(static_cast<bool>(tactical::change_credits(account, player, units(20000)))
+            && account.credits == adjusted(units(20000)), "WPR-12: skirmish balance exceeds lobby and campaign caps");
+        const auto before = account.credits;
+        expect(static_cast<bool>(tactical::change_credits(account, player, units(-100)))
+            && account.credits.raw() == before.raw() - units(100).raw(), "WPR-12: AI debits are unscaled");
+        expect(static_cast<bool>(tactical::change_credits(account, player, Fixed{})), "WPR-12: zero change is allowed");
+
+        // Invalid production refunds use the same adjustment; human validity removal remains unpaid.
+        for (const bool computer : {false, true}) {
+            player.ai = computer;
+            account.credits = units(1000);
+            account.queues[0] = {{ship_type, ai_station, units(500), 100, 100}};
+            const auto removed = tactical::service_production(account, player, 1,
+                [](const auto&) { return false; }, [](const auto&) { return tactical::BuildKind::unit; });
+            expect(removed && account.queues[0].empty() && account.credits.raw() == units(1000).raw()
+                + (computer ? adjusted(units(500)).raw() : 0), "WPR-20/12: only AI validity removal refunds, at difficulty");
+        }
+        std::vector<std::string> expected;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto world = session(content);
+            if (!world) return;
+            for (const auto id : {human, ai}) {
+                const auto station = id == human ? human_station : ai_station;
+                expect(static_cast<bool>(world->submit(buy(0, id, 0, station, ship_type))), "WPR-12 buy records");
+                expect(static_cast<bool>(world->submit(cancel(1, id, 1, 0))), "WPR-12 refund records");
+                expect(static_cast<bool>(world->submit({{2, id, 2}, {}, tactical::CreditGrantPayload{units(20000)}})),
+                    "WPR-12 bonus records");
+            }
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            const auto rate = Fixed::from_raw(content.income[0].per_frame.raw() + content.income[0].bonuses[0].per_frame.raw());
+            for (std::uint64_t tick = 0; tick < 3; ++tick) {
+                const auto stepped = world->step(executor);
+                expect(static_cast<bool>(stepped), "WPR-12 credit tick succeeds");
+                if (!stepped) return;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto ai_expected = units(5500).raw() + (tick >= 1 ? adjusted(units(500)).raw() : 0)
+                    + (tick >= 2 ? adjusted(units(20000)).raw() : 0) + static_cast<std::int64_t>(tick + 1) * adjusted(rate).raw();
+                const auto human_expected = units(tick >= 2 ? 26000 : tick >= 1 ? 6000 : 5500).raw()
+                    + static_cast<std::int64_t>(tick + 1) * rate.raw();
+                expect(ledger(*world, ai)->credits.raw() == ai_expected && ledger(*world, human)->credits.raw() == human_expected,
+                    "WPR-12: income, explicit refund and bonus scale for AI only; starting cash and debit stay exact");
+            }
+            if (expected.empty()) expected = hashes;
+            expect(expected == hashes, "WPR-12: all difficulties agree on 1/2/4/8 workers");
+            auto replay = tactical::TacticalSession::from_replay(world->record(), sensors, {}, motion(), std::nullopt, {}, {}, {}, content);
+            expect(static_cast<bool>(replay), "WPR-12 difficulty replay binds");
+            if (replay) for (const auto& hash : hashes) {
+                const auto stepped = replay.value().step(executor);
+                expect(stepped && stepped.value().state_sha256 == hash, "WPR-12 credit adjustments replay exactly");
+            }
+        }
+    }
+    auto invalid = rules();
+    invalid.players[1].credit_multiplier = units(-1);
+    expect(!tactical::validate_economy(invalid, setup().players), "WPR-12 negative multiplier is rejected");
+    tactical::PlayerEconomy overflowing;
+    overflowing.credits = Fixed::from_raw(std::numeric_limits<std::int64_t>::max() - 1);
+    overflowing.queues[0] = {{ship_type, human_station, units(500), 100, 100}};
+    const auto before = overflowing;
+    const auto cancelled = tactical::cancel_build(overflowing, rules().players[0], tactical::BuildQueue::units, 0, 1);
+    expect(!cancelled && overflowing == before, "WPR-12: overflowing refund preserves balance and queue for transactional failure");
+}
 
 
 // PU-35: the lane table and its sum.
@@ -253,6 +330,104 @@ void test_cancel() {
         "WPR-31: immutable retained cue history is stable after completion");
     expect(ledger(*world, human)->pool == std::vector<tactical::TypeId>{squadron_type},
         "PC-03: the squadron completes 510 frames after the cancel made it the front");
+}
+
+// PU-17/63, WPR-31: the clicked identity survives completion and duplicate commands.
+void test_cancel_entry() {
+    auto content = rules();
+    content.income.clear();
+    for (auto& menu : content.menus) menu.options[0].build_frames = 1;
+    tactical::TacticalReplay replay;
+    replay.setup = setup();
+    replay.setup.queue_identities = true;
+    replay.final_tick_count = 3;
+    replay.commands = {buy(0, human, 0, human_station, ship_type),
+        buy(0, human, 1, human_station, squadron_type), buy(0, human, 2, human_station, squadron_type),
+        {{2, human, 3}, {}, tactical::CancelPayload{0, 0, 2}},
+        {{2, human, 4}, {}, tactical::CancelPayload{0, 0, 2}}};
+    const auto written = tactical::write_replay(replay);
+    expect(static_cast<bool>(written), "QIDS: cancel-by-entry replay writes");
+    if (!written) return;
+    const auto parsed = tactical::parse_replay(written.value());
+    expect(parsed && parsed.value() == replay, "QIDS: header and opcode 22 round-trip");
+    if (!parsed) return;
+    auto bad_version = written.value();
+    bad_version[112] = 2; // Only QIDS is present: its version follows the tag/length at offset 108.
+    expect(!tactical::parse_replay(bad_version), "QIDS: unsupported extension version is rejected");
+    auto bad_identity = written.value();
+    const auto last_record = bad_identity.size() - 52;
+    expect(bad_identity[last_record + 24] == 22, "QIDS: identity command uses reserved opcode 22");
+    std::fill_n(bad_identity.begin() + static_cast<std::ptrdiff_t>(last_record + 36), 8, std::uint8_t{});
+    expect(!tactical::parse_replay(bad_identity), "opcode 22 rejects zero identity without legacy fallback");
+    auto bad_reserved = written.value();
+    bad_reserved[last_record + 32] = 1;
+    expect(!tactical::parse_replay(bad_reserved), "opcode 22 rejects nonzero reserved word");
+    std::vector<std::string> baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = tactical::TacticalSession::create(parsed.value().setup, sensors, {}, motion(),
+            std::nullopt, {}, {}, {}, content);
+        expect(static_cast<bool>(created), "QIDS: session creates");
+        if (!created) return;
+        auto world = std::move(created).value();
+        for (const auto& command : parsed.value().commands)
+            expect(static_cast<bool>(world.submit(command)), "QIDS: command submitted");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::uint64_t tick = 0; tick < 3; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "QIDS: tick succeeds");
+            if (!stepped) return;
+            hashes.push_back(stepped.value().state_sha256);
+            hashes.push_back(stepped.value().snapshot->sha256());
+            if (tick == 0) {
+                const auto& queue = ledger(world, human)->queues[0];
+                expect(queue.size() == 3 && queue[1].entry_id == 2 && queue[2].entry_id == 3,
+                    "PU-17: identical B/C purchases have distinct snapshot identities");
+            }
+            if (tick == 1) expect(ledger(world, human)->queues[0].front().entry_id == 2,
+                "PU-17: A completes between the clicked snapshot and cancellation");
+            if (tick == 2) {
+                const auto events = stepped.value().snapshot->events();
+                expect(events.size() == 2 && events[0].kind == tactical::EventKind::order_accepted
+                    && events[1].reason == tactical::RejectReason::no_queue_entry,
+                    "PU-17: second click is refused instead of cancelling C");
+            }
+        }
+        const auto* account = ledger(world, human);
+        expect(account->queues[0].size() == 1 && account->queues[0].front().entry_id == 3
+            && account->queues[0].front().complete_frame == 512 && account->credits == units(4950),
+            "PU-17: B is cancelled/refunded once, C retains identity and starts at the cancel frame");
+        if (workers == 1) baseline = hashes;
+        else expect(hashes == baseline, "QIDS: replay state and snapshots match at 1/2/4/8 workers");
+    }
+    auto legacy = replay;
+    legacy.setup.queue_identities = false;
+    legacy.commands.resize(4);
+    legacy.commands.back().payload = tactical::CancelPayload{0, 1};
+    const auto old_bytes = tactical::write_replay(legacy);
+    expect(static_cast<bool>(old_bytes), "legacy index cancellation still writes opcode 10");
+    if (old_bytes) {
+        const auto old_parsed = tactical::parse_replay(old_bytes.value());
+        const auto reencoded = old_parsed ? tactical::write_replay(old_parsed.value())
+            : tactical::write_replay(tactical::TacticalReplay{});
+        expect(old_parsed && old_parsed.value() == legacy && reencoded && reencoded.value() == old_bytes.value(),
+            "legacy opcode 10 round-trips byte for byte without QIDS");
+        auto old_world = session(content);
+        if (old_world) {
+            for (const auto& command : legacy.commands) expect(static_cast<bool>(old_world->submit(command)), "legacy command submitted");
+            step_to(*old_world, 3);
+            expect(ledger(*old_world, human)->queues[0].front().entry_id == 2,
+                "legacy shifted index still cancels C, preserving historical replay behavior");
+            expect(!old_world->submit({{3, human, 5}, {}, tactical::CancelPayload{0, 0, 2}}),
+                "identity command cannot enter a legacy session with unhashed identities");
+        }
+    }
+    auto missing_extension = replay;
+    missing_extension.setup.queue_identities = false;
+    expect(!tactical::write_replay(missing_extension), "opcode 22 requires QIDS header");
+    auto noncanonical = replay;
+    std::get<tactical::CancelPayload>(noncanonical.commands.back().payload).index = 1;
+    expect(!tactical::write_replay(noncanonical), "opcode 22 reserved index must be zero");
 }
 
 // PU-18: a lost station's entries go; only an AI is refunded.

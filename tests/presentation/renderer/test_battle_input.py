@@ -49,15 +49,17 @@ from battle_input_camera_cases import BattleInputCameraCases
 from battle_input_order_cases import BattleInputOrderCases
 from battle_input_card_cases import BattleInputCardCases
 from battle_input_production_cases import BattleInputProductionCases
+from hardpoint_tooltip_cases import HardpointTooltipCases
+from hardpoint_repair_permission_cases import HardpointRepairPermissionCases
 
 
-class BattleInputSources(BattleInputSourceCases, unittest.TestCase):
+class BattleInputSources(BattleInputSourceCases, HardpointRepairPermissionCases, unittest.TestCase):
     pass
 
 
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "set EAWR_GODOT_VIEWER_RUNTIME_TEST, EAWR_GODOT_EXECUTABLE and EAWR_EAW_GAME_ROOT")
-class BattleInputGraphical(BattleInputRunner, BattleInputCameraCases, BattleInputOrderCases, BattleInputCardCases, BattleInputProductionCases, unittest.TestCase):
+class BattleInputGraphical(BattleInputRunner, BattleInputCameraCases, BattleInputOrderCases, BattleInputCardCases, BattleInputProductionCases, HardpointTooltipCases, unittest.TestCase):
     pass
 
 

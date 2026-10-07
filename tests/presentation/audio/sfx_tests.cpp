@@ -2,6 +2,7 @@
 // Synthetic inputs only; no game data.
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
+#include "eawr/presentation/audio/command_cues.hpp"
 
 #include <cmath>
 #include <cstddef>
@@ -104,6 +105,288 @@ std::vector<std::byte> wav(const std::uint16_t format, const std::uint16_t bits,
     return bytes;
 }
 
+audio::SfxEvent event(const std::string& name, bool three_d, int instances, int priority = 3);
+
+struct LifecycleRig final {
+    audio::Random random{73};
+    audio::SfxRegistry registry;
+    audio::Voices voices;
+    audio::EventQueue queue;
+    std::array<bool, audio::Voices::voices_3d + audio::Voices::voices_2d> playing{};
+    std::vector<audio::EventQueue::Sample> starts;
+    std::vector<audio::EventQueue::Chain> chains;
+    bool missing{};
+    std::uint64_t stops{};
+    audio::EventQueue::Backend backend() {
+        return {
+            [this](const audio::EventQueue::Sample& cue) {
+                starts.push_back(cue);
+                auto start = voices.allocate(cue.request.voice, {}, cue.values);
+                if (start.result == Result::playing) {
+                    playing[start.voice] = !missing;
+                    if (missing) {
+                        voices.finished(start.voice);
+                        start.result = Result::no_samples;
+                    }
+                }
+                return start;
+            },
+            [this](const std::size_t voice) { return playing[voice]; },
+            [this](const std::size_t voice) { playing[voice] = false; voices.finished(voice); ++stops; },
+            [this](const std::size_t voice) { voices.set_fading(voice); }
+        };
+    }
+    void step(const double ms = 0.0, const bool paused = false) {
+        const auto released = queue.service(ms, paused, {}, random, registry, backend());
+        chains.insert(chains.end(), released.begin(), released.end());
+    }
+    void pump(const int count) { for (int i = 0; i < count; ++i) step(); }
+    void finish() { playing.fill(false); }
+};
+
+void event_lifecycle() {
+    for (const bool spatial : {false, true}) {
+        for (const bool pre_sample : {false, true}) {
+            for (const int delay : {0, 100}) {
+                LifecycleRig rig;
+                auto cue = event("StartTiming", spatial, 1);
+                if (pre_sample) cue.pre_samples = {"intro"};
+                cue.min_predelay_ms = cue.max_predelay_ms = delay;
+                const auto position = spatial ? std::optional<audio::Vec3>{audio::Vec3{}} : std::nullopt;
+                const auto accepted = rig.queue.admit({{&cue, position}}, rig.random);
+                rig.step();
+                expect(accepted.handle && rig.starts.empty(), "loop initialization does not allocate a sample");
+                if (delay) {
+                    rig.step(99);
+                    expect(rig.starts.empty(), "authored predelay remains pending before expiry");
+                    rig.step(1);
+                    expect(rig.starts.empty(), "predelay expiry selects the next sample for the following service");
+                }
+                rig.step();
+                expect(rig.starts.size() == 1
+                       && rig.starts.front().stage == (pre_sample ? audio::EventQueue::Stage::pre : audio::EventQueue::Stage::main),
+                       "first sample starts on the next service without an empty pre-stage wait");
+            }
+        }
+    }
+    {
+        LifecycleRig rig;
+        auto response = event("Delayed", false, 1);
+        response.min_predelay_ms = response.max_predelay_ms = 100;
+        response.overlap_test = "BUSY";
+        const auto accepted = rig.queue.admit({{&response, std::nullopt, false}, 7}, rig.random);
+        expect(accepted.handle && rig.starts.empty() && rig.voices.playing_count() == 0, "admission precedes decoding/allocation");
+        expect(rig.queue.admit({{&response, std::nullopt, false}}, rig.random).result == Result::instance_limit, "queued event counts at instance limit");
+        auto overlapping = response;
+        expect(rig.queue.admit({{&overlapping, std::nullopt, false}}, rig.random).result == Result::overlap, "delayed event counts for overlap");
+        rig.step();
+        rig.step(99);
+        expect(rig.starts.empty(), "predelay uses elapsed milliseconds");
+        rig.step(1);
+        rig.step();
+        expect(rig.starts.size() == 1, "sample starts only after predelay");
+        rig.queue.detach(7, rig.backend());
+        expect(!rig.queue.active(*accepted.handle) && rig.voices.playing_count() == 0, "detachment stops the owned sample");
+        const auto queued = rig.queue.admit({{&response, std::nullopt, false}, 8}, rig.random);
+        rig.queue.detach(8, rig.backend());
+        rig.pump(8);
+        expect(queued.handle && rig.starts.size() == 1 && rig.queue.size() == 0, "detachment removes a queued event without later playback");
+    }
+    {
+        LifecycleRig rig;
+        auto staged = event("Stages", false, 1);
+        staged.play_sequentially = true;
+        staged.play_count = 2;
+        staged.samples = {"main0", "main1"};
+        staged.pre_samples = {"pre0", "pre1"};
+        staged.post_samples = {"post0", "post1"};
+        staged.min_volume = staged.max_volume = 61;
+        staged.min_pitch = staged.max_pitch = 123;
+        staged.min_pan = staged.max_pan = 17;
+        staged.min_postdelay_ms = staged.max_postdelay_ms = 50;
+        const auto handle = rig.queue.admit({{&staged, std::nullopt, false}}, rig.random).handle;
+        for (int loop = 0; loop < 2; ++loop) {
+            rig.pump(2); // initialize, pre
+            expect(rig.starts.back().values.sample == "pre" + std::to_string(loop), "pre cursor in turn");
+            rig.finish(); rig.pump(2); // completion, main
+            expect(rig.starts.back().values.sample == "main" + std::to_string(loop)
+                   && !rig.starts.back().continuous, "finite main plays once per event loop");
+            rig.finish(); rig.pump(2); // completion, post
+            expect(rig.starts.back().values.sample == "post" + std::to_string(loop), "post cursor in turn");
+            rig.finish(); rig.step();
+            rig.step(49);
+            expect(rig.queue.completed_loops() == static_cast<std::uint64_t>(loop), "postdelay precedes completed-loop count");
+            rig.step(1); rig.step();
+        }
+        expect(handle && !rig.queue.active(*handle) && rig.queue.completed_loops() == 2 && rig.starts.size() == 6,
+               "positive play count counts whole completed loops");
+        for (const auto& start : rig.starts) {
+            expect(near(start.values.volume, .61) && near(start.values.pitch, 1.23) && near(start.values.pan, .17),
+                   "pre/main/post use the same loop gain pitch and pan");
+        }
+        // Unequal pre/main sizes keep separate cursors; the next admission resynchronizes equals.
+        staged.pre_samples = {"short"};
+        const auto next = rig.queue.admit({{&staged, std::nullopt, false}}, rig.random).handle;
+        rig.pump(2); rig.finish(); rig.pump(2);
+        expect(next && rig.starts.back().values.sample == "main0", "main cursor retained across admissions");
+        rig.queue.stop(*next, rig.backend());
+        staged.pre_samples = {"pre0", "pre1"};
+        rig.queue.admit({{&staged, std::nullopt, false}}, rig.random);
+        rig.pump(2);
+        expect(rig.starts.back().values.sample == "pre1", "equal pre/main cursors synchronize at admission");
+    }
+    {
+        LifecycleRig rig;
+        auto loop = event("Loop", true, 8);
+        loop.play_count = -1;
+        loop.pre_samples = {"intro"};
+        const auto accepted = rig.queue.admit({{&loop, audio::Vec3{}}, 5}, rig.random);
+        expect(rig.queue.admit({{&loop, audio::Vec3{}}, 5}, rig.random).result == Result::attached_loop,
+               "duplicate loop refused before sample allocation");
+        rig.pump(2);
+        expect(!rig.starts.back().continuous, "loop pre sample is finite");
+        rig.finish(); rig.pump(2);
+        expect(rig.starts.back().continuous && rig.queue.completed_loops() == 0, "infinite main is continuous, not repeated one-shot restarts");
+        rig.queue.stop(*accepted.handle, rig.backend(), .2);
+        expect(rig.queue.instances(&loop) == 0, "fading-to-silence excluded from event admission count");
+        const auto replacement = rig.queue.admit({{&loop, audio::Vec3{}}, 5}, rig.random);
+        expect(replacement.handle.has_value(), "fading loop no longer blocks same attachment");
+        rig.step(100, true);
+        expect(near(rig.queue.fade(*accepted.handle), 1.0), "spatial pause freezes event fade");
+        rig.step(100);
+        expect(near(rig.queue.fade(*accepted.handle), .5), "fade advances in elapsed time");
+        rig.queue.detach(5, rig.backend()); rig.step();
+        expect(rig.queue.size() == 0 && rig.voices.playing_count() == 0, "destruction stops fading and queued replacement");
+    }
+    {
+        LifecycleRig rig;
+        std::vector<std::string> problems;
+        rig.registry.add("Authored", std::vector<audio::Field>{{"Is_3D", "No"}, {"Samples", "authored"}}, problems);
+        const auto* authored = rig.registry.find("Authored");
+        auto primary = event("Primary", false, 1);
+        auto assist = event("Assist", false, 1);
+        primary.chained = "Authored";
+        primary.min_postdelay_ms = primary.max_postdelay_ms = 100;
+        const auto handle = rig.queue.admit({{&primary, std::nullopt, false}}, rig.random).handle;
+        rig.queue.chain(*handle, &assist, true, 99);
+        rig.pump(3); rig.finish(); rig.pump(3);
+        expect(rig.chains.empty(), "runtime chain waits for whole event, including postdelay");
+        rig.step(100); rig.step();
+        expect(rig.chains.size() == 1 && rig.chains[0].event == &assist && rig.chains[0].runtime && rig.chains[0].attack,
+               "runtime 2D chain takes precedence over authored chain");
+        assist.probability = 0;
+        expect(rig.queue.admit({{rig.chains[0].event, std::nullopt, false}}, rig.random).result == Result::probability, "chains re-enter ordinary admission");
+        rig.chains.clear();
+        const auto again = rig.queue.admit({{&primary, std::nullopt, false}}, rig.random).handle;
+        rig.queue.chain(*again, &assist, false, 99);
+        rig.queue.cancel_missing_chains([](std::uint64_t) { return false; });
+        rig.pump(3); rig.finish(); rig.pump(3); rig.step(100); rig.step();
+        expect(rig.chains.size() == 1 && rig.chains[0].event == authored && !rig.chains[0].runtime,
+               "removed runtime chain source leaves authored fallback");
+        rig.chains.clear();
+        const auto cancelled = rig.queue.admit({{&primary, std::nullopt, false}}, rig.random).handle;
+        rig.queue.chain(*cancelled, &assist, false, 99);
+        rig.queue.stop(*cancelled, rig.backend()); rig.pump(20);
+        expect(rig.chains.empty(), "cancelled event releases no runtime or authored chain");
+    }
+    {
+        LifecycleRig rig;
+        auto source = event("Missing", false, 1);
+        rig.missing = true;
+        const auto handle = rig.queue.admit({{&source, std::nullopt, false}}, rig.random).handle;
+        rig.pump(2);
+        expect(handle && rig.queue.active(*handle) && rig.voices.playing_count() == 0, "missing sample is an allocation failure after accepted admission");
+        rig.step();
+        expect(!rig.queue.active(*handle), "finite failed allocation retires cleanly");
+    }
+    for (const auto failure : {Result::no_samples, Result::no_voice}) {
+        for (const bool runtime : {false, true}) {
+            LifecycleRig rig;
+            std::vector<std::string> problems;
+            rig.registry.add("Authored", std::vector<Field>{{"Is_3D", "No"}, {"Samples", "authored"}}, problems);
+            auto primary = event("FailedPrimary", false, 1, 5);
+            primary.play_count = 2;
+            primary.chained = "Authored";
+            auto assist = event("Runtime", false, 1);
+            auto occupied = event("Occupied", false, static_cast<int>(audio::Voices::voices_2d), 1);
+            rig.missing = failure == Result::no_samples;
+            if (failure == Result::no_voice) {
+                for (std::size_t slot = 0; slot < audio::Voices::voices_2d; ++slot) {
+                    expect(rig.voices.start({&occupied, {}}, {}, rig.random).result == Result::playing,
+                           "fill higher-priority voices before admitted allocation failure");
+                }
+            }
+            const auto handle = rig.queue.admit({{&primary, {}}}, rig.random).handle;
+            if (runtime) rig.queue.chain(*handle, &assist, true, 99);
+            rig.pump(8);
+            expect(handle && !rig.queue.active(*handle) && rig.queue.completed_loops() == 2
+                   && rig.starts.size() == 2, "admitted sample failure counts and repeats completed loops");
+            expect(rig.chains.size() == 1 && rig.chains[0].runtime == runtime
+                   && rig.chains[0].event == (runtime ? &assist : rig.registry.find("Authored")),
+                   "missing/capacity failure preserves runtime-before-authored completion chain");
+        }
+    }
+    expect(audio::attached_gain(false, false, true, true) == 1.0, "story cinematic bypasses attached fog");
+    expect(audio::attached_gain(false, false, true, false) == 0.0, "ordinary attached fog mutes");
+    expect(audio::attached_gain(true, false, false, true) == 0.0
+           && audio::attached_gain(false, true, false, true) == 0.0, "silence/model-hidden gates survive cinematic");
+    expect(audio::attached_gain(false, false, false, false) == 1.0, "reveal restores attached gain");
+}
+
+void stolen_event_completion() {
+    for (const bool spatial : {false, true}) {
+        for (const int count : {2, -1}) {
+            LifecycleRig rig;
+            auto victim = event("Victim", spatial, 1, 5);
+            victim.play_count = count;
+            auto assist = event("Runtime", false, 1);
+            const auto size = spatial ? audio::Voices::voices_3d : audio::Voices::voices_2d;
+            const auto first_slot = spatial ? 0 : audio::Voices::voices_3d;
+            auto occupied = event("Occupied", spatial, static_cast<int>(size) - 1, 1);
+            auto incoming = event("Incoming", spatial, 1, 1);
+            const auto position = spatial ? std::optional<audio::Vec3>{{10.0, 0.0, 0.0}} : std::nullopt;
+            const auto handle = rig.queue.admit({{&victim, position}, 42}, rig.random).handle;
+            rig.queue.chain(*handle, &assist, false, 99);
+            rig.pump(3);
+            expect(rig.voices.playing(first_slot) == &victim, "victim owns the first backend slot");
+            for (std::size_t slot = 1; slot < size; ++slot) rig.queue.admit({{&occupied, position}}, rig.random);
+            rig.pump(3);
+            const auto incoming_position = spatial ? std::optional<audio::Vec3>{{5.0, 0.0, 0.0}} : std::nullopt;
+            rig.queue.admit({{&incoming, incoming_position}}, rig.random);
+            rig.pump(2); // initialize, main; release capacity before the victim's next loop starts
+            expect(rig.voices.playing(first_slot) == &incoming && rig.playing[first_slot],
+                   "higher-priority sample steals the victim's slot");
+            expect(rig.queue.active(*handle) && rig.queue.completed_loops() == 1 && rig.chains.empty(),
+                   "stolen sample completes its current loop and retains finite/infinite event");
+            // Free a different slot while the thief keeps playing. Completion of
+            // the former owner must never stop or finish the reused first slot.
+            rig.playing[first_slot + 1] = false;
+            rig.pump(3);
+            std::size_t victim_starts = 0;
+            for (const auto& cue : rig.starts) if (cue.request.voice.event == &victim) ++victim_starts;
+            expect(victim_starts == 2 && rig.voices.playing(first_slot + 1) == &victim,
+                   "stolen event starts its next loop on a newly available slot");
+            expect(rig.voices.playing(first_slot) == &incoming && rig.playing[first_slot],
+                   "former event never controls the thief's reused slot");
+            if (count == 2) {
+                rig.playing[first_slot + 1] = false;
+                rig.pump(4);
+                expect(!rig.queue.active(*handle), "finite stolen event finishes after its second loop");
+                expect(spatial ? rig.chains.empty() : rig.chains.size() == 1
+                       && rig.chains[0].runtime && rig.chains[0].event == &assist,
+                       "finite stolen 2D event retains runtime completion chain");
+            } else {
+                expect(rig.starts.back().continuous, "infinite stolen main restarts continuously");
+                rig.queue.stop(*handle, rig.backend());
+                rig.step();
+                expect(!rig.queue.active(*handle) && rig.chains.empty(), "explicit stop cancels retained infinite event");
+            }
+            expect(rig.voices.playing(first_slot) == &incoming && rig.playing[first_slot],
+                   "retiring the former owner preserves the replacement sample");
+        }
+    }
+}
+
 void wave_files() {
     std::string error;
     const auto mono = wav(1, 16, 1, 100);
@@ -136,7 +419,7 @@ void falloff_and_listener() {
     expect(near(down.position[0], 5.0) && near(down.position[1], 7.0) && near(down.position[2], 60.0), "straight down");
 }
 
-audio::SfxEvent event(const std::string& name, const bool three_d, const int instances, const int priority = 3) {
+audio::SfxEvent event(const std::string& name, const bool three_d, const int instances, const int priority) {
     audio::SfxEvent result;
     result.name = name;
     result.is_3d = three_d;
@@ -233,6 +516,129 @@ void voice_rules() {
     }
 }
 
+void two_dimensional_pool() {
+    audio::Random random(17);
+    audio::Voices voices;
+    std::array<audio::SfxEvent, 16> pool{};
+    const audio::Vec3 listener{};
+    for (std::size_t index = 0; index < pool.size(); ++index) {
+        pool[index] = event("Pool" + std::to_string(index), false, 1, index == 3 || index == 9 ? 5 : 2);
+        const double clock = index == 9 ? 1.0 : 10.0 + static_cast<double>(index);
+        expect(voices.start({&pool[index], {}, false, false, false, clock}, listener, random).result == Result::playing,
+               "fill 2D slot");
+    }
+    auto incoming = event("Incoming", false, 32, 5);
+    auto result = voices.start({&incoming, {}}, listener, random);
+    expect(result.admitted && result.stopped == audio::Voices::voices_3d + 9, "equal priority steals oldest least important");
+    result = voices.start({&incoming, {}}, listener, random);
+    expect(result.stopped == audio::Voices::voices_3d + 3, "replacement resets age");
+    auto important = event("Important", false, 32, 1);
+    result = voices.start({&important, {}}, listener, random);
+    expect(result.stopped == audio::Voices::voices_3d + 9, "higher priority steals remaining least important oldest");
+    auto low = event("Low", false, 1, 5);
+    // Retire the remaining priority-5 voice, leaving only priority 1 and 2.
+    result = voices.start({&important, {}}, listener, random);
+    expect(result.stopped == audio::Voices::voices_3d + 3, "higher priority clears final priority-5 voice");
+    result = voices.start({&low, {}}, listener, random);
+    expect(result.result == Result::no_voice && result.admitted && !result.stopped, "lower priority admitted but not allocated");
+    pool[0].overlap_test = "BUSY";
+    low.overlap_test = "BUSY";
+    result = voices.start({&low, {}}, listener, random);
+    expect(result.result == Result::overlap && !result.admitted, "overlap refuses before allocation");
+    expect(voices.playing_count() == 16, "pool bounded after steals and refusals");
+    audio::Voices tied;
+    for (auto& sfx : pool) {
+        sfx.priority = 3;
+        sfx.overlap_test.clear();
+        expect(tied.start({&sfx, {}, false, false, false, 7.0}, listener, random).result == Result::playing, "fill tied pool");
+    }
+    low.priority = 3;
+    low.overlap_test.clear();
+    expect(tied.start({&low, {}}, listener, random).stopped == audio::Voices::voices_3d, "equal clocks retain first slot");
+    auto silent = event("Silent", false, 1, 1);
+    silent.play_sequentially = true;
+    silent.min_volume = silent.max_volume = 0;
+    result = tied.start({&silent, {}}, listener, random);
+    expect(result.result == Result::zero_gain && result.admitted && !result.stopped, "zero target gain never steals");
+    expect(result.sample == "A.wav", "silent allocation still draws the event sample");
+    silent.min_volume = silent.max_volume = 100;
+    expect(tied.start({&silent, {}}, listener, random).sample == "B.wav", "silent sample advances sequential cursor before refusal");
+}
+
+void category_admission_and_gain() {
+    audio::Random random(19);
+    const audio::Vec3 listener{};
+    for (const bool spatial : {false, true}) {
+        for (const bool localized : {false, true}) {
+            auto sfx = event("Category", spatial, 32);
+            sfx.localized = localized;
+            sfx.unit_response_vo = true;
+            audio::MixLevels levels{0.5, 0.4, 0.8, 0.1};
+            expect(near(audio::category_gain(sfx, levels), localized ? 0.4 : 0.2), "Localize chooses gain in both spatial modes");
+            levels.master = 0.25;
+            expect(near(audio::category_gain(sfx, levels), localized ? 0.2 : 0.1), "master multiplies category independently");
+            levels.speech = 0.2;
+            expect(near(audio::category_gain(sfx, levels), localized ? 0.05 : 0.1), "speech slider affects only localized WAVs");
+            levels.sfx = 0.8;
+            expect(near(audio::category_gain(sfx, levels), localized ? 0.05 : 0.2), "SFX slider affects only other WAVs");
+        }
+    }
+    auto sfx = event("Admission", false, 32);
+    audio::Voices voices;
+    audio::Admission policy;
+    policy.speech_stream = true;
+    sfx.hud_vo = true;
+    expect(voices.start({&sfx, {}}, listener, random, policy).result == Result::hud_speech, "HUD refused during retained MP3");
+    sfx.hud_vo = false;
+    sfx.unit_response_vo = true;
+    expect(voices.start({&sfx, {}}, listener, random, policy).result == Result::playing, "unit response has no MP3 exclusion");
+    for (int category = 0; category < 4; ++category) {
+        audio::Admission disabled;
+        sfx.localized = category == 0;
+        sfx.unit_response_vo = category == 1;
+        sfx.hud_vo = category == 2;
+        sfx.ambient_vo = category == 3;
+        disabled.localized = category != 0;
+        disabled.unit_response = category != 1;
+        disabled.hud = category != 2;
+        disabled.ambient = category != 3;
+        expect(voices.start({&sfx, {}, false, true}, listener, random, disabled).result == Result::category_disabled,
+               "forced request retains disabled category gate");
+        expect(voices.start({&sfx, {}}, listener, random, disabled).result == Result::category_disabled,
+               "ordinary request retains disabled category gate");
+    }
+    sfx.ambient_vo = false;
+    sfx.hud_vo = true;
+    sfx.max_instances = 0;
+    sfx.probability = 0;
+    sfx.overlap_test = "FORCED";
+    policy.demo_dialog = policy.tutorial_tactical = true;
+    expect(voices.start({&sfx, {}, false, true}, listener, random, policy).result == Result::playing,
+           "force bypasses instances, probability, HUD speech, tutorial and demo gates");
+    expect(voices.start({&sfx, {}, true, true}, listener, random, policy).result == Result::hidden, "force retains explicit fog gate");
+    expect(voices.start({&sfx, {}, false, true, true}, listener, random, policy).result == Result::delete_pending, "force retains delete gate");
+    policy.story_cinematic = true;
+    expect(voices.start({&sfx, {}, true, true}, listener, random, policy).result == Result::playing, "story cinematic bypasses explicit fog");
+    policy.negative_feedback = &sfx;
+    policy.cinematic = true;
+    expect(voices.start({&sfx, {}, false, true}, listener, random, policy).result == Result::cinematic_feedback, "force retains cinematic negative feedback gate");
+    policy = {};
+    sfx.max_instances = 32;
+    sfx.probability = 100;
+    sfx.overlap_test.clear();
+    policy.tutorial_tactical = true;
+    expect(voices.start({&sfx, {}}, listener, random, policy).result == Result::tutorial_hud, "tutorial HUD refusal");
+    policy = {};
+    policy.demo_dialog = true;
+    expect(voices.start({&sfx, {}}, listener, random, policy).result == Result::demo_dialog, "demo dialog refuses non-GUI");
+    sfx.gui = true;
+    expect(voices.start({&sfx, {}}, listener, random, policy).result == Result::playing, "demo dialog admits GUI");
+    expect(audio::pauses_with_game(sfx, true) && !audio::pauses_with_game(sfx, false), "pause spatial one-shots, keep 2D one-shots running");
+    sfx.play_count = -1;
+    expect(audio::pauses_with_game(sfx, false), "pause infinite 2D loop");
+    expect(near(audio::speech_sfx_gain(0.8, false, false), 0.8), "WAV response never starts MP3 ducking");
+}
+
 void attached_voice_positions() {
     audio::Random random(7);
     audio::Voices voices;
@@ -294,6 +700,49 @@ void music() {
     expect(cue && cue->file == "Imperial_Attack_1.MP3", "ambient continues with its next file");
     cue = director.tick(true, random);
     expect(cue && cue->file == "B.MP3", "battle resumes where it stopped");
+
+    const std::vector<Field> outcome_fields{
+        {"Music_Event_Tactical_Win", " DefaultWin "},
+        {"Music_Event_Tactical_Lose", " DefaultLose "},
+        {"Music_Event_Tactical_Win_Vs_Faction", "Empire, FirstWin"},
+        {"Music_Event_Tactical_Win_Vs_Faction", "Empire, SecondWin"},
+        {"Music_Event_Tactical_Win_Vs_Faction", "Underworld, "},
+        {"Music_Event_Tactical_Lose_Vs_Faction", "Empire, LoseEmpire"}};
+    expect(audio::tactical_music_event(outcome_fields, true, "Empire") == "FirstWin", "first exact faction wins");
+    expect(audio::tactical_music_event(outcome_fields, true, "Pirates") == "DefaultWin", "unmatched win default");
+    expect(audio::tactical_music_event(outcome_fields, false, "Pirates") == "DefaultLose", "unmatched lose default");
+    expect(audio::tactical_music_event(outcome_fields, true, "Underworld").empty(), "matched blank does not fall back");
+    expect(audio::tactical_music_event(outcome_fields, false, "Empire") == "LoseEmpire", "defeat override");
+    const auto victory = audio::parse_music_event("Win", std::vector<Field>{{"Files", "Win.MP3"}});
+    const auto defeat = audio::parse_music_event("Lose", std::vector<Field>{{"Files", "Lose.MP3"}});
+    cue = director.result(true, &victory);
+    expect(cue && cue->file == "Win.MP3" && cue->mode == audio::MusicDirector::Mode::victory, "exact local winner");
+    expect(!director.result(true, &victory), "repeated result does not restart");
+    expect(!director.tick(false, random), "quiet result does not switch to ambient");
+    cue = director.result(false, &defeat);
+    expect(cue && cue->file == "Lose.MP3" && cue->mode == audio::MusicDirector::Mode::defeat, "other winner selects lose");
+    expect(!director.result(true, nullptr) && director.mode() == audio::MusicDirector::Mode::defeat,
+           "blank selection preserves prior music mode");
+
+    audio::MusicFade fade;
+    fade.begin(2.0);
+    fade.advance(1.0);
+    expect(near(fade.level, 0.5), "half faded in");
+    fade.retire(2.0);
+    fade.advance(1.0);
+    expect(near(fade.level, 0.25), "partial fade keeps full duration");
+    fade.advance(1.0);
+    expect(near(fade.level, 0.0), "partial fade reaches zero at two seconds");
+    fade.begin(0.0);
+    fade.retire(2.0);
+    fade.advance(1.0);
+    expect(near(fade.level, 0.5), "full-level crossfade midpoint");
+    fade.advance(1.0);
+    expect(near(fade.level, 0.0), "full-level crossfade end");
+    fade.begin(2.0);
+    fade.retire(0.0);
+    fade.advance(1.0);
+    expect(std::isfinite(fade.level) && near(fade.level, 0.0), "zero level/duration remains finite");
 }
 
 void announcements() {
@@ -366,10 +815,53 @@ void announcements() {
 } // namespace
 
 int main() {
+    for (const auto cue : {audio::CommandCue::attack, audio::CommandCue::attack_move,
+                           audio::CommandCue::guard, audio::CommandCue::move}) {
+        expect(audio::command_cue_on_press(cue, true), "mode arming requests its cue");
+        expect(!audio::command_cue_on_press(cue, false), "mode disarming is silent");
+    }
+    expect(audio::command_cue_on_press(audio::CommandCue::stop, false), "stop cue does not depend on selection or mode");
+    expect(!audio::command_cue_on_press(audio::CommandCue::none, true), "executing a world order has no button cue");
+    const int asteroid = 1, nebula = 2, group = 3, ordinary = 4, assist = 5;
+    expect(audio::move_response(true, true, true, &asteroid, &nebula, &group, &ordinary) == &asteroid,
+           "asteroid wins overlapping hazard destinations");
+    expect(audio::move_response(true, true, true, static_cast<const int*>(nullptr), &nebula, &group, &ordinary) == &group,
+           "missing asteroid line skips nebula and falls through to group");
+    expect(audio::move_response(false, true, false, &asteroid, &nebula, &group, &ordinary) == &nebula,
+           "nebula line is used before ordinary movement");
+    expect(audio::move_response(false, true, false, &asteroid, static_cast<const int*>(nullptr), &group, &ordinary) == &ordinary,
+           "missing single-unit environment line falls through to ordinary");
+    expect(audio::assist_eligible(false, false, false), "different-type other selected object can assist");
+    expect(!audio::assist_eligible(true, false, false) && !audio::assist_eligible(false, true, false)
+           && !audio::assist_eligible(false, false, true), "speaker, same type and vehicle thief cannot assist");
+    audio::ResponseChains<int, 2> chains;
+    expect(!chains.complete(0).cue, "refused primary creates no chain");
+    chains.set(0, &assist, true, 7);
+    expect(chains.complete(1).cue == nullptr, "unrelated completion cannot release chain");
+    const auto completed = chains.complete(0);
+    expect(completed.cue == &assist && completed.attack && completed.source == 7 && !chains.complete(0).cue,
+           "natural completion releases the retained source once");
+    for (const bool attack : {false, true}) {
+        chains.set(0, &assist, attack, 7);
+        chains.set(1, &assist, attack, 8);
+        // Candidate 7 leaves between primary start and completion; candidate 8 stays live.
+        chains.cancel_missing([](const std::uint64_t source) { return source == 8; });
+        expect(!chains.complete(0).cue, "removed move/attack assist source cannot release at primary completion");
+        const auto surviving = chains.complete(1);
+        expect(surviving.cue == &assist && surviving.attack == attack && surviving.source == 8,
+               "unrelated source removal preserves the other pending move/attack assist");
+    }
+    chains.set(0, &assist, false, 7);
+    chains.cancel(0);
+    expect(!chains.complete(0).cue, "explicit cancellation removes pending assist");
     registry_and_presets();
+    event_lifecycle();
+    stolen_event_completion();
     wave_files();
     falloff_and_listener();
     voice_rules();
+    two_dimensional_pool();
+    category_admission_and_gain();
     attached_voice_positions();
     speakers();
     music();

@@ -59,22 +59,26 @@ core::Result<authoritative::TacticalOrder> translate_order(const authoritative::
         return authoritative::TacticalOrder{static_cast<tactical::PlayerId>(player.value()),
             std::move(units), std::move(payload)};
     };
-    if (command.verb == verb_credit_grant) {
+    if (command.verb == verb_credit_grant || command.verb == verb_reservation_debit) {
         const auto* value = std::get_if<LuaNumber>(&arguments[2].data);
         if (arguments.size() != 3 || value == nullptr) return bad("malformed credit grant");
         const auto amount = numeric::to_fixed(*value);
         if (!amount || amount.value().raw() <= 0) return bad("invalid credit grant");
+        if (command.verb == verb_reservation_debit)
+            return OrderResult::success(make_order({}, tactical::AiReservationDebitPayload{amount.value()}));
         return OrderResult::success(make_order({}, tactical::CreditGrantPayload{amount.value()}));
     }
     if (command.verb == verb_buy || command.verb == verb_pad_build || command.verb == verb_reinforce) {
         const Handle* type = as_handle(arguments[2], handle_type);
         if (type == nullptr) return bad("malformed production type");
         if (command.verb == verb_buy || command.verb == verb_pad_build) {
-            if (arguments.size() != 3) return bad("buy expects producer and type");
+            if (arguments.size() != 3 && !(command.verb == verb_buy && arguments.size() == 4
+                && std::get_if<bool>(&arguments[3].data) != nullptr)) return bad("buy expects producer and type");
             if (command.verb == verb_pad_build) {
                 return OrderResult::success(make_order({unit->id}, tactical::PadBuildPayload{type->id}));
             }
-            return OrderResult::success(make_order({unit->id}, tactical::BuyPayload{type->id}));
+            return OrderResult::success(make_order({unit->id}, tactical::BuyPayload{type->id,
+                arguments.size() == 4 && std::get<bool>(arguments[3].data)}));
         } else {
             if (arguments.size() != 4 && arguments.size() != 5 && arguments.size() != 7) return bad("reinforce expects type, position and optional purchase token and search metadata");
             const auto* token = arguments.size() >= 5 ? std::get_if<Handle>(&arguments[4].data) : nullptr;

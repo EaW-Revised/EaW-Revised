@@ -77,7 +77,8 @@ namespace {
 // What a projectile of a shielded unit can hit (BP-19): the collidable meshes and, while the
 // shield is up, the SHIELD mesh, as model-space triangles in the bind pose, each mesh placed by
 // its bone's bind frame.
-[[nodiscard]] std::vector<space::ShieldTriangle> collision_triangles(const assets::Model& model, const bool shield_only = false) {
+[[nodiscard]] std::vector<space::ShieldTriangle> collision_triangles(const assets::Model& model,
+    const bool shield_only = false, std::vector<std::uint32_t>* bones = nullptr) {
     std::vector<space::ShieldTriangle> result;
     const auto frames = units::bind_frames(model);
     for (const assets::Mesh& mesh : model.meshes) {
@@ -97,7 +98,10 @@ namespace {
             }
             return placed;
         };
+        const auto first = result.size();
         append_triangles(mesh, place, result);
+        if (bones != nullptr) bones->insert(bones->end(), result.size() - first,
+            mesh.bone < 0 ? 0U : static_cast<std::uint32_t>(mesh.bone));
     }
     return result;
 }
@@ -148,7 +152,32 @@ const assets::Texture* BattleEffects::resolve_texture(const std::string_view aut
 
 void BattleEffects::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::particles);
+    laser_scales_ = presentation_constants::load_lasers(*filesystem_);
     if (auto constants = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
+        // OF-01/02: retain the authored effects and space scale, including mod overrides.
+        constexpr std::array<std::string_view, 4> tags{"GUI_Move_Command_Ack_Effect",
+            "GUI_Double_Click_Move_Command_Ack_Effect", "GUI_Attack_Move_Command_Ack_Effect",
+            "GUI_Guard_Move_Command_Ack_Effect"};
+        for (const auto& child : constants.value().root.children) {
+            for (std::size_t index = 0; index < tags.size(); ++index) {
+                if (lower(child.name) != lower(tags[index])) continue;
+                data::tag_trace::used(child);
+                move_particles_[index] = trim(child.raw_text);
+            }
+            if (lower(child.name) == "gui_move_acknowledge_scale_space") {
+                data::tag_trace::used(child);
+                const auto values = numbers(child.raw_text);
+                if (!values.empty() && values.front() > 0.0F) move_scale_ = values.front();
+            }
+        }
+        for (const auto& particle : move_particles_) {
+            const auto* type = particle_type(particle);
+            if (!type || !type->system) continue;
+            for (const auto& emitter : type->system->emitters) {
+                static_cast<void>(resolve_texture(emitter.color_texture));
+                if (!emitter.normal_texture.empty()) static_cast<void>(resolve_texture(emitter.normal_texture));
+            }
+        }
         for (std::size_t index = 0; index < hero_beams_.size(); ++index) {
             auto& look = hero_beams_[index];
             const std::string prefix = index == 0 ? "Energy_Beam_" : "Tractor_Beam_";
@@ -162,7 +191,16 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
                 } else if (lower(child.name) == lower(prefix + "Color")) {
                     data::tag_trace::used(child);
                     const auto values = numbers(child.raw_text);
-                    if (values.size() >= 3) look.colour = {values[0], values[1], values[2], values.size() >= 4 ? values[3] : 1.0F};
+                    // TBF-01: these authored channels are bytes, not HDR multipliers.
+                    const auto channel = [](const float value) { return std::clamp(value, 0.0F, 255.0F) / 255.0F; };
+                    if (values.size() >= 3) look.colour = {channel(values[0]), channel(values[1]), channel(values[2]),
+                        values.size() >= 4 ? channel(values[3]) : 1.0F};
+                } else if (index == 1 && lower(child.name) == lower(prefix + "Frames")) {
+                    data::tag_trace::used(child);
+                    const std::string value = trim(child.raw_text);
+                    std::int32_t frames{};
+                    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), frames);
+                    if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size()) look.frames = frames;
                 }
             }
         }
@@ -176,10 +214,14 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
             return look;
         }
         const data::EffectiveObject& value = object.value();
+        const auto behaviours = type_list(value, "Behavior");
+        look.hide_when_fogged = std::any_of(behaviours.begin(), behaviours.end(),
+            [](const auto& name) { return lower(name) == "hide_when_fogged"; });
+        look.immediate_fog = truthy(tag(value, "Last_State_Visible_Under_FOW"));
         // BP-01: Projectile_Custom_Render 1 is the laser beam, 2 the laser kite; anything else
         // draws Space_Model_Name.
-        const std::string custom = tag(value, "Projectile_Custom_Render");
-        look.render = custom == "1" ? Render::beam : custom == "2" ? Render::kite
+        const int custom = presentation_constants::custom_render(tag(value, "Projectile_Custom_Render"));
+        look.render = custom == 1 ? Render::beam : custom == 2 ? Render::kite
             : tag(value, "Space_Model_Name").empty() ? Render::none : Render::model;
         const auto width = numbers(tag(value, "Projectile_Width"));
         const auto length_value = numbers(tag(value, "Projectile_Length"));
@@ -191,6 +233,8 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         if (colour.size() >= 4) look.colour = {colour[0] / 255.0F, colour[1] / 255.0F, colour[2] / 255.0F, colour[3] / 255.0F};
         look.detonation = tag(value, "Projectile_Object_Detonation_Particle");
         look.lifetime_detonation = tag(value, "Projectile_Lifetime_Detonation_Particle");
+        const auto death_explosions = type_list(value, "Death_Explosions");
+        if (!death_explosions.empty()) look.death_explosion = death_explosions.front();
         look.armor_reduced = tag(value, "Projectile_Object_Armor_Reduced_Detonation_Particle");
         look.shield_absorbed = tag(value, "Projectile_Absorbed_By_Shields_Particle");
         return look;
@@ -217,6 +261,10 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
     }
     for (const units::UnitType& type : tables.units) {
         TypeLooks looks;
+        for (std::size_t index = 0; index < type.death_projectiles.size(); ++index) {
+            looks.weapons.emplace(tactical::death_projectile_slot_flag | static_cast<std::uint32_t>(index),
+                look_of(type.death_projectiles[index]));
+        }
         for (const auto& ability : type.abilities)
             if (ability.type == "REPLENISH_WINGMEN") looks.replenish_particle = ability.replenish_particle;
         const tactical::CombatProfile* profile = combat.find(skirmish::type_id(type.id));
@@ -283,10 +331,19 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         if (type.scale_factor) looks.scale = to_float(*type.scale_factor);
         // BP-17, BP-19: only a shield takes a hit whole, so only shielded types need their
         // collision meshes and whether they have a SHIELD sub-object.
-        if ((type.shielded || !looks.asteroid_hits.empty()) && !type.model_path.empty()) {
+        if (!type.model_path.empty()) {
             if (auto model = assets::load_model(*filesystem_, type.model_path)) {
                 looks.shield_mesh = has_shield_mesh(model.value());
-                looks.collision = space::make_shield_collision_mesh(collision_triangles(model.value()));
+                if (type.shielded || !looks.asteroid_hits.empty()) {
+                    looks.collision = space::make_shield_collision_mesh(collision_triangles(model.value(), false, &looks.collision_bones));
+                }
+                // PS-02: the event's damaged hardpoint names the contact mesh; absent mesh uses bone 0.
+                for (const units::Hardpoint& hardpoint : type.hardpoints) {
+                    const auto mesh = std::find_if(model.value().meshes.begin(), model.value().meshes.end(),
+                        [&](const assets::Mesh& entry) { return lower(entry.name) == lower(hardpoint.collision_mesh); });
+                    looks.hardpoint_contact_bones.push_back(mesh == model.value().meshes.end() || mesh->bone < 0
+                        ? 0U : static_cast<std::uint32_t>(mesh->bone));
+                }
                 if (!looks.asteroid_hits.empty()) looks.asteroid_collision = space::make_shield_collision_mesh(
                     collision_triangles(model.value(), looks.shield_mesh));
             } else {
@@ -334,6 +391,7 @@ const BattleEffects::ParticleType* BattleEffects::particle_type(const std::strin
         const auto lifetime = numbers(tag(object.value(), "Particle_Lifetime_Frames"));
         type.lifetime_frames = lifetime.empty() ? 0U : static_cast<std::uint32_t>(std::max(0.0F, lifetime.front()));
         type.attached_to_collision = truthy(tag(object.value(), "Particle_Attach_To_Collision"));
+        type.decoration = truthy(tag(object.value(), "Is_Decoration"));
         if (model.empty()) {
             type.cause = "no Space_Model_Name";
         } else {

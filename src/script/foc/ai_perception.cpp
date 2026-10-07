@@ -372,6 +372,68 @@ Real normalised(Real value, Real normaliser) {
 
 } // namespace
 
+std::optional<Real> Engine::pad_count(const tactical::PlayerId player,
+    const std::vector<std::string>& names, const bool open) const {
+    std::vector<tactical::TypeId> types;
+    for (const auto& name : names) {
+        const auto found = host_->types_by_name.find(name);
+        if (found == host_->types_by_name.end()) return std::nullopt;
+        types.push_back(found->second->type_id);
+    }
+    if (host_->world == nullptr || host_->view == nullptr) return Real{};
+    const auto& world = *host_->world;
+    const auto& view = *host_->view;
+    const auto players = world.players();
+    const auto owner = std::find_if(players.begin(), players.end(),
+        [player](const auto& entry) { return entry.player_id == player; });
+    if (owner == players.end()) return Real{};
+    // WAS-10/11: copy query inputs, prepare disjoint pad rows, then reduce integers in order.
+    // Earlier goal reservations in this barrier are included; ownership/build-limit counts
+    // remain separate. This never introduces a serial entity census.
+    const std::vector<std::pair<sim::EntityId, tactical::PadState>> pads(world.pads().begin(), world.pads().end());
+    std::vector<std::int64_t> counts(pads.size());
+    const sim::InlineExecutor inline_executor;
+    prepare_rows(perception_executor_ != nullptr ? *perception_executor_ : inline_executor,
+        "ai-pad-perception", pads.size(), [&](const std::size_t index) {
+        const auto& [object, state] = pads[index];
+        const auto* pad = view.find(object);
+        if (pad == nullptr || !host_->allied(player, pad->owner) || host_->neutral(pad->owner)) return;
+        const auto reserved = pad_reservations_.find(object);
+        const bool pending_or_live = reserved != pad_reservations_.end()
+            && (!reserved->second.consumed || view.tick <= reserved->second.issued
+                || view.find(state.under_construction) != nullptr || view.find(state.constructed) != nullptr);
+        const auto reservation = pending_or_live && host_->allied(player, reserved->second.player)
+            ? reserved->second.type : tactical::TypeId{};
+        if (open) {
+            const auto* profile = world.economy().pads.point(pad->type);
+            if (reservation != 0 || profile == nullptr || !profile->build_pad
+                || view.tick < state.cooldown_until
+                || !tactical::pad_construction_allowed(*profile, state, player, players,
+                    view.capture_candidates, world.economy().pads, object, pad->position)) return;
+            const auto* menu = world.economy().menu(pad->type, owner->faction_id);
+            if (types.empty() || std::any_of(types.begin(), types.end(), [&](const auto type) {
+                return type == pad->type || (menu != nullptr && menu->find(type) != nullptr);
+            })) counts[index] = 1; // WAS-11: multiple matching filters still count once
+        } else {
+            for (const auto type : types) {
+                if (reservation != 0) {
+                    const auto* child = world.economy().pads.child(reservation);
+                    if (reservation == type || (child != nullptr && child->constructed == type)) ++counts[index];
+                } else {
+                    // WAS-10: without a stored reservation, inspect the actual children.
+                    for (const auto id : {state.constructed, state.under_construction}) {
+                        const auto* child = view.find(id);
+                        if (child != nullptr && child->type == type) ++counts[index];
+                    }
+                }
+            }
+        }
+    });
+    std::int64_t total = 0;
+    for (const auto count : counts) total += count;
+    return real(total);
+}
+
 struct Engine::Evaluator final : LookupResolver {
     const Engine& engine;
     const Context& context;
@@ -516,7 +578,7 @@ struct Engine::Evaluator final : LookupResolver {
             }
             return real(level);
         }
-        if (token == "CREDITSUNNORMALIZED") return account != nullptr ? fixed(account->credits) : Real{};
+        if (token == "CREDITSUNNORMALIZED") return fixed(host().credits(id));
         if (token == "UNITSPACEAVAILABLE") {
             return account != nullptr ? real(account->population_cap - std::min(account->population, account->population_cap)) : Real{};
         }
@@ -529,25 +591,11 @@ struct Engine::Evaluator final : LookupResolver {
             return total;
         }
         if (token == "TACTICALBUILTSTRUCTURECOUNT") {
-            std::int64_t total = 0;
-            if (host().world != nullptr) for (const auto& name : parameters.types) {
-                const auto type = host().types_by_name.find(name);
-                if (type != host().types_by_name.end()) total += static_cast<std::int64_t>(host().world->production_counts(id, type->second->type_id).owned_player);
-            }
-            return real(total);
+            return engine.pad_count(id, parameters.types, false);
         }
         if (token == "OPENBUILDPADCOUNT") {
-            std::int64_t total = 0;
-            if (host().world != nullptr) for (const auto& [object, state] : host().world->pads()) {
-                const auto* pad = view().find(object);
-                const auto* type = pad != nullptr ? host().type(pad->type) : nullptr;
-                if (pad == nullptr || type == nullptr || pad->owner != id || state.under_construction != 0 || state.constructed != 0) continue;
-                const auto* profile = host().world->economy().pads.point(pad->type);
-                if (profile == nullptr || !profile->build_pad) continue;
-                if (parameters.types.empty() || std::any_of(parameters.types.begin(), parameters.types.end(),
-                    [&](const std::string& name) { return name == type->name; })) ++total;
-            }
-            return real(total);
+            if (id != context.player) return std::nullopt; // WAS-11: self context only
+            return engine.pad_count(id, parameters.types, true);
         }
         if (token == "ISFACTION") {
             const auto found = host().players.find(id);

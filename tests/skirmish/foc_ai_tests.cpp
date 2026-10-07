@@ -1,5 +1,5 @@
 // The FoC tactical AI in the M2 battle (#79, docs/behaviour/foc-tactical-ai.md "#79 host"):
-// the Empire AI's retail freestore against an idle Rebel player on the pinned start. The
+// the Empire AI's retail freestore and goal engine against an idle Rebel player on the pinned start. The
 // fixture must give the same script commands, world events and state hashes on 1, 2, 4 and
 // 8 workers (ADR-009), a headless replay of its record must reproduce the world without
 // running a script, and the per-tick Lua load stays below the service budget. A real-time
@@ -141,6 +141,19 @@ std::optional<Content> load(const std::filesystem::path& root, bool rebel_ai = f
     auto start = skirmish::build_start(fixture, inputs.value());
     expect(static_cast<bool>(start), "FoC start builds");
     if (!start) return std::nullopt;
+    if (!rebel_ai) {
+        // FH-20/WHZ-50: this controlled two-faction engagement omits Hutt map fixtures.
+        // Their authored Structure category is a valid nearer target in the stock scene.
+        std::set<eawr::sim::EntityId> omitted;
+        for (const auto& unit : start.value().units) {
+            const auto owner = std::find_if(start.value().players.begin(), start.value().players.end(),
+                [&](const auto& player) { return player.player.player_id == unit.state.owner; });
+            if (unit.role == skirmish::UnitRole::map_object && owner != start.value().players.end()
+                && owner->faction == "Hutts") omitted.insert(unit.state.entity_id);
+        }
+        std::erase_if(start.value().units, [&](const auto& unit) { return omitted.contains(unit.state.entity_id); });
+        std::erase_if(start.value().setup.units, [&](const auto& unit) { return omitted.contains(unit.entity_id); });
+    }
     auto content = skirmish::session_content(tables.value(), skirmish::human_slots(fixture));
     expect(static_cast<bool>(content), "FoC session content builds");
     if (!content) return std::nullopt;
@@ -151,11 +164,11 @@ std::optional<Content> load(const std::filesystem::path& root, bool rebel_ai = f
     content.value().fog = fog.value();
     Content out{start.value(), std::move(content).value(), skirmish::victory_rules(start.value(), tables.value()),
         skirmish::ai_setup(start.value(), inputs.value(), tables.value()), {}, {}, {}};
-    if (rebel_ai) {
-        auto enabled = skirmish::enable_goal_system(filesystem.value(), out.ai);
-        expect(static_cast<bool>(enabled), "the Rebel goal system loads");
-        if (!enabled) return std::nullopt;
-    }
+    // FT-02/WNO-11: the freestore's regional fallback needs the perception/goal host
+    // when its forced nearest query finds no object. Match the production live AI setup.
+    auto enabled = skirmish::enable_goal_system(filesystem.value(), out.ai);
+    expect(static_cast<bool>(enabled), "the tactical goal system loads");
+    if (!enabled) return std::nullopt;
     auto modules = skirmish::ai_modules(filesystem.value(), out.ai);
     expect(static_cast<bool>(modules), "the AI's Lua files load: " + (modules ? std::string() : modules.error().message));
     if (!modules) return std::nullopt;
@@ -267,8 +280,25 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
     auto world = tactical::TacticalSession::create(content.start.setup, content.content.sensors, content.content.durability,
         content.content.motion, content.content.fog, content.content.combat, content.victory,
         content.content.abilities);
-    expect(static_cast<bool>(world), "the world is created");
+    expect(static_cast<bool>(world), "the world is created: "
+        + (world ? std::string() : world.error().code + " " + world.error().message));
     if (!world) return std::nullopt;
+    if (workers == 1) {
+        const auto snapshot = world.value().snapshot();
+        std::cout << "Initial object fog (snapshot player bits):";
+        for (std::size_t index = 0; index < snapshot->players().size(); ++index)
+            std::cout << " bit" << index << "=player" << snapshot->players()[index].player_id;
+        std::cout << '\n';
+        for (const auto& instance : snapshot->instances()) {
+            const auto name = content.type_names.find(instance.type_id);
+            std::cout << "  unit " << instance.entity_id << " owner " << instance.owner
+                      << " type " << (name == content.type_names.end() ? "(unknown)" : name->second)
+                      << " visible_to " << instance.visible_to << " x "
+                      << instance.fixed_transform.rows[0][3].trunc_to_integer() << " y "
+                      << instance.fixed_transform.rows[1][3].trunc_to_integer() << " reveal_range "
+                      << (instance.reveal_range ? instance.reveal_range->trunc_to_integer() : 0) << '\n';
+        }
+    }
     auto session = foc::create_session(std::move(world).value(), content.ai, content.modules);
     expect(static_cast<bool>(session), "the AI session is created: " + (session ? std::string() : session.error().code + " " + session.error().message));
     if (!session) return std::nullopt;
@@ -319,11 +349,79 @@ std::optional<Run> run(const Content& content, std::size_t workers, std::uint64_
     return out;
 }
 
+// FH-20: category search admits Hutt structures independently of R-09 opportunity priority.
+void hutt_nearest_probe(const Content& content) {
+    Content probe = content;
+    probe.ai.xml.clear(); // This probe isolates the nearest binding from independent plans.
+    const auto resource = skirmish::type_id("Orbital_Resource_Container");
+    const auto type = std::find_if(probe.ai.content.types.begin(), probe.ai.content.types.end(),
+        [&](const auto& entry) { return entry.type_id == resource; });
+    const auto property = probe.ai.content.properties.find("NOTOPPORTUNITYTARGET");
+    expect(type != probe.ai.content.types.end() && property != probe.ai.content.properties.end()
+        && (type->property_bits & property->second) != 0 && !type->space_evaluator,
+        "FH-20: stock Hutt resource retains its opportunity exclusion and no goal evaluator");
+    const auto source = std::find_if(probe.ai.content.types.begin(), probe.ai.content.types.end(),
+        [&](const auto& entry) { return entry.type_id == skirmish::type_id("Acclamator_Assault_Ship"); });
+    expect(source != probe.ai.content.types.end() && source->locomotor && !source->star_base,
+        "FH-13: the nearest probe source enters the freestore");
+    const auto at = [](const std::int64_t x) {
+        return eawr::sim::math::Vec3{eawr::sim::math::Fixed::from_raw(x * eawr::sim::math::Fixed::scale), {}, {}};
+    };
+    probe.start.setup.units = {
+        {1, skirmish::type_id("Acclamator_Assault_Ship"), 2, at(0), eawr::sim::math::identity_quat(), {}},
+        {2, resource, 7, at(100), eawr::sim::math::identity_quat(), {}},
+        {3, resource, 4, at(50), eawr::sim::math::identity_quat(), {}},
+        {4, skirmish::type_id("Skirmish_Rebel_Star_Base_1"), 1, at(1000), eawr::sim::math::identity_quat(), {}}};
+    probe.start.setup.squadrons.clear();
+    // FL-14: this query-only fixture replaces the starting companies, so their
+    // registered objects and replenishment templates no longer belong to it.
+    probe.start.setup.free_garrisons.clear();
+    probe.start.units.clear();
+    probe.content.fog.reset();
+    probe.victory = {};
+    probe.ai.freestore_module = "Data/Scripts/Test/HuttNearestProbe.lua";
+    probe.modules[probe.ai.freestore_module] =
+        "function Base_Definitions()\n"
+        "  ServiceRate = 0\n"
+        "  UnitServiceRate = 0\n"
+        "end\n"
+        "function main() end\n"
+        "function On_Unit_Service(object)\n"
+        "  if target_ordered then return end\n"
+        "  target = Find_Nearest(object, \"Structure | Capital\", PlayerObject, false)\n"
+        "  if target then\n"
+        "    object.Attack_Target(target)\n"
+        "    target_ordered = true\n"
+        "  end\n"
+        "end\n";
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const auto result = run(probe, workers, 120);
+        expect(result.has_value(), "FH-20: nearest Hutt probe runs");
+        if (!result) continue;
+        std::size_t found = 0;
+        for (const auto& command : result->record.commands) {
+            if (const auto* attack = std::get_if<tactical::AttackPayload>(&command.payload)) {
+                expect(attack->target == 2, "FH-20: nearest non-neutral Hutt structure wins over neutral scenery and farther starbase");
+                ++found;
+            }
+        }
+        expect(found == 1, "FH-20: the initial nearest search returns the Hutt structure despite opportunity exclusion");
+        expect(result->diagnostics.empty(), "FH-20: the focused nearest script runs without diagnostics");
+        std::cout << "Hutt nearest probe: " << workers << " workers, " << found << " attacks, "
+                  << result->commands.size() << " routed commands\n";
+        for (const auto& diagnostic : result->diagnostics) std::cout << diagnostic << '\n';
+        if (workers == 1) reference = result->hashes;
+        else expect(result->hashes == reference, "FH-20: Hutt nearest probe hashes agree on 1/2/4/8 workers");
+    }
+}
+
 // #76 (space-abilities.md AB-44): a stand-in freestore that asks each of the AI's units for
 // POWER_TO_WEAPONS through the Lua ability calls. The requests reach the world as ability
 // commands, the same on 1 and 2 workers, and the record replays them without the script.
 void ability_probe(const Content& content) {
     Content probe = content;
+    probe.ai.xml.clear(); // This probe isolates explicit ability requests from independent plans.
     probe.ai.freestore_module = "Data/Scripts/Test/AbilityProbe.lua";
     probe.modules[probe.ai.freestore_module] =
         "function Base_Definitions()\n"
@@ -529,8 +627,7 @@ int main(int argc, char** argv) {
                   << " in the 60 ticks after the pause\n";
     }
 
-    // The plans step: every selected plan loads and runs its definition load through the same
-    // bindings; the goal system that would start them is not hosted (#78 trigger).
+    // Every selected plan also loads its definitions through the same production bindings.
     auto files = content->plan_modules;
     auto plans = foc::inspect_plans(content->ai, files);
     expect(static_cast<bool>(plans), "the selected plans are inspected");
@@ -545,6 +642,7 @@ int main(int argc, char** argv) {
     }
     for (const auto& line : foc::unsupported_plan_calls()) std::cout << "unsupported: " << line << '\n';
 
+    hutt_nearest_probe(*content);
     ability_probe(*content);
 
     if (failures != 0) {

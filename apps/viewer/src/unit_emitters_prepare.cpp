@@ -172,6 +172,20 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
                               const std::span<const scene::HardpointState> states, const Modes modes) {
     const assets::Model* model = nullptr;
     const ModelFrames* frames = model_frames(placement, model);
+    // BP-70: root particle projectiles have no mesh or proxy bone; their emitter
+    // uses the projectile's model transform, including Scale_Factor.
+    if (model == nullptr && view.projectile && cache_.particle_system(placement.model_path)) {
+        const EffectSystem& system = effect_system(placement.model_path);
+        Wanted wanted{proxy_base, placement.model_declared, placement.model_path,
+            attachment, static_cast<std::uint32_t>(plan_seed) + static_cast<std::uint32_t>(view.entity), system.capacity};
+        wanted.size_scale = static_cast<float>(placement.scale_raw) / static_cast<float>(sim::math::Fixed::scale);
+        if (!system.system) {
+            wanted.failed = true;
+            ++start_failed_[wanted.effect + ": " + system.cause];
+        }
+        ship.wanted.push_back(std::move(wanted));
+        return;
+    }
     if (model == nullptr || frames == nullptr || model->proxies.empty()) return;
     std::vector<particles::EffectEvidence> effects(model->proxies.size());
     for (std::size_t ordinal = 0; ordinal < model->proxies.size() && ordinal < placement.effects.size(); ++ordinal) {

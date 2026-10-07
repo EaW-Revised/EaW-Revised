@@ -256,7 +256,8 @@ namespace {
         return input;
     }
     if (input.kind == "wheel") {
-        if (target != "out" || input.shift || input.ctrl || input.alt) return std::nullopt;
+        if ((target != "out" && target != "in") || input.shift || input.ctrl || input.alt) return std::nullopt;
+        input.key = target;
         return input;
     }
     if (input.kind == "box") {
@@ -295,10 +296,11 @@ namespace {
         };
         const std::string_view hud = input.hud;
         const bool time = hud == "begin" || hud == "pause" || hud == "fast_forward" || hud == "resume" || hud == "quit";
+        const bool order = hud == "attack" || hud == "attack_move" || hud == "move" || hud == "stop" || hud == "guard";
         const bool production = hud == "b_reinforcement" || hud == "r_close" ||
                                 (hud.size() == 6 && hud.substr(0, 2) == "r_" && digits(hud.substr(2))) ||
                                 (hud.size() == 8 && hud.substr(0, 6) == "tqueue" && digits(hud.substr(6)));
-        if (!time && !production) return std::nullopt;
+        if (!time && !production && !order) return std::nullopt;
         if (input.shift || input.ctrl || input.alt) return std::nullopt;
         return input;
     }
@@ -515,8 +517,8 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:<click|rclick>:minimap=x,y or <tick>:box:minimap=x,y/minimap=x,y, "
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
-                    "or <tick>:wheel:out, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN>; "
+                    "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|stop|guard>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));

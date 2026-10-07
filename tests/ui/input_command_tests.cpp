@@ -503,6 +503,22 @@ int main() {
     }
     command_sink_contracts();
     {
+        auto barrage = intent(ui::TacticalVerb::ability, {91});
+        barrage.unit_ability = tactical::AbilityKind::barrage;
+        barrage.ability_action = tactical::AbilityAction::activate;
+        barrage.destination = {eawr::sim::math::Fixed::from_raw(17), eawr::sim::math::Fixed::from_raw(-31), {}};
+        const auto payload = ui::command_payload(barrage);
+        const auto* area = payload ? std::get_if<tactical::AreaAbilityPayload>(&payload.value()) : nullptr;
+        expect(area && area->ability == tactical::AbilityKind::barrage && area->point == barrage.destination,
+            "WAD-38: BARRAGE world point becomes the admitted area command without an object target");
+        barrage.ability_action = tactical::AbilityAction::deactivate;
+        const auto ended = ui::command_payload(barrage);
+        const auto* ability = ended ? std::get_if<tactical::AbilityPayload>(&ended.value()) : nullptr;
+        expect(ability && ability->ability == tactical::AbilityKind::barrage
+            && ability->action == tactical::AbilityAction::deactivate && !ability->position,
+            "WAD-38: BARRAGE cancellation retains its ordinary ability command");
+    }
+    {
         auto weaken = intent(ui::TacticalVerb::ability, {91});
         weaken.unit_ability = tactical::AbilityKind::weaken_enemy;
         weaken.ability_action = tactical::AbilityAction::activate;
@@ -515,6 +531,21 @@ int main() {
         const auto ended = ui::command_payload(weaken);
         expect(ended && !std::get<tactical::AbilityPayload>(ended.value()).position,
             "a non-activation carries no world point");
+    }
+    {
+        ui::CommandScheduler scheduler(local_player);
+        auto repair = intent(ui::TacticalVerb::repair_hardpoint, {91});
+        repair.hardpoint = 3;
+        expect(static_cast<bool>(scheduler.issue(repair)), "WSL-40: repair click schedules one station");
+        const auto commands = scheduler.take(0);
+        expect(commands.size() == 1 && commands[0].key.player_id == local_player
+            && commands[0].units == std::vector<sim::EntityId>{91}
+            && std::get<tactical::RepairHardpointPayload>(commands[0].payload).hardpoint == 3,
+            "WSL-40: scheduler stamps the station, index and paying player for replay");
+        repair.units = {91, 92};
+        expect(!scheduler.issue(repair), "WSL-40: repair rejects multiple stations");
+        repair.units = {91}; repair.hardpoint = tactical::attack_hull;
+        expect(!scheduler.issue(repair), "WSL-40: repair requires a hardpoint rather than hull");
     }
     command_scheduler_cross_thread();
     input_routing_contracts();

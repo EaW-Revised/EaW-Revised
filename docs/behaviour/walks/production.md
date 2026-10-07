@@ -83,7 +83,7 @@ Production has no per-unit update. It runs in four places:
 | Rule | Behaviour | Source | Existing | Ours |
 |---|---|---|---|---|
 | WPR-01 | Each player starts with the lobby's credits: `MP_Default_Credits` (6000). `Min_Skirmish_Credits` (2000) and `Max_Skirmish_Credits` (8000) bound the starting-credit option, not the balance earned in battle. Lobby activation clamps a remembered starting amount to these bounds; incoming skirmish options are accepted only inside the inclusive range. | data; debug build EEC-18/19 | same (PU-01); missing explicit distinction from a battle cap | does default credits (skirmish economy.cpp `economy_rules`); lobby validation is a separate interface. |
-| WPR-02 | Each player starts at the lobby's tech level (`MP_Default_Start_Tech_Level`) with its maximum (`MP_Default_Max_Tech_Level`). A station level-up (WPR-52) or an upgrade that authors `Tactical_Build_Increments_Tech_Level` (WPR-22) raises it. The tactical build test does not read it (WPR-20). What else reads it in battle is walk 6's. | debug build WP-09, WP-13, WP-17 | missing there | does: initialized/capped from the lobby constants; explicit upgrades and station replacements raise it. |
+| WPR-02 | Each player starts at the lobby's tech level (`MP_Default_Start_Tech_Level`) with its maximum (`MP_Default_Max_Tech_Level`). A station level-up (WPR-52) or an upgrade that authors `Tactical_Build_Increments_Tech_Level` (WPR-22) raises it. The tactical build test does not read it (WPR-20). What else reads it in battle is walk 6's. | debug build WP-09, WP-13, WP-17 | missing there | does: selected lobby tech and maximum bind every account; explicit upgrades raise same-faction allies and station replacements raise all allies, capped per account. |
 | WPR-03 | **Starting forces.** Each listed starting-forces type is placed at the player's spawn markers in turn, round-robin, as a company in free space near the marker (legacy EAWR-597). Placement takes no credits and does **not** register the units in the population. The first marker's facing becomes the player's reinforcement facing (WPR-32). | debug build WP-01, WP-02 | differs: PU-22 rests on one HUD capture and calls it unverified; the debug build settles it the same way | does: starting units do not count (PU-22). Free-space start placement is tracked separately (legacy EAWR-597). |
 | WPR-04 | **The cap.** In a multiplayer space battle a player's population cap is its faction's `Space_Tactical_Unit_Cap` (Rebel 25, Empire 20). A station's `Additional_Population_Capacity` does not enter it in space. | debug build WP-04; data | same (PU-21) | does. |
 
@@ -93,7 +93,7 @@ Production has no per-unit update. It runs in four places:
 |---|---|---|---|---|
 | WPR-10 | A stream with recipients pays every frame, except while a setup phase runs (never in M2). | debug build WP-07 | same (PU-02) | does (session_step.cpp economy service). |
 | WPR-11 | The payment is (actual value ÷ actual interval) ÷ logical FPS (30 in stock) to each recipient. Actual value = `Base_Income_Value` × (1 + P) + A; actual interval = max(1 second, `Base_Interval_In_Secs` × (1 + I)). For each of the three independent modifier lists, take the greatest signed contribution in each nonempty stacking category, then sum those category winners; an empty list contributes 0. P contains `Income_Multiplier` minus 1, A contains `Income_Additive_Value`, I contains `Interval_Multiplier` minus 1. Thus interval adjustments add across categories; their authored multipliers are not multiplied together. The supply dock's +20 is an additive contribution while its hardpoint stands. Recipient splitting follows the source's flags; stock stations and completed mines give owner and allies the full amount. | debug build WP-07, EEC-04/07/08/13/53/56/58/59; data | same base arithmetic PU-02 to PU-04; category reduction and interval floor missing there | does base/additive income; lacks source/category modifier lists (PU-G22). |
-| WPR-12 | **Adding credits.** A positive amount for an AI player is multiplied by difficulty `Credit_Multiplier` (Easy 0.5, Normal 1.0, Hard 1.2), including positive refunds; debits are not multiplied. Credits clamp at 0. The player's cap refresh explicitly sets **no cap** for multiplayer tactical/skirmish rules. Outside that branch, the cap is max(1, owned planet count) × `Credit_Cap_Per_Planet`, a campaign interface. Credit addition also bypasses an existing cap in a nonstrategic battle with forced skirmish rules. Do not impose `Max_Skirmish_Credits` or 10,000 as a battle balance cap. | debug build WP-08, EEC-05/09; data | missing there; U-2 settled | does uncapped skirmish balances; lacks the AI multiplier, skirmish tech and AI credit rules (legacy EAWR-727); campaign cap is outside M2. |
+| WPR-12 | **Adding credits.** A positive amount for an AI player is multiplied by difficulty `Credit_Multiplier` (Easy 0.5, Normal 1.0, Hard 1.2), including positive refunds; debits are not multiplied. Credits clamp at 0. The player's cap refresh explicitly sets **no cap** for multiplayer tactical/skirmish rules. Outside that branch, the cap is max(1, owned planet count) × `Credit_Cap_Per_Planet`, a campaign interface. Credit addition also bypasses an existing cap in a nonstrategic battle with forced skirmish rules. Do not impose `Max_Skirmish_Credits` or 10,000 as a battle balance cap. | debug build WP-08, EEC-05/09; data | missing there; U-2 settled | does: positive AI income, grants, sale proceeds, explicit refunds and validity refunds use selected difficulty data; debits remain unscaled, credits floor at zero and skirmish balances remain uncapped. Campaign cap is outside M2. |
 | WPR-13 | Every round(interval × 30) frames the stream closes a bookkeeping interval (the credits earned in it, for the AI and the HUD). It changes no balance. | debug build WP-07 | same (PU-02) | does (no bookkeeping needed). |
 | WPR-14 | A stream ends with its station. The losing-team bonus needs three non-empty teams. | debug build | same (PU-05, PU-06) | does. |
 | WPR-15 | Economy order is object work and due creation/deletion → income → players in ascending ID, with AI then units queue then upgrades queue. A stream registered before the income pass participates in that pass; a queue-created income upgrade appears after that frame's income and can affect the next pass. An existing modifier's due object service can update streams before the current income pass. Global command admission and individual object traversal details remain the frame-order walk's boundary. | debug build WBF-20..25, WP-09; EEC-04/12/29/31/34/50 | missing in PU; resolves this walk's U-1 | differs: `TacticalSession::step` combines economy work; retain these visible ordering dependencies for G3/G4 in [build pads](build-pads.md). |
@@ -130,7 +130,7 @@ Production has no per-unit update. It runs in four places:
 |---|---|---|---|---|
 | WPR-50 | **The upgrade menu entries** of a level-1 skirmish station. <br>- **The L1 upgrades** (Rebel `RS_Enhanced_Shielding_L1_Upgrade` 850 and `RS_Improved_Weapons_L1_Upgrade` 800; Empire `ES_Enhanced_Reactors_L1_Upgrade` and `ES_Reinforced_Armor_L1_Upgrade` 750): 30 s each, in the **upgrades** queue, `Build_Limit_Current_For_All_Allies` 1. <br>- **The level-2 upgrade** (`RS_Level_Two_Starbase_Upgrade`, `ES_Level_Two_Starbase_Upgrade`): 2000 credits, 80 s, in the **units** queue, `Build_Limit_Current_For_All_Allies` 1, and it needs the player or an ally to own the level-1 skirmish station (`Tactical_Build_Prerequisites`). | data WP-23 | differs: PU-20 lists them as never bought, and says nothing of the queue, limit and prerequisite | does: generic production closure and type-authored queue, price and time (corrected data values below). |
 | WPR-51 | **An L1 upgrade's bonus** (`Combat_Bonus_Ability`, `Space_Automatic`). Once the upgrade object exists, every unit of its owner and the owner's allies whose type is in `Applicable_Unit_Types` or `Applicable_Unit_Categories` gets the bonus, and so does each such unit created later. A unit type that is the upgrade's own container is excluded. The bonuses are `Health_`, `Damage_`, `Energy_Pool_`, `Shield_`, `Defense_` and `Movement_Speed_Bonus_Percentage`. A health, energy or shield bonus raises the maximum and the current value by the same amount; health also scales the hardpoints. Bonuses of one `Stacking_Category` do not add up: the largest counts. M2 examples: +25 % shield on the Rebel fighters (`RS_Enhanced_Shielding_L1`), +25 % defense on the Tartan (`ES_Reinforced_Armor_L1`). Walk 7 owns the effect on the unit. | debug build WP-18; data | missing there | does: allied automatic bonuses, type OR category targets, category maximum and distinct-category sum; existing and later units. |
-| WPR-52 | **The level-up** (`Starbase_Upgrade_Ability`, `Skirmish_Automatic`). In its first service after completing, the level-2 upgrade object replaces its station, then removes itself. In order: <br>1. A new station of the type's `Next_Level_Base` is created for the same owner, at the old one's position and facing. <br>2. Hardpoints are carried over by index. One being repaired keeps its health and its repairing players, and is disabled. **A destroyed or disabled one comes back disabled with 0.1 health, not destroyed.** <br>3. The station's upgrade objects move to the new station, and so does the selection. <br>4. The owner and every ally gain a tech level (up to their maximum), and their queue entries at the old station now build at the new one. <br>5. The old station is removed without dying: no kill, no explosion, no victory check. <br>6. The local player hears the faction's `SFXEvent_Starbase_Upgraded`, `SFXEvent_Starbase_Ally_Upgraded` or `SFXEvent_Starbase_Enemy_Upgraded`. <br>The level-2 lists keep every level-1 unit and L1 upgrade, so the queued entries stay valid. | debug build WP-13 to WP-17; data | missing there (PU-G1) | does: next-level replacement, index carry-over, held objects/selection, allied tech/queues, removal without death and upgraded sound; U-6 retail repair-state capture confirmed (2026-10-01); exact numeric sampling limits remain. |
+| WPR-52 | **The level-up** (`Starbase_Upgrade_Ability`, `Skirmish_Automatic`). In its first service after completing, the level-2 upgrade object replaces its station, then removes itself. In order: <br>1. A new station of the type's `Next_Level_Base` is created for the same owner, at the old one's position and facing. <br>2. Hardpoints are carried over by index. One being repaired keeps its health and its repairing players, and is disabled. **A destroyed or disabled one comes back disabled with 0.1 health, not destroyed.** <br>3. The station's upgrade objects move to the new station, and so does the selection. <br>4. The owner and every ally gain a tech level (up to their maximum), and their queue entries at the old station now build at the new one. <br>5. The old station is removed without dying: no kill, no explosion, no victory check. <br>6. The local player hears the upgraded station owner's faction's `SFXEvent_Starbase_Upgraded`, `SFXEvent_Starbase_Ally_Upgraded` or `SFXEvent_Starbase_Enemy_Upgraded`, selected by own/ally/enemy relationship to the local player. Neutral owners and an empty selected event are silent. Stock teams use one faction; mixed-faction ally coverage uses a controlled fixture. <br>The level-2 lists keep every level-1 unit and L1 upgrade, so the queued entries stay valid. | debug build WP-13 to WP-17, EUS-25; data | missing there (PU-G1) | does: next-level replacement, index carry-over, held objects/selection, allied tech/queues, removal without death and upgraded sound; U-6 retail repair-state capture confirmed (2026-10-01); exact numeric sampling limits remain. |
 | WPR-53 | **Station reference transfer:** combat/order targets, opportunity targets, squadron targets/escorts, active ability targets and in-flight projectile references follow the replacement station. Valid hardpoint indices remain; missing indices fall back to the hull. | project deterministic policy; original attack-target lifetime unverified | missing there | does: partitioned reference transfer at replacement; this does not claim the original lifetime policy. |
 | WPR-55 | **Production work budget:** buys share one partitioned ownership census; queue validation uses one survivor census. Unconstrained operations skip it. Bonuses are cached per player/type when held sources change and reused by later births. Charging, IDs and replacement commits retain stable serial order. | project performance rule; ADR-009 | missing there | does: copied inputs, disjoint partition outputs and ordered commits; deterministic visit/allocation budgets cover census and bonus work, excluded from canonical state and replay. |
 | WPR-56 | **Replacement hangar reconciliation:** retained squadrons consume the replacement hangar's caps, matching entries by squadron type. Finite reserves retain previously consumed launches; absent types lose their old spawner reference. | project deterministic policy; original cross-level reserve behavior unverified | missing there | does: preserves retained squadrons and finite-launch accounting; original reserve reconciliation remains unverified. |
@@ -150,7 +150,7 @@ Production has no per-unit update. It runs in four places:
 | G-2 | WPR-20, WPR-30, WPR-33 | resolved: authored build limits and prerequisites | Medium: needed when station upgrades become buildable. Without them an upgrade could be queued twice, or a level-2 upgrade queued after a level-up. |
 | G-3 | WPR-22, WPR-30, WPR-40, WPR-52 | lacks: the production sounds | Low: build started and complete, the arrival sound and the station-upgraded lines. |
 | G-4 | WPR-22, WPR-61 | closed by the reinforcement-button flash work (legacy EAWR-726, EAWR-981): PU-71 applies the local pool addition flash, its continuous component pulse | Debug build: local pool addition, space button update and component flash service/draw. |
-| G-5 | WPR-02, WPR-12 | lacks: the tech level, the AI credit multiplier and the credit cap | None in M2 while the AI plays Normal with the GC setup. They matter after the purchasing-capable skirmish AI setup work (legacy EAWR-603), and on Easy or Hard. |
+| G-5 | WPR-02, WPR-12 | resolved: selected lobby tech, AI credit multiplier, credit floor and uncapped skirmish balances | Difficulty affects positive AI credit changes; allied tech changes honor each account's maximum. Campaign caps remain outside M2. |
 | G-6 | WPR-32 | differs: craft placement | Covered by **free-space placement (legacy EAWR-597)** and PU-G6; no new ticket. |
 | G-7 | WPR-60 | lacks: AI buying | **purchasing-capable skirmish AI setup (legacy EAWR-603)**; no new ticket. |
 
@@ -172,8 +172,8 @@ Production has no per-unit update. It runs in four places:
 - **Missing in ours: 2**: WPR-12, -60.
 
 The economy follow-up adds WPR-15/16 (26 rules total). WPR-15 differs in the combined economy
-service; WPR-16 lacks mine admission and upgrade activation. WPR-12's uncapped skirmish balance
-matches ours; its AI multiplier remains missing. These refine the earlier baseline rather than
+service; WPR-16 lacks mine admission and upgrade activation. WPR-12's AI multiplier and uncapped skirmish balance
+are applied. These refine the earlier baseline rather than
 claiming that all subsequent implementation work has been re-audited.
 
 ### Tags this subsystem reads that statuses.json marks todo
@@ -185,7 +185,7 @@ level-up, tech and automatic bonuses. Remaining tags are listed below:
 - **Now applied, the level-up:** `StarBase/Next_Level_Base` (G-1).
 - **Now applied, tech level:** `MP_Default_Start_Tech_Level`, `MP_Default_Max_Tech_Level` (G-5).
 - **Build sounds:** `SFXEvent_Build_Started`, `SFXEvent_Build_Complete`, `SFXEvent_Build_Cancelled` on units, squadrons and stations (G-3).
-- **Faction sounds:** `SFXEvent_Starbase_Upgraded`, `SFXEvent_Starbase_Ally_Upgraded`, `SFXEvent_Starbase_Enemy_Upgraded`, `SFXEvent_Arrive_From_Hyperspace`, `SFXEvent_Tactical_Pop_Cap_Reached`, `SFXEvent_Tactical_Unit_Cap_Reached` (G-3; the last two unverified, U-5).
+- **Faction sounds:** `SFXEvent_Starbase_Upgraded`, `SFXEvent_Starbase_Ally_Upgraded`, `SFXEvent_Starbase_Enemy_Upgraded`, `SFXEvent_Arrive_From_Hyperspace`, `SFXEvent_Tactical_Pop_Cap_Reached`, `SFXEvent_Tactical_Unit_Cap_Reached` (G-3; the last two are sourced by U-5/EUS-06).
 - **Constants:** `Skirmish_Reinforcement_Delay_Frames` (U-3), `Space_Reinforcement_Collision_Check_Distance` (PU-G5), `Min_Skirmish_Credits`, `Max_Skirmish_Credits` (the lobby).
 - **Not read in a space skirmish:** `StarBase/Additional_Population_Capacity` (WPR-04), `Maintenance_Cost` and the other galactic costs.
 
@@ -200,20 +200,31 @@ cue belongs to the local room query changing to full (WP-A03; WR-05 uses one pop
 the type-less query). These settle U-4 and U-5's debug-build questions; retail ear comparison
 is still required. The existing station-upgraded route already covers WPR-52 step 6.
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-3 | The 90-frame constant seeds reinforcement-time battlefield modifiers and is used by the land transport start-frame path. It does not establish an ordinary space reinforcement cooldown; the space arrival counters are the separately sourced hyperspace interface. | EUS-34 |
+| U-5 | The local human player announces tactical population full on a false-to-true no-room transition during player service, then stores that state. A refused reinforcement execution announces the tactical unit-cap event. Both resolve the local faction event; neither is a queue-completion announcement. | EUS-06 |
+| WPR-51 | Immediate projectile damage resolves the retained shooter identity at impact and reads the current shooter damage modifiers then. A removed shooter contributes no shooter damage modifier. This is separate from the retained projectile instance amount and the recipient defense sampled at delivery. Remake gap: in-flight shooter modifier gap (legacy EAWR-1809). | EUS-16 |
+| WPR-55 | Commands precede object/deletion service; mode income follows objects, then each player services AI before that player's build queue (WFO-02/26/29/31). The old production U-1 reference is stale. | EUS-04 |
+| WPR-55-audio | Station upgrade announcements choose own/ally/enemy relative to the local player, then resolve the selected event from the upgraded station owner’s faction. A neutral relationship takes none of those announcement branches. Implemented in the viewer; controlled contracts cover mixed-faction allies. | EUS-25 |
+
 ## Unverified
 
 | Id | Question | What would settle it |
 |---|---|---|
-| U-3 | What `Skirmish_Reinforcement_Delay_Frames` (90) delays. The only readers found are a battlefield-modifier seed and a land transport's start frame. | A debug-build read of that modifier's readers. |
 | U-4 | Whether an ordinary queue cancel plays `SFXEvent_Build_Cancelled`; relevant to cancelling a mine's queued income upgrade, whose full refund is already WPR-31. | Retail harness: buy L1 income upgrade at a completed mine, cancel once before it is front and once while building; record logical frame, queue entries, fractional credits and audio/event trace. Compare a station unit queue cancel and an AI refund control at each difficulty. This does not establish a UC cancel action (build pads U-BP-9). |
-| U-5 | When `SFXEvent_Tactical_Pop_Cap_Reached` and `SFXEvent_Tactical_Unit_Cap_Reached` play. | A debug-build xref from their getters. |
 | U-6 | Retail capture 2026-10-01 confirms the destroyed Rebel laser cannon returns disabled/repairable with a grey reticle and "Laser Cannon Battery - 0%", after 80.56–81.55 wall seconds at normal speed. | Exact 0.1 health and exactly 80 simulation seconds remain beyond UI sampling precision; those numeric rules retain their debug-build/data evidence. The staging probe reselects the replacement, so this capture does not prove selection transfer. |
 
 <a id="540-implementation-and-remaining-fidelity-work"></a>
 
 ## Station upgrades and remaining fidelity work
 
-WPR-02 initializes and caps player tech from the multiplayer constants. WPR-20/33
+WPR-02 initializes and caps player tech from the selected lobby options, whose defaults
+come from the multiplayer constants. WPR-20/33
 checks all four optional limits and every owned prerequisite before charging,
 and again during each reverse validity sweep. Current counts include standing
 units, held upgrades, both queues and reinforcement pools; lifetime counts rise
@@ -233,8 +244,10 @@ the largest percentage per stacking category and sums distinct categories.
 WHE-17/18/19 (walks/heroes.md) supply category aggregation, positive max/current
 deltas, proportional hardpoint increases and clamp-only removal. WCC-44
 (walks/capital-combat.md) supplies damage and defense factors. The implementation
-samples shooter damage at launch and target defense at impact; the shooter
-sampling time is **unverified**. These six authored modifiers are nonnegative;
+samples shooter damage at launch and target defense at impact. The sourced
+projectile delivery instead resolves the retained shooter and its current damage
+modifiers at impact; a removed shooter contributes no shooter modifier (EUS-16).
+This launch-versus-impact difference is gap in-flight shooter modifier gap (legacy EAWR-1809). These six authored modifiers are nonnegative;
 negative bonus authoring is outside this validated upgrade profile.
 
 WPR-52 creates the next type at the old owner/pose, carries hardpoint slots by
@@ -324,15 +337,17 @@ when held sources change; repeated births read those profiles without recomputat
 Deterministic visit budgets and allocation probes enforce these limits in the station
 contracts. The profiles and scratch are derived data, excluded from state and replay.
 Within-frame income, queue completion, then object service is our explicit
-schedule; retail's order remains **unverified U-1**. The announcer resolves the
-local faction's own/ally/enemy upgraded sound; which faction retail resolves for
-an allied/enemy station is **unverified**. Started/complete/cancel sounds and
+schedule; retail instead runs commands before objects/deletion, then mode income,
+then each player's AI before that player's build queue (EUS-04; WFO-02/26/29/31).
+The announcer chooses the relationship to local and resolves the upgraded
+station owner's faction, matching the sourced route (EUS-25).
+Started/complete/cancel sounds and
 reinforcement flashing remain G-3/G-4. U-6's retail capture confirms the grey,
 repairable cannon and displayed 0%, with the timing/measurement limits above.
 
 Nearby tags deliberately outside this change: `Additional_Population_Capacity`
-is galactic (WPR-04); AI credit multipliers/caps await skirmish AI economy work
-(legacy EAWR-603, EAWR-727); build/arrival/cap sounds remain production-audio work
+is galactic (WPR-04); campaign credit caps are outside skirmish rules (WPR-12);
+build/arrival/cap sounds remain production-audio work
 (legacy EAWR-725); `Ability_Recharge_Bonus` and `Fire_Range_Bonus` have no supported
 L1 skirmish authoring and await their ability/targeting subsystem; heroes' combat
 bonus abilities await the hero lifecycle despite sharing the parsed schema.
@@ -360,3 +375,10 @@ with an unsupported modifier are wholly unavailable (AB-26), rather than failing
 the whole session or applying only part of the ability; specifically the
 Admonitor's power-to-weapons damage multiplier remains outside the modelled
 ability subset. This does not disable its ordinary weapons or upgrade bonuses.
+
+### Additional sweep boundaries
+
+| ID | Remaining question | Source boundary |
+|---|---|---|
+| WPR-53 | Station replacement lifetime of attack targets and other non-held references. Still unverified: Station upgrade explicitly transfers held upgrades and hardpoint state before destroying the old station. Arbitrary non-held attack/reference observers depend on later detach callbacks, which are not exhaustively traced by that replacement body. | EUS-25 |
+| WPR-57 | Arbitrary non-death holder deletion and holder-search order (mod/campaign boundary). Still unverified: The stock no-eligible-holder branch is already sourced. Arbitrary non-death deletion and alternate-holder search ordering require their deletion/search callers; these mod/campaign boundaries remain deferred outside stock M2. | EUS-25 |

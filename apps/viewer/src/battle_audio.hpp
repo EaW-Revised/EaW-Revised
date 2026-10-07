@@ -12,6 +12,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <godot_cpp/classes/audio_effect_capture.hpp>
+#include <godot_cpp/classes/audio_effect_panner.hpp>
 #include <godot_cpp/classes/audio_listener3d.hpp>
 #include <godot_cpp/classes/audio_stream.hpp>
 #include <godot_cpp/classes/audio_stream_player.hpp>
@@ -46,6 +47,8 @@ class BattleAudio final {
 public:
     struct Options final {
         bool muted{};
+        audio::MixLevels levels{};
+        audio::Admission admission{};
     };
     BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const data::Catalog& catalog, Options options);
     ~BattleAudio();
@@ -58,9 +61,22 @@ public:
     // One presentation frame: the events of the ticks the frame reached, the gestures the player
     // made, the camera it renders and the frame's duration in seconds.
     void frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
-               std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, double delta);
+               std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, double delta,
+               std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback = {},
+               std::vector<BattleEffects::TerminalSound> terminal_sounds = {});
     void release();
     void loading_complete();
+    void set_mix_levels(const audio::MixLevels& levels);
+    void set_admission(const audio::Admission& admission) { options_.admission = admission; }
+    void set_attached_silent(sim::EntityId source, bool silent) {
+        if (silent) silent_sources_.insert(source);
+        else silent_sources_.erase(source);
+    }
+    struct RadarWarning final {
+        audio::Vec3 position{};
+        double age{};
+    };
+    [[nodiscard]] std::span<const RadarWarning> radar_warnings() const noexcept { return radar_warnings_; }
     // The report's "battle_audio" member, followed by ",\n".
     void write_report(std::ostream& output) const;
 
@@ -75,6 +91,9 @@ private:
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
         const audio::SfxEvent* ambient_moving{};
+        const audio::SfxEvent* engine_idle{};
+        const audio::SfxEvent* engine_moving{};
+        const audio::SfxEvent* fleet_move{};
         int ambient_min_delay{150};
         int ambient_max_delay{300};
         const audio::SfxEvent* build_started{};
@@ -93,6 +112,8 @@ private:
         bool type_sighted{};
         const audio::SfxEvent* spotted{};
         bool squadron{};
+        bool base{};
+        bool community_property{};
         const audio::SfxEvent* sold{};
         std::vector<const audio::SfxEvent*> hardpoint_deaths;           // HardPoints order
         std::vector<sim::math::Vec3> hardpoint_points;
@@ -102,6 +123,11 @@ private:
         const audio::SfxEvent* attack{};
         const audio::SfxEvent* group_move{};
         const audio::SfxEvent* group_attack{};
+        const audio::SfxEvent* assist_move{};
+        const audio::SfxEvent* assist_attack{};
+        const audio::SfxEvent* move_asteroid{};
+        const audio::SfxEvent* move_nebula{};
+        bool vehicle_thief{};
         const audio::SfxEvent* stop{};
         const audio::SfxEvent* guard{};
         std::map<std::string, const audio::SfxEvent*> attack_hardpoint;
@@ -113,6 +139,7 @@ private:
             const audio::SfxEvent* deactivated{};
         };
         std::map<sim::tactical::AbilityKind, AbilityVoice> ability_voices;
+        std::map<sim::tactical::AbilityKind, const audio::SfxEvent*> ability_targets;
     };
     // A faction's toggle sounds for one ability (BA-50): what its own and its allies' switches play,
     // and what an enemy's play.
@@ -122,6 +149,9 @@ private:
         const audio::SfxEvent* enemy_on{};
         const audio::SfxEvent* enemy_off{};
     };
+    // BA-85: countdown-spawned projectiles retain their own detonation cue.
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> projectile_detonations_;
+    std::map<sim::tactical::TypeId, const audio::SfxEvent*> terminal_detonations_;
     struct Sample final {
         godot::Ref<godot::AudioStream> stream;
         std::string cause;  // why it did not load
@@ -136,9 +166,24 @@ private:
     [[nodiscard]] const audio::SfxEvent* event(std::string_view name, const std::string& where);
     [[nodiscard]] const Sample& sample(const std::string& name);
     [[nodiscard]] godot::Ref<godot::AudioStream> music_stream(const std::string& file);
-    // Starts `sfx` (a 3D one at `position`); `reason` keys the report's counts.
-    void play(const audio::SfxEvent* sfx, std::optional<audio::Vec3> position, bool hidden, const std::string& reason,
-              sim::EntityId loop_child = sim::invalid_entity_id, sim::EntityId attached = sim::invalid_entity_id);
+    // Admits an event; the identifier is independent of later sample allocation (SND-18).
+    std::optional<audio::EventQueue::Handle> play(const audio::SfxEvent* sfx, std::optional<audio::Vec3> position, bool hidden, const std::string& reason,
+              sim::EntityId loop_child = sim::invalid_entity_id, sim::EntityId attached = sim::invalid_entity_id,
+              bool engine_loop = false);
+    audio::Start start_sample(const audio::EventQueue::Sample& cue);
+    audio::EventQueue::Backend event_backend();
+    audio::EventQueue events_;
+    struct EventState final {
+        std::string reason;
+        sim::EntityId attached{};
+        sim::EntityId loop_child{};
+        bool engine_loop{};
+        bool hidden{};
+        const audio::SfxEvent* event{};
+    };
+    std::map<audio::EventQueue::Handle, EventState> event_states_;
+    std::set<sim::EntityId> silent_sources_;
+    double event_delta_ms_{};
     struct BuildSounds final {
         const audio::SfxEvent* started{};
         const audio::SfxEvent* loop{};
@@ -149,16 +194,40 @@ private:
     };
     [[nodiscard]] const BuildSounds& build_sounds(const std::string& faction);
     std::map<std::string, BuildSounds> build_sounds_;
-    std::map<sim::EntityId, std::pair<std::size_t, std::uint64_t>> pad_loops_;
+    std::array<const audio::SfxEvent*, 4> reinforcement_sounds_{};
+    std::array<const audio::SfxEvent*, static_cast<std::size_t>(audio::CommandCue::count)> command_cues_{};
+    std::map<sim::EntityId, audio::EventQueue::Handle> pad_loops_;
     void respond(const BattleInput::Acknowledgement& acknowledgement, const LiveSessionView& live);
     // BA-50, BA-51: the toggle sound of an ability the snapshot at `tick` shows switched on or off.
     void toggle_abilities(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live);
     // BA-52: the unit voice of a command bar press.
     void voice_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live);
+    void target_ability(const LiveSessionView::AbilityClick& click, const LiveSessionView& live);
+    void spawned_ability(const sim::tactical::TacticalInstance& instance, const sim::tactical::AbilityStatus& status,
+                         bool hidden);
     [[nodiscard]] const std::map<sim::tactical::AbilityKind, Toggle>& toggles_of(const std::string& faction);
     void cue_music(const audio::MusicDirector::Cue& cue);
     void update_voices(const audio::Vec3& listener, const LiveSessionView& live);
+    void update_pause(bool paused, double delta);
     void update_music(double delta);
+    void engine_loops(const sim::tactical::TacticalSnapshot& snapshot, std::span<const sim::EntityId> visible);
+    void stop_engine_loop(sim::EntityId source, const audio::SfxEvent* event);
+    struct EngineState final {
+        bool online{};
+        bool idle{};
+        bool moving{};
+        std::uint64_t seen{};
+    };
+    std::map<sim::EntityId, EngineState> engine_states_;
+    double engine_idle_speed_{};
+    std::uint64_t engine_visits_{};
+    std::uint64_t engine_transitions_{};
+    std::uint64_t engine_stops_{};
+    std::uint64_t engine_retired_{};
+    std::uint64_t engine_peak_{};
+    std::uint64_t engine_hidden_updates_{};
+    std::uint64_t engine_fade_updates_{};
+    std::uint64_t engine_detached_{};
     void ambient_moving(const sim::tactical::TacticalSnapshot& snapshot, const LiveSessionView& live,
                         std::span<const sim::EntityId> visible);
     struct AmbientTimer final {
@@ -225,6 +294,7 @@ private:
     std::map<sim::tactical::TypeId, TypeSounds> types_;
     std::map<std::string, Sample> samples_;
     std::vector<audio::MusicEvent> music_events_;
+    std::vector<audio::Field> tactical_music_fields_;
     std::array<const audio::MusicEvent*, 2> summary_events_{}; // WBF-47: resolved win, lose
     const audio::MusicEvent* summary_event_{};
     std::size_t summary_next_file_{};
@@ -237,6 +307,8 @@ private:
     godot::AudioListener3D* listener_{};
     std::vector<godot::AudioStreamPlayer3D*> players_3d_;
     std::vector<godot::AudioStreamPlayer*> players_2d_;
+    std::array<godot::Ref<godot::AudioEffectPanner>, audio::Voices::voices_2d> panners_;
+    std::array<std::int32_t, audio::Voices::voices_2d> pan_buses_{};
     // The playing voices' base volume (event volume) and position, for the per-frame falloff.
     struct VoiceState final {
         double volume{};
@@ -247,17 +319,31 @@ private:
         sim::EntityId attached{sim::invalid_entity_id}; // SP-03: a spinning dead copy
         double positional_gain{};
         bool ambient{}; // SND-11: live-object attachment, separate from spin-away's dead copy
+        bool engine_loop{};
+        double fade_started{};
+        double fade_seconds{};
+        bool paused{};
+        double paused_position{};
+        audio::EventQueue::Handle event_handle{};
     };
     double clock_{};  // seconds of frames presented
+    bool paused_{};
+    std::uint64_t pause_transitions_{};
+    std::uint64_t paused_voice_frames_{};
+    std::uint64_t paused_speech_frames_{};
+    std::uint64_t pause_3d_{};
+    std::uint64_t pause_2d_loops_{};
+    std::uint64_t pause_speech_{};
+    double pause_position_drift_{};
+    double speech_paused_position_{};
     std::array<VoiceState, audio::Voices::voices_3d + audio::Voices::voices_2d> voice_states_{};
     std::uint64_t attached_moves_{};
     // Two music players crossfade (Fade_In_Seconds, Fade_Out_Previous_Seconds).
     struct MusicTrack final {
         godot::AudioStreamPlayer* player{};
         double volume{};       // the event's Volume_Percent
-        double level{};        // 0..1 of the fade
-        double fade_seconds{}; // this fade's length (0: at once)
-        bool fading_out{};
+        audio::MusicFade fade;
+        std::string file;
         bool playing{};
     };
     std::array<MusicTrack, 2> music_tracks_{};
@@ -285,6 +371,7 @@ private:
         bool active{};
         bool timed{};
         std::uint32_t remaining{};
+        std::uint64_t started{};
     };
     std::map<std::pair<sim::EntityId, sim::tactical::AbilityKind>, AbilityMemory> ability_memory_;
     bool ability_memory_started_{};
@@ -299,6 +386,9 @@ private:
         double tick{};
         double volume{};
         double pitch{};
+        std::optional<audio::Vec3> position;
+        sim::EntityId attached{};
+        bool localized{};
     };
     std::vector<StartRow> start_rows_;
     double presented_tick_{};
@@ -312,13 +402,25 @@ private:
     std::uint64_t frames_{};
     std::map<std::string, std::uint64_t> requested_;                  // reason:event -> starts asked
     std::map<std::string, std::map<std::string, std::uint64_t>> results_; // reason -> result -> count
+    struct Allocation final {
+        std::uint64_t requested{}, admitted{}, allocated{}, refused{}, stolen{}, audible{};
+        std::uint64_t samples_requested{}, samples_failed{};
+    };
+    std::map<std::string, Allocation> allocations_;
     std::map<std::string, std::uint64_t> played_samples_;
     std::map<std::string, std::string> missing_samples_;               // sample -> cause
     std::set<std::string> missing_events_;                             // "where: event"
     std::uint64_t max_voices_{};
     std::uint64_t stolen_{};
     std::uint64_t attacks_{};
+    const audio::SfxEvent* base_under_attack_{};
+    std::uint64_t base_warning_delay_frames_{};
+    std::uint64_t base_warning_countdown_{};
+    struct BaseWarningRow final { std::uint64_t tick{}; sim::EntityId target{}; bool radar{}; };
+    std::vector<BaseWarningRow> base_warning_rows_;
+    std::vector<RadarWarning> radar_warnings_;
     std::vector<std::string> music_log_;
+    std::vector<std::string> music_stream_log_;
     std::vector<std::string> response_log_;
     std::vector<std::string> problems_;
     std::string listener_text_;

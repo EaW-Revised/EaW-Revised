@@ -14,7 +14,7 @@ complete flight and presentation review.
 | RFL-04 | Coordinate curves are natural cubic splines with uniform parameter knots. Lookup chooses the first segment whose cumulative arc length is strictly greater than the requested distance, then evaluates its cubic at the fraction of that segment's arc length. Equality with the whole path length fails lookup. The presentation samples use ceil(segment arc length / 10), bounded to 1..100. |
 | RFL-05 | With `Explode_When_Reached_Target_Radius` true, construction stops at the aim. Otherwise it constructs a post-aim extension from the late presentation tangent with 0.3 times the authored offset, and trims and reevaluates a path longer than authored maximum flight distance. The retained target-radius distance is the authored flight distance, independently of actual path length. |
 | RFL-06 | Service increments distance along the path by current speed. A successful lookup supplies the next spatial position and updates facing. Failed lookup forces terminal advancement at the current position; it does not snap to the aim. A missing path after failed construction is a separate state from exhausted lookup. |
-| RFL-07 | Hostile active/passive missile shields and sensor jamming can redirect on radius entry: the next position is inside or on the radius and the current position is outside or on it. Active ability radius overrides passive shield radius; a jamming ability supplies its radius. Space redirection builds a spatial spherical detour with a 30-unit margin, preserves remaining authored flight allowance, resets path distance and clears the missile target. Its complete construction and activation interfaces require a later weapons implementation. |
+| RFL-07 | Non-allied active/passive missile shields and sensor jamming can redirect on radius entry: the next position is inside or on the radius and the current position is outside or on it. Source position is unadjusted for rocket entry, unlike direct deflection. Declared shield ability radius overrides passive radius; a jamming ability supplies its radius when jammed. Space redirection builds a spatial spherical detour with a 30-unit margin, preserves remaining authored flight allowance, resets path distance and clears the missile target. Production consumes copied passive and active shield sources plus user-input jammer owners, with current-frame recipient stamps. Static sources retain creation order; jammer activation appends through the transactional PDEF ledger. |
 | RFL-08 | Ordinary collision runs before endpoint expiry. A hit suppresses the expiry blast. Positive travel allowance takes precedence over lifetime for ordinary space categories; otherwise lifetime expires only strictly after its authored duration. Rocket target-radius expiry compares distance along its path with the retained authored flight distance. DEFAULT target-radius expiry compares squared spatial displacement strictly beyond squared origin-to-aim distance. Generic removal adds no blast. |
 
 The normal Diamond Boron profile authors speed 7.5, maximum flight distance 5000,
@@ -27,7 +27,7 @@ offset alone does not prove every rocket route is collinear.
 
 The read-only debug-build observations establish these decisions, but do not
 establish retail presentation acceptance. Nonzero-offset custom rockets,
-shield/jamming activation and detour parity, forward-firing launch alignment,
+shield/jamming activation, retail detour parity, forward-firing launch alignment,
 post-aim extension, and retail height/endpoint captures remain separate review
 gates. Arc length recursively compares the chord with the two midpoint chords.
 It returns their sum when either the relative or absolute difference is at most
@@ -35,3 +35,24 @@ It returns their sum when either the relative or absolute difference is at most
 Q24 rounds that threshold to 17 raw units, an explicit numeric policy.
 The area service must accept the terminal pose supplied by
 flight and emit exactly one blast even while those broader gates stay open.
+
+RFL-07 detour construction normalizes the last movement direction and requires
+the source to lie ahead. It places lead points 30 and 60 units ahead, constructs
+a sphere centered on the source through the latter point, and intersects a
+forward ray starting another half-unit ahead (bounded to one million units).
+No intersection leaves the old route and tracking in place but marks the attempt.
+The current frame still uses its point selected before this construction.
+
+On success, the route starts at the current pose, reaches the first lead point,
+and follows normalized spherical midpoint controls. The retained seed controls
+are the eighth and three-quarter directions; subdivision inserts midpoints in
+order while angular separation times sphere radius exceeds authored curve
+distance, then removes the first two entries when subdivision grew the list.
+The final segment follows the normalized planar old direction for remaining
+authored allowance minus 30. These detour straight segments use subdivisions
+at the authored curve distance. The complete cubic is trimmed at the original
+type's authored maximum, rebuilt, and its target-radius allowance reduced by
+the consumed cursor before resetting that cursor and clearing tracking.
+The original authored distance remains immutable for later detour trims.
+Q24 uses the existing turn trigonometry and two-pi constant for angular length;
+the existing 2,048-point and depth-32 bounds also cap spherical subdivision.

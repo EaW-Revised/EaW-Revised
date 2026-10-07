@@ -4,6 +4,31 @@
 
 # Space battle presentation
 
+BP-70: A projectile's root `Space_Model_Name` may name a particle-system ALO instead
+of a mesh ALO. It runs as an effect on the projectile's posed slot while armed,
+with the normal model `Scale_Factor` applied to emission and sprite sizes. The
+static-bomb flight service preserves its position. Starting a countdown selects
+the first animation without looping, with its starting frame adjusted to the
+countdown when that animation exists; a root particle system has no skeleton
+animation. Countdown expiry starts ordinary death presentation, applies the blast,
+and removes the projectile. Its explosion is `Death_Explosions`, independent of
+the contact/lifetime projectile particles; the remake retains its existing first
+entry policy for death-explosion alternatives. Emit one death explosion per bomb,
+not one per blast recipient. Evidence: debug build (countdown, static-bomb flight,
+death initialization/effects and root emitter model handling), effective XML and
+asset format; MD-06/R-ROT-01 retain the authored model transform.
+
+The spawned weaken projectile uses the no-contact terminal particle route
+(WAD-07, WPJ-35): the debug build requests its authored
+`Projectile_Lifetime_Detonation_Particle` before applying the weaken status.
+`Antilles_Weaken_Enemy_Effect` names `Weaken_Enemy_Detonation_Effect` and no
+`Death_Explosions`. The viewer's shared hero terminal consumer selects one
+death explosion when authored, otherwise the lifetime detonation particle.
+It emits exactly one effect at the spawned projectile's terminal position;
+the ordinary expiry consumer does not emit a second copy for these spawns.
+Evidence: cached debug-build terminal advance and explicit explosion routes
+in the projectile walk (WPJ-35, WAD-07), plus effective projectile XML.
+
 ## Applicability
 
 What FoC draws for a space battle's shots, hits, shield hits and deaths, so the viewer can present
@@ -52,6 +77,16 @@ session's hashes are the same with or without it (UI-07).
 | BP-12 | "The shield took it whole": the shield stage took at least the damage it was given (FoC's absorbed flag). In the remake: the absorbed amount is positive and not below the shield-scaled damage (space-damage DG-06). PB-11. |
 | BP-13 | The armor multiplier is the one that scaled the damage reaching the hull stage; with nothing reaching it the multiplier counts as 1. PB-11. |
 
+Projectile expiry follows WAD-04/07 in the [area-damage walk](walks/area-damage.md):
+travel allowance, lifetime, target radius, exhausted rocket paths and explicit explosion
+requests publish one terminal pose when no ordinary contact occurred. The viewer spawns
+`Projectile_Lifetime_Detonation_Particle` at that pose. Particle absence does not prevent
+area damage. Generic deletion and ordinary impacts do not produce this expiry effect.
+The bounded presentation log retains the projectile ID, source weapon, original target
+and terminal reason after snapshot history is discarded; the ID selects an ability or
+Barrage look recorded at launch. These presentation events do not enter canonical snapshot
+bytes. Visibility uses the existing BP-09 approximation. Sound creation remains WAD-07's
+separate interface, and exact fog-cell visibility remains U-02.
 <a id="shield-hits-415"></a>
 
 ### Shield hits
@@ -73,7 +108,7 @@ session's hashes are the same with or without it (UI-07).
 | BP-60 | A projectile whose type is neither a beam nor a kite (BP-01) and names a `Space_Model_Name` is drawn as that model, like any object: at its position, turned by its facing triple (roll 0, pitch, yaw) through R-ROT-01 (Rz(yaw) Ry(pitch) Rz(+90), so the model's -Y nose points along the facing) at its `Scale_Factor`. Its model's particle proxies run as any object's (BP-40 admission). Of the M2 projectiles only `Proj_Ship_Concussion_Missile` is one: `W_concussion_missile.alo`, a `missile` mesh (`MeshGloss.fx`) and a `p_concussion` trail proxy, scale 1. The Acclamator's `HP_Acclamator_Weapon_FC` and both level-1 stations (`HP_Rebel_Station_One_CCM`, `HP_Empire_Station_One_00`) fire it. The proton torpedo is a kite (`Projectile_Custom_Render` 2) and loads no model. PB-01, PB-63; XML, model data. |
 | BP-61 | A homing projectile faces its own yaw and pitch (space-damage MS-02 to MS-05; pitch positive downward), so a missile turns as it homes. Any other projectile flies along its facing (BP-02), so its step gives it: the yaw is the step's heading in [0, 360), the pitch its negated elevation. Remake rule between ticks, as for units: the position lies straight between the two ticks' positions, the yaw turns the short way and the pitch moves between the two (`presentation::space::interpolate_projectile`). |
 | BP-62 | Remake rule: the viewer draws each model projectile on a placed ship from a pool of 32 per projectile type, set up with the population. A projectile keeps its slot for its whole flight; a slot its projectile left stays hidden for one frame before another takes it, so the trail it ran stops before the model shows elsewhere. A projectile that finds every slot taken is not drawn (`battle_effects.projectile_models.<type>.refused`). Model projectiles follow BP-09's visibility. The trail runs in `UnitEmitters`; a stall's catch-up sample poses the slot from that tick's snapshots. When the projectile's flight ends its proxies stop at once, as BP-44 stops a unit's; whether FoC's removal of the projectile lets the trail drain (particle-system-detach D-02) is unverified. `battle_effects.projectile_models_drawn` counts the drawn frames, `populate.live_units.projectile_slots_drawn` the slots composed. |
-| BP-63 | A hit the shield did not take whole spawns, after its detonation particle (BP-11), one entry of the target type's `Damage_Hit_Particles` at the contact: the entry's index is a uniform draw in [0, n - 1] from the synchronized random generator. A hit the shield took whole spawns, after its absorb particle, one entry of `Shield_Hit_Particles`, drawn the same way, at the same place and facing (BP-20). Both tags are lists of object types; the remake reads every such tag of the type and splits each on commas. Each entry attaches to the hit bone when it sets `Particle_Attach_To_Collision`, as the detonation does; the viewer places both free (fidelity list). No M2 unit type names either list. PB-60 to PB-62; XML. |
+| BP-63 | A hit the shield did not take whole spawns, after its detonation particle (BP-11), one entry of the target type's `Damage_Hit_Particles` at the contact: the entry's index is a uniform draw in [0, n - 1] from the synchronized random generator. A hit the shield took whole spawns, after its absorb particle, one entry of `Shield_Hit_Particles`, drawn the same way, at the same place and facing (BP-20). Both tags are lists of object types; the remake reads every such tag of the type and splits each on commas. Each entry attaches to the hit bone when it sets `Particle_Attach_To_Collision`, as the detonation does. The contact mesh selects its bone; an absent mesh uses bone 0. The initial contact transform is retained relative to that bone, so later translation and rotation carry the effect without applying a second model turn or the owner's scale to the effect. The viewer retains that ownership for both hit lists, using the damaged hardpoint's contact mesh or the shield cast's contact mesh. Entries without the flag retain their initial world frame. No M2 unit type names either list. PB-60 to PB-62; debug build contact ownership reread; XML. |
 | BP-64 | Remake rule: the viewer's draw for BP-63 never touches the simulation's random streams. It is a fixed 64-bit mix of the hit's projectile ID and the list (damage or shield), taken modulo the entry count (`presentation::space::hit_particle_pick`), so every run and viewer shows the same entry for the same projectile. The projectile is the one in flight at the end of the tick before the hit from the event's shooter and weapon whose position is the event's origin. When none matches (launched and spent within one tick, or that tick has left the snapshot history), a mix of the event's tick, shooter, weapon, target and origin stands in (`battle_effects.hit_picks.by_projectile`, `by_event`). FoC's draw also advances its synchronized stream; the remake's simulation does not model that draw, so a type that names these lists would shift FoC's later draws but not the remake's (fidelity list; none in M2). |
 | BP-67 | A hardpoint's `Model_To_Attach` participates in the owner's emitter visibility switches: the debug build visits attached models recursively when showing or hiding an emitter type. Its proxy particle effects stand on the attached model's proxy bind frames, composed with the owner's `Attachment_Bone` bind frame and the live unit's pose. Attached effects follow the same engine, ability, fog and retirement rules as root-model effects (BP-41 to BP-45). Intact and damaged hardpoints retain their attached effects; destroying a hardpoint removes its attached model and its effects along with it (BP-30). Proxy identities include the attachment slot, so equal proxy names on separate hardpoints remain independent. The Underworld generator authors two visible proxies, `p_u_shieldgen_pulse` and `p_u_shieldgen`; these effects come from the attached model, rather than the root's shield behaviour. Evidence: authored hardpoint XML and models; debug build's recursive emitter visibility; owner playtest observation of the generator pulse. |
 | BP-68 | Remake projection rule: a bolt's drawn long axis follows the perspective projection of its actual flight at the bolt's current, interpolated position. The camera-plane tangent is the flight direction minus the eye-to-bolt ray multiplied by the ratio of the flight's view-depth change to the bolt's view depth; normalize that tangent to draw the axis. Removing only the global camera-forward component can rotate or reverse apparent flight away from the screen centre. Preserve BP-04's across-view length, width, atlas, colour and head/tail shape, and the simulation's scattered step and facing (BP-02, BP-61). A radial or zero projected motion has no screen tangent; retain the existing fallback axis. Evidence: owner footage observation that bolt axes differ from frame displacement; numerical perspective contracts over 2,160 moving samples. The renderer reports a separate point-projection comparison of the drawn head/tail with the flight step, including reversed heads. |
@@ -88,6 +123,15 @@ session's hashes are the same with or without it (UI-07).
 | BP-22 | A unit's SHIELD sub-object (the first named `SHIELD`, case ignored, BP-17) is hidden by its ALO: the four M2 ships' SHIELD meshes carry the hidden flag. The game shows it only while the unit's `DEFEND` ability runs: turning the ability on or off sets the sub-object's code-hidden state to the ability's inverse, and a loaded game restores it the same way. Nothing else shows it: no hit, no shield strength and no faction reaches it (the shield behaviour only switches its collision, BP-19, and starts BP-21's flash). PB-20, PB-21; model data. |
 | BP-23 | The SHIELD submesh draws with its authored material. On the Nebulon-B and the Acclamator that is `MeshShield.fx` t0/t0_p0: additive ONE/ONE, no depth write, depth test LESSEQUAL, no culling, no fog. Per vertex it forms three UV sets from the authored UV: Tex0 = BaseUVScale x UV, Tex1 = DistortUVScale x UV, Tex2 = WaveUVScale x UV, each scrolled along v by the effect clock times its own rate (BaseUVScrollRate, DistortUVScrollRate, WaveUVScrollRate). The diffuse is the vertex colour x saturate(N.z + EdgeBrightness) x Color (N the model-space normal), saturated as a colour output. Per pixel it samples the distortion texture at Tex2 and the energy texel (BaseTexture) at Tex0 + 0.25 x distortion.rg. It then multiplies that texel by the wave texel sampled at Tex1 and by the diffuse. The source crosses the wave and distortion sets (WaveUVScale drives the distortion lookup); the viewer keeps that. Nebulon-B: Color (1, 1, 1, 1), EdgeBrightness 0.1, BaseUVScale 16, WaveUVScale 1, DistortUVScale 1, rates -0.15, -0.15 and -0.25, textures `shield_color.tga`, `NB_ShieldWave.tga`, `NB_ShieldRipple.tga`. The Acclamator's are the same except EdgeBrightness 0.5. The colour comes from the textures, so both factions' shells are the same blue. The Corellian corvette's and the Tartan's SHIELD submeshes are `alDefault.fx`, and neither type has DEFEND. PB-22; shader source, model data. |
 | BP-24 | Of the M2 types the Nebulon-B and the MC80 have `DEFEND` (`Expiration_Seconds` 15, `Recharge_Seconds` 60 on the Nebulon-B and 40 on the MC80, `Supports_Autofire`). The MC80's model names `MeshShield.fx` with the Nebulon-B's shield textures (model data; its shell parameters are not listed in BP-23). A retail rig recording (RC-427-01, fog off, Highest) of a Tartan firing at a Nebulon-B shows the shell at +10.1, +12.7, +19.8 and +22.2 s into the duels. It also shows it in a still with no shot in view. It does not show it at +0.5 s, before any hit, or at +29.4 s, after 15 s of DEFEND. What makes the game fire DEFEND on its own is unverified. The remake's simulation has no ability state yet (legacy EAWR-76). The viewer composes the shell for every live unit whose type has `DEFEND` (`populate.live_units.shield_shells`) and shows it while `LivePose::defend_active` is set. Until space ability implementation (legacy EAWR-76) feeds that flag, `--eawr-live-defend on` sets it for every unit; the default is off, the least visible choice. The shell's clock is the presentation clock in seconds (FoC's effect clock is not recovered; only the scroll phase depends on it). The shell is not part of a unit's pick box. |
+
+BP-22 also applies to a hero's secondary ability and to purchased reinforcements. The
+debug build switches the shell by ability kind and active state, without an ability-slot
+or hero-type condition. `Home_One` authors `CONCENTRATE_FIRE` followed by `DEFEND`, and
+`RV_HOMEONE.ALO` contains a `SHIELD` sub-object using `MeshShield.fx` and the three shield
+textures listed in BP-23. Its two `Expiration_Seconds` entries resolve to the last value,
+15 seconds; the existing ability loader already preserves that order. The viewer prepares
+shell capability after creating arrival slots, so newly purchased heroes and ordinary
+ships use BP-22 just like starting units. Placement previews do not compose a shell.
 
 The remake shares FW-19 unit opacity across the hull, attachments and shield shell.
 Explicit-alpha mesh shaders apply it after their authored alpha. Partially faded models
@@ -334,3 +378,56 @@ homing, impact, visibility or simulation state.
   for reinforcements, then flown in at the cinematic hyperspace distance per frame, faction arrival
   sound at frame 35; PB-13). It moves the unit, so it belongs to the simulation; the M2 session has
   no arrival yet and the viewer draws none.
+
+### Effective presentation constants
+
+BP-04 and BP-07 read `Laser_Kite_Z_Scale_Factor` and
+`Laser_Beam_Z_Scale_Factor` from the effective VFS at effect preparation.
+Zero gives a width factor of one at every depth. BP-01 accepts integer-valued
+render selectors, including `01` and `1.0`.
+
+BP-21 reads `Shield_Flash_Scale` and `Shield_Flash_Duration` when the live
+view prepares. RGB components and duration must be finite and nonnegative;
+a zero duration has no visible flash. The continuous light-scale interpolation
+uses elapsed logical game seconds (TR-03), rather than converting the duration
+to an integer frame deadline; TR-04's seconds-to-frames conversion therefore
+does not apply to this presentation interpolation. U-822-01: the exact debug-build flash-expiry rounding at fractional frames
+remains unverified; a later targeted debug-build query must settle it before
+changing continuous interpolation to a rounded frame countdown.
+
+Missing or invalid values produce a diagnostic and use the stock fallback
+(beam 8, kite 1.2, flash RGB 1/1.1/1.25, duration 0.1 seconds).
+`live_session_effect_cases.py::test_effective_constants_change_drawn_width_and_flash` perturbs each value in a scratch effective
+VFS and measures drawn widths, applied flash scales and active flash samples.
+The data contracts cover zero scales, numeric selectors and invalid inputs.
+
+Depth-definition recheck: debug-build camera arithmetic transforms the point by
+the view matrix's third row, negates that signed view Z, then subtracts near
+and divides by far minus near. Both laser geometries use this linear value
+(BP-04/BP-07); projected depth-buffer Z is a different quantity. The live
+capture identity includes actual render clip planes and eye/target positions.
+The project-authored live default distance is 1200; the effective stock
+Space_Mode default is 1000. The tactical XML uses near 10, far 7000 and maximum
+distance 1900. The live space renderer widens far to 60000 for sky geometry;
+the constants GPU audit found that widened camera also reached laser depth scaling.
+The handoff below corrects it. Both camera distance and the clip planes used
+for laser depth must be matched for a visual comparison.
+
+### Tactical clips for laser depth
+
+BP-04/BP-07 normalize linear camera view depth using the tactical camera's
+Near_Clip and Far_Clip. The space sky renderer widens its far clip to 60000 so
+sky geometry remains visible; that render extension must not enter the laser
+width term. Live laser geometry receives the drawn camera pose with the
+effective Space_Mode clip planes (stock 10/7000), including validated camera
+overrides. The render camera retains its sky clip.
+
+The effects report records the clip planes and first drawn beam/kite depth,
+factor and world half width. The covering renderer case compares stock clips
+with a private 60000 Far_Clip override reproducing the former scaling at
+distances 1000/1500/1900, holding the combat replay and pose fixed.
+
+Other effects audit: terminal impact admission tests the supplied render
+frustum, including its far clip. Its retail clip authority remains unverified,
+so this fix preserves that admission. Particle camera frames use eye, target
+and up only; particle lifetimes and fog fades use their clocks, not clip planes.

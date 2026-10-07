@@ -130,6 +130,7 @@ void EawrTacticalHud::relayout() {
         placed.button->set_position(rect.position);
         placed.button->set_size(rect.size);
         if (auto* button = Object::cast_to<EawrHudButton>(placed.button); button != nullptr) {
+            button->set_order_shift_pixels(static_cast<float>(shell.scale));
             const Rect2 hit = rect2(model::shell_to_screen(placed.hit, shell));
             button->set_hit_rect(Rect2(hit.position - rect.position, hit.size));
         }

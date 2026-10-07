@@ -41,11 +41,13 @@ std::string_view to_string(const OrderKind kind) noexcept {
         return "pad_sell";
     case OrderKind::credit_grant:
         return "credit_grant";
+    case OrderKind::ai_reservation_debit: return "ai_reservation_debit";
     case OrderKind::intentional_quit: return "intentional_quit";
     case OrderKind::area_ability:
         return "area_ability";
     case OrderKind::manual_target:
         return "manual_target";
+    case OrderKind::repair_hardpoint: return "repair_hardpoint";
     case OrderKind::reveal_all:
         return "reveal_all";
     }
@@ -170,9 +172,12 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_manual_target:
         return 16;
     case 9:  // #530 buy: type
+    case opcode_repair_hardpoint: // WSL-40: slot and zero reserved word
     case opcode_reveal_all: // V-20: player ID and zero reserved word
     case opcode_pad_build: // WBP-09: UC type
     case opcode_credit_grant: // SAE-07: Q24 credits
+    case opcode_ai_reservation_debit: // WAS-25: Q24 credits
+    case opcode_prepaid_buy: // WAS-26: type
     case 10: // #530 cancel: queue, index
         return 8;
     case 11: // #530 reinforce: type, position
@@ -180,15 +185,27 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
         return 32;
     case opcode_reserved_reinforce: // SAE-11: type, position, purchase token
         return 40;
+    case opcode_reinforce_facing: // WR-X01: type, position, purchase token, explicit yaw
+        return 48;
+    case opcode_cancel_entry: // PU-17: queue, reserved zero, entry identity
+        return 16;
     default:
         return 0;
     }
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<AiReservationDebitPayload>(command.payload)) return opcode_ai_reservation_debit;
+    if (const auto* buy = std::get_if<BuyPayload>(&command.payload); buy != nullptr && buy->prepaid)
+        return opcode_prepaid_buy;
+    if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+        cancel != nullptr && cancel->entry_id != 0) return opcode_cancel_entry;
+    if (std::holds_alternative<RepairHardpointPayload>(command.payload)) return opcode_repair_hardpoint;
     if (std::holds_alternative<RevealAllPayload>(command.payload)) return opcode_reveal_all;
     if (const auto* move = std::get_if<MovePayload>(&command.payload);
         move != nullptr && move->through_hazards) return opcode_hazard_move;
+    if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
+        reinforce != nullptr && reinforce->facing_yaw) return opcode_reinforce_facing;
     if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
         reinforce != nullptr && reinforce->pool_token != 0) return opcode_reserved_reinforce;
     if (std::holds_alternative<QuitPayload>(command.payload)) return opcode_intentional_quit;
@@ -255,7 +272,10 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* reveal = std::get_if<RevealAllPayload>(&command.payload)) {
+    if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, repair->hardpoint);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* reveal = std::get_if<RevealAllPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, reveal->player);
         sim::detail::append_u32(bytes, 0);
     } else if (const auto* manual = std::get_if<ManualTargetPayload>(&command.payload)) {
@@ -314,17 +334,21 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_u64(bytes, buy->type);
     } else if (const auto* grant = std::get_if<CreditGrantPayload>(&command.payload)) {
         sim::detail::append_i64(bytes, grant->amount.raw());
+    } else if (const auto* debit = std::get_if<AiReservationDebitPayload>(&command.payload)) {
+        sim::detail::append_i64(bytes, debit->amount.raw());
     } else if (const auto* pad = std::get_if<PadBuildPayload>(&command.payload)) {
         sim::detail::append_u64(bytes, pad->type);
     } else if (const auto* cancel = std::get_if<CancelPayload>(&command.payload)) {
         sim::detail::append_u32(bytes, cancel->queue);
         sim::detail::append_u32(bytes, cancel->index);
+        if (cancel->entry_id != 0) sim::detail::append_u64(bytes, cancel->entry_id);
     } else if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload)) {
         sim::detail::append_u64(bytes, reinforce->type);
         sim::detail::append_i64(bytes, reinforce->position.x.raw());
         sim::detail::append_i64(bytes, reinforce->position.y.raw());
         sim::detail::append_i64(bytes, reinforce->position.z.raw());
-        if (reinforce->pool_token != 0) sim::detail::append_u64(bytes, reinforce->pool_token);
+        if (reinforce->pool_token != 0 || reinforce->facing_yaw) sim::detail::append_u64(bytes, reinforce->pool_token);
+        if (reinforce->facing_yaw) sim::detail::append_i64(bytes, reinforce->facing_yaw->raw());
     }
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
     sim::detail::append_u32(bytes, 0);
@@ -363,6 +387,11 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
+    if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload);
+        repair != nullptr && (command.units.size() != 1 || repair->hardpoint >= 255)) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": repair requires one station and a hardpoint below 255", logical_path));
+    }
     // #530: a buy lists exactly its station; a cancel or reinforce lists no unit.
     if ((std::holds_alternative<BuyPayload>(command.payload) || std::holds_alternative<PadBuildPayload>(command.payload)
             || std::holds_alternative<PadSellPayload>(command.payload))
@@ -372,6 +401,7 @@ core::Result<void> validate_command_shape(
     }
     if ((std::holds_alternative<CancelPayload>(command.payload)
             || std::holds_alternative<ReinforcePayload>(command.payload) || std::holds_alternative<CreditGrantPayload>(command.payload)
+            || std::holds_alternative<AiReservationDebitPayload>(command.payload)
             || std::holds_alternative<QuitPayload>(command.payload) || std::holds_alternative<RevealAllPayload>(command.payload))
         && !command.units.empty()) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
@@ -383,7 +413,7 @@ core::Result<void> validate_command_shape(
             std::string(context) + ": unit list is empty", logical_path));
     }
     if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
-        cancel != nullptr && cancel->queue >= build_queue_count) {
+        cancel != nullptr && (cancel->queue >= build_queue_count || (cancel->entry_id != 0 && cancel->index != 0))) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": cancel names no build queue", logical_path));
     }
@@ -412,6 +442,12 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": manual target requires a nonzero entity and hardpoint below 255", logical_path));
     }
+    if (const auto* reinforce = std::get_if<ReinforcePayload>(&command.payload);
+        reinforce != nullptr && reinforce->facing_yaw
+        && (reinforce->facing_yaw->raw() < 0 || reinforce->facing_yaw->raw() >= 360 * math::Fixed::scale)) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": reinforcement facing must be in [0, 360) degrees", logical_path));
+    }
     if (const auto* damage = std::get_if<DamagePayload>(&command.payload);
         damage != nullptr && damage->amount.raw() < 0) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
@@ -421,6 +457,11 @@ core::Result<void> validate_command_shape(
         grant != nullptr && grant->amount.raw() <= 0) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
             std::string(context) + ": credit grant must be positive", logical_path));
+    }
+    if (const auto* debit = std::get_if<AiReservationDebitPayload>(&command.payload);
+        debit != nullptr && debit->amount.raw() <= 0) {
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": reservation debit must be positive", logical_path));
     }
     if (const auto* ability = std::get_if<AbilityPayload>(&command.payload)) {
         const auto kind = static_cast<std::uint8_t>(ability->ability);

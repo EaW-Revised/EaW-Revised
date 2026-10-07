@@ -33,6 +33,7 @@ struct FogLooks {
     double regrow_seconds{6.0};                             // SpaceFOWRegrowTime
     // FW-22: SpaceReinforceFOWColor, the colour of the blocked-area overlay (#563).
     std::array<std::uint8_t, 4> reinforce_colour{255, 0, 0, 254};
+    bool reinforce_only_while_dragging{}; // SpaceReinforceFeedbackOnlyWhileDragging (FW-23)
     // Values that were absent or unreadable; their defaults are used.
     std::vector<core::Diagnostic> diagnostics;
 };

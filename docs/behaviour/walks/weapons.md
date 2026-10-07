@@ -163,6 +163,16 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 - **WWP-33** (debug build, EWW-03) Between pulses the recharge is `trunc(Fire_Pulse_Delay_Seconds ×
   fps)` times the weapon delay factor, rounded; with `r ≤ 0` recharge and burst both become zero,
   else the recharge is divided by `r`, rounded.
+  Stock Y-wing torpedoes use `HP_BOMBER_03` with `MuzzleA_01`; TIE bomber torpedoes use
+  `HP_BOMBER_02` with `MuzzleB_00`. Both author two pulses from their single muzzle,
+  a 0.15-second pulse delay and fixed 8-second recharge.
+  At 30 logical frames/s with ordinary modifiers, truncation gives a **four-frame gap**
+  (about 0.133 seconds), then 240 frames from the second shot to the next volley.
+  The debug-build fire and service paths were rechecked for the bomber volley timing
+  investigation; there is no torpedo-specific simultaneous-pulse branch. The installed-data
+  headless regression in `tests/units/unit_tables_foc_tests.cpp` checks both bombers,
+  both volleys and equal hashes on 1/2/4/8 workers. This timing check does not settle
+  visual overlap or spacing between different squadron members.
 - **WWP-34** (debug build, EWW-03) The hardpoint remembers the frame it fired and the object it
   fired at.
 - **WWP-35** (debug build, EWW-02, EWW-03) No line-of-fire or obstruction test: fog, category,
@@ -341,7 +351,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-12 | `service_opportunity` | same |
 | WWP-13, WWP-15 | `attempt` (live, fogged, restricted); stealth and hero clash not modelled | same for M2 |
 | WWP-14 | not modelled | missing (not in M2) |
-| WWP-16 | nearest targetable hardpoint from the shooter's position | same (the shooter's height adjustment differs by at most 35, G-06) |
+| WWP-16 | nearest targetable hardpoint from the shooter's height-adjusted position | **same** for space units and structures |
 | WWP-17 | turrets treated as fixed (P-04) | missing (not in M2; G-08) |
 | WWP-18 | projectile override comes with targeted ion-shot input and HUD (legacy EAWR-561) | same after the targeted ion-shot input and HUD work |
 | WWP-19 | a squadron resolves to its nearest craft (`resolve_target`) | **differs (G-04)** |
@@ -363,7 +373,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-45, WWP-46 | `service_weapon` | same |
 | WWP-47 | the unit's origin | **differs (G-03)** |
 | WWP-48 | the projectile's `Projectile_Max_Flight_Distance` (500 for the small lasers) | **differs (G-03)** |
-| WWP-49 | `resolve_target` (nearest to the unit's position) | same (nearest to the muzzle, not the centre: G-03) |
+| WWP-49 | `resolve_target` from the copied shooter's squadron centre for object weapons, without an aimed hardpoint | squadron-centre clause implemented; ungrouped muzzle reference remains G-03 |
 | WWP-50 | the nearest targetable hardpoint, else the R-10 search with a range test | **differs (G-03)** |
 | WWP-51, WWP-52 | `lead`; no unit weapon scatter | same |
 | WWP-53 | cone as W-09; `Fires_Forward` yes flies at the aim point | same for M2; missing for `Fires_Forward` yes (G-08) |
@@ -374,7 +384,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-66 | hostile-player gate shared with ordinary targeting; living collision permission loaded and applied; a separate persistent owner tree supplies ray contacts in DG-30 order | agrees in query order; DG-30f records deterministic tick commit and equal-centre tie choices |
 | WWP-67 | hand-off to `damage.cpp`; no blast area | same for M2 |
 | WWP-68 to WWP-70 | `step_projectile` | same; lifetime expiry missing (not in M2; G-08) |
-| WWP-72 | not loaded | **differs (G-06)** |
+| WWP-72 | loaded for `SpaceUnit` and `SpaceStructure`; applied to launch fallback, nearest-hardpoint reference and homing | **same** for these classes |
 
 Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 43**, **differs 12**
 (WWP-02, 19, 20, 21, 26, 27, 43, 47, 48, 50, 72, and the project choice of WWP-66), **missing 7**
@@ -389,7 +399,7 @@ Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 43**, **di
 | G-03 fighter aim and muzzle bones (legacy EAWR-710) | WWP-47, WWP-48, WWP-49, WWP-50 | The unit's own weapon: aim at the ordered hardpoint, else a random target bone, else the height-adjusted centre (never the nearest hardpoint, which with DG-39 also sends the damage to that hardpoint); fire from the muzzle bones in turn; travel `Targeting_Max_Attack_Distance`. | M |
 | G-04 random craft selection by ordered hardpoints (legacy EAWR-711) | WWP-19 | A hardpoint ordered at a squadron fires at a random craft each attempt (a synchronized draw), not the nearest; FO-04 is corrected. | S |
 | G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
-| G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | Load `Ranged_Target_Z_Adjust` and use the height-adjusted position for the aim fallback, the nearest-hardpoint reference and missile steering (the Nebulon-B +35). | S |
+| G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | **Implemented** for `SpaceUnit` and `SpaceStructure`: launch fallbacks, nearest-hardpoint reference and missile steering use `Ranged_Target_Z_Adjust` (Nebulon-B +35; resource container +30). | S |
 | G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
 | G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 22 (random box), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
 
@@ -451,13 +461,20 @@ and `_Length` are drawing data (presentation). `HardPoint/Allows_Special_Weapon_
 - **per-unit flight heights (are range and arcs planar?).** See "Planar or 3-D": hardpoint range planar, travel
   compensated for height, cones and the opportunity aim distance 3-D.
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-04 | The fallback uses the type model returned for the active mode without an instance/faction override, taking the greater absolute X/Y box extent. A positive custom soft radius overrides it; otherwise a positive space-obstacle radius overrides it, then Scale_Factor applies. With no model the result is zero before those overrides. The object normally delegates to this type radius; the team/locomotor special case uses hard coordinate radius. | EUS-18 |
+| U-05 | Hostility reads the stored player relationship. The neutral faction establishes neutral relationships, so stock Neutral props and asteroids are not enemies merely because they are objects. Non-neutral pirate factions are distinct and may be hostile. Other targetability/opportunity-fire gates still apply (WNO-05 and WHZ-51). | EUS-28 |
+| U-06 | Object weapons search the authored muzzle prefix followed by _00, then consecutive two-digit suffixes starting at zero. The first absent bone ends enumeration; an absent _00 leaves the firing list empty and warns. Next firing index becomes zero once a bone is appended. Related flash/light subobjects are resolved per discovered bone. | EUS-11 |
+
 ## Unverified
 
 | ID | What | What would settle it |
 |---|---|---|
-| U-01 | The order of a unit's services and hardpoints within a frame. | The object manager's service loop (a debug-build read). |
 | U-02 | Whether a hardpoint's projectile moves in the frame it is fired (its muzzle delay is left at the data default). | A retail per-frame projectile position trace of one hardpoint shot (S-15 has shot and hit ticks only). |
-| U-03 | What sets the "okay to attack" targeting state (two targeting checks not read here). | Walk 1/2's read of the targeting service. |
-| U-04 | Which model box gives the soft radius without a custom radius. | A read of the model's bounds call; or compare the stations' 300/250 against a ship's. |
-| U-05 | Whether neutral objects (asteroids, props) are enemies of a player and so can be hit. | A read of the player enemy test; M2 has no neutral combatants. |
-| U-06 | How the muzzle bones are found by name (the X-wing's `MuzzleA_NN`). | A read of the unit weapon's bone look-up. |
+| U-03 | What sets the "okay to attack" targeting state (two targeting checks not read here). **Sweep:** Still unverified: Attack wrappers assign targets, but the two virtual okay-to-attack gates are not resolved by those assignments. Their setters and policy remain unverified. | Walk 1/2's read of the targeting service. Retained sweep boundary: EUS-37. |

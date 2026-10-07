@@ -160,8 +160,11 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                 if (!iequals(node.name, "Unit_Ability")) continue;
                 data::tag_trace::used(node);
                 Ability ability;
-                const bool concentrate = std::any_of(node.children.begin(), node.children.end(), [](const auto& child) {
-                    return iequals(child.name, "Type") && iequals(trim(child.raw_text), "CONCENTRATE_FIRE");
+                const bool spatial_radius = std::any_of(node.children.begin(), node.children.end(), [](const auto& child) {
+                    if (!iequals(child.name, "Type")) return false;
+                    const auto kind = trim(child.raw_text);
+                    return iequals(kind, "CONCENTRATE_FIRE") || iequals(kind, "WEAKEN_ENEMY")
+                        || iequals(kind, "MISSILE_SHIELD") || iequals(kind, "SENSOR_JAMMING");
                 });
                 for (const auto& child : node.children) {
                     const auto value = trim(child.raw_text);
@@ -179,7 +182,7 @@ void Loader::load_abilities(Object& object, UnitType& unit) {
                         data::tag_trace::used(child);
                         ability.recharge_seconds = number(value);
                         if (!ability.recharge_seconds) report_.missing(unit.id, "Recharge_Seconds", value, "not a decimal");
-                    } else if ((concentrate || ability.type == "WEAKEN_ENEMY") && iequals(child.name, "Effective_Radius")) {
+                    } else if (spatial_radius && iequals(child.name, "Effective_Radius")) {
                         data::tag_trace::used(child);
                         ability.effective_radius = number(value);
                         if (!ability.effective_radius) report_.missing(unit.id, "Effective_Radius", value, "not a decimal");
@@ -488,9 +491,17 @@ void Loader::load_body(Object& object, UnitType& unit) {
         unit.base_level = count(object, "Base_Level", false).value_or(0);
         unit.space_fow_reveal_range = object.fixed("Space_FOW_Reveal_Range", report_, has_reveal(object));
         unit.reveal = has_reveal(object);
+        unit.force_sensitive = flag(object, "Is_Force_Sensitive", false).value_or(false);
+        unit.dense_fow_multiplier = object.fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
+            .value_or(Fixed::from_raw(Fixed::scale / 2));
+        unit.multisample_fow = flag(object, "Multisample_FOW_Check", false).value_or(false);
+        unit.fog_box_offset.x = object.fixed("Custom_Hard_XExtent_Offset", report_, false).value_or(Fixed{});
+        unit.fog_box_offset.y = object.fixed("Custom_Hard_YExtent_Offset", report_, false).value_or(Fixed{});
         load_selection(object, unit);
         // #74: the shield behaviour, and what projectiles hit.
         unit.shielded = has_behavior(object, "SHIELDED");
+        unit.passive_missile_shield_radius = object.fixed("Passive_Missile_Shield_Radius", report_, false);
+        unit.ranged_target_z_adjust = object.fixed("Ranged_Target_Z_Adjust", report_, false);
         unit.powered = has_behavior(object, "POWERED"); // #361: the energy pool
         unit.ion_stun_effect = has_behavior(object, "ION_STUN_EFFECT"); // #561: IS-02
         if (model != nullptr) unit.collision = collision_bounds(*model->model, model->frames);
@@ -624,6 +635,8 @@ void Loader::load_team(Object& object, UnitType& unit) {
         unit.team_shield_points = team->fixed("Shield_Points", report_, false);
         load_selection(*team, unit);
         if (has_reveal(*team)) unit.team_reveal_range = team->fixed("Space_FOW_Reveal_Range", report_, true);
+        unit.team_dense_fow_multiplier = team->fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
+            .value_or(Fixed::from_raw(Fixed::scale / 2));
         // AB-60 (#561): a team ability's data lives on the team container.
         UnitType container;
         container.id = unit.team_type;

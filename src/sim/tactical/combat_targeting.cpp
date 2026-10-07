@@ -3,6 +3,20 @@
 namespace eawr::sim::tactical {
 using detail::combat_detail::one_raw;
 
+bool players_allied(const std::span<const SnapshotPlayer> players, const PlayerId owner, const PlayerId target) noexcept {
+    const auto find = [&](const PlayerId id) -> const SnapshotPlayer* {
+        const auto entry = std::lower_bound(players.begin(), players.end(), id,
+            [](const SnapshotPlayer& player, const PlayerId value) { return player.player_id < value; });
+        return entry != players.end() && entry->player_id == id ? &*entry : nullptr;
+    };
+    const auto* source = find(owner);
+    const auto* recipient = find(target);
+    // WPR-33/WHZ-51: neutral relationships are bound faction data, never an alliance
+    // inferred solely from a matching numeric team (including the neutral team).
+    return source != nullptr && recipient != nullptr && (owner == target
+        || (!source->neutral && !recipient->neutral && source->team_id == recipient->team_id));
+}
+
 bool players_hostile(const std::span<const SnapshotPlayer> players, const PlayerId owner, const PlayerId target) noexcept {
     const auto find = [&](const PlayerId id) -> const SnapshotPlayer* {
         const auto entry = std::lower_bound(players.begin(), players.end(), id,
@@ -230,6 +244,13 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
 [[nodiscard]] UnitCombat::Suitability UnitCombat::ship_suitable(const CombatUnit& target) {
         Suitability result;
         if (target.profile == nullptr || !hostile(target) || !visible_to_me(target)) return result;
+        // WCC-25: the held team object bypasses type admission; its members do not.
+        // Use the immutable team index rather than resolving or allocating an aim candidate.
+        const auto team = std::lower_bound(world_.teams.begin(), world_.teams.end(), target.id,
+            [](const auto& entry, const EntityId id) { return entry.first < id; });
+        const bool container = team != world_.teams.end() && team->first == target.id;
+        if ((!container && (!target.profile->living_projectile_collision || !target.profile->valid_target))
+            || target.in_limbo || (target.profile->special_weapon && !target.profile->star_base)) return result;
         bool armed = false;
         for (const auto& weapon : profile_.weapons) {
             if (weapon_up(weapon) && !restricted(weapon, target)) {

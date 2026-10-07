@@ -25,6 +25,46 @@ float dot(const Vec3 a,const Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 Vec3 cross(const Vec3 a,const Vec3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 bool same(const Vec3 a,const Vec3 b){return a.x==b.x&&a.y==b.y&&a.z==b.z;}
 bool same(const Basis3& a,const Basis3& b){return same(a.x,b.x)&&same(a.y,b.y)&&same(a.z,b.z);}
+Basis3 interpolate_basis(const Basis3& first,const Basis3& last,const float fraction){
+    if(same(first,last)||fraction>=1)return last;
+    if(fraction<=0)return first;
+    // PS-10, PSE-WALK-FRAME: normalized quaternion interpolation of the rigid frame.
+    const auto quaternion=[](const Basis3& b){
+        Vec4 q;const float trace=b.x.x+b.y.y+b.z.z;
+        if(trace>0){const float scale=2*std::sqrt(trace+1);q={
+            (b.y.z-b.z.y)/scale,(b.z.x-b.x.z)/scale,(b.x.y-b.y.x)/scale,scale/4};}
+        else if(b.x.x>b.y.y&&b.x.x>b.z.z){const float scale=2*std::sqrt(std::max(0.0F,1+b.x.x-b.y.y-b.z.z));
+            if(scale==0)return Vec4{0,0,0,1};
+            q={scale/4,(b.y.x+b.x.y)/scale,(b.z.x+b.x.z)/scale,(b.y.z-b.z.y)/scale};}
+        else if(b.y.y>b.z.z){const float scale=2*std::sqrt(std::max(0.0F,1+b.y.y-b.x.x-b.z.z));
+            if(scale==0)return Vec4{0,0,0,1};
+            q={(b.y.x+b.x.y)/scale,scale/4,(b.z.y+b.y.z)/scale,(b.z.x-b.x.z)/scale};}
+        else{const float scale=2*std::sqrt(std::max(0.0F,1+b.z.z-b.x.x-b.y.y));
+            if(scale==0)return Vec4{0,0,0,1};
+            q={(b.z.x+b.x.z)/scale,(b.z.y+b.y.z)/scale,scale/4,(b.x.y-b.y.x)/scale};}
+        return q;
+    };
+    const Vec3 first_scale{length(first.x),length(first.y),length(first.z)};
+    const Vec3 last_scale{length(last.x),length(last.y),length(last.z)};
+    if(first_scale.x<=1e-12F||first_scale.y<=1e-12F||first_scale.z<=1e-12F||
+       last_scale.x<=1e-12F||last_scale.y<=1e-12F||last_scale.z<=1e-12F)return last;
+    const Basis3 first_rotation{first.x*(1/first_scale.x),first.y*(1/first_scale.y),first.z*(1/first_scale.z)};
+    const Basis3 last_rotation{last.x*(1/last_scale.x),last.y*(1/last_scale.y),last.z*(1/last_scale.z)};
+    const auto a=quaternion(first_rotation);auto b=quaternion(last_rotation);
+    if(a.x*b.x+a.y*b.y+a.z*b.z+a.w*b.w<0)b={-b.x,-b.y,-b.z,-b.w};
+    Vec4 q{a.x+(b.x-a.x)*fraction,a.y+(b.y-a.y)*fraction,
+        a.z+(b.z-a.z)*fraction,a.w+(b.w-a.w)*fraction};
+    const float magnitude=std::sqrt(q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w);
+    if(magnitude<=1e-12F)return last;
+    q={q.x/magnitude,q.y/magnitude,q.z/magnitude,q.w/magnitude};
+    Basis3 rotation{{1-2*(q.y*q.y+q.z*q.z),2*(q.x*q.y+q.z*q.w),2*(q.x*q.z-q.y*q.w)},
+        {2*(q.x*q.y-q.z*q.w),1-2*(q.x*q.x+q.z*q.z),2*(q.y*q.z+q.x*q.w)},
+        {2*(q.x*q.z+q.y*q.w),2*(q.y*q.z-q.x*q.w),1-2*(q.x*q.x+q.y*q.y)}};
+    // PS-10/PS-15: rotating a host does not discard its authored spatial scale.
+    const Vec3 scale=first_scale+(last_scale-first_scale)*fraction;
+    rotation.x=rotation.x*scale.x;rotation.y=rotation.y*scale.y;rotation.z=rotation.z*scale.z;
+    return rotation;
+}
 bool finite(const Vec3 value){return std::isfinite(value.x)&&std::isfinite(value.y)&&std::isfinite(value.z);}
 bool finite(const Vec4 value){return finite(Vec3{value.x,value.y,value.z})&&std::isfinite(value.w);}
 bool finite(const Basis3& basis){return finite(basis.x)&&finite(basis.y)&&finite(basis.z);}
@@ -35,7 +75,7 @@ bool finite(const PropertyGroup& group){return finite(group.point)&&finite(group
     finite(group.range_max)&&std::isfinite(group.angle_min)&&std::isfinite(group.angle_max)&&
     std::isfinite(group.spherical_radius_min)&&std::isfinite(group.spherical_radius_max)&&
     std::isfinite(group.cylinder_radius)&&std::isfinite(group.cylinder_height_min)&&
-    std::isfinite(group.cylinder_height_max)&&std::isfinite(group.torus_radius)&&std::isfinite(group.tube_radius);}
+    std::isfinite(group.cylinder_height_max)&&std::isfinite(group.pinch_fraction)&&std::isfinite(group.torus_radius)&&std::isfinite(group.tube_radius);}
 bool finite(const ScalarTrack& track){return std::all_of(track.keys.begin(),track.keys.end(),
     [](const ScalarKey& key){return std::isfinite(key.time)&&std::isfinite(key.value);});}
 bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.particles_per_interval)&&
@@ -46,11 +86,11 @@ bool finite(const EmitterDefinition& emitter){return std::isfinite(emitter.parti
     finite(emitter.position)&&finite(emitter.velocity)&&std::isfinite(emitter.lifetime)&&
     std::isfinite(emitter.lifetime_variation)&&(!emitter.lifetime_range||
         (std::isfinite(emitter.lifetime_range->minimum)&&std::isfinite(emitter.lifetime_range->maximum)))&&
-    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&
+    std::isfinite(emitter.inward_speed)&&finite(emitter.acceleration)&&std::isfinite(emitter.gravity)&&
     std::isfinite(emitter.inward_acceleration)&&std::isfinite(emitter.wind_response)&&
     std::isfinite(emitter.terrain_elasticity)&&finite(emitter.red)&&finite(emitter.green)&&finite(emitter.blue)&&
     finite(emitter.alpha)&&finite(emitter.size)&&std::isfinite(emitter.size_variation)&&finite(emitter.uv_index)&&
-    finite(emitter.rotation_rate)&&std::isfinite(emitter.random_rotation_average)&&
+    finite(emitter.rotation_rate)&&std::isfinite(emitter.rotation_variation)&&std::isfinite(emitter.random_rotation_average)&&
     std::isfinite(emitter.random_rotation_variation)&&finite(emitter.color_variance);}
 float saturated(const float value){return std::clamp(value,0.0F,1.0F);}
 float mix(const float first,const float last,float amount,const Interpolation interpolation){
@@ -207,7 +247,16 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
     max_child_instances_=links;
     child_instances_.reserve(links);
     emitter_start_.assign(definition_.emitters.size(),0.0F);
+    schedules_before_.resize(definition_.emitters.size());
     enabled_.assign(definition_.emitters.size(),1U);
+    if(mesh_binding_&&std::any_of(definition_.emitters.begin(),definition_.emitters.end(),[](const auto& emitter){
+        return emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex;
+    })){
+        mesh_vertices_.reserve(mesh_vertex_count_);vertex_order_.resize(mesh_vertex_count_);
+        for(std::size_t submesh=0;submesh<mesh_binding_->geometry.submeshes.size();++submesh)
+            for(std::size_t vertex=0;vertex<mesh_binding_->geometry.submeshes[submesh].vertices.size();++vertex)
+                mesh_vertices_.push_back({submesh,vertex});
+    }
 }
 
 core::Result<void> CpuSystem::set_detail(ParticleDetail detail){
@@ -268,7 +317,7 @@ void CpuSystem::set_origin(const Vec3 origin){
     if(!origin_set_){sampled_origin_=origin;origin_set_=true;}
     origin_=origin;
 }
-void CpuSystem::set_basis(const Basis3 basis){if(finite(basis))basis_=basis;}
+void CpuSystem::set_basis(const Basis3 basis){if(finite(basis)){basis_=basis;if(!prerolled_)sampled_basis_=basis;}}
 void CpuSystem::set_wind(const Vec3 acceleration){if(finite(acceleration))wind_=acceleration;}
 core::Result<void> CpuSystem::set_mesh_frame(const MeshFrame& frame){
     if(!mesh_binding_||!finite(frame))return core::Result<void>::failure({
@@ -295,11 +344,23 @@ Vec3 CpuSystem::sample(const PropertyGroup& group,const bool hollow){
     switch(group.shape){
     case Shape::point:return group.point;
     case Shape::direction:{const float magnitude=hollow?(random(0,1)<0.5F?group.magnitude_min:group.magnitude_max):random(group.magnitude_min,group.magnitude_max);return normalized(group.direction)*magnitude;}
-    case Shape::sphere:{const float radius=hollow?group.radius_max:random(group.radius_min,group.radius_max);const float azimuth=random(0,2*pi),tilt=random(-pi,pi);const float planar=std::cos(tilt);return {std::cos(azimuth)*planar*radius,std::sin(azimuth)*planar*radius,std::sin(tilt)*radius};}
+    case Shape::sphere:{const float radius=hollow?group.radius_max:random(group.radius_min,group.radius_max);
+        const float azimuth=random(0,2*pi),polar_cosine=random(-1,1);
+        const float planar=std::sqrt(std::max(0.0F,1-polar_cosine*polar_cosine));
+        return {std::cos(azimuth)*planar*radius,std::sin(azimuth)*planar*radius,polar_cosine*radius};}
     case Shape::range:return {random(group.range_min.x,group.range_max.x),random(group.range_min.y,group.range_max.y),random(group.range_min.z,group.range_max.z)};
     case Shape::spherical_range:{const float angle=random(group.angle_min,group.angle_max),radius=random(group.spherical_radius_min,group.spherical_radius_max),azimuth=random(0,2*pi);return {std::cos(azimuth)*std::cos(angle)*radius,std::sin(azimuth)*std::cos(angle)*radius,std::sin(angle)*radius};}
     case Shape::cylinder:{const float radius=hollow?group.cylinder_radius:random(0,group.cylinder_radius),angle=random(0,2*pi);return {std::cos(angle)*radius,std::sin(angle)*radius,random(group.cylinder_height_min,group.cylinder_height_max)};}
     case Shape::torus:{const float radius=hollow?group.tube_radius:random(0,group.tube_radius),around=random(0,2*pi),tube=random(0,2*pi);const float ring=group.torus_radius+std::cos(tube)*radius;return {std::cos(around)*ring,std::sin(around)*ring,std::sin(tube)*radius};}
+    case Shape::pinched_cylinder:{
+        // PS-12: mirror a sampled half-height, then pinch the radius quadratically.
+        const float azimuth=random(0,2*pi);
+        float height=random(0,group.pinch_fraction*0.5F);
+        if(random(0,1)<0.5F)height=1-height;
+        float radius=group.cylinder_radius*(4*height*height-4*height+1);
+        if(!hollow)radius*=random(0,1);
+        return {-std::sin(azimuth)*radius,std::cos(azimuth)*radius,height*group.cylinder_height_max};
+    }
     }
     return {};
 }
@@ -316,10 +377,9 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         auto& state=emitters_[emitter_index];
         std::size_t submesh_index{},vertex_index{};
         if(emitter.mesh_mode==MeshSpawnMode::every_vertex){
-            submesh_index=state.submesh;vertex_index=state.vertex;
-            if(++state.vertex==geometry.submeshes[state.submesh].vertices.size()){
-                state.vertex=0;state.submesh=(state.submesh+1)%geometry.submeshes.size();
-            }
+            const auto location=mesh_vertices_[vertex_order_[state.vertex]];
+            submesh_index=location.submesh;vertex_index=location.vertex;
+            state.vertex=(state.vertex+1)%mesh_vertex_count_;
         }else{
             submesh_index=random_index(static_cast<std::uint32_t>(geometry.submeshes.size()));
             if(emitter.mesh_mode==MeshSpawnMode::random_vertex)
@@ -371,12 +431,25 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
     particle.size_scale=1.0F;
     if(emitter.size_variation>0)particle.size_scale+=random(-emitter.size_variation,emitter.size_variation);
     particle.rotation_direction=emitter.random_rotation_direction&&random(0,1)<0.5F?-1.0F:1.0F;
-    if(emitter.random_rotation){particle.rotation=emitter.random_rotation_average;if(emitter.random_rotation_variation>0)particle.rotation+=random(-emitter.random_rotation_variation,emitter.random_rotation_variation)*particle.rotation;particle.rotation*=particle.rotation_direction;}
+    if(emitter.random_rotation&&definition_.version!=AloParticleVersion::legacy_v1){particle.rotation=emitter.random_rotation_average;if(emitter.random_rotation_variation>0)particle.rotation+=random(-emitter.random_rotation_variation,emitter.random_rotation_variation)*particle.rotation;particle.rotation*=particle.rotation_direction;}
     if(has(emitter,53)){
-        particle.color_offset.x=random(0,emitter.color_variance.x);
-        particle.color_offset.y=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.y);
-        particle.color_offset.z=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.z);
-        particle.color_offset.w=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.w);
+        if(definition_.version==AloParticleVersion::legacy_v1){
+            // PS-23: integer byte offsets; alpha has its own signed draw even with RGB locked.
+            const auto limit=[](float variation){return static_cast<std::uint32_t>(
+                std::min(127.0F,std::trunc(std::max(0.0F,variation)*100)));};
+            particle.color_offset.x=static_cast<float>(random_index(limit(emitter.color_variance.x)+1));
+            particle.color_offset.y=emitter.grayscale_variance?particle.color_offset.x:
+                static_cast<float>(random_index(limit(emitter.color_variance.y)+1));
+            particle.color_offset.z=emitter.grayscale_variance?particle.color_offset.x:
+                static_cast<float>(random_index(limit(emitter.color_variance.z)+1));
+            const auto alpha=limit(emitter.color_variance.w);
+            particle.color_offset.w=static_cast<float>(static_cast<int>(random_index(alpha*2+1))-static_cast<int>(alpha));
+        }else{
+            particle.color_offset.x=random(0,emitter.color_variance.x);
+            particle.color_offset.y=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.y);
+            particle.color_offset.z=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.z);
+            particle.color_offset.w=emitter.grayscale_variance?particle.color_offset.x:random(0,emitter.color_variance.w);
+        }
     }
     if(emitter.creator_id==35&&emitter.mesh_mode!=MeshSpawnMode::every_vertex){
         // Mesh emission: the debug build offsets random samples by half the
@@ -386,27 +459,93 @@ void CpuSystem::initialize_particle(Particle& particle,const EmitterDefinition& 
         const float size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
         particle.position+=mesh_offset_normal*(emitter.mesh_surface_offset*size*0.5F);
     }
-    if(emitter.inward_speed!=0.0F)particle.velocity=normalized(particle.position-origin_)*emitter.inward_speed;
-    particle.motion_velocity=particle.velocity;
+    if(emitter.inward_speed!=0.0F)particle.radial_velocity=normalized(particle.position-origin_)*emitter.inward_speed;
+    particle.motion_velocity=particle.velocity+particle.radial_velocity;
     particle.inherited_speed_limit=inherited_speed_limit_;
+    particle.previous_position=particle.position;
+    const float saved_time=time_;time_=spawn_time;
     update_particle(particle,emitter,0.0F);
+    time_=saved_time;
 }
 
 void CpuSystem::update_particle(Particle& particle,const EmitterDefinition& emitter,const float delta){
     const float lifetime=particle.death_time-particle.spawn_time;
     const float relative=lifetime>0?saturated((time_-particle.spawn_time)/lifetime):1.0F;
-    particle.acceleration={};
-    if(has(emitter,10))particle.acceleration=emitter.acceleration_local?transformed(basis_,emitter.acceleration):emitter.acceleration;
-    if(has(emitter,11))particle.acceleration+=normalized(particle.position-origin_)*emitter.inward_acceleration;
-    if(has(emitter,54))particle.acceleration+=wind_*emitter.wind_response;
     particle.color={sample_track(emitter.red,relative,1),sample_track(emitter.green,relative,1),sample_track(emitter.blue,relative,1),sample_track(emitter.alpha,relative,1)};
-    if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
+    if(definition_.version==AloParticleVersion::legacy_v1){
+        const auto channel=[](const float track,const float offset){
+            return std::clamp(std::trunc(saturated(track)*255)+offset,0.0F,255.0F)/255;
+        };
+        particle.color={channel(particle.color.x,particle.color_offset.x),channel(particle.color.y,particle.color_offset.y),
+            channel(particle.color.z,particle.color_offset.z),channel(particle.color.w,particle.color_offset.w)};
+    }else if(has(emitter,53)){particle.color.x=saturated(particle.color.x+particle.color_offset.x);particle.color.y=saturated(particle.color.y+particle.color_offset.y);particle.color.z=saturated(particle.color.z+particle.color_offset.z);particle.color.w=saturated(particle.color.w+particle.color_offset.w);}
     particle.size=std::max(0.0F,particle.size_scale*sample_track(emitter.size,relative,1));
     // PS-30: integer square root, including nonsquare authored frame counts.
     const int grid=std::max(1,static_cast<int>(std::sqrt(static_cast<double>(emitter.texture_size))));
     const int uv=safe_truncated_index(sample_track(emitter.uv_index,relative,0));
     particle.texcoords={static_cast<float>(uv%grid)/grid,static_cast<float>(uv/grid)/grid,1.0F/grid,1.0F/grid};
-    if(!emitter.random_rotation)particle.rotation+=delta*particle.rotation_direction*sample_track(emitter.rotation_rate,relative,0);
+    if(definition_.version==AloParticleVersion::legacy_v1){
+        if((emitter.initial_rotation_only&&delta==0)||(!emitter.initial_rotation_only&&delta>0)){
+            // PS-29: turns, fresh variation, accumulated angle and mirrored 256-bin orientation.
+            const float variation=emitter.rotation_variation==0?0:random(-emitter.rotation_variation,emitter.rotation_variation);
+            const float increment=sample_track(emitter.rotation_rate,relative,0)*(2*pi)*(delta==0?1:delta);
+            particle.rotation_angle+=increment+increment*variation;
+            if(particle.rotation_angle>=2*pi){
+                // PS-29: subtract the truncated float turn count. A remainder
+                // operation puts authored 3/6/9-turn boundaries in bin 255.
+                const float turns=particle.rotation_angle/(2*pi);
+                if(turns<static_cast<float>(std::numeric_limits<int>::max()))
+                    particle.rotation_angle-=static_cast<float>(static_cast<int>(turns))*(2*pi);
+                else particle.rotation_angle=std::fmod(particle.rotation_angle,2*pi);
+            }
+            int bin=safe_truncated_index((particle.rotation_angle/(2*pi))*256);
+            if(particle.rotation_direction<0)bin=255-bin;
+            particle.rotation=static_cast<float>(std::clamp(bin,0,255))*(2*pi/256);
+        }
+    }else if(!emitter.random_rotation)particle.rotation+=delta*particle.rotation_direction*sample_track(emitter.rotation_rate,relative,0);
+}
+
+core::Result<void> CpuSystem::set_wind_disturbances(const std::span<const WindDisturbance> disturbances){
+    if(disturbances.size()>64U||std::any_of(disturbances.begin(),disturbances.end(),[](const auto& item){
+        return !finite(item.position)||!finite(item.velocity)||!std::isfinite(item.radius)||item.radius<=0||
+            !std::isfinite(item.factor)||!std::isfinite(item.angular_limit);
+    }))return core::Result<void>::failure({std::string(diagnostic_codes::invalid_value),core::Severity::error,
+        "wind disturbances require finite values, positive radii and at most 64 samples",{},{},{},{}});
+    if(!disturbances.empty()&&disturbances_.capacity()<64U)disturbances_.reserve(64U);
+    disturbances_.assign(disturbances.begin(),disturbances.end());
+    return core::Result<void>::success();
+}
+
+void CpuSystem::move_particle(Particle& particle,const EmitterDefinition& emitter,const float delta,const bool birth){
+    particle.previous_position=particle.position;
+    // PS-24/PS-25: the bulk path gates the complete acceleration block;
+    // births and wind/collision updates use the ordinary per-particle path.
+    const bool simple=!birth&&emitter.wind_response==0&&emitter.killer_id!=21;
+    const bool accelerate=!simple||std::abs(emitter.gravity)>0.01F||dot(emitter.acceleration,emitter.acceleration)>0.01F;
+    particle.acceleration={};
+    if(accelerate){
+        if(has(emitter,10))particle.acceleration=emitter.acceleration_local?transformed(basis_,emitter.acceleration):emitter.acceleration;
+        particle.acceleration.z-=emitter.gravity;
+        if(has(emitter,11)&&(!simple||std::abs(emitter.inward_acceleration)>0.01F))
+            particle.acceleration+=normalized(particle.position-origin_)*emitter.inward_acceleration;
+    }
+    if(has(emitter,54))particle.acceleration+=wind_*emitter.wind_response;
+    particle.velocity+=particle.acceleration*delta;
+    particle.motion_velocity=particle.velocity+particle.radial_velocity;
+    if(emitter.inherit_emitter_motion&&emitter.parent_emitter==EmitterDefinition::no_parent)
+        particle.motion_velocity+=emitter_velocity_*emitter.inherited_velocity_scale;
+    // PS-26: disturbance motion does not accumulate into particle velocity.
+    if(emitter.wind_response!=0&&emitter.wind_disturbances)for(const auto& item:disturbances_){
+        const Vec3 offset=particle.position-item.position;
+        const float fraction=length(offset)/item.radius;
+        if(fraction>=1)continue;
+        float angle=(dot(normalized(item.velocity),normalized(offset))+1)*0.5F;
+        if(item.angular_limit<=0)angle=-angle;
+        if(angle>item.angular_limit)continue;
+        particle.motion_velocity+=item.velocity*(item.factor*(1-2*std::abs(fraction-0.5F)));
+    }
+    particle.inherited_speed_limit=inherited_speed_limit_;
+    particle.position+=particle.motion_velocity*delta;
 }
 
 std::size_t CpuSystem::live_child_instances() const{
@@ -415,7 +554,7 @@ std::size_t CpuSystem::live_child_instances() const{
 }
 
 void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const Particle* parent,
-                            AdvanceStats& stats,std::vector<ParentEvent>& events){
+                            AdvanceStats& stats,std::vector<ParentEvent>& events,const MeshFrame* current_frame){
     const auto& emitter=definition_.emitters[index];
     // PS-36/PS-37: reject births only; already live particles still update and retire.
     if(!emitter_enabled(index))return;
@@ -430,8 +569,33 @@ void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const
     const std::size_t available=capacities_[index].reserved-state.live;
     const std::size_t spawn_count=std::min(count,available);
     saturating_add(stats.requested,count);
+    if(spawn_count>0&&emitter.creator_id==35&&emitter.mesh_mode==MeshSpawnMode::every_vertex){
+        // PS-14: shuffle the complete bound vertex set, then admit/cycle its prefix.
+        // Scratch is shared across sequential batches and allocated only at construction.
+        for(std::size_t vertex=0;vertex<vertex_order_.size();++vertex)vertex_order_[vertex]=static_cast<std::uint32_t>(vertex);
+        for(std::size_t remaining=vertex_order_.size();remaining>1;--remaining)
+            std::swap(vertex_order_[remaining-1],vertex_order_[random_index(static_cast<std::uint32_t>(remaining))]);
+        state.vertex=0;
+    }
+    std::optional<EmitterMotion> birth_motion;
+    if(current_frame&&emitter.translater_id==26&&
+        (!same(origin_,current_frame->origin)||!same(basis_,current_frame->basis)))
+        birth_motion=emitter_motion({origin_,basis_},*current_frame);
+    const auto carry_birth=[&](const Vec3 position){
+        return birth_motion->rotation?current_frame->origin+transformed(*birth_motion->rotation,position-origin_):
+            position+birth_motion->translation;
+    };
     for(std::size_t particle_index=0;particle_index<spawn_count;++particle_index){
         Particle particle;initialize_particle(particle,emitter,index,spawn_time,parent);
+        const float residual=std::max(0.0F,time_-spawn_time);
+        if(residual>0){move_particle(particle,emitter,residual,true);update_particle(particle,emitter,residual);}
+        if(birth_motion){
+            // BP-40/PS-15: linked residuals live in the sampled birth frame,
+            // then render through the current host. Intrinsic velocity stays
+            // world-oriented; parent events also need the carried endpoints.
+            particle.position=carry_birth(particle.position);
+            particle.previous_position=carry_birth(particle.previous_position);
+        }
         if(state.free_slots.empty())particle.draw_slot=state.next_slot++;
         else{particle.draw_slot=state.free_slots.back();state.free_slots.pop_back();}
         particle.draw_eligible=draw_eligible(particle);
@@ -468,21 +632,15 @@ void CpuSystem::process_events(std::vector<ParentEvent>& events,AdvanceStats& st
                 instance.emitter_index=index;
                 instance.parent_id=event.parent.id;
                 instance.parent_snapshot=event.parent;
-                instance.start_time=event.parent.spawn_time;
-                instance.next_spawn=instance.start_time+emitter.start_delay;
-                if(!std::isfinite(instance.next_spawn))continue;
+                instance.segment_scheduled=true;
                 child_instances_.push_back(instance);++stats.child_instances_started;++active_instances;
-                if(time_>=instance.next_spawn){
-                    spawn_batch(index,instance.next_spawn,&event.parent,stats,events);
-                    auto& added=child_instances_.back();
-                    if(emitter.stop_time>0&&added.next_spawn-added.start_time>=emitter.stop_time)
-                        added.active=false;
-                    else{
-                        const float delay=emitter.bursting?emitter.spawn_interval:
-                            emitter.spawn_interval/emitter.particles_per_interval;
-                        added.next_spawn+=delay;
-                        if(!(added.next_spawn>instance.next_spawn)||!std::isfinite(added.next_spawn))added.active=false;
-                    }
+                if(emitter.bursting){
+                    if(detail_.local>0.7F)spawn_batch(index,time_,&event.parent,stats,events);
+                    child_instances_.back().active=false;
+                }else if(detail_.local>0.7F&&draw_eligible(event.parent)){
+                    auto& state=emitters_[index];
+                    state.next_spawn=schedules_before_[index].next_spawn;state.started=schedules_before_[index].started;
+                    schedule_emitter(index,&event.parent,update_delta_,update_before_,stats,events);
                 }
                 if(!child_instances_.back().active){--active_instances;child_instances_.pop_back();}
             }
@@ -531,13 +689,12 @@ void CpuSystem::preroll(AdvanceStats& stats){
     for(auto& state:emitters_)state.next_spawn-=shift;
     for(auto& start:emitter_start_)start-=shift;
     for(auto& instance:child_instances_){
-        instance.next_spawn-=shift;instance.start_time-=shift;
         instance.parent_snapshot.spawn_time-=shift;instance.parent_snapshot.death_time-=shift;
     }
 }
 
 AdvanceStats CpuSystem::advance(const float delta_seconds){
-    AdvanceStats stats;if(!std::isfinite(delta_seconds)||delta_seconds<0||
+    AdvanceStats stats;if(!std::isfinite(delta_seconds)||delta_seconds<=0||
         delta_seconds>std::numeric_limits<float>::max()-time_)return stats;
     if(!prerolled_){
         prerolled_=true;
@@ -565,19 +722,23 @@ void CpuSystem::freeze_crossing(const float delta_seconds){
 }
 
 CpuSystem::EmitterMotion CpuSystem::emitter_motion() const{
-    EmitterMotion motion{origin_-previous_origin_,std::nullopt};
-    if(same(basis_,previous_basis_))return motion;
+    return emitter_motion({previous_origin_,previous_basis_},{origin_,basis_});
+}
+
+CpuSystem::EmitterMotion CpuSystem::emitter_motion(const MeshFrame& from,const MeshFrame& to) const{
+    EmitterMotion motion{to.origin-from.origin,std::nullopt};
+    if(same(to.basis,from.basis))return motion;
     // The rotation that carries the previous emitter frame onto the current one: basis_ times
     // the inverse of previous_basis_ (its columns are the images of the unit axes).
-    const Basis3& b=previous_basis_;
+    const Basis3& b=from.basis;
     const float determinant=dot(b.x,cross(b.y,b.z));
     if(!std::isfinite(determinant)||std::abs(determinant)<1.0e-20F)return motion;
     const float inverse=1.0F/determinant;
     // Rows of inverse(previous_basis_).
     const Vec3 row_x=cross(b.y,b.z)*inverse,row_y=cross(b.z,b.x)*inverse,row_z=cross(b.x,b.y)*inverse;
-    const Basis3 rotation{transformed(basis_,{row_x.x,row_y.x,row_z.x}),
-                          transformed(basis_,{row_x.y,row_y.y,row_z.y}),
-                          transformed(basis_,{row_x.z,row_y.z,row_z.z})};
+    const Basis3 rotation{transformed(to.basis,{row_x.x,row_y.x,row_z.x}),
+                          transformed(to.basis,{row_x.y,row_y.y,row_z.y}),
+                          transformed(to.basis,{row_x.z,row_y.z,row_z.z})};
     if(finite(rotation))motion.rotation=rotation;
     return motion;
 }
@@ -603,6 +764,12 @@ void CpuSystem::follow_emitter(){
 
 void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const bool prewarming){
     const float before=time_;
+    update_before_=before;update_delta_=delta_seconds;
+    update_origin_start_=sampled_origin_;update_basis_start_=sampled_basis_;
+    // PS-16: dependent start phase captures one clock for every parent segment.
+    for(std::size_t index=0;index<emitters_.size();++index)
+        schedules_before_[index]={emitters_[index].next_spawn,emitters_[index].started};
+    for(auto& instance:child_instances_)instance.segment_scheduled=false;
     time_+=delta_seconds;const EmitterMotion motion=emitter_motion();
     // MD-07: sample the attached frame independently of render-only following.
     if(delta_seconds>0.0F){
@@ -626,12 +793,7 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
         // A linked particle first moves with its emitter to the current frame; the world velocity,
         // with an object-space acceleration rotated once by the current basis, moves it from there.
         update_particle(particle,emitter,delta_seconds);if(emitter.translater_id==26)follow(particle,motion);
-        particle.motion_velocity=particle.velocity;
-        if(emitter.inherit_emitter_motion&&emitter.parent_emitter==EmitterDefinition::no_parent){
-            particle.motion_velocity+=emitter_velocity_*emitter.inherited_velocity_scale;
-        }
-        particle.inherited_speed_limit=inherited_speed_limit_;
-        particle.position+=particle.motion_velocity*delta_seconds;particle.velocity+=particle.acceleration*delta_seconds;
+        move_particle(particle,emitter,delta_seconds);
         particles_[write++]=particle;
     }
     particles_.resize(write);
@@ -650,7 +812,6 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
     child_instances_.erase(std::remove_if(child_instances_.begin(),child_instances_.end(),
         [](const ChildInstance& instance){return !instance.active;}),child_instances_.end());
     process_events(events,stats);
-    constexpr std::size_t max_spawn_events_per_advance=100000U;std::size_t events_count{};
     for(auto& instance:child_instances_){
         const auto parent=find_parent(instance.parent_id);
         if(parent==particles_.end()||parent->id!=instance.parent_id){
@@ -658,39 +819,87 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
         }
         instance.parent_snapshot=*parent;
         const auto& emitter=definition_.emitters[instance.emitter_index];
-        if(frozen(instance.emitter_index))continue;
-        while(instance.active&&time_>=instance.next_spawn&&events_count++<max_spawn_events_per_advance){
-            spawn_batch(instance.emitter_index,instance.next_spawn,&instance.parent_snapshot,stats,events);
-            const float elapsed=instance.next_spawn-instance.start_time;
-            if(emitter.stop_time>0&&elapsed>=emitter.stop_time){instance.active=false;break;}
-            const float delay=emitter.bursting?emitter.spawn_interval:emitter.spawn_interval/emitter.particles_per_interval;
-            const float previous=instance.next_spawn;instance.next_spawn+=delay;
-            if(!(instance.next_spawn>previous)||!std::isfinite(instance.next_spawn)){instance.active=false;break;}
-        }
-        if(events_count>=max_spawn_events_per_advance)instance.active=false;
+        if(instance.segment_scheduled||frozen(instance.emitter_index)||emitter.bursting||detail_.local<=0.7F||!draw_eligible(*parent))continue;
+        auto& state=emitters_[instance.emitter_index];
+        state.next_spawn=schedules_before_[instance.emitter_index].next_spawn;
+        state.started=schedules_before_[instance.emitter_index].started;
+        schedule_emitter(instance.emitter_index,&instance.parent_snapshot,delta_seconds,before,stats,events);
+        if(!state.active)instance.active=false;
     }
     child_instances_.erase(std::remove_if(child_instances_.begin(),child_instances_.end(),
         [](const ChildInstance& instance){return !instance.active;}),child_instances_.end());
     process_events(events,stats);
     // A detached system schedules no further root emission; the emitter state
     // is kept as it was so no random draw or ID is consumed on its behalf.
-    std::size_t root_events{};
-    for(std::size_t index=0;!detached_&&index<emitters_.size();++index){auto& state=emitters_[index];const auto& emitter=definition_.emitters[index];
+    for(std::size_t index=0;!detached_&&index<emitters_.size();++index){const auto& emitter=definition_.emitters[index];
         if(emitter.creator_id!=34&&emitter.creator_id!=35)continue;
         if(frozen(index)||(prewarming&&before<emitter_start_[index]))continue;
-        while(state.active&&time_>=state.next_spawn&&root_events++<max_spawn_events_per_advance){
-            spawn_batch(index,state.next_spawn,nullptr,stats,events);
-            const float elapsed=state.next_spawn-emitter_start_[index]-emitter.start_delay;if(emitter.stop_time>0&&elapsed>=emitter.stop_time){state.active=false;break;}
-            const float delay=emitter.bursting?emitter.spawn_interval:emitter.spawn_interval/emitter.particles_per_interval;
-            const float previous=state.next_spawn;state.next_spawn+=delay;
-            if(!(delay>0)||!std::isfinite(delay)||!(state.next_spawn>previous)){state.active=false;break;}
-        }
-        if(root_events>=max_spawn_events_per_advance)state.active=false;
+        schedule_emitter(index,nullptr,delta_seconds,before,stats,events);
     }
     process_events(events,stats);
     if(!prewarming)for(auto& state:emitters_)if(!state.frozen)state.elapsed+=delta_seconds;
     previous_origin_=origin_;
     previous_basis_=basis_;
+    sampled_basis_=basis_;
+}
+
+void CpuSystem::schedule_emitter(const std::size_t index,const Particle* parent,const float segment_delta,
+                                 const float before,AdvanceStats& stats,std::vector<ParentEvent>& events){
+    auto& state=emitters_[index];const auto& emitter=definition_.emitters[index];
+    if(!state.active||frozen(index)||!emitter_enabled(index))return;
+    const float interval=emitter.bursting?emitter.spawn_interval:emitter.spawn_interval/emitter.particles_per_interval;
+    if(!(interval>0)||!std::isfinite(interval)){state.active=false;return;}
+    const auto emit=[&](const float event_time,const bool first){
+        const Vec3 saved_origin=origin_;const Basis3 saved_basis=basis_;
+        const MeshFrame current_frame{saved_origin,saved_basis};
+        const float fraction=first?1:saturated((event_time-before)/std::max(segment_delta,std::numeric_limits<float>::min()));
+        Particle sample_parent;
+        if(parent){sample_parent=*parent;sample_parent.position=parent->previous_position+
+            (parent->position-parent->previous_position)*fraction;}
+        else{
+            origin_=update_origin_start_+(saved_origin-update_origin_start_)*fraction;
+            basis_=interpolate_basis(update_basis_start_,saved_basis,fraction);
+        }
+        std::optional<MeshFrame> saved_mesh;
+        if(emitter.creator_id==35&&mesh_binding_){
+            saved_mesh=mesh_binding_->frame;
+            // PS-10/PS-15: the bound bone is supplied in the current host frame.
+            // Re-express it at birth before linked positions are carried forward.
+            const auto motion=emitter_motion(current_frame,{origin_,basis_});
+            auto& mesh=mesh_binding_->frame;
+            if(motion.rotation){
+                mesh.origin=origin_+transformed(*motion.rotation,mesh.origin-saved_origin);
+                mesh.basis={transformed(*motion.rotation,mesh.basis.x),
+                    transformed(*motion.rotation,mesh.basis.y),transformed(*motion.rotation,mesh.basis.z)};
+            }else mesh.origin+=motion.translation;
+        }
+        spawn_batch(index,event_time,parent?&sample_parent:nullptr,stats,events,&current_frame);
+        if(saved_mesh)mesh_binding_->frame=*saved_mesh;
+        origin_=saved_origin;basis_=saved_basis;
+    };
+    // PS-10: the first admitted update visits only the delay event; later
+    // updates enter strictly beyond an interval and visit inclusive event times.
+    if(!state.started){
+        if(time_<state.next_spawn)return;
+        emit(state.next_spawn,true);state.started=true;state.next_spawn+=interval;
+        if(!std::isfinite(state.next_spawn))state.active=false;
+        return;
+    }
+    if(time_<=state.next_spawn)return;
+    constexpr std::size_t max_events=100000U;std::size_t count{};
+    if(time_-state.next_spawn>=emitter.lifetime){
+        const double skipped=std::floor((static_cast<double>(time_)-emitter.lifetime-state.next_spawn)/interval)+1;
+        state.next_spawn=static_cast<float>(state.next_spawn+skipped*interval);
+    }
+    while(state.active&&state.next_spawn<=time_&&count++<max_events){
+        const float event_time=state.next_spawn;
+        emit(event_time,false);
+        const float elapsed=event_time-emitter_start_[index]-emitter.start_delay;
+        if(emitter.stop_time>0&&elapsed>=emitter.stop_time){state.active=false;break;}
+        state.next_spawn+=interval;
+        if(!(state.next_spawn>event_time)||!std::isfinite(state.next_spawn)){state.active=false;break;}
+    }
+    if(count>=max_events)state.active=false;
 }
 
 } // namespace eawr::presentation::particles

@@ -287,7 +287,10 @@ void test_attachment_hidden_at_start_spawns_on_first_visible() {
     }
     expect(first && *first > 0 && result.steps[*first].visible && result.generations == 1 && result.detaches == 0,
            "the first visible sample starts generation 0 even under stay_detached");
-    expect(first && result.steps[*first].stats.advance.spawned > 0, "the new generation's zero-delta frame emits");
+    // PS-10: generation setup is zero-delta; only the next positive sample emits.
+    expect(first && result.steps[*first].stats.advance.spawned == 0 &&
+           *first + 1 < result.steps.size() && result.steps[*first + 1].stats.advance.spawned > 0,
+           "a new generation waits for its first positive sample to emit");
     expect(result.released_at_end == 1 && result.resources_after == 0 && backend.live.empty(),
            "the owner releases the active generation at the end");
 }
@@ -301,7 +304,7 @@ void test_attachment_moving_host() {
     particles::AttachmentLifecycle life(registry, system_spawner(attached_spray(true), 256), 7,
                                         particles::ReappearancePolicy::respawn);
     constexpr float dt = 1.0F / 30.0F;
-    bool checked_respawn = false, drain_follows = true;
+    bool checked_respawn = false, drain_follows = true, awaiting_birth = false;
     for (int index = 0; index < 60; ++index) {
         const float time = static_cast<float>(index) * dt;
         const HostSample sample = sample_host(host, time);
@@ -309,14 +312,20 @@ void test_attachment_moving_host() {
         expect(bool(step), "moving host step succeeds");
         if (!step) return;
         if (step.value().spawned && index > 0) {
-            // Only the new generation's zero-delta birth batch sits at the host;
-            // the old drain died out during the hidden span (0.5 s lifetime).
+            // PS-10: the zero-delta setup leaves the new generation empty.
+            expect(step.value().live_instances == 1 && step.value().stats.advance.spawned == 0 &&
+                   !step.value().stats.has_bounds, "reappearance setup waits for positive elapsed time");
+            awaiting_birth = true;
+        } else if (awaiting_birth) {
+            // PS-10: first positive emission uses the host's current frame.
+            // The old drain died out during the hidden span (0.5 s lifetime).
             const float x = sample.frame.origin.x;
             expect(step.value().live_instances == 1 && step.value().stats.has_bounds &&
                    step.value().stats.bounds_min.x >= x - 1.01F && step.value().stats.bounds_max.x <= x + 1.01F,
                    "the reappeared generation is born at the host's current origin");
             expect(x > 9.0F, "the host moved while it was hidden");
             checked_respawn = true;
+            awaiting_birth = false;
         }
         if (!life.draining().empty()) {
             // Draining instances keep receiving the host frame (reference

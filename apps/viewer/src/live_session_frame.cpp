@@ -43,9 +43,6 @@ namespace tactical = sim::tactical;
 using namespace live_session_detail;
 
 namespace {
-// GAMECONSTANTS.XML Shield_Flash_Scale and Shield_Flash_Duration (seconds), BP-21.
-constexpr std::array<double, 3> shield_flash_scale{1.0, 1.1, 1.25};
-constexpr double shield_flash_duration = 0.1;
 
 // #497: how many shooter and target pairs the report keeps the first hit of.
 constexpr std::size_t first_hits_limit = 4096;
@@ -380,6 +377,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             row.first_tick = latest->completed_tick();
             row.owner = instance.owner;
             row.type = instance.type_id;
+            row.facing_yaw = space::instance_yaw_degrees(instance.fixed_transform);
         }
         row.last_frame = *instance.arrival;
         if (row.visible_tick == 0 && *instance.arrival >= tactical::arrival_visible_frame) row.visible_tick = latest->completed_tick();
@@ -445,12 +443,22 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 {to_float(instance.fixed_transform.rows[0][3]), to_float(instance.fixed_transform.rows[1][3]),
                  to_float(instance.fixed_transform.rows[2][3])},
                 std::binary_search(drawn_now.begin(), drawn_now.end(), instance.entity_id), type->second.second});
+            // WNO-44: copy radar identity only on observation, never from a hidden live owner.
+            if (std::binary_search(visible_now.begin(), visible_now.end(), instance.entity_id)) {
+                auto& radar = radar_memories_[instance.entity_id];
+                radar.type = instance.type_id;
+                radar.owner = instance.owner;
+                radar.position = observations.back().position;
+                radar.yaw = std::atan2(to_float(instance.fixed_transform.rows[1][0]),
+                    to_float(instance.fixed_transform.rows[0][0])) * 180.0 / std::acos(-1.0);
+                radar.capture_point = economy_.pads.point(instance.type_id) != nullptr;
+            }
             const auto remembered = fog_ghosts_.states().find(instance.entity_id);
             if (observations.back().visible || remembered == fog_ghosts_.states().end()
                 || !remembered->second.known || remembered->second.ghost) continue;
             // FW-26: capture the prior submitted frame only when sight is lost,
             // before idle sampling, live composition or colour changes advance.
-            const auto ship = ship_of(instance.entity_id, instance.type_id);
+            const auto ship = ship_of(instance.entity_id, instance.type_id, instance.owner);
             if (!ship) continue;
             if (!fog_lookup_ready) {
                 population.prepare_fog_model_capture();
@@ -543,7 +551,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     for (const space::LiveUnitPose& pose : poses) {
         if (!pad_visible(pose.entity)) continue;
         if (!options_.reveal && !std::binary_search(visible_now.begin(), visible_now.end(), pose.entity)) continue;
-        const auto ship = ship_of(pose.entity, pose.type);
+        const auto ship = ship_of(pose.entity, pose.type, pose.owner);
         if (!ship) continue;
         const auto players = latest->players();
         const auto owner = std::lower_bound(players.begin(), players.end(), pose.owner,
@@ -561,7 +569,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         for (const space::LiveUnitPose& pose : *drawn) {
             // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
             if (!pad_visible(pose.entity)) continue;
-            const auto ship = ship_of(pose.entity, pose.type);
+            const auto ship = ship_of(pose.entity, pose.type, pose.owner);
             if (!ship) continue;
             SpacePopulation::LivePose placed;
             placed.ship = *ship;
@@ -708,19 +716,42 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         // #862: the ion shots launched since the last frame pose as the ability shot's model.
         projectile_models_->note_ability_shots(battle_frame_.reached, *latest,
             [this](const std::uint64_t tick) { return session_->snapshot_at(tick); });
+        const BattleEffects::ProjectileObserver observer =
+            [this, latest_fog = battle_frame_.fog,
+             samples = std::make_shared<std::map<std::uint64_t, std::shared_ptr<const platform::LiveFog>>>()]
+            (const tactical::PlayerId owner, const sim::math::Vec3& position, const std::uint64_t tick) {
+                auto [sample, inserted] = samples->try_emplace(tick);
+                if (inserted) sample->second = latest_fog && latest_fog->tick == tick
+                    ? latest_fog : session_->fog_at(tick);
+                return snapshot_index_.point_visible(owner, position, sample->second.get(), options_.reveal);
+            };
+        // Events can span several ticks in a fast frame. Observe those retained
+        // snapshots before terminal admission, including shots already gone.
+        for (const auto& record : battle_frame_.reached) {
+            const auto before = record.tick > 0 ? session_->snapshot_at(record.tick - 1) : nullptr;
+            const auto after = session_->snapshot_at(record.tick);
+            if (before && after) projectile_models_->observe_projectiles(*before, *after,
+                std::min(static_cast<double>(record.tick), presented_tick_), observer);
+        }
+        projectile_models_->observe_projectiles(*previous, *latest, presented_tick_, observer);
         projectile_models_->pose_projectile_models(*previous, *latest, battle_frame_.alpha,
             [this](const sim::EntityId entity) { return unit_frame(entity); }, live);
+        for (const auto& pose : live) {
+            if (projectile_models_->is_projectile_model(pose.ship))
+                population.set_live_opacity(renderer, pose.ship, projectile_models_->projectile_model_opacity(pose.ship));
+        }
     }
     // WR-12..14: cursor-following clones use the same composed model, scale and idle reader
     // as ordinary ships. Emitters were removed from their private placements at composition.
     if (preview_type_ && preview_point_ && reinforcement_allowed()) {
         const auto* player = economy_.player(player_);
         if (player != nullptr) {
-            const auto direction = tactical::planar_direction(player->reinforcement_yaw);
+            const auto yaw = reinforcement_facing();
+            const auto direction = tactical::planar_direction(yaw);
             if (!direction) return fail(core::format_diagnostic(direction.error()));
             std::ostringstream sample;
             sample << "{\"tick\": " << latest->completed_tick() << ", \"valid\": "
-                   << (preview_valid_ ? "true" : "false") << ", \"clones\": [";
+                   << (preview_valid_ ? "true" : "false") << ", \"facing_yaw\": " << to_float(yaw) << ", \"clones\": [";
             std::size_t clone_index = 0;
             for (const auto& clone : placement_clones_) {
                 if (clone.type != *preview_type_) continue;
@@ -734,7 +765,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
                 placed.position = {sim::math::Fixed::from_raw(preview_point_->x.raw() + xx.value().raw() - yy.value().raw()),
                     sim::math::Fixed::from_raw(preview_point_->y.raw() + xy.value().raw() + yx.value().raw()),
                     sim::math::Fixed::from_raw(clone.layer_z.raw() + clone.offset.z.raw())};
-                placed.yaw_degrees = player->reinforcement_yaw;
+                placed.yaw_degrees = yaw;
                 live.push_back(placed);
                 sample << (clone_index++ ? ", " : "") << "[" << to_float(placed.position.x) << ", "
                        << to_float(placed.position.y) << ", " << to_float(placed.position.z) << "]";
@@ -759,7 +790,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     // whose adapters carry the unit's opacity uniform (the hull surfaces, as BP-21's shield flash
     // reaches) dither with it, the others ignore it (G-FW14).
     for (const space::LiveUnitPose& pose : poses) {
-        const auto ship = ship_of(pose.entity, pose.type);
+        const auto ship = ship_of(pose.entity, pose.type, pose.owner);
         if (!ship) continue;
         const auto blend = nebula_blends_.find(pose.entity);
         const float nebula = blend == nebula_blends_.end() || blend->second.value() <= 0.01F ? 0.0F : blend->second.value();
@@ -815,11 +846,15 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
     for (auto flash = shield_flash_start_.begin(); flash != shield_flash_start_.end();) {
         const double seconds = (presented_tick_ - flash->second) / tactical::logical_frames_per_second;
-        const bool running = seconds >= 0.0 && seconds < shield_flash_duration;
+        const bool running = seconds >= 0.0 && seconds < shield_flash_constants_.duration;
+        if (running) ++shield_flash_samples_;
         std::array<float, 3> scale{1.0F, 1.0F, 1.0F};
         for (std::size_t channel = 0; running && channel < 3; ++channel) {
-            const double t = seconds / shield_flash_duration;
-            scale[channel] = static_cast<float>(shield_flash_scale[channel] + (1.0 - shield_flash_scale[channel]) * t);
+            const double t = seconds / shield_flash_constants_.duration;
+            scale[channel] = static_cast<float>(shield_flash_constants_.scale[channel] + (1.0 - shield_flash_constants_.scale[channel]) * t);
+        }
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            max_shield_flash_scale_[channel] = std::max(max_shield_flash_scale_[channel], scale[channel]);
         }
         if (const auto ship = ship_of_entity_.find(flash->first); ship != ship_of_entity_.end()) {
             if (const auto base = visual_scales.find(flash->first); base != visual_scales.end()) {
@@ -833,8 +868,27 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     }
 
     SpaceLiveUpdate update;
+    for (const auto& visible : visible_) {
+        const auto entry = radar_memories_.find(visible.entity);
+        if (entry == radar_memories_.end()) continue;
+        auto& memory = entry->second;
+        memory.position = visible.position;
+        memory.yaw = visible.yaw;
+        memory.world_half_size = {};
+        if (const auto box = population.live_ship_box(visible.ship)) {
+            for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
+                memory.world_half_size[row] += std::abs(to_float(box->model_to_world.rows[row][axis]))
+                    * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
+            }
+        }
+    }
     fog_ghost_instances_.clear();
     if (!options_.reveal) population.draw_fog_models(renderer, fog_ghosts_, fog_ghost_instances_);
+    std::erase_if(radar_memories_, [this](const auto& entry) { return !fog_ghosts_.states().contains(entry.first); });
+    for (auto& [entity, memory] : radar_memories_) {
+        const auto& state = fog_ghosts_.states().at(entity);
+        memory.retained_model = state.known && state.ghost && population.fog_model_pieces(entity) != 0;
+    }
     if (fog_ghost_logged_tick_ != latest->completed_tick()) {
         fog_ghost_logged_tick_ = latest->completed_tick();
         for (const auto& observation : observations) {

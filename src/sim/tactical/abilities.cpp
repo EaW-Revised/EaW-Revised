@@ -1,4 +1,5 @@
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/sim/tactical/combat.hpp"
 
 #include "../replay_internal.hpp"
 #include "tactical_internal.hpp"
@@ -23,7 +24,7 @@ struct KindName {
     std::string_view name;
 };
 
-constexpr std::array<KindName, 13> kind_names{{
+constexpr std::array<KindName, 16> kind_names{{
     {AbilityKind::defend, "DEFEND"},
     {AbilityKind::turbo, "TURBO"},
     {AbilityKind::power_to_weapons, "POWER_TO_WEAPONS"},
@@ -37,6 +38,9 @@ constexpr std::array<KindName, 13> kind_names{{
     {AbilityKind::harmonic_bomb, "HARMONIC_BOMB"},
     {AbilityKind::weaken_enemy, "WEAKEN_ENEMY"},
     {AbilityKind::replenish_wingmen, "REPLENISH_WINGMEN"},
+    {AbilityKind::hunt, "HUNT"},
+    {AbilityKind::missile_shield, "MISSILE_SHIELD"},
+    {AbilityKind::sensor_jamming, "SENSOR_JAMMING"},
 }};
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
@@ -269,7 +273,7 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
     };
     for (const auto& profile : table.profiles) {
         const auto type = " (type " + std::to_string(profile.type_id) + ")";
-        if ((profile.abilities.empty() && profile.special.empty()) || profile.abilities.size() > max_abilities_per_type) {
+        if ((profile.abilities.empty() && profile.special.empty() && !profile.force_sensitive) || profile.abilities.size() > max_abilities_per_type) {
             return invalid("a type has one or two abilities" + type);
         }
         if (profile.special.size() > 256) return invalid("too many nested handlers" + type);
@@ -292,6 +296,9 @@ core::Result<void> validate_abilities(const AbilityTable& table) {
             if (ability.kind == AbilityKind::none || to_string(ability.kind) == "NONE") {
                 return invalid("unknown ability kind" + type);
             }
+            if ((ability.kind == AbilityKind::missile_shield || ability.kind == AbilityKind::sensor_jamming)
+                && (ability.effective_radius.raw() < 0 || ability.effective_radius.raw() > max_combat_distance * one_raw))
+                return invalid("projectile defence radius out of range" + type);
             if (ability.kind == AbilityKind::replenish_wingmen && ability.replenish_team == 0)
                 return invalid("wingman replenishment requires an authored team" + type);
             if (ability.kind == AbilityKind::harmonic_bomb || ability.kind == AbilityKind::weaken_enemy) {
@@ -441,6 +448,89 @@ Fixed ability_multiplier(const UnitAbilityProfile& profile, const AbilityState& 
         value = value.raw() == one_raw ? factor : product(value, factor);
     }
     return value;
+}
+
+core::Result<math::Vec3> hunt_destination(const math::Vec3 position,
+    const std::optional<std::array<Fixed, 4>>& bounds, const Fixed reveal_range,
+    const bool force_sensitive, const std::span<const HuntEnemy> enemies,
+    const std::function<bool(math::Vec3)>& fogged, CombatRandom& random) {
+    bool valid = true;
+    const auto add = [&](Fixed a, Fixed b) { Fixed value; valid = math::try_add(a, b, value) && valid; return value; };
+    const auto sub = [&](Fixed a, Fixed b) { Fixed value; valid = math::try_subtract(a, b, value) && valid; return value; };
+    const auto mul = [&](Fixed a, Fixed b) { Fixed value; valid = math::try_multiply(a, b, value) && valid; return value; };
+    const auto div = [&](Fixed a, Fixed b) { Fixed value; valid = math::try_divide(a, b, value) && valid; return value; };
+    const auto units = [](std::int64_t n) { return Fixed::from_raw(n * Fixed::scale); };
+    const auto draw = [&](Fixed low, Fixed high) {
+        const auto fraction = Fixed::from_raw(random.uniform(0, static_cast<std::uint32_t>(Fixed::scale - 1)));
+        return add(low, mul(sub(high, low), fraction));
+    };
+    auto destination = position;
+    bool selected = false;
+    if (bounds) {
+        const auto& area = *bounds;
+        // WAB-54: the branch draw precedes both point draws, even for a force-sensitive hunter.
+        const auto chance = draw(Fixed{}, units(1));
+        if (!force_sensitive && chance.raw() > Fixed::scale / 2) {
+            std::vector<math::Vec3> points;
+            const auto dx = div(sub(area[2], area[0]), units(100));
+            const auto dy = div(sub(area[3], area[1]), units(100));
+            for (std::int64_t cell = 0; cell < 99; ++cell) {
+                const auto x = add(area[0], mul(dx, units(cell)));
+                const auto y = add(area[1], mul(dy, units(cell)));
+                math::Vec3 point{draw(x, add(x, dx)), draw(y, add(y, dy)), position.z};
+                if (fogged(point)) points.push_back(point);
+            }
+            if (!points.empty()) {
+                destination = points[random.uniform(0, static_cast<std::uint32_t>(points.size() - 1))];
+                selected = true;
+            }
+        }
+        if (!selected && !enemies.empty()) {
+            std::vector<std::size_t> hidden, sensitive;
+            const auto count = std::min<std::size_t>(128, enemies.size());
+            for (std::size_t i = 0; i < count; ++i) {
+                if (enemies[i].fogged) hidden.push_back(i);
+                if (enemies[i].force_sensitive) sensitive.push_back(i);
+            }
+            if (force_sensitive && !sensitive.empty()) {
+                destination = enemies[sensitive[random.uniform(0, static_cast<std::uint32_t>(sensitive.size() - 1))]].position;
+            } else if (!hidden.empty()) {
+                destination = enemies[hidden[random.uniform(0, static_cast<std::uint32_t>(hidden.size() - 1))]].position;
+            } else {
+                destination = enemies[random.uniform(0, static_cast<std::uint32_t>(count - 1))].position;
+            }
+            selected = true;
+        }
+        if (!selected) {
+            destination = {draw(area[0], area[2]), draw(area[1], area[3]), Fixed{}};
+            const math::Vec3 direction{sub(destination.x, position.x), sub(destination.y, position.y), sub(destination.z, position.z)};
+            const auto length = math::length(direction);
+            if (!length) return core::Result<math::Vec3>::failure(length.error());
+            if (length.value() < units(500) || length.value() > units(1000)) {
+                const auto distance = draw(units(500), units(1000));
+                if (length.value().raw() != 0) {
+                    destination = {add(position.x, mul(div(direction.x, length.value()), distance)),
+                        add(position.y, mul(div(direction.y, length.value()), distance)),
+                        add(position.z, mul(div(direction.z, length.value()), distance))};
+                } else destination = position;
+                // Only the adjusted fallback is clamped, before the positive offsets (WAB-54).
+                const auto half = Fixed::from_raw(reveal_range.raw() / 2);
+                const auto clamp = [&](Fixed value, Fixed low, Fixed high) {
+                    low = add(low, half); high = sub(high, half);
+                    return low <= high ? std::clamp(value, low, high) : low;
+                };
+                destination.x = clamp(destination.x, area[0], area[2]);
+                destination.y = clamp(destination.y, area[1], area[3]);
+            }
+        }
+    }
+    if (!force_sensitive) {
+        destination.x = add(destination.x, draw(units(30), units(400)));
+        destination.y = add(destination.y, draw(units(30), units(400)));
+        destination.z = position.z;
+    }
+    if (!valid) return core::Result<math::Vec3>::failure(detail::diagnostic(diagnostic_codes::worker_failure, "hunt destination exceeds fixed-point range"));
+    return core::Result<math::Vec3>::success(destination);
 }
 
 std::uint32_t scaled_weapon_delay(const std::uint32_t frames, const Fixed multiplier, const bool full) noexcept {

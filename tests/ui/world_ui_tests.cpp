@@ -210,6 +210,38 @@ void candidates() {
 
 // WU-25 to WU-27: the combat grid and the dogfight icon layout.
 void dogfight_grid() {
+    // WSU-34: old-speed stepping, velocity cap, and braking in either held grid.
+    ui::SquadronIconAnchor moving{{0.0F, 0.0F, 0.0F}, 0.0F, false};
+    ui::slide_squadron_icon(moving, {100.0F, 0.0F, 0.0F}, 2.0F, 3.0F, false, false);
+    expect(moving.position[0] == 0.0F && moving.speed == 2.0F, "the first render frame accelerates without moving");
+    ui::slide_squadron_icon(moving, {100.0F, 0.0F, 0.0F}, 2.0F, 3.0F, false, false);
+    expect(moving.position[0] == 2.0F && moving.speed == 3.0F, "move with the old speed then cap to member velocity");
+    moving = {{0.0F, 0.0F, 0.0F}, 10.0F, false};
+    ui::slide_squadron_icon(moving, {20.0F, 0.0F, 0.0F}, 2.0F, 20.0F, true, false);
+    expect(moving.position[0] == 10.0F && moving.speed == 8.0F, "idle and combat grid anchors brake within stopping distance");
+    ui::slide_squadron_icon(moving, {11.0F, 0.0F, 0.0F}, 2.0F, 20.0F, true, false);
+    expect(moving.position[0] == 11.0F, "within one old-speed step the anchor lands");
+    ui::slide_squadron_icon(moving, {100.0F, 0.0F, 0.0F}, 2.0F, 20.0F, false, true);
+    expect(moving.position[0] == 100.0F, "fast forward places the anchor at the desired point");
+
+    // WSU-36: world-distance admission, then fixed placement even after a camera move.
+    ui::SquadronIconAnchor joining{{0.0F, 0.0F, 0.0F}, 5.0F, false};
+    expect(!ui::settle_squadron_icon(joining, {35.01F, 0.0F, 0.0F}, 35.0F, false)
+               && joining.position[0] == 0.0F, "a distant newly occupied cell keeps its sliding icon");
+    expect(ui::settle_squadron_icon(joining, {35.0F, 0.0F, 0.0F}, 35.0F, false), "the snap threshold is inclusive");
+    expect(ui::settle_squadron_icon(joining, {500.0F, 0.0F, 0.0F}, 35.0F, true)
+               && joining.position[0] == 500.0F, "an admitted icon follows its slot immediately when the camera changes");
+    expect(!ui::settle_squadron_icon(joining, {600.0F, 0.0F, 0.0F}, 35.0F, false), "a new cell requires admission again");
+
+    // WSU-60: independent snapping keeps atlas sampling fixed within a pixel.
+    const auto frame_a = ui::squadron_icon_rect({100.1F, 200.1F}, 33.75F);
+    const auto frame_b = ui::squadron_icon_rect({100.8F, 200.8F}, 33.75F);
+    expect(frame_a.x == frame_b.x && frame_a.y == frame_b.y && frame_a.width == 33.75F,
+           "fractional movement within a raster pixel keeps the identity quad stable");
+    const auto inner = ui::squadron_icon_rect({100.1F, 200.1F}, 28.125F);
+    expect(inner.x == 86.0F && inner.y == 187.0F && inner.width == 28.125F, "the inner icon snaps separately and keeps its scaled extent");
+    const auto unsnapped = ui::squadron_icon_rect({100.1F, 200.1F}, 33.75F, false);
+    expect(close_to(unsnapped.x, 83.225F) && unsnapped.width == 33.75F, "Pixel_Align false retains fractional placement");
     expect(ui::combat_cell_of({100.0F, 100.0F}, {0.0F, 0.0F}) == ui::CombatCell{0, 0}, "a point in the first cell");
     expect(ui::combat_cell_of({100.0F, 500.0F}, {0.0F, 0.0F}) == ui::CombatCell{-1, 1}, "an odd row is shifted half a cell");
     const auto centre = ui::combat_cell_point({0, 0}, {0.0F, 0.0F});
@@ -280,6 +312,66 @@ void dogfight_grid() {
     // Equal scores: the first cell in row order from the low corner wins.
     const ui::CombatGrid tie;
     expect(tie.search({400.0F, 200.0F}, origin) == ui::CombatCell{0, 0}, "a tie goes to the first cell in row order");
+}
+
+void stable_icon_grid() {
+    const ui::CombatCell cell{1, 2};
+    ui::CombatIconGrid grid;
+    std::vector<ui::CombatIconGrid::Cell> cells{{cell, {10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110}, 10.0F}};
+    grid.update(cells);
+    std::vector<std::array<float, 2>> initial;
+    for (const auto squadron : cells.front().squadrons) initial.push_back(grid.position(cell, squadron).value().offset);
+    expect(initial.front() == std::array<float, 2>{-60.0F, 0.0F}
+        && initial.back() == std::array<float, 2>{0.0F, 60.0F},
+        "stable grid: eleven icons occupy four columns at the retail pitch");
+
+    // Crossing the retail sqrt boundary (11 -> 9) must not shift a surviving
+    // slot, including when the first squadron's different-height craft leave.
+    cells.front().squadrons = {20, 30, 40, 60, 70, 80, 90, 100, 110};
+    cells.front().height = 99.0F;
+    grid.update(cells);
+    expect(!grid.position(cell, 10) && !grid.position(cell, 50), "stable grid: departing icons are not drawn");
+    for (const auto squadron : cells.front().squadrons) {
+        const auto position = grid.position(cell, squadron).value();
+        expect(position.offset == initial[static_cast<std::size_t>(squadron / 10 - 1)] && position.height == 10.0F,
+               "stable grid: leave retains every other offset and the initial anchor height");
+    }
+    cells.front().squadrons.insert(cells.front().squadrons.begin(), 50);
+    cells.front().squadrons.push_back(10);
+    grid.update(cells);
+    expect(grid.position(cell, 10).value().offset == initial[0]
+        && grid.position(cell, 50).value().offset == initial[4],
+        "stable grid: a returning owner recovers its vacancy despite changed service order");
+
+    // Lower-ID newcomers may fill vacancies but never steal an existing slot.
+    std::erase(cells.front().squadrons, sim::EntityId{10});
+    cells.front().squadrons.insert(cells.front().squadrons.begin(), 5);
+    grid.update(cells);
+    expect(grid.position(cell, 5).value().offset == initial[0] && !grid.position(cell, 10)
+        && grid.position(cell, 110).value().offset == initial[10],
+        "stable grid: a newcomer fills a vacancy without moving later-ID owners");
+    for (sim::EntityId newcomer = 1000; newcomer < 1100; ++newcomer) {
+        cells.front().squadrons.front() = newcomer;
+        grid.update(cells);
+        expect(grid.position(cell, newcomer).value().offset == initial[0],
+               "stable grid: repeated churn reuses slots rather than extending the layout");
+    }
+    cells.push_back({{3, 4}, {200, 210}, 30.0F});
+    grid.update(cells);
+    expect(grid.position({3, 4}, 200).value().offset == initial[0]
+        && grid.position({3, 4}, 200).value().height == 30.0F
+        && grid.position(cell, 110).value().height == 10.0F,
+        "stable grid: independent cells keep independent anchor lifetimes");
+    cells.front().squadrons.clear();
+    grid.update(cells);
+    expect(!grid.position(cell, 20), "stable grid: an empty cell ends the slot lifetime");
+    cells.front().squadrons = {110, 20};
+    cells.front().height = 20.0F;
+    grid.update(cells);
+    expect(grid.position(cell, 110).value().offset == initial[0] && grid.position(cell, 110).value().height == 20.0F,
+        "stable grid: a new dogfight starts compactly with its own initial height");
+    grid.update({});
+    expect(!grid.position(cell, 110) && !grid.position({3, 4}, 200), "stable grid: no held cells releases all slots");
 }
 
 void reticles() {
@@ -382,6 +474,7 @@ int main() {
     bars();
     candidates();
     dogfight_grid();
+    stable_icon_grid();
     reticles();
     reticle_size();
     reticle_anchor();

@@ -113,7 +113,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 
 | Rule | Behaviour | Source | Existing | Ours |
 |---|---|---|---|---|
-| WCC-40 | **Gates.** Nothing happens when any of these holds: the type is immune to damage; the unit is in limbo; objects are globally set not to take damage (a debug switch); **a victory is pending**; the unit is flagged immune; its health is already 0; or the damage is 0 or less. After a battle is decided, nothing takes damage during the 210 frames before it ends (VT-11). | debug build WC-04 | differs: DG-02 mentions a pending victory only as a damage scale | lacks: the session keeps applying hits after the deciding destruction until `end_tick` (session_step.cpp projectile commit). |
+| WCC-40 | **Gates.** Nothing happens when any of these holds: the type is immune to damage; the unit is in limbo; objects are globally set not to take damage (a debug switch); **a victory is pending**; the unit is flagged immune; its health is already 0; or the damage is 0 or less. After a battle is decided, nothing takes damage during the 210 frames before it ends (VT-11). | debug build WC-04 | differs: DG-02 mentions a pending victory only as a damage scale | Matches: the ordered destruction hook sets pending victory before later direct, area, delayed, beam or scripted damage; projectiles continue to fly and are spent. |
 | WCC-41 | **Scales.** In order: the target's take-damage unit-mode multiplier; the shooter's cause-damage multiplier; base-shield vulnerability; the diminishing-firepower curve (DG-05); the under-construction multiplier; the retreat multiplier. | debug build WC-04, PD-07 | same (DG-01, DG-02, DG-05) | does DG-05; the rest are 1 in M2 (DG-02). |
 | WCC-42 | **The aimed hardpoint decides.** When the projectile's original target is this unit and it carries an aimed hardpoint (WCC-21), the damage goes to that hardpoint's `Collision_Mesh`, whatever mesh the projectile met. Otherwise the met mesh decides. On land, a hit with no mesh goes to the hardpoint nearest the shooter. | debug build WC-04, WC-13 | differs: DG-11 routes by the mesh met; DG-39 in hardpoint hit routing (hardpoint-directed damage routing) adds this rule | lacks on the integration branch. Hardpoint hit routing (`aimed_routes`) implements it. |
 | WCC-43 | **Lucky shot** (`LUCKY_SHOT`): scales the hit and may move a hull hit to the nearest hardpoint. No M2 unit has it. | debug build WC-04 | missing there (listed by hardpoint hit routing) | lacks; not M2. |
@@ -158,7 +158,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 
 | Rule | Behaviour | Source | Existing | Ours |
 |---|---|---|---|---|
-| WCC-25 | A target is suitable when its type is a valid target and can be hit by a projectile (a squadron is judged by itself), and it is not in limbo, dead, in a transport or in a hero clash. A victory-relevant special structure is suitable only as a star base. | debug build WC-25 | same (T-06, R-08) | does (`ship_suitable`). |
+| WCC-25 | Ordinary ship-level suitability rejects a non-team object whose effective `Collidable_By_Projectile_Living` is false or whose `Is_Valid_Target` is false (defaults false and true respectively). A team container bypasses these two type checks; its craft do not. All targets must be outside limbo, death, transport and hero clash. A target with `SPECIAL_WEAPON` behavior is rejected unless it also has `DUMMY_STAR_BASE`; `Victory_Relevant` is an assertion in the rejected branch, not an admission exception. XML class alone does not grant either behavior. Direct assignment first promotes a craft target to its team, then refuses limbo, dead or invalid-type targets before replacing the held target; there is no team exception for this valid-type check. Collision and special-weapon admission remain scan gates. An invalid-type refusal leaves the previous combat target unchanged; the outer attack command continues without rejection feedback and may still change movement. | debug build WC-25, WC-25-D (assignment and outer order), behavior enum; defaults ESU-03 | T-06 documents this ship gate separately from R-08 | `combat_targeting.cpp` applies loaded type flags, the team exception, limbo and special-weapon/star-base admission before weapon/priority/range work. `session_step_commands.cpp` silently refuses invalid-type direct assignment while retaining outer command acceptance and approach movement. Dead and limbo units are absent from the live command map. Transport and hero-clash states are land-only and have no M2 space runtime representation. |
 
 ## Gaps against our code
 
@@ -170,7 +170,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 | G-4 | WCC-47 with BP-19 | differs: the shield mesh collides while the depletion effect runs (the shield regains up to 0.25) | Medium: such hits absorb nothing and land on the hull through the `shield` mesh (DG-11), another hull leak besides G-1 (hardpoint-directed damage routing). |
 | G-5 | WCC-14, WCC-15, WCC-82 | lacks: target stickiness and damage tracking for every unit | Medium: in FoC a ship finishes a target that is about to die instead of switching. The retail time-to-kill comparison tracks this gap (legacy EAWR-536). |
 | G-6 | WCC-18 | differs: the best hardpoint | Medium: the hardpoint priority lists of the AI's sets are ignored, and targetable but not destroyable hardpoints are chosen. |
-| G-7 | WCC-40 | lacks: no damage while a victory is pending | Low to medium: a ship can die in the 7 s after the battle is decided; in FoC nothing does. |
+| G-7 | WCC-40 | Closed: pending victory gates damage from the deciding destruction onward | Same-tick and countdown projectile/scripted cases preserve surviving hull and shields. |
 | G-8 | WCC-71 | lacks: the hardpoints' self-destruct at death | Low (presentation): no breakoff props or hardpoint explosions when a ship dies with hardpoints standing. |
 | G-9 | WCC-16 | differs: "damaged" is taken from the hull, not the displayed health | Low: the hull may sit up to 0.2 above the hardpoints' share (WCC-30), so FoC counts a ship that has lost most of its hardpoints as damaged before ours does. |
 | G-10 | WCC-48 | resolved: drain and temporary engine disable | EN-07 to EN-09 cover the expanded production roster. Exact movement-replan latency remains unverified in space-damage G-D2. |
@@ -202,7 +202,7 @@ Totals over the 45 rules. **Same: 30**:
 
 **Differs: 11**: WCC-01, -02, -14, -15, -16, -17, -18, -22, -47, -54, -82.
 
-**Missing in ours: 4**: WCC-40, -42 (in hardpoint hit routing), -63, -71.
+**Missing in ours: 3**: WCC-42 (in hardpoint hit routing), -63, -71.
 
 ### Tags this subsystem reads that statuses.json marks todo or deferred
 
@@ -225,15 +225,22 @@ All are todo in the combat tag report (legacy EAWR-650) unless marked otherwise.
 | `SecondaryStructure/Shield_Points`, `Shield_Refresh_Rate`, `Shield_Armor_Type`, `Armor_Type`, `Energy_Capacity` economy tag coverage (legacy EAWR-654), `Energy_Refresh_Rate`; `SpaceStructure/Shield_*`, `Armor_Type`, `Energy_*` | WCC-46, WCC-80 | variant or parent objects in the scene whose values the loaded types override; to confirm under combat tag coverage (legacy EAWR-650) |
 | `SpaceUnit/Damage`, `Squadron/Damage`, `StarBase/Damage`, `Container/Damage` | none | an autoresolve value, not tactical damage (unverified; combat tag coverage (legacy EAWR-650) to confirm) |
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-2 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-3 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-5 | The unit/squadron Damage getter feeds autoresolve combatants and strategic hit-rate calculation, plus strongest-ship selection and the weakness comparison. Tactical projectile damage remains the projectile/hardpoint route already sourced in the weapons walk; unit Damage is not a replacement for it. | EUS-12 |
+
 ## Unverified
 
 | Id | Question | What would settle it |
 |---|---|---|
-| U-1 | **When is a ship in a movement formation** (WCC-11, WCC-17)? Only the formation code sets it: when units join, merge or are cleaned up. Unknown: whether a ship keeps its formation after its move ends; whether a freshly spawned ship or one moved only by the AI has one; whether a lone ship ordered to move gets one. | Debug build: the formation clean-up's callers and when it runs. Retail capture: a staged Nebulon-B and Acclamator, once with no order and once after a move order, each fighting an enemy frigate. Log each weapon hardpoint's aimed hardpoint per shot. The behaviour recorder already logs hits by mesh; add the shot's target hardpoint. |
-| U-2 | The objects' service order within a frame (WCC-01). | Debug build: the object manager's service list, and where new objects join it. |
-| U-3 | The behaviour list order of the M2 ship types (WCC-02). It decides whether targeting runs before or after shield and energy recharge within a frame. | Debug build: the behaviour creation from `Behavior` and `SpaceBehavior`, in the order the XML lists them. |
-| U-4 | Whether any M2 ability takes a whole hit (WCC-45). | Walk 7. |
-| U-5 | What the `Damage` tag on units and squadrons is (tag table). | Debug build: the xref from the tag string. |
+| U-1 | **When is a ship in a movement formation** (WCC-11, WCC-17)? Only the formation code sets it: when units join, merge or are cleaned up. Unknown: whether a ship keeps its formation after its move ends; whether a freshly spawned ship or one moved only by the AI has one; whether a lone ship ordered to move gets one. **Sweep:** Ordinary populated position formations, including one member, survive arrival at their destination. Cleanup tests uninitialized base destination, lost object target or no members, rather than Done state. Still unverified: Fresh-spawn and every AI-only movement admission path remain outside this predicate trace; do not claim every live ship already has a formation. | Debug build: the formation clean-up's callers and when it runs. Retail capture: a staged Nebulon-B and Acclamator, once with no order and once after a move order, each fighting an enemy frigate. Log each weapon hardpoint's aimed hardpoint per shot. The behaviour recorder already logs hits by mesh; add the shot's target hardpoint. Retained sweep boundary: EUS-19. |
+| U-4 | Whether any M2 ability takes a whole hit (WCC-45). **Sweep:** Still unverified: A redirect callback can cancel a qualifying contact, but that is not proof that every stock M2 ability or whole-hit interception route was enumerated. The preceding suitability check and effective stock ability inventory remain required. | Walk 7. Retained sweep boundary: EUS-36. |
 
 ## Cases for the tickets
 
@@ -247,3 +254,9 @@ All are todo in the combat tag report (legacy EAWR-650) unless marked otherwise.
   better-priority target enters range. At 6 s it switches.
 - **G-7**: after the deciding station dies, a projectile in flight hits a ship. Its hull and
   shield are unchanged.
+
+### Additional sweep boundaries
+
+| ID | Remaining question | Source boundary |
+|---|---|---|
+| G-10 | Exact movement-replan latency after temporary engine disable. | Retail capture required |

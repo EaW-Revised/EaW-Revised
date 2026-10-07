@@ -204,6 +204,7 @@ struct PotentialPlan {
     std::size_t plan{};                        // PlanDef index
     bool valid{};
     bool reserved{};
+    bool funded{}; // WAS-25: ignored reservations retain their initial debit
     std::vector<tactical::TypeId> units;       // instantiated units' types
     std::vector<sim::EntityId> freestore;      // the free store object of each, 0 when none
     // SAE-03: 0 existing object, 1 pooled reinforcement, 2 new production.
@@ -255,6 +256,10 @@ struct BuildTask {
     sim::EntityId child_floor{};
     std::uint64_t pool_token{};
     bool pad_build{};
+    bool direct_pad{};
+    bool prepaid{};
+    bool acknowledged{};
+    Real generic_cost{};
     bool finished{};
     bool failed{};
 };
@@ -503,7 +508,12 @@ private:
     [[nodiscard]] bool test_valid(PlayerAi& player, Goal& goal);
     [[nodiscard]] bool test_target_contrast(PlayerAi& player, Goal& goal);
     void reserve(PlayerAi& player, Goal& goal);
-    void release(PlayerAi& player, const Goal& goal);
+    void release(PlayerAi& player, const Goal& goal, bool refund = true);
+    void refund_funds(PlayerAi& player, std::uint64_t goal);
+    void change_wallet(tactical::PlayerId player, Real amount);
+    void observe_purchases(PlayerAi& player, const tactical::TacticalSnapshot& snapshot);
+    [[nodiscard]] std::optional<Real> pad_count(tactical::PlayerId player,
+        const std::vector<std::string>& types, bool open) const;
     void register_activation(PlayerAi& player, const Goal& goal, bool success);
     [[nodiscard]] std::int64_t recent_failures(const History* history) const;
     [[nodiscard]] Real category_budget(const PlayerAi& player, const std::string& category) const;
@@ -518,7 +528,7 @@ private:
     [[nodiscard]] core::Result<void> service_plans(PlayerAi& player, authoritative::ScriptScheduler& scripts,
         std::uint64_t& sequence);
     void finish_plan(PlayerAi& player, std::uint64_t plan_id, authoritative::ScriptScheduler& scripts, bool abandoned = false);
-    void service_execution(PlayerAi& player);
+    void service_execution(PlayerAi& player, bool direct_pad_only = false);
     void service_reinforcements(PlayerAi& player);
     void service_blocks();
     void service_taskforce_events();
@@ -547,6 +557,15 @@ private:
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
     mutable ProducerWork producer_work_{};
+    const sim::PartitionExecutor* perception_executor_{};
+    struct PadReservation {
+        tactical::PlayerId player{};
+        std::uint64_t goal{};
+        tactical::TypeId type{};
+        bool consumed{};
+        std::uint64_t issued{};
+    };
+    std::map<sim::EntityId, PadReservation> pad_reservations_;
     AiData data_;
     std::vector<PlanDef> plans_;
     ThreatGrid grid_;
@@ -570,7 +589,7 @@ private:
     std::vector<authoritative::ScriptEvent> events_;
     std::vector<authoritative::ScriptCommand> orders_;
     std::uint64_t event_tick_{};
-    std::uint64_t* sequence_{};
+    std::uint64_t sequence_{}; // owned across before/after service
     authoritative::ScriptScheduler* scripts_{};
     AiRandom sync_;                  // the goal system's synchronized draws (GS-07)
     std::uint32_t game_seed_{};

@@ -170,6 +170,7 @@ bool LiveSessionView::prepare_m2(const vfs::Vfs& filesystem, const data::Catalog
     }
     start_ = std::move(start).value();
     setup_ = skirmish::recording_setup(fixture, *start_);
+    setup_->queue_identities = true; // PU-17/63: new live recordings name clicked queue entries.
     content_ = std::move(content).value();
     victory_ = skirmish::victory_rules(*start_, tables.value());
     // #530: the skirmish economy (credits, the station build queues and hyperspace arrival).
@@ -471,6 +472,8 @@ bool LiveSessionView::prepare_replay(const vfs::Vfs& filesystem, const data::Cat
 
 bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view map_path,
                               std::string& failure) {
+    shield_flash_constants_ = presentation_constants::load_flash(filesystem);
+    deployment_facing_.reset(); // WR-X01: per local player, per battle
     core::load_profile::Scope load_scope(core::load_profile::Phase::session);
     const auto minimap_settings = ui::minimap_settings(filesystem);
     nebula_colour_ = minimap_settings.nebula;
@@ -522,13 +525,6 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     if (scoring) scoring_ = std::move(scoring).value();
     else scoring_failure_ = core::format_diagnostic(scoring.error());
     if (!scoring_failure_.empty()) godot::UtilityFunctions::printerr(godot::String(scoring_failure_.c_str()));
-    for (SpacePopulation::Options::PlacedShip& ship : placed_ships_) {
-        const auto type = std::find_if(tables_->units.begin(), tables_->units.end(),
-                                       [&](const units::UnitType& entry) { return entry.id == ship.object_id; });
-        ship.defend_shell = type != tables_->units.end()
-            && std::any_of(type->abilities.begin(), type->abilities.end(),
-                           [](const units::Ability& ability) { return ability.type == "DEFEND"; });
-    }
     // #76 AB-31 (UA-06): a type with SPOILER_LOCK plays its DEPLOY clip when the ability switches
     // on and UNDEPLOY when it switches off. Retail draws among several variants; the X-wing has one.
     const auto exists = [&](const std::string& path) { return static_cast<bool>(filesystem.stat(path)); };
@@ -579,6 +575,14 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     prepare_sfoil_clips();
     prepare_clips(filesystem, catalog);
     prepare_launch_slots(filesystem, catalog);
+    // BP-22: purchased reinforcements need the same shell as starting ships, including
+    // heroes with DEFEND in their second slot. Include their newly prepared arrival slots.
+    for (SpacePopulation::Options::PlacedShip& ship : placed_ships_) {
+        const auto* type = tables_->find(ship.object_id);
+        ship.defend_shell = type != nullptr && !ship.placement_preview
+            && std::any_of(type->abilities.begin(), type->abilities.end(),
+                           [](const units::Ability& ability) { return ability.type == "DEFEND"; });
+    }
     // #614: a squadron a hangar launches later flies in a launch slot, which the first pass
     // did not see; without the clips the slot's craft never plays DEPLOY or UNDEPLOY.
     prepare_sfoil_clips();
@@ -658,6 +662,19 @@ bool LiveSessionView::start(std::string& failure) {
                                                 : platform::LiveSession::Pacing::driven;
     session_options.target_rate = time_.target_rate(); // #459 TM-01
     session_options.initially_paused = true;
+    // SND-40: only authored bases opt into the bounded durable presentation journal.
+    for (const auto& type : tables_->units) {
+        const auto base = [](const std::string& name) {
+            const auto value = lower_path(name);
+            return value == "dummy_star_base" || value == "dummy_orbital_structure";
+        };
+        const auto& behavior = type.footprint.hazard;
+        if (std::any_of(behavior.behavior.begin(), behavior.behavior.end(), base)
+            || std::any_of(behavior.space_behavior.begin(), behavior.space_behavior.end(), base)) {
+            session_options.base_attack_types.push_back(skirmish::type_id(type.id));
+        }
+    }
+    std::sort(session_options.base_attack_types.begin(), session_options.base_attack_types.end());
     // UI-07: the local player's one scheduler, taken on the simulation thread right before
     // each step with its own keys. The session starts at tick 0.
     scheduler_ = std::make_unique<ui::CommandScheduler>(player_, 0, 0);

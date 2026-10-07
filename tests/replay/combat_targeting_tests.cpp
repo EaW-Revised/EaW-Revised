@@ -1,5 +1,6 @@
 #include "combat_support.hpp"
 #include "../../apps/sim_headless/json.hpp"
+#include "../../src/sim/tactical/combat_algorithms.hpp"
 
 namespace combat_test_support {
 
@@ -342,6 +343,91 @@ void test_attack_order() {
     static_cast<void>(run(value, 1));
     const auto stopped = value.combat_state(1);
     expect(stopped && !stopped->direct && stopped->attack_target == 0, "another order ends the attack order");
+
+    // WCC-25: the submitted collidable/invalid-type reproduction must reach assignment,
+    // rather than constructing an impossible direct target in a combat state.
+    for (const int gate : {0, 1, 2, 3}) {
+        auto profiles = table();
+        auto& candidate = profiles.profiles[3];
+        if (gate == 1) candidate.valid_target = false;
+        if (gate == 2) candidate.living_projectile_collision = false;
+        if (gate == 3) candidate.special_weapon = true;
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto ordered = session(setup({unit(1, gunship_type, 1, at(0, 0)),
+                unit(2, transport_type, 2, at(300, 0))}), profiles);
+            expect(static_cast<bool>(ordered.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                "WCC-25: direct assignment probe is queued");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            int accepted = 0, rejected = 0, direct_ticks = 0, shots = 0;
+            for (int tick = 0; tick < 150; ++tick) {
+                auto stepped = ordered.step(executor);
+                expect(static_cast<bool>(stepped), "WCC-25: direct assignment probe steps");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                const auto states = ordered.units();
+                expect(!states.empty() && states.front().order.kind == tactical::OrderKind::attack
+                    && states.front().order.target == 2, "WCC-25: assignment refusal retains the outer attack order");
+                for (const auto& event : stepped.value().snapshot->events()) {
+                    if (event.kind == tactical::EventKind::order_accepted) ++accepted;
+                    if (event.kind == tactical::EventKind::order_rejected) ++rejected;
+                }
+                const auto combat = ordered.combat_state(1);
+                if (combat && combat->direct && combat->attack_target == 2) ++direct_ticks;
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1 && event.target == 2) ++shots;
+                }
+            }
+            expect(accepted == 1 && rejected == 0, "WCC-25: outer order accepts silent assignment refusal");
+            expect(direct_ticks == (gate == 1 ? 0 : 150), "WCC-25: invalid types refuse direct assignment");
+            expect(gate == 1 ? shots == 0 : shots > 0, "WCC-25: invalid types receive no ordered fire");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WCC-25: submitted direct orders equal on 1/2/4/8 workers");
+        }
+    }
+
+    auto profiles = table();
+    profiles.profiles[3].valid_target = false;
+    auto moving_result = tactical::TacticalSession::create(setup({unit(1, gunship_type, 1, at(0, 0)),
+        unit(2, transport_type, 2, at(2000, 0))}), sensors(5000), {}, turning_motion_all(), std::nullopt, profiles);
+    expect(static_cast<bool>(moving_result), "WCC-25: refused assignment movement probe is created");
+    if (moving_result) {
+        auto moving = std::move(moving_result).value();
+        expect(static_cast<bool>(moving.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+            "WCC-25: refused assignment movement order is queued");
+        static_cast<void>(run(moving, 10));
+        expect(moving.motion_state(1) && moving.motion_state(1)->kind == tactical::MotionKind::path,
+            "WCC-25: silent assignment refusal retains approach movement");
+        expect(moving.combat_state(1) && moving.combat_state(1)->attack_target == 0 && !moving.combat_state(1)->direct,
+            "WCC-25: approach movement never assigns the invalid target");
+    }
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto held = session(setup({unit(1, gunship_type, 1, at(0, 0)),
+            unit(2, transport_type, 2, at(300, 0)), unit(3, bomber_type, 2, at(400, 0))}), profiles);
+        expect(static_cast<bool>(held.submit({{0, 1, 0}, {1}, tactical::AttackPayload{3}})),
+            "WCC-25: prior valid attack is queued");
+        expect(static_cast<bool>(held.submit({{1, 1, 1}, {1}, tactical::AttackPayload{2}})),
+            "WCC-25: invalid replacement attack is queued");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (int tick = 0; tick < 150; ++tick) {
+            auto stepped = held.step(executor);
+            expect(static_cast<bool>(stepped), "WCC-25: held target assignment probe steps");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            const auto combat = held.combat_state(1);
+            expect(combat && combat->direct && combat->attack_target == 3,
+                "WCC-25: refused assignment preserves the previous direct target");
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1)
+                    expect(event.target == 3, "WCC-25: refused assignment never redirects previous fire");
+            }
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "WCC-25: preserved direct targets equal on 1/2/4/8 workers");
+    }
 }
 
 void test_ship_level_choice() {
@@ -365,6 +451,173 @@ void test_ship_level_choice() {
     auto far = session(setup({unit(1, gunship_type, 1, at(0, 0)), unit(2, bomber_type, 2, at(1001, 0), true)}));
     static_cast<void>(run(far, 5));
     expect(far.combat_state(1)->attack_target == 0, "ship level: nothing beyond the attack distance");
+}
+
+void test_ship_level_suitability() {
+    // A visible terminal-priority target competes with a collidable bomber. Test ship
+    // acquisition and object fire independently of the hardpoint opportunity service.
+    for (const int gate : {0, 1, 2, 3, 4}) {
+        auto profiles = table();
+        auto& candidate = profiles.profiles[3];
+        if (gate == 1) candidate.living_projectile_collision = false;
+        if (gate == 2) candidate.valid_target = false;
+        if (gate >= 3) candidate.special_weapon = true;
+        if (gate == 4) candidate.star_base = true;
+        const bool admitted = gate == 0 || gate == 4;
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+            auto value = session(setup({unit(1, gunship_type, 1, at(0, 0)),
+                unit(2, transport_type, 2, at(300, 0)), unit(3, bomber_type, 2, at(400, 0))}), profiles);
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool fired = false;
+            for (int tick = 0; tick < 150; ++tick) {
+                auto stepped = value.step(executor);
+                expect(static_cast<bool>(stepped), "WCC-25: ship admission step succeeds");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                expect(value.combat_state(1)->attack_target == (admitted ? 2U : 3U),
+                    "WCC-25: ship-level choice rejects invalid types and keeps valid targets/star bases");
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.shooter != 1 || event.kind != tactical::CombatEventKind::weapon_fired) continue;
+                    fired = true;
+                    expect(event.target == (admitted ? 2U : 3U), "WCC-25: object weapon fires at the admitted target");
+                }
+            }
+            expect(fired, "WCC-25: a suitable enemy receives object-weapon fire");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "WCC-25: every tick equals 1/2/4/8 workers");
+        }
+    }
+    namespace d = tactical::detail;
+    auto profiles = table();
+    tactical::CombatState state;
+    d::CombatUnit scanner, candidate, alternate;
+    scanner.id = 1; scanner.owner = 1; scanner.profile = &profiles.profiles[4]; scanner.combat = &state;
+    candidate.id = 2; candidate.type_id = transport_type; candidate.owner = 2;
+    candidate.profile = &profiles.profiles[3]; candidate.visible_to = 1; candidate.position = at(300, 0);
+    alternate.id = 3; alternate.type_id = bomber_type; alternate.owner = 2;
+    alternate.profile = &profiles.profiles[2]; alternate.visible_to = 1; alternate.position = at(400, 0);
+    const auto players = setup({}).players;
+    const std::array<tactical::SnapshotPlayer, 2> relations{{{1, 1, false}, {2, 2, false}}};
+    d::CombatWorld world;
+    world.players = players; world.relationships = relations; world.table = &profiles;
+    world.units = {scanner, candidate, alternate};
+    const std::array<tactical::SpaceBody, 3> bodies{{{1, 1, scanner.position},
+        {2, 2, candidate.position}, {3, 2, alternate.position}}};
+    world.index = tactical::SpaceIndex::build(bodies).value();
+    const auto chosen = [&] { return d::target_combat(world, scanner, {}, 0, {}).attack_target; };
+    world.units[1].in_limbo = true;
+    expect(chosen() == 3, "WCC-25: a visible limbo candidate is rejected");
+    world.units[1].in_limbo = false;
+    profiles.profiles[3].living_projectile_collision = false;
+    profiles.profiles[3].valid_target = false;
+    world.teams = {{2, {}}};
+    expect(chosen() == 2, "WCC-25: team containers bypass collision and valid-type admission");
+    world.units[1].in_limbo = true;
+    expect(chosen() == 3, "WCC-25: team containers still reject limbo");
+    world.units[1].in_limbo = false;
+    world.teams.clear();
+    state.attack_target = 2;
+    expect(chosen() == 3, "WCC-14/25: an unsuitable held terminal-priority target may be replaced");
+    profiles.profiles[3].valid_target = true;
+    state.direct = true;
+    expect(chosen() == 2, "WCC-25: a valid noncollidable direct target retains its separate scan admission");
+}
+
+void test_noncollidable_opportunity_target() {
+    // R-08 / WHZ-51: exercise the production candidate predicate directly.
+    // Collision permission and hostile ownership are independent requirements.
+    {
+        auto profiles = table();
+        const auto staged = setup({unit(1, shooter_type, 1, at(0, 0)),
+            unit(2, transport_type, 2, at(300, 0))});
+        std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+        tactical::CombatState state;
+        tactical::detail::CombatWorld world;
+        world.players = staged.players;
+        world.relationships = relationships;
+        world.table = &profiles;
+        tactical::detail::CombatUnit shooter;
+        shooter.id = 1;
+        shooter.owner = 1;
+        shooter.team = 1;
+        shooter.profile = &profiles.profiles[0];
+        shooter.combat = &state;
+        tactical::detail::CombatUnit pad;
+        pad.id = 2;
+        pad.type_id = transport_type;
+        pad.owner = 2;
+        pad.team = 2;
+        pad.position = at(300, 0);
+        pad.visible_to = 1;
+        pad.profile = &profiles.profiles[3];
+        world.units = {shooter, pad};
+        world.index = tactical::SpaceIndex::build(std::array{
+            tactical::SpaceBody{pad.id, pad.owner, pad.position}}).value();
+        tactical::detail::combat_detail::UnitCombat combat(world, world.units.front());
+        tactical::CombatRandom random(12345, 16, 1, 0);
+        tactical::detail::combat_detail::UnitCombat::Opportunity opportunity(combat, 0, random);
+        for (const bool neutral : {false, true}) {
+            relationships[1].neutral = neutral;
+            for (const bool collidable : {false, true}) {
+                profiles.profiles[3].living_projectile_collision = collidable;
+                const auto candidates = opportunity.candidates(1);
+                expect(candidates.size() == 1, "pad predicate: one visible in-range candidate");
+                if (candidates.size() != 1) continue;
+                const auto& candidate = candidates.front();
+                expect(candidate.suitable == !neutral, "WHZ-51: neutral ownership rejects suitability");
+                expect(candidate.eligible == collidable, "R-08: collision permission gates eligibility");
+                expect((candidate.suitable && candidate.eligible) == (!neutral && collidable),
+                    "R-08 / WHZ-51: only a hostile collidable pad passes both predicates");
+            }
+        }
+    }
+    auto profiles = table();
+    auto& pad = profiles.profiles[3];
+    pad.living_projectile_collision = false;
+    // The visible, in-cone pad has terminal priority 1.0; the bomber has 2.0.
+    // R-08 must reject the pad before R-09 can prefer or retain it.
+    auto value = session(setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, transport_type, 2, at(300, 0)), unit(3, bomber_type, 2, at(400, 0))}), profiles);
+    const auto events = run(value, 150);
+    expect(std::any_of(events.begin(), events.end(), [](const Shot& shot) {
+        return shot.kind == tactical::CombatEventKind::weapon_fired && shot.shooter == 1 && shot.target == 3;
+    }), "R-08: a noncollidable best-priority pad does not starve a valid enemy");
+    expect(std::none_of(events.begin(), events.end(), [](const Shot& shot) { return shot.target == 2; }),
+        "R-08: a noncollidable pad is neither acquired nor fired at");
+    expect(opportunity_target(value, 1) == 3, "R-08: the valid enemy remains the opportunity target");
+    auto only_pad = session(setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, transport_type, 2, at(300, 0))}), profiles);
+    expect(run(only_pad, 150).empty() && opportunity_target(only_pad, 1) == 0,
+        "R-08: without a collidable enemy the weapon remains idle");
+    // A Buzz_Droids-like type is collidable but explicitly not a valid target.
+    pad.living_projectile_collision = true;
+    pad.valid_target = false;
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        auto invalid = session(setup({unit(1, shooter_type, 1, at(0, 0)),
+            unit(2, transport_type, 2, at(300, 0)), unit(3, bomber_type, 2, at(400, 0))}), profiles);
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool valid_fired = false;
+        bool invalid_fired = false;
+        for (int tick = 0; tick < 150; ++tick) {
+            auto stepped = invalid.step(executor);
+            expect(static_cast<bool>(stepped), "R-08: valid-type admission step succeeds");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.shooter != 1) continue;
+                invalid_fired = invalid_fired || event.target == 2;
+                valid_fired = valid_fired || (event.target == 3 && event.kind == tactical::CombatEventKind::weapon_fired);
+            }
+        }
+        expect(!invalid_fired && valid_fired && opportunity_target(invalid, 1) == 3,
+            "R-08: a hardpoint rejects an invalid terminal-priority type and keeps the valid enemy");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "R-08: valid-type admission equals every tick on 1/2/4/8 workers");
+    }
 }
 
 void test_restrictions_and_fog() {

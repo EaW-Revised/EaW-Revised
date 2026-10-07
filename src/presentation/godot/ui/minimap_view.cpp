@@ -1,4 +1,8 @@
 #include "minimap_view.hpp"
+#include "eawr/assets/assets.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/data/tag_trace.hpp"
+#include "eawr/presentation/animation/animation.hpp"
 
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
@@ -8,8 +12,10 @@
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <numbers>
 #include <sstream>
 #include <utility>
@@ -41,6 +47,187 @@ EawrMinimap::EawrMinimap() {
 
 EawrMinimap::~EawrMinimap() {
     if (layers_.is_valid()) RenderingServer::get_singleton()->free_rid(layers_);
+    for (const auto& marker : order_markers_) {
+        if (marker.item.is_valid()) RenderingServer::get_singleton()->free_rid(marker.item);
+    }
+    if (order_layer_.is_valid()) RenderingServer::get_singleton()->free_rid(order_layer_);
+}
+
+void EawrMinimap::prepare_orders(const vfs::Vfs& filesystem) {
+    const auto text = [](const data::XmlNode& node) {
+        data::tag_trace::used(node);
+        const auto first = node.raw_text.find_first_not_of(" \t\r\n");
+        return first == std::string::npos ? std::string{}
+            : node.raw_text.substr(first, node.raw_text.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    const auto number = [&text](const data::XmlNode& node) {
+        const auto value = text(node);
+        double parsed{};
+        const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+        return result.ec == std::errc{} && std::isfinite(parsed) ? parsed : 0.0;
+    };
+    constexpr std::array<std::string_view, 3> tags{"GUI_Movement_Click_Radar_Event_Name",
+        "GUI_Attack_Movement_Click_Radar_Event_Name", "GUI_Movement_Double_Click_Radar_Event_Name"};
+    if (auto constants = data::load_document(filesystem, "data/xml/gameconstants.xml")) {
+        for (const auto& child : constants.value().root.children) {
+            for (std::size_t index = 0; index < tags.size(); ++index) {
+                if (child.name == tags[index]) order_art_[index].name = text(child);
+            }
+        }
+    }
+    if (auto radar = data::load_document(filesystem, "data/xml/radarmap.xml")) {
+        for (const auto& group : radar.value().root.children) {
+            if (group.name == "RadarMapSettings") for (const auto& child : group.children) {
+                if (child.name == "Use_Event_System") order_events_enabled_ = text(child) == "Yes";
+            }
+            if (group.name != "RadarMapEvents") continue;
+            for (const auto& event : group.children) {
+                const auto name = std::find_if(event.attributes.begin(), event.attributes.end(),
+                    [](const auto& attribute) { return attribute.name == "name"; });
+                for (auto& art : order_art_) {
+                    if (name == event.attributes.end() || name->value != art.name) continue;
+                    data::tag_trace::used_attribute(event, "name");
+                    for (const auto& child : event.children) {
+                        if (child.name == "Event_Model_Name") art.model = text(child);
+                        else if (child.name == "Event_Model_Scale") art.scale = number(child);
+                        else if (child.name == "Event_Duration") art.duration = number(child);
+                        else if (child.name == "Event_Single_Instance") art.singleton = text(child) == "Yes";
+                    }
+                }
+            }
+        }
+    }
+    // OF-04: cache the authored skinned radar animation in normalized map units.
+    // These tiny models are sampled once here; gestures and frames reuse their arrays.
+    for (auto& art : order_art_) {
+        if (art.duration <= 0.0 || art.duration > 10.0 || art.scale <= 0.0 || art.model.empty()) continue;
+        auto mesh = assets::load_model(filesystem, "data/art/models/" + art.model);
+        if (!mesh) continue;
+        const auto dot = art.model.find_last_of('.');
+        auto clip = assets::load_animation(filesystem, "data/art/models/" + art.model.substr(0, dot) + "_idle_00.ala");
+        auto player = animation::Player::create(mesh.value(), clip ? &clip.value() : nullptr);
+        if (!player) continue;
+        const auto transform = [](const animation::Matrix& matrix, const assets::Vec3f point) {
+            return assets::Vec3f{matrix[0] * point.x + matrix[4] * point.y + matrix[8] * point.z + matrix[12],
+                matrix[1] * point.x + matrix[5] * point.y + matrix[9] * point.z + matrix[13],
+                matrix[2] * point.x + matrix[6] * point.y + matrix[10] * point.z + matrix[14]};
+        };
+        const auto count = static_cast<std::size_t>(std::ceil(art.duration * 30.0));
+        art.samples.resize(count);
+        for (std::size_t frame = 0; frame < count; ++frame) {
+            auto pose = player.value().sample({static_cast<float>(frame) / 30.0F});
+            if (!pose) continue;
+            auto& sample = art.samples[frame];
+            for (const auto& part : mesh.value().meshes) for (const auto& submesh : part.submeshes) {
+                Color tint(1, 1, 1, 1);
+                for (const auto& parameter : submesh.parameters) {
+                    if (parameter.name == "BaseTexture" && std::holds_alternative<std::string>(parameter.value)) {
+                        const auto& texture = std::get<std::string>(parameter.value);
+                        if (art.texture.is_null() && setup_.texture) art.texture = setup_.texture(texture);
+                    } else if (parameter.name == "Color" && std::holds_alternative<assets::Vec4f>(parameter.value)) {
+                        const auto value = std::get<assets::Vec4f>(parameter.value);
+                        // OF-04: the additive material uses Color RGB; its authored W is zero, not opacity.
+                        tint = Color(value.x, value.y, value.z, 1.0F);
+                    }
+                }
+                if (!part.visible) continue;
+                for (const auto index : submesh.indices) {
+                    const auto& vertex = submesh.vertices[index];
+                    assets::Vec3f point{};
+                    if (submesh.skin_bones.empty()) {
+                        if (part.bone < 0 || static_cast<std::size_t>(part.bone) >= pose.value().bones.size()) continue;
+                        const auto& bone = pose.value().bones[static_cast<std::size_t>(part.bone)];
+                        if (!bone.visible) continue;
+                        point = transform(bone.model_asset, vertex.position);
+                    } else {
+                        for (std::size_t weight = 0; weight < vertex.bone_weights.size(); ++weight) {
+                            if (vertex.bone_weights[weight] == 0.0F) continue;
+                            const auto palette = vertex.bone_indices[weight];
+                            if (palette >= submesh.skin_bones.size()) continue;
+                            const auto bone = submesh.skin_bones[palette];
+                            if (bone >= pose.value().bones.size()) continue;
+                            const auto posed = transform(pose.value().bones[bone].skin_asset, vertex.position);
+                            point.x += posed.x * vertex.bone_weights[weight];
+                            point.y += posed.y * vertex.bone_weights[weight];
+                        }
+                    }
+                    sample.indices.push_back(static_cast<int32_t>(sample.points.size()));
+                    sample.points.push_back(Vector2(point.x, -point.y));
+                    sample.uvs.push_back(Vector2(vertex.texcoord[0].x, vertex.texcoord[0].y));
+                    sample.colours.push_back(tint);
+                }
+            }
+        }
+    }
+    order_material_.instantiate();
+    order_material_->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+    auto* server = RenderingServer::get_singleton();
+    order_layer_ = server->canvas_item_create();
+    server->canvas_item_set_parent(order_layer_, get_canvas_item());
+    server->canvas_item_set_clip(order_layer_, true);
+    for (auto& marker : order_markers_) {
+        marker.item = server->canvas_item_create();
+        server->canvas_item_set_parent(marker.item, order_layer_);
+        server->canvas_item_set_material(marker.item, order_material_->get_rid());
+    }
+}
+
+void EawrMinimap::move_feedback(const model::MinimapPoint centre, const model::OrderMode mode, const bool double_click) {
+    if (!order_events_enabled_) return;
+    const std::size_t art = mode == model::OrderMode::attack_move ? 1U : double_click ? 2U : 0U;
+    if (order_art_[art].samples.empty() || order_art_[art].texture.is_null()) return;
+    auto* server = RenderingServer::get_singleton();
+    OrderMarker* slot = nullptr;
+    // OF-03: a double click removes the youngest ordinary radar click.
+    if (art == 2U) {
+        for (auto& marker : order_markers_) {
+            if (marker.active && marker.art == 0U && (!slot || marker.born >= slot->born)) slot = &marker;
+        }
+    }
+    if (order_art_[art].singleton) for (auto& marker : order_markers_) {
+        if (marker.active && marker.art == art) { slot = &marker; break; }
+    }
+    if (!slot) for (auto& marker : order_markers_) if (!marker.active) { slot = &marker; break; }
+    if (!slot) slot = &*std::min_element(order_markers_.begin(), order_markers_.end(),
+        [](const auto& left, const auto& right) { return left.born < right.born; });
+    if (slot->active) ++orders_replaced_;
+    server->canvas_item_clear(slot->item);
+    slot->centre = centre;
+    slot->born = order_seconds_;
+    slot->art = art;
+    slot->sample = std::numeric_limits<std::size_t>::max();
+    slot->active = true;
+    ++orders_shown_;
+    order_frame(order_seconds_);
+}
+
+void EawrMinimap::order_frame(const double seconds) {
+    if (!std::isfinite(seconds)) return;
+    order_seconds_ = seconds;
+    auto* server = RenderingServer::get_singleton();
+    const Rect2 rect = minimap_rect();
+    if (order_layer_.is_valid()) server->canvas_item_set_custom_rect(order_layer_, true, rect);
+    for (auto& marker : order_markers_) {
+        if (!marker.active) continue;
+        const auto& art = order_art_[marker.art];
+        const double age = std::max(0.0, seconds - marker.born);
+        if (age >= art.duration) {
+            marker.active = false;
+            server->canvas_item_clear(marker.item);
+            ++orders_expired_;
+            continue;
+        }
+        server->canvas_item_set_transform(marker.item, Transform2D(0.0F,
+            Vector2(rect.size.x * static_cast<float>(art.scale), rect.size.y * static_cast<float>(art.scale)),
+            0.0F, to_screen(marker.centre)));
+        const auto frame = std::min(art.samples.size() - 1, static_cast<std::size_t>(age * 30.0));
+        if (frame == marker.sample) continue;
+        marker.sample = frame;
+        const auto& sample = art.samples[frame];
+        server->canvas_item_clear(marker.item);
+        if (!sample.indices.is_empty()) server->canvas_item_add_triangle_array(marker.item, sample.indices,
+            sample.points, sample.colours, sample.uvs, order_empty_bones_, order_empty_weights_, art.texture->get_rid());
+    }
 }
 
 void EawrMinimap::setup(Setup setup) {
@@ -180,6 +367,8 @@ void EawrMinimap::_gui_input(const Ref<InputEvent>& event) {
         accept_event();
         if (button->is_pressed()) {
             right_down_ = true;
+            // OF-03: double-click belongs to the press; dispatch the order on release.
+            right_double_click_ = button->is_double_click();
         } else if (right_down_ && _has_point(at)) {
             right_down_ = false;
             ++moves_;
@@ -188,7 +377,7 @@ void EawrMinimap::_gui_input(const Ref<InputEvent>& event) {
             line << "move " << point.x << "," << point.y;
             log_.push_back(line.str());
             if (log_.size() > 16) log_.erase(log_.begin());
-            if (move_) move_(point);
+            if (move_) move_(point, right_double_click_);
         } else {
             right_down_ = false;
         }
@@ -266,6 +455,21 @@ void EawrMinimap::_draw() {
     }
     draw_set_transform(Vector2(), 0.0F, Vector2(1.0F, 1.0F));
     icons_missing_ = missing;
+    // SND-40: the authored marker keeps its texture colour, pulses in alpha
+    // and size, and stays at the notification position for four seconds.
+    const Ref<Texture2D> warning = setup_.texture && !setup_.warning_icon.empty()
+        ? setup_.texture(setup_.warning_icon) : Ref<Texture2D>();
+    if (warning.is_valid()) {
+        for (const auto& marker : frame_.warnings) {
+            if (marker.centre.x < -1.0 || marker.centre.x > 1.0 || marker.centre.y < -1.0 || marker.centre.y > 1.0) continue;
+            const double phase = std::fmod(std::max(0.0, marker.age) * 1024.0, 510.0);
+            const float alpha = static_cast<float>(std::abs(255.0 - phase));
+            const float pulse = alpha / 512.0F + 0.5F;
+            const Vector2 size = warning->get_size() * setup_.warning_scale * pulse * static_cast<float>(setup_.placement().scale);
+            draw_texture_rect(warning, Rect2(to_screen(marker.centre) - size * 0.5F, size), false,
+                Color(1.0F, 1.0F, 1.0F, alpha / 255.0F));
+        }
+    }
     if (frame_.guide) {
         // The outline's lines stop at the minimap's edge, as the engine's radar viewport cuts them.
         const auto& corners = *frame_.guide;
@@ -283,6 +487,26 @@ std::string EawrMinimap::report_json() const {
            << "\", \"backdrop_drawn\": " << (backdrop_tiles_.is_valid() ? "true" : "false")
            << ", \"backdrop_repeats\": " << model::minimap_backdrop_repeats << ", \"frames\": " << frames_
            << ", \"blips\": " << frame_.blips.size() << ", \"icons_missing\": " << icons_missing_
+           << ", \"order_feedback\": {\"shown\": " << orders_shown_ << ", \"expired\": " << orders_expired_
+           << ", \"replaced\": " << orders_replaced_ << ", \"active\": "
+           << std::count_if(order_markers_.begin(), order_markers_.end(), [](const auto& marker) { return marker.active; })
+           << ", \"markers\": [" << [&] {
+                std::ostringstream rows;
+                bool first = true;
+                for (const auto& marker : order_markers_) {
+                    if (!marker.active) continue;
+                    const auto& art = order_art_[marker.art];
+                    const auto point = to_screen(marker.centre);
+                    rows << (first ? "" : ",") << "{\"event\":\"" << art.name << "\",\"duration\":" << art.duration
+                        << ",\"age\":" << order_seconds_ - marker.born << ",\"screen\":[" << point.x << ',' << point.y
+                        << "],\"indices\":" << (marker.sample < art.samples.size() ? art.samples[marker.sample].indices.size() : 0) << '}';
+                    first = false;
+                }
+                return rows.str();
+           }() << "]}"
+           << ", \"warning_icon\": \"" << setup_.warning_icon << "\", \"warnings\": " << frame_.warnings.size()
+           << ", \"warning_texture_available\": " << (setup_.texture && !setup_.warning_icon.empty()
+               && setup_.texture(setup_.warning_icon).is_valid() ? "true" : "false")
            << ", \"hazard_pixels\": " << hazard_pixels_ << ", \"hazards\": [" << [&] {
                   std::ostringstream rows;
                   for (std::size_t index = 0; index < hazard_inputs_.size(); ++index) {
@@ -312,6 +536,7 @@ std::string EawrMinimap::report_json() const {
         output << (index ? ", " : "") << "{\"id\": " << blip.id << ", \"icon\": \"" << blip.icon << "\", \"at\": [" << at.x
                << ", " << at.y << "], \"half_size\": [" << blip.half_size[0] << ", " << blip.half_size[1]
                << "], \"point_pixels\": " << (blip.icon.empty() ? blip.point_pixels : 0U)
+               << ", \"remembered\": " << (blip.remembered ? "true" : "false")
                << ", \"rotation\": " << blip.rotation_degrees << ", \"colour\": [" << int(blip.colour.r)
                << ", " << int(blip.colour.g) << ", " << int(blip.colour.b) << ", " << int(blip.colour.a) << "]}";
     }

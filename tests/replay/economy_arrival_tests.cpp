@@ -419,6 +419,12 @@ void test_arrival_lane_sweep() {
     if (!world) return;
     auto verdict = world->reinforcement_point(human, ship_type, at(-2850, 0));
     expect(verdict && !verdict.value(), "WR-25: blocker behind endpoint rejects 200-unit sweep");
+    verdict = world->reinforcement_point(human, ship_type, at(-2850, 0), nullptr, units(180));
+    expect(verdict && verdict.value(), "WR-X01: reversing explicit facing puts the sweep ahead of the blocker");
+    verdict = world->reinforcement_point(human, ship_type, at(-3000, 150), nullptr, units(90));
+    expect(verdict && !verdict.value(), "WR-X01: quarter-turn sweep uses the chosen facing");
+    verdict = world->reinforcement_point(human, ship_type, at(-3000, 150));
+    expect(verdict && verdict.value(), "WR-X01: same point remains clear with the unscrolled default facing");
     verdict = world->reinforcement_point(human, ship_type, at(-2850, 60));
     expect(verdict && verdict.value(), "WR-25: hard rectangular Y extents leave adjacent lane clear");
     verdict = world->reinforcement_point(human, squadron_type, at(-2850, 0));

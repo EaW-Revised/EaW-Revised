@@ -25,6 +25,9 @@ inline constexpr std::size_t replay_header_size = 104;
 inline constexpr std::size_t replay_policy_header_size = 116;
 inline constexpr std::uint16_t replay_extension_match_policy = 1;
 inline constexpr std::uint16_t replay_extension_skirmish_setup = 2; // coordinator-reserved SKSU
+inline constexpr std::uint16_t replay_extension_garrison_disabled = 3; // coordinator-reserved GSPN
+inline constexpr std::uint16_t replay_extension_queue_identities = 4; // coordinator-reserved QIDS
+inline constexpr std::uint16_t replay_extension_free_garrison = 5; // coordinator-reserved GARR
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
 
 // A fighter squadron (#271, docs/behaviour/space-visibility.md V-03): its team container,
@@ -64,6 +67,15 @@ struct ReplaySkirmishSetup final {
     bool operator==(const ReplaySkirmishSetup&) const = default;
 };
 
+// Optional player-owned free starting force and its full-depletion replacement delay.
+struct FreeGarrisonSetup {
+    PlayerId player{};
+    std::uint32_t delay_frames{};
+    std::vector<TypeId> templates; // faction order, including repeated companies
+    std::vector<EntityId> registered; // actual free craft/objects, excluding squadron containers
+    friend bool operator==(const FreeGarrisonSetup&, const FreeGarrisonSetup&) = default;
+};
+
 // The tick-zero session: players and units in strictly increasing ID order. Setup units
 // carry no order. Squadrons are in strictly increasing container ID; each container and
 // craft is a setup unit of one owner, and no unit belongs to two squadrons.
@@ -77,6 +89,8 @@ struct TacticalSetup {
     std::optional<SkirmishMatchPolicy> match_policy;
     // Optional SKSU is attached by live recording callers; pinned builders retain old bytes.
     std::optional<ReplaySkirmishSetup> skirmish{};
+    bool queue_identities{}; // PU-17: opt in to canonical queue identities; legacy recordings retain their hashes.
+    std::vector<FreeGarrisonSetup> free_garrisons; // FL-14: optional, strictly increasing player IDs
     friend bool operator==(const TacticalSetup&, const TacticalSetup&) = default;
 };
 

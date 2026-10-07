@@ -170,7 +170,8 @@ void TacticalSession::Impl::bind_squadrons(const std::vector<LiveUnit>& live) {
             }
         }
         for (const auto& unit : live) {
-            if (table.find_spawner(unit.state.type_id) != nullptr) {
+            const auto* profile = table.find_spawner(unit.state.type_id);
+            if (profile != nullptr && (!profile->entries.empty() || (!setup.free_garrisons.empty() && profile->starbase))) {
                 spawners.emplace(unit.state.entity_id, initial_spawner(setup.seed, 1, unit.state.entity_id));
             }
         }
@@ -179,10 +180,13 @@ void TacticalSession::Impl::bind_squadrons(const std::vector<LiveUnit>& live) {
 core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const SpawnerProfile& profile,
     const SpawnDecision& decision, const std::uint64_t frame, EntityId& next, std::vector<LiveUnit>& survivors,
     std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
-    detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders) const {
+    detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
+    const TypeId free_type, const PlayerId free_owner, std::vector<EntityId>* registered) const {
         using Void = core::Result<void>;
         const auto& table = motion.squadrons;
-        const auto* squadron = table.find_squadron(profile.entries[decision.entry].squadron);
+        const auto company_type = free_type != 0 ? free_type : profile.entries[decision.entry].squadron;
+        const auto owner = free_type != 0 ? free_owner : spawner.state.owner;
+        const auto* squadron = table.find_squadron(company_type);
         const auto& bay = profile.bays[decision.bay];
         const auto context = "tick " + std::to_string(frame) + " spawner " + std::to_string(spawner.state.entity_id) + ": ";
         const auto transform = math::to_matrix(spawner.state.rotation, spawner.state.position);
@@ -204,6 +208,38 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             next = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
             return Void::success();
         };
+        if (free_type != 0 && (squadron == nullptr || table.find_craft(company_type) != nullptr)) {
+            if (next == invalid_entity_id) return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit,
+                context + "stable ID space exhausted"));
+            auto at = position.value();
+            const auto* footprint = economy.footprint_of(company_type);
+            const auto* solo = table.find_craft(company_type);
+            const auto height = solo != nullptr ? solo->layer_z : footprint != nullptr ? footprint->layer_z : math::Fixed{};
+            const auto raised = math::add(at.z, height);
+            if (!raised) return Void::failure(raised.error());
+            at.z = raised.value();
+            const auto id = next;
+            math::Quat rotation = spawner.state.rotation;
+            if (solo != nullptr) {
+                auto flight = launch_state(direction.value(), solo->max_speed);
+                if (!flight) return Void::failure(flight.error());
+                auto facing = craft_rotation(flight.value());
+                if (!facing) return Void::failure(facing.error());
+                rotation = facing.value();
+                flights[id] = flight.value();
+                squadron_list.push_back({id, {id}});
+                SquadronState order;
+                order.container = id;
+                order.squadron_type = company_type;
+                order.roster = {id};
+                order.anchor = at;
+                order.next_scan_frame = frame + logical_frames_per_second;
+                orders.emplace(id, std::move(order));
+            }
+            if (auto added = add(UnitState{id, company_type, owner, at, rotation, {}}); !added) return added;
+            registered->push_back(id);
+            return Void::success();
+        }
         std::vector<EntityId> members;
         math::Fixed layer_z{};
         for (const auto type : squadron->members) {
@@ -223,17 +259,18 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             if (!raised) return Void::failure(raised.error());
             at.z = raised.value();
             const auto id = next;
-            if (auto added = add(UnitState{id, type, spawner.state.owner, at, rotation.value(), {}}); !added) {
+            if (auto added = add(UnitState{id, type, owner, at, rotation.value(), {}}); !added) {
                 return added;
             }
             flights[id] = flight.value();
             members.push_back(id);
+            if (registered != nullptr) registered->push_back(id);
         }
         if (next == invalid_entity_id) {
             return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
         }
         const auto container = next;
-        if (auto added = add(UnitState{container, squadron->type_id, spawner.state.owner, position.value(),
+        if (auto added = add(UnitState{container, squadron->type_id, owner, position.value(),
                 math::identity_quat(), {}}); !added) {
             return added;
         }
@@ -241,7 +278,7 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
         SquadronState order;
         order.container = container;
         order.squadron_type = squadron->type_id;
-        order.spawner = spawner.state.entity_id;
+        order.spawner = free_type != 0 ? invalid_entity_id : spawner.state.entity_id;
         order.entry = decision.entry;
         order.roster = members;
         order.next_scan_frame = frame + logical_frames_per_second; // FT-06: a launched squadron idles first

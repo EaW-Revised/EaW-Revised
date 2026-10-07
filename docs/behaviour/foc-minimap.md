@@ -18,7 +18,8 @@ camera, a right click becomes the same move order as a right click on empty spac
 
 ## Interface
 
-Input: the units the local player sees (type, owner, position, facing), the selection, the local
+Input: copied live radar candidates (type, owner, position, facing and admission state), separate
+previously revealed retained-model identities, the selection, the local
 player's fog cells (or, in a battle without fog rules, the local team's sensor revealers), the
 camera's frame and target bounds, and the shell's `radar` mesh.
 Output: the minimap image inside the radar mesh; camera moves and move orders from the pointer.
@@ -45,7 +46,9 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   `Radar_Rotate_Icon` (default No). Icons come from the command bar's mega texture.
 - MM-07 (MME-3). In skirmish a blip's colour is its owner's player colour (the lobby colour). An
   owner without a lobby slot (a map's Neutral or Pirates objects) takes its faction's `Color` from
-  Factions.xml: grey for Neutral, orange for Pirates, as the retail Coruscant still shows.
+  the VFS-winning files in `FactionFiles.xml`: grey for Neutral, orange for Pirates, as the retail
+  Coruscant still shows. The expansion registry also supplies Hutts orange (WNO-40). Later
+  same-name faction definitions replace earlier colour inputs, including no-colourisation fallbacks.
 - MM-08 (MME-4, MME-6). A blip is its icon on a quad centred on the unit, half extents from
   `Radar_Icon_Size`, turned by the unit's facing less a quarter turn when the type shows facing; a
   facing of exactly zero is not turned. The icon list is submitted from its end, so the first unit
@@ -68,9 +71,14 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   pixels from the press starts a drag, and from then every move re-points the camera. A right release
   on the minimap orders the selection to move there (with the attack-move and guard modifiers of a
   right click). A left double click also points the camera and ends a tethered camera.
-- MM-12 (MME-2). A unit shows only when its type is visible on the radar; an enemy also needs its
-  type visible on enemy radars and must be seen by the local player (not jammed, stealthed, in a
-  nebula or fogged). Asteroid fields, ion storms, nebulae and dead units never show as blips.
+- MM-12 (MME-2, supplemented by WNO-41/44). A live unit requires radar type permission and
+  local visibility or active interdiction; enemy radar permission, jamming, stealth and nebula
+  exclusions still apply. `Visible_On_Radar_When_Fogged` and replay bypass only hidden-model
+  and radar-fade rejection. Previously revealed retained fog models use a separate remembered
+  radar pass, never a live target. Asteroid fields, ion storms and nebulae never show as ordinary
+  blips. Capture colours follow WNO-43, including raw-fog Neutral colour and capture progress,
+  after selected recolouring. See the [neutral-object radar rules](walks/neutral-objects.md).
+  The stock asteroid-base live-versus-memory runtime witness remains unverified (UN-04).
 - MM-13 (MME-6). Draw order: the background layer (MM-14), the fog layer, the backdrop grid, the
   point layer, the unit icons, the camera outline, all alpha-blended. The backdrop quad's texture coordinates run 0 to 25 with
   wrapping, so the 32-texel grid tile repeats 25 times on each axis (the retail still shows a line

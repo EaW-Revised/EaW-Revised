@@ -13,12 +13,277 @@ from battle_input_test_support import (
     Y_WING_SQUADRON, collections, contextlib, decode_png,
     hashlib, inside, json, math,
     os, pathlib, re, read,
-    screen, shutil, source_text, strict_json,
+    screen, shutil, source_text, strict_json, squadron_members,
     subprocess, sys, tempfile, unittest,
 )
 
 
 class BattleInputOrderCases:
+    def _rebel_hangar_refill(self, directory):
+        # WSL-22..28: marker-created stations have no authored garrison. Fully
+        # deplete the two free starting companies to launch real replacements.
+        # Resolve actual craft IDs: the containers themselves are not damageable.
+        code, seed = self._run(directory, "refill-roster", HUD_OFF, end_tick=1)
+        self.assertEqual(code, 0, seed.get("failure"))
+        members = [craft for container in (X_WING_SQUADRON, X_WING_SQUADRON_3)
+                   for craft in squadron_members(seed, container, "Rebel_X-Wing_Squadron")]
+        return tuple(arg for craft in members
+                     for arg in ("--eawr-live-order", f"10:damage:{craft}@1000000"))
+
+    def test_ctrl_a_selects_all_local_mobile_units_without_orders(self):
+        # S-5a: the real key queue replaces a station selection with the whole local fleet.
+        with tempfile.TemporaryDirectory(prefix="eawr-select-all-") as temporary:
+            directory = pathlib.Path(temporary)
+            look = ("--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                    "--eawr-live-step", "1", "--eawr-map-timed-frames", "1")
+            expected_by_player = {}
+            for player, station, expected in ((1, STAR_BASE, {2, 3, 4, 5, 6, 7}),
+                                               (2, 8, {9, 10, 11, 12})):
+                with self.subTest(player=player):
+                    options = (*look, "--eawr-live-player", str(player))
+                    code, idle = self._run(directory, f"idle-{player}", options, end_tick=60)
+                    self.assertEqual(code, 0, idle.get("failure"))
+                    # Include the station's fresh garrison launches, using the independent
+                    # no-input roster rather than hardcoding dynamically assigned container IDs.
+                    own = {row["entity"] for row in idle["live_session"]["own_units"]}
+                    expected |= {team["container"] for team in idle["live_session"]["squadrons"]
+                                 if any(member in own for member in team["members"])}
+                    expected_by_player[player] = expected
+                    # Follow the enemy start so the local fleet is outside the viewport.
+                    enemy_station = 8 if player == 1 else STAR_BASE
+                    code, selected = self._run(directory, f"all-{player}", (*options,
+                        "--eawr-live-follow-group", f"1:{enemy_station}",
+                        "--eawr-live-input", "20:key:A+ctrl",
+                        "--eawr-live-input", "40:key:A+ctrl"), end_tick=60)
+                    self.assertEqual(code, 0, selected.get("failure"))
+                    battle = selected["battle_input"]
+                    self.assertEqual(set(battle["selected"]), expected, battle["log"])
+                    self.assertEqual(len(battle["selected"]), len(expected))
+                    self.assertEqual(battle["log"].count("select all"), 2)
+                    self.assertEqual(battle["orders"], 0)
+                    self.assertEqual(battle["camera_focuses"], 0)
+                    self.assertNotIn(station, battle["selected"])
+                    cards = battle["unit_cards"]["cards"]
+                    self.assertEqual({member for card in cards for member in card["members"]}, expected)
+                    self.assertTrue(selected["hud"]["unit_cards"]["drawn"])
+                    self.assertTrue(selected["live_session"]["headless_hashes_equal"])
+                    self.assertEqual(selected["live_session"]["final_state_sha256"],
+                                     idle["live_session"]["final_state_sha256"])
+
+            code, replaced = self._run(directory, "replace-station", (*look,
+                "--eawr-live-input", "10:click:unit=1",
+                "--eawr-live-input", "20:key:A+ctrl"), end_tick=60)
+            self.assertEqual(code, 0, replaced.get("failure"))
+            self.assertEqual(set(replaced["battle_input"]["selected"]), expected_by_player[1])
+            self.assertIsNone(replaced["battle_input"]["production"]["station"])
+
+            code, plain = self._run(directory, "plain-a", (*look,
+                "--eawr-live-input", "20:key:A"), end_tick=60)
+            self.assertEqual(code, 0, plain.get("failure"))
+            self.assertEqual(plain["battle_input"]["selected"], [])
+            self.assertIn("attack mode", plain["battle_input"]["log"])
+            self.assertNotIn("select all", plain["battle_input"]["log"])
+
+    def test_move_order_feedback_scene_minimap_and_expiry(self):
+        # OF-01/02/04: actual local input draws authored art in both views;
+        # the same command through the headless hook has identical state.
+        captures = os.environ.get("EAWR_ORDER_FEEDBACK_CAPTURES")
+        context = (contextlib.nullcontext(captures) if captures
+                   else tempfile.TemporaryDirectory(prefix="eawr-order-feedback-"))
+        with context as output:
+            directory = pathlib.Path(output)
+            directory.mkdir(parents=True, exist_ok=True)
+            # OF-02: the captured retail opening uses the spawn target and max
+            # distance 1900, verified against its minimap camera footprint.
+            camera = directory / "retail-opening-camera.xml"
+            camera.write_text(CAMERA.read_text(encoding="utf-8").replace(
+                'target_x="-4850" target_y="4400"',
+                'target_x="-5057" target_y="4700"').replace(
+                'zoom="0.611111"', 'zoom="1"'), encoding="utf-8")
+            shutil.copy(CAMERA.parent / "space-live-camera-bindings.json", directory)
+            look = ("--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                    "--eawr-live-ai", "off", "--eawr-live-step", "1", "--eawr-map-timed-frames", "1")
+            # Match the retail capture's screen position and park the cursor away.
+            inputs = ("--eawr-live-input", f"10:click:unit={CORVETTE}",
+                      "--eawr-live-input", "15:rclick:screen=740,345",
+                      "--eawr-live-input", "16:hover:screen=605,393")
+            # Capture the expanding authored rings about 0.3s after admission.
+            code, active = self._run(directory, "move-active", (*look, *inputs), camera=camera, end_tick=25)
+            self.assertEqual(code, 0, active.get("failure"))
+            battle = active["battle_input"]
+            self.assertEqual(battle["orders"], 1, battle["log"])
+            self.assertTrue(active["live_session"]["headless_hashes_equal"])
+            self.assertEqual(active["live_session"]["presented_tick"], 25)
+            radar = active["hud"]["minimap"]["order_feedback"]
+            self.assertEqual((radar["shown"], radar["active"]), (1, 1))
+            self.assertEqual(radar["markers"][0]["event"], "Default_Click")
+            self.assertEqual(radar["markers"][0]["duration"], .8)
+            self.assertGreater(radar["markers"][0]["indices"], 0)
+            effects = active["battle_effects"]
+            self.assertEqual(effects["spawned"].get("move_feedback:GUI_Move_Command_Particle"), 1)
+            self.assertEqual(effects["move_feedback_active"], 1)
+            self.assertEqual(effects["move_feedback_scale"], 5)
+            self.assertFalse(effects["spawn_failed"], effects["spawn_failed"])
+            order = next(line for line in battle["log"] if line.startswith("move @"))
+            match = re.fullmatch(r"move @(\S+) units (\d+) tick (\d+)", order)
+            self.assertTrue(match, order)
+            point, unit, tick = match.groups()
+            hook = ("--eawr-live-input", f"10:click:unit={CORVETTE}",
+                    "--eawr-live-order", f"{tick}:move:{unit}@{point}",
+                    "--eawr-live-input", "16:hover:screen=605,393")
+            code, control = self._run(directory, "move-control", (*look, *hook), camera=camera, end_tick=25)
+            self.assertEqual(code, 0, control.get("failure"))
+            self.assertEqual(active["live_session"]["final_state_sha256"], control["live_session"]["final_state_sha256"])
+            # Pixels prove the cached mesh and particles reached their render backends.
+            width, height, pixels = decode_png((directory / "move-active.png").read_bytes())
+            cw, ch, plain = decode_png((directory / "move-control.png").read_bytes())
+            self.assertEqual((width, height), (cw, ch))
+            rect = active["hud"]["minimap"]["rect"]
+            rx, ry, rw, rh = (int(value) for value in rect)
+            # The retail near viewport edge spans 27px (+/-1 raster pixel) on
+            # its calibrated 160px-wide map of 12200 world units. This checks
+            # the projection independently of the destination particle art.
+            guide = active["hud"]["minimap"]["guide"]
+            near_world_width = math.dist(guide[2], guide[3]) / rect[2] * 12200
+            self.assertGreaterEqual(near_world_width, 26 / 160 * 12200)
+            self.assertLessEqual(near_world_width, 28 / 160 * 12200)
+            sx, sy = next(point["at"] for point in battle["scripted_points"] if point["kind"] == "rclick")
+            mx, my = radar["markers"][0]["screen"]
+            self.assertTrue(50 <= sx <= width - 50 and 50 <= sy <= 480, (sx, sy))
+            changed_map = changed_scene = 0
+            scene_x, scene_y, map_x, map_y = [], [], [], []
+            for y in range(height):
+                for x in range(width):
+                    difference = max(abs(pixels[y][x][c] - plain[y][x][c]) for c in range(3))
+                    if difference < 25:
+                        continue
+                    if rx <= x < rx + rw and ry <= y < ry + rh and abs(x - mx) <= 24 and abs(y - my) <= 24:
+                        changed_map += 1
+                        map_x.append(x)
+                        map_y.append(y)
+                    elif abs(x - sx) <= 65 and abs(y - sy) <= 65:
+                        changed_scene += 1
+                        scene_x.append(x)
+                        scene_y.append(y)
+            self.assertGreater(changed_map, 3)
+            self.assertGreater(changed_scene, 20)
+            # OF-02: delayed retail ring at this camera/position has 18x13px
+            # ink span (19x14 footprint), using the same RGB threshold 25.
+            # Allow 3px per axis for the approximate capture age and edge rasterization.
+            scene_span = (max(scene_x) - min(scene_x), max(scene_y) - min(scene_y))
+            for span, retail_span in zip(scene_span, (18, 13)):
+                self.assertGreaterEqual(span, retail_span - 3, scene_span)
+                self.assertLessEqual(span, retail_span + 3, scene_span)
+            # Native corners at age0.3 are +/-12.7952, yielding ~4.25px
+            # geometry at XML scale0.001 on this radar (3px ink span).
+            early_map_span = (max(map_x) - min(map_x), max(map_y) - min(map_y))
+            for span in early_map_span:
+                self.assertGreaterEqual(span, 3)
+                self.assertLessEqual(span, 5)
+            self.assertLessEqual(math.dist(((min(scene_x) + max(scene_x)) / 2,
+                                           (min(scene_y) + max(scene_y)) / 2), (sx, sy)), 3)
+            self.assertLessEqual(math.dist(((min(map_x) + max(map_x)) / 2,
+                                           (min(map_y) + max(map_y)) / 2), (mx, my)), 5)
+            code, growing = self._run(directory, "move-growing", (*look, *inputs), camera=camera, end_tick=37)
+            self.assertEqual(code, 0, growing.get("failure"))
+            self.assertAlmostEqual(growing["hud"]["minimap"]["order_feedback"]["markers"][0]["age"], .7)
+            code, growing_control = self._run(directory, "move-growing-control", (*look, *hook), camera=camera, end_tick=37)
+            self.assertEqual(code, 0, growing_control.get("failure"))
+            self.assertEqual(growing["live_session"]["final_state_sha256"],
+                             growing_control["live_session"]["final_state_sha256"])
+            _, _, expanded = decode_png((directory / "move-growing.png").read_bytes())
+            _, _, reference = decode_png((directory / "move-growing-control.png").read_bytes())
+            growing_map = [(x, y) for y in range(max(ry, int(my)-24), min(ry+rh, int(my)+25))
+                           for x in range(max(rx, int(mx)-24), min(rx+rw, int(mx)+25))
+                           if max(abs(expanded[y][x][c] - reference[y][x][c]) for c in range(3)) >= 25]
+            self.assertTrue(growing_map)
+            for axis in range(2):
+                span = max(p[axis] for p in growing_map) - min(p[axis] for p in growing_map)
+                self.assertGreater(span, early_map_span[axis])
+                self.assertLessEqual(span, 7)
+            code, expired = self._run(directory, "move-expired", (*look, *inputs), camera=camera, end_tick=100)
+            self.assertEqual(code, 0, expired.get("failure"))
+            self.assertEqual(expired["hud"]["minimap"]["order_feedback"]["active"], 0)
+            self.assertEqual(expired["hud"]["minimap"]["order_feedback"]["expired"], 1)
+            self.assertEqual(expired["battle_effects"]["move_feedback_active"], 0)
+            self.assertTrue(expired["live_session"]["headless_hashes_equal"])
+            code, expired_control = self._run(directory, "move-expired-control", (*look, *hook), camera=camera, end_tick=100)
+            self.assertEqual(code, 0, expired_control.get("failure"))
+            self.assertEqual(expired["live_session"]["final_state_sha256"],
+                             expired_control["live_session"]["final_state_sha256"])
+            ew, eh, gone = decode_png((directory / "move-expired.png").read_bytes())
+            pw, ph, baseline = decode_png((directory / "move-expired-control.png").read_bytes())
+            self.assertEqual((ew, eh), (pw, ph))
+            # Expiry must remove pixels too, not just clear diagnostic counters.
+            for label, bounds in (("scene", (int(sx)-65, int(sy)-65, int(sx)+66, int(sy)+66)),
+                                  ("radar", (max(rx, int(mx)-24), max(ry, int(my)-24),
+                                             min(rx+rw, int(mx)+25), min(ry+rh, int(my)+25)))):
+                x0, y0, x1, y1 = bounds
+                remaining = sum(max(abs(gone[y][x][c] - baseline[y][x][c]) for c in range(3)) >= 25
+                                for y in range(y0, y1) for x in range(x0, x1))
+                self.assertEqual(remaining, 0, (label, remaining))
+
+    def test_order_feedback_routing_and_minimap_input(self):
+        # OF-01/04: mode routing and the minimap path share destination feedback.
+        with tempfile.TemporaryDirectory(prefix="eawr-order-feedback-routing-") as temporary:
+            directory = pathlib.Path(temporary)
+            look = ("--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                    "--eawr-live-ai", "off", "--eawr-live-step", "1", "--eawr-map-timed-frames", "1")
+            cases = (("attack-move", "15:rclick:@-4450,4850,0+ctrl", "GUI_Attack_Move_Command_Particle", "Default_Attack_Click"),
+                     ("guard", "15:rclick:@-4450,4850,0+ctrl+alt", "GUI_Guard_Move_Command_Particle", "Default_Click"),
+                     ("minimap", "15:rclick:minimap=-0.729508,0.795082", "GUI_Move_Command_Particle", "Default_Click"))
+            for name, gesture, particle, event in cases:
+                with self.subTest(name=name):
+                    code, active = self._run(directory, name, (*look,
+                        "--eawr-live-input", f"10:click:unit={CORVETTE}",
+                        "--eawr-live-input", gesture), end_tick=21)
+                    self.assertEqual(code, 0, active.get("failure"))
+                    self.assertEqual(active["battle_input"]["orders"], 1, active["battle_input"]["log"])
+                    self.assertTrue(active["live_session"]["headless_hashes_equal"])
+                    self.assertEqual(active["battle_effects"]["spawned"].get("move_feedback:" + particle), 1)
+                    radar = active["hud"]["minimap"]["order_feedback"]
+                    self.assertEqual((radar["shown"], radar["active"]), (1, 1))
+                    self.assertEqual(radar["markers"][0]["event"], event)
+            code, double = self._run(directory, "double-move", (*look,
+                "--eawr-live-input", f"10:click:unit={CORVETTE}",
+                "--eawr-live-input", "15:rdclick:@-4450,4850,0"), end_tick=21)
+            self.assertEqual(code, 0, double.get("failure"))
+            self.assertEqual(double["battle_input"]["orders"], 2)
+            self.assertTrue(double["live_session"]["headless_hashes_equal"])
+            self.assertEqual(double["battle_effects"]["move_feedback_active"], 1)
+            self.assertEqual(double["battle_effects"]["spawned"].get(
+                "move_feedback:GUI_Double_Click_Move_Command_Particle"), 1)
+            radar = double["hud"]["minimap"]["order_feedback"]
+            self.assertEqual((radar["shown"], radar["replaced"], radar["active"]), (2, 1, 1))
+            self.assertEqual(radar["markers"][0]["event"], "Default_Double_Click")
+
+            code, minimap_double = self._run(directory, "minimap-double-move", (*look,
+                "--eawr-live-input", f"10:click:unit={CORVETTE}",
+                "--eawr-live-input", "15:rdclick:minimap=-0.729508,0.795082"), end_tick=21)
+            self.assertEqual(code, 0, minimap_double.get("failure"))
+            self.assertEqual(minimap_double["battle_input"]["orders"], 2)
+            self.assertTrue(minimap_double["live_session"]["headless_hashes_equal"])
+            effects = minimap_double["battle_effects"]
+            self.assertEqual(effects["move_feedback_active"], 1)
+            self.assertEqual(effects["spawned"].get("move_feedback:GUI_Move_Command_Particle"), 1)
+            self.assertEqual(effects["spawned"].get("move_feedback:GUI_Double_Click_Move_Command_Particle"), 1)
+            radar = minimap_double["hud"]["minimap"]["order_feedback"]
+            self.assertEqual((radar["shown"], radar["replaced"], radar["active"]), (2, 1, 1))
+            self.assertEqual(radar["markers"][0]["event"], "Default_Double_Click")
+
+            code, enemy = self._run(directory, "enemy-selection", (*look,
+                "--eawr-live-player", "2", "--eawr-live-reveal", "on",
+                "--eawr-live-input", f"10:click:unit={CORVETTE}",
+                "--eawr-live-input", "15:rclick:@-4450,4850,0"), end_tick=21)
+            self.assertEqual(code, 0, enemy.get("failure"))
+            # The hostile contact is visible, but this selection model admits only our units.
+            self.assertIn(CORVETTE, {row["entity"] for row in enemy["live_session"]["hostile_units"]})
+            self.assertEqual(enemy["battle_input"]["selected"], [])
+            self.assertEqual(enemy["battle_input"]["orders"], 0)
+            self.assertTrue(enemy["live_session"]["headless_hashes_equal"])
+            self.assertEqual(enemy["battle_effects"]["move_feedback_active"], 0)
+            self.assertEqual(enemy["hud"]["minimap"]["order_feedback"]["shown"], 0)
+
     def test_box_skips_station_and_keeps_ship_cards(self):
         # WSU-21..24: exercise real Godot pointer input with the station and fleet both in view.
         captures = os.environ.get("EAWR_BOX_SELECTION_CAPTURE_DIR")
@@ -196,7 +461,8 @@ class BattleInputOrderCases:
 
     def test_right_click_attacks_a_capital_ship_seen_through_fog(self):
         with tempfile.TemporaryDirectory(prefix="eawr-battle-attack-ship-") as temporary:
-            tick, live = self._attack_through_fog(pathlib.Path(temporary), "attack_ship", TARTAN, TARGET_POINT, 2500, 3300)
+            tick, live = self._attack_through_fog(pathlib.Path(temporary), "attack_ship", TARTAN, TARGET_POINT,
+                                                  2500, 3300, disarm_spotter=True)
             # OR-20: the unit hook aims at collision geometry (#841); only a reticle names a hardpoint.
             self.assertEqual(self.result["battle_input"]["hardpoint_orders"], 0, self.result["battle_input"]["log"])
             hits = [hit for hit in live["first_hits"] if hit["shooter"] == CORVETTE and hit["target"] == TARTAN]
@@ -233,7 +499,8 @@ class BattleInputOrderCases:
         with tempfile.TemporaryDirectory(prefix="eawr-battle-attack-squadron-") as temporary:
             tick, live = self._attack_through_fog(pathlib.Path(temporary), "attack_squadron", TIE_SQUADRON, TARGET_POINT,
                                                   2100, 2900)
-            hits = [hit for hit in live["first_hits"] if hit["shooter"] == CORVETTE and hit["target"] in TIE_CRAFT]
+            members = squadron_members({"live_session": live}, TIE_SQUADRON, "TIE_Interceptor_Squadron")
+            hits = [hit for hit in live["first_hits"] if hit["shooter"] == CORVETTE and hit["target"] in members]
             self.assertTrue(hits, live["first_hits"])
             self.assertGreater(min(hit["tick"] for hit in hits), tick, hits)
 
@@ -277,11 +544,14 @@ class BattleInputOrderCases:
         destination = (-4550.0, 5150.0)
         with tempfile.TemporaryDirectory(prefix="eawr-battle-squadron-") as temporary:
             directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "squadron-roster", HUD_OFF, end_tick=1)
+            self.assertEqual(code, 0, probe.get("failure"))
+            y_wings = squadron_members(probe, Y_WING_SQUADRON, "Y-Wing_Squadron")
             code, result = self._run(directory, "squadron", (
                 *HUD_OFF, *SPREAD,
                 "--eawr-live-input", f"30:click:icon={Y_WING_SQUADRON}",
                 "--eawr-live-input", f"40:rclick:@{destination[0]},{destination[1]},0",
-                "--eawr-live-input", f"290:hover:unit={Y_WINGS[1]}"), end_tick=300)
+                "--eawr-live-input", f"290:hover:unit={y_wings[1]}"), end_tick=300)
             self.assertEqual(code, 0, result.get("failure"))
             battle, live, world = result["battle_input"], result["live_session"], result["world_ui"]
             self.assertEqual(battle["scripted_fired"], 3, battle["log"])
@@ -291,7 +561,7 @@ class BattleInputOrderCases:
                                 for line in battle["log"]), battle["log"])
             self.assertEqual(live["rejected"], [])
             self.assertIs(live["headless_hashes_equal"], True)
-            for craft in Y_WINGS:
+            for craft in y_wings:
                 position = self._position(result, craft)
                 self.assertLess(math.dist(destination, position[:2]), 250.0, (craft, position))
             self.assertTrue(world["ring_loaded"] and world["atlas_loaded"], world["unresolved"])
@@ -307,7 +577,7 @@ class BattleInputOrderCases:
                 self.assertEqual(battle["hovered_icon"], Y_WING_SQUADRON, battle)
                 self.assertEqual(world["bar_rows"], [], world)
             else:
-                self.assertIn(battle["hovered"], Y_WINGS, battle)
+                self.assertIn(battle["hovered"], y_wings, battle)
                 self.assertEqual(world["bar_rows"], [f"{battle['hovered']}:h10"], world)
 
 
@@ -349,9 +619,13 @@ class BattleInputOrderCases:
         # X-wing squadrons, never the ship. The old per-unit box missed the craft there and hit the
         # ship's box, which is how the ship got in.
         with tempfile.TemporaryDirectory(prefix="eawr-battle-fighter-over-ship-") as temporary:
-            code, result = self._run(pathlib.Path(temporary), "fighter-over-ship", (
+            directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "fighter-roster", HUD_OFF, end_tick=1)
+            self.assertEqual(code, 0, probe.get("failure"))
+            craft = squadron_members(probe, X_WING_SQUADRON_3, "Rebel_X-Wing_Squadron")[2]
+            code, result = self._run(directory, "fighter-over-ship", (
                 *HUD_OFF, "--eawr-live-order", f"1:move:{X_WING_SQUADRON_3}@{NEBULON_START[0]},{NEBULON_START[1]},0",
-                "--eawr-live-input", f"150:dclick:unit={X_WING_3_CRAFT}+@0,0,35"), end_tick=160)
+                "--eawr-live-input", f"150:dclick:unit={craft}+@0,0,35"), end_tick=160)
             self.assertEqual(code, 0, result.get("failure"))
             battle, live = result["battle_input"], result["live_session"]
             self.assertEqual(battle["scripted_fired"], 1, battle["log"])
@@ -384,7 +658,9 @@ class BattleInputOrderCases:
         with tempfile.TemporaryDirectory(prefix="eawr-battle-launched-") as temporary:
             directory = pathlib.Path(temporary)
             # The station hangar is outside the narrowed 4:3 FOV (e8eed89f); frame its launches.
-            launch_camera = (*HUD_OFF, "--eawr-live-follow-group", f"1:{STAR_BASE}")
+            refill = self._rebel_hangar_refill(directory)
+            launch_camera = (*HUD_OFF, *refill,
+                             "--eawr-live-follow-group", f"1:{STAR_BASE}")
             code, probe = self._run(directory, "launch-probe", launch_camera, end_tick=LAUNCH_PROBE_TICK)
             self.assertEqual(code, 0, probe.get("failure"))
             rows = probe["live_session"]["squadrons"]
@@ -437,6 +713,7 @@ class BattleInputOrderCases:
         # the reference; the station's first launch is an X-wing squadron (SK-23).
         with tempfile.TemporaryDirectory(prefix="eawr-battle-launched-sfoils-") as temporary:
             directory = pathlib.Path(temporary)
+            refill = self._rebel_hangar_refill(directory)
 
             def squadron_row(result, container):
                 rows = [row for row in result["live_session"]["squadrons"] if row["container"] == container]
@@ -446,7 +723,7 @@ class BattleInputOrderCases:
             def click_sfoil(name, container, tick):
                 # SPREAD moves the stacked start squadrons apart, so an icon click picks its own squadron.
                 code, result = self._run(directory, name, (
-                    *SPREAD,
+                    *SPREAD, *(refill if tick else ()),
                     # Keep the launched roster on screen after the 4:3 FOV correction (e8eed89f).
                     "--eawr-live-follow-group", f"1:{container if tick else X_WING_SQUADRON}",
                     "--eawr-live-input", f"{tick + 30}:click:icon={container}",
@@ -466,7 +743,8 @@ class BattleInputOrderCases:
             self.assertEqual((start_row["sfoil_craft"], start_row["sfoils_locked"]), (crafts, crafts), start_row)
             self.assertEqual(start["live_session"]["sfoil_switches"], crafts)
 
-            code, probe = self._run(directory, "launch-probe", HUD_OFF, end_tick=LAUNCH_PROBE_TICK)
+            code, probe = self._run(directory, "launch-probe", (*HUD_OFF, *refill),
+                                    end_tick=LAUNCH_PROBE_TICK)
             self.assertEqual(code, 0, probe.get("failure"))
             rebel = [row for row in probe["live_session"]["squadrons"] if row["launched"] and row["owner"] == 1]
             self.assertTrue(rebel, probe["live_session"]["squadrons"])
@@ -524,6 +802,44 @@ class BattleInputOrderCases:
             # The X-wing's XML maximum speed bounds every member's current speed.
             self.assertLessEqual(anchor["speed"], 5.21, anchor)
 
+    def test_idle_squadron_icon_holds_its_idle_point(self):
+        # WSU-34/WSQ-09: finish a move to claim an idle cell, then hold its point
+        # while the craft orbit. FM-25: a tick-zero squadron has no cell yet.
+        anchors = []
+        for end_tick in (300, 330, 360):
+            with tempfile.TemporaryDirectory(prefix="eawr-idle-icon-") as temporary:
+                code, result = self._run(pathlib.Path(temporary), "idle", (*HUD_OFF, "--eawr-live-ai", "off",
+                    "--eawr-live-order", f"1:move:{X_WING_SQUADRON}@-4750,4700,0"),
+                                         end_tick=end_tick)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                points = {row["squadron"]: row for row in result["world_ui"]["gripper_points"]}
+                row = points[X_WING_SQUADRON]
+                self.assertTrue(row["idle"], row)
+                self.assertTrue(row["idle_grid"], row)
+                self.assertEqual(result["live_session"]["rejected"], [])
+                self.assertLess(math.dist(row["position"], row["desired"]), 0.01, row)
+                anchors.append(row["position"])
+        self.assertEqual(anchors[0], anchors[1])
+        self.assertEqual(anchors[1], anchors[2])
+
+    def test_initial_and_stopped_squadron_icons_have_no_idle_cell(self):
+        # FM-25: neither initial idle flight nor an explicit stop owns a grid
+        # cell. The report's legacy `idle` flag means idle-grid ownership.
+        for name, orders in (("initial", ()), ("stopped", (
+            "--eawr-live-order", f"1:move:{X_WING_SQUADRON}@-4750,4700,0",
+            "--eawr-live-order", f"310:stop:{X_WING_SQUADRON}"))):
+            with self.subTest(name=name), tempfile.TemporaryDirectory(prefix="eawr-no-idle-cell-") as temporary:
+                code, result = self._run(pathlib.Path(temporary), name,
+                    (*HUD_OFF, "--eawr-live-ai", "off", *orders), end_tick=330)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                self.assertEqual(result["live_session"]["rejected"], [])
+                row = next(row for row in result["world_ui"]["gripper_points"]
+                           if row["squadron"] == X_WING_SQUADRON)
+                self.assertFalse(row["idle_grid"], row)
+                self.assertFalse(row["idle"], row)
+
     def test_dogfighting_squadrons_share_a_grid_cell(self):
         # #435: X-wing squadron 2 and TIE Interceptor squadron 9 meet mid-map and attack each other.
         # The orders target the team containers (space-fighters FO-04); the craft fire at the other
@@ -576,24 +892,153 @@ class BattleInputOrderCases:
 
 
     def test_the_dogfight_grid_holds_still_while_the_dogfight_holds(self):
-        # #564 (WU-26, debug build): the grid's cell point sits at the craft type's Layer_Z_Adjust, a
-        # constant, so the icons in a held cell do not bob as the fighters pitch. The same dogfight
-        # read at three later ticks: one cell, and every gridded icon on the same screen Y.
+        # WSU-36/60: the held cell supplies XY and height; every rendered sample
+        # in a stationary-camera interval must keep both coordinates and integral quads.
         seen = []
         for end_tick in (DOGFIGHT_TICK, DOGFIGHT_TICK + 25, DOGFIGHT_TICK + 50):
             with tempfile.TemporaryDirectory(prefix="eawr-battle-dogfight-still-") as temporary:
                 code, result = self._dogfight_run(pathlib.Path(temporary), "dogfight-still", (), end_tick=end_tick)
                 self.assertEqual(code, 0, result.get("failure"))
-                rows = {row.split(":")[0]: row for row in result["world_ui"]["icon_rows"]}
-                seen.append({squadron: re.search(r":y=(-?\d+):grid(-?\d+,-?\d+)$", rows[str(squadron)])
-                             for squadron in (X_WING_SQUADRON, TIE_SQUADRON)})
-        for tick, found in zip((0, 25, 50), seen):
-            self.assertTrue(all(found.values()), (tick, found))
-        cells = {match.group(2) for found in seen for match in found.values()}
-        self.assertEqual(len(cells), 1, cells)
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                world = result["world_ui"]
+                geometry = {row["entity"]: row for row in world["identity_geometry"]}
+                anchors = {row["squadron"]: row for row in world["gripper_points"]}
+                current = {}
+                for squadron in (X_WING_SQUADRON, TIE_SQUADRON):
+                    row = geometry[squadron]
+                    for quad in ("frame", "inner"):
+                        self.assertTrue(all(value == int(value) for value in row[quad][:2]), row)
+                    samples = [sample for sample in anchors[squadron]["grid_samples"]
+                               if sample["tick"] >= DOGFIGHT_TICK - 10]
+                    self.assertGreaterEqual(len(samples), 2, anchors[squadron])
+                    self.assertEqual(len({tuple(sample["cell"]) for sample in samples}), 1, samples)
+                    self.assertEqual(len({tuple(sample["screen"]) for sample in samples}), 1, samples)
+                    self.assertEqual(samples[-1]["screen"], row["centre"], (samples[-1], row))
+                    current[squadron] = row["frame"]
+                seen.append(current)
         for squadron in (X_WING_SQUADRON, TIE_SQUADRON):
-            ys = [found[squadron].group(1) for found in seen]
-            self.assertEqual(len(set(ys)), 1, (squadron, ys))
+            self.assertEqual(len({tuple(frame[squadron]) for frame in seen}), 1, seen)
+
+    def test_held_dogfight_grid_follows_a_camera_pan(self):
+        # WSU-36: the anchor is world-cell based, so a camera pan moves the slot.
+        with tempfile.TemporaryDirectory(prefix="eawr-dogfight-camera-") as temporary:
+            code, result = self._dogfight_run(pathlib.Path(temporary), "dogfight-pan",
+                (f"{DOGFIGHT_TICK}:mdrag:100,0",), end_tick=DOGFIGHT_TICK + 25)
+            self.assertEqual(code, 0, result.get("failure"))
+            anchors = {row["squadron"]: row for row in result["world_ui"]["gripper_points"]}
+            for squadron in (X_WING_SQUADRON, TIE_SQUADRON):
+                samples = anchors[squadron]["grid_samples"]
+                before = [row for row in samples if DOGFIGHT_TICK - 10 <= row["tick"] < DOGFIGHT_TICK]
+                after = [row for row in samples if row["tick"] >= DOGFIGHT_TICK + 5]
+                self.assertTrue(before and after, samples)
+                self.assertEqual(before[-1]["cell"], after[-1]["cell"])
+                self.assertGreater(math.dist(before[-1]["screen"], after[-1]["screen"]), 10)
+                self.assertEqual(len({tuple(row["screen"]) for row in after}), 1, after)
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+
+    def test_dogfight_icon_leaves_from_its_drawn_slot_and_rejoins_without_dropout(self):
+        # WSU-34/36: leaving exposes the current gripper anchor, not the flying
+        # squadron centre. The project retains the other icons' slots.
+        with tempfile.TemporaryDirectory(prefix="eawr-dogfight-rejoin-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._dogfight_run(directory, "dogfight-rejoin", (),
+                end_tick=DOGFIGHT_TICK + 70,
+                orders=(f"{DOGFIGHT_TICK}:move:{X_WING_SQUADRON}@{CLEAR_OF_DOGFIGHT[0]},{CLEAR_OF_DOGFIGHT[1]},0",
+                        f"{DOGFIGHT_TICK + 20}:attack:{X_WING_SQUADRON}@{TIE_SQUADRON}"),
+                extra=("--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                       "--eawr-live-capture-ticks", ",".join(str(tick) for tick in range(
+                           DOGFIGHT_TICK - 2, DOGFIGHT_TICK + 71))))
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["live_session"]["rejected"], [])
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+            anchors = {row["squadron"]: row for row in result["world_ui"]["gripper_points"]}
+            samples = [row for row in anchors[X_WING_SQUADRON]["icon_samples"]
+                       if row["tick"] >= DOGFIGHT_TICK - 10]
+            self.assertGreaterEqual(len(samples), 30, samples)
+            self.assertTrue(all(row["drawn"] for row in samples), samples)
+            self.assertTrue(all(b["frame"] == a["frame"] + 1 for a, b in zip(samples, samples[1:])), samples)
+            departures = [(a, b) for a, b in zip(samples, samples[1:]) if a["grid"] and not b["grid"]]
+            self.assertTrue(departures, samples)
+            # Pixel truncation in the screen-to-world ray can account for one
+            # pixel per axis; the first departure has zero anchor velocity.
+            self.assertLessEqual(math.dist(departures[0][0]["screen"], departures[0][1]["screen"]), 2,
+                                 departures[0])
+            self.assertTrue(any(row["grid"] and row["tick"] > DOGFIGHT_TICK + 20 for row in samples), samples)
+
+    def test_big_dogfight_keeps_other_icon_slots_when_a_squadron_leaves_and_rejoins(self):
+        # WSU-36 project policy: leaving/rejoining must not repack a held cell.
+        with tempfile.TemporaryDirectory(prefix="eawr-big-dogfight-slots-") as temporary:
+            directory = pathlib.Path(temporary)
+            fleet = (*HUD_OFF, "--eawr-live-ai", "off", "--eawr-live-reveal", "on",
+                     "--eawr-skirmish-fleet", "1:" + ",".join(["Rebel_X-Wing_Squadron"] * 6),
+                     "--eawr-skirmish-fleet", "2:" + ",".join(["TIE_Interceptor_Squadron"] * 6))
+            code, seed = self._run(directory, "roster", fleet, end_tick=1, session="skirmish")
+            self.assertEqual(code, 0, seed.get("failure"))
+            teams = {player: [row["entity"] for row in seed["live_session"]["start_fleet"]
+                              if row["player"] == player and row["type"] == kind]
+                     for player, kind in ((1, "Rebel_X-Wing_Squadron"), (2, "TIE_Interceptor_Squadron"))}
+            # SK-21/22: the XML's free starting forces precede the six authored
+            # fleet entries. Clear those extras so only our twelve teams meet.
+            self.assertTrue(all(len(teams[side]) >= 6 for side in (1, 2)), teams)
+            teams = {side: teams[side][-6:] for side in (1, 2)}
+            self.assertEqual([len(teams[side]) for side in (1, 2)], [6, 6], teams)
+            camera = directory / "dogfight-camera.xml"
+            shutil.copy(CAMERA.parent / "space-live-camera-bindings.json", directory)
+            camera.write_text(re.sub(r"<initial [^>]*/>", f'<initial target_x="{MEETING[0]}" '
+                f'target_y="{MEETING[1]}" target_height="0" zoom="0.5" yaw_degrees="0"/>',
+                CAMERA.read_text(encoding="utf-8")), encoding="utf-8")
+            orders = [f"1:move:{team}@{MEETING[0]},{MEETING[1]},0"
+                      for side in (1, 2) for team in teams[side]]
+            selected = set(teams[1] + teams[2])
+            orders.extend(f"1:move:{row['entity']}@{CLEAR_OF_DOGFIGHT[0]},{CLEAR_OF_DOGFIGHT[1]},0"
+                          for row in seed["live_session"]["start_fleet"] if row["entity"] not in selected)
+            for rebel, empire in zip(teams[1], teams[2]):
+                orders.extend((f"{DOGFIGHT_ORDER_TICK}:attack:{rebel}@{empire}",
+                               f"{DOGFIGHT_ORDER_TICK}:attack:{empire}@{rebel}"))
+            leaving = teams[1][0]
+            # Keep its opponent fighting a remaining team before the departure;
+            # otherwise that opponent correctly chases the leaving squadron out
+            # too, and the fixture no longer isolates one membership change.
+            orders.extend((f"{DOGFIGHT_TICK - 10}:attack:{teams[2][0]}@{teams[1][1]}",
+                           f"{DOGFIGHT_TICK}:move:{leaving}@{CLEAR_OF_DOGFIGHT[0]},{CLEAR_OF_DOGFIGHT[1]},0",
+                           f"{DOGFIGHT_TICK + 20}:attack:{leaving}@{teams[2][0]}"))
+            code, result = self._run(directory, "big-slots", (*fleet,
+                "--eawr-live-step", "1", "--eawr-map-timed-frames", "1",
+                "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                "--eawr-live-capture-ticks", ",".join(str(tick) for tick in range(
+                    DOGFIGHT_TICK - 10, DOGFIGHT_TICK + 71)),
+                *(arg for order in orders for arg in ("--eawr-live-order", order))),
+                camera=camera, end_tick=DOGFIGHT_TICK + 70, session="skirmish")
+            self.assertEqual(code, 0, result.get("failure"))
+            self.assertEqual(result["live_session"]["rejected"], [])
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+            anchors = {row["squadron"]: row for row in result["world_ui"]["gripper_points"]}
+            samples = [row for row in anchors[leaving]["icon_samples"]
+                       if row["tick"] >= DOGFIGHT_TICK - 10]
+            departures = [(a, b) for a, b in zip(samples, samples[1:]) if a["grid"] and not b["grid"]]
+            self.assertTrue(departures, samples)
+            before_frame = departures[0][0]["frame"]
+            before_tick = departures[0][0]["tick"]
+            cell = next(row["cell"] for row in reversed(anchors[leaving]["grid_samples"])
+                        if row["tick"] <= before_tick)
+            rejoined = [row for row in samples if row["grid"] and row["tick"] > DOGFIGHT_TICK + 20]
+            self.assertTrue(rejoined, samples)
+            self.assertTrue(all(row["drawn"] for row in samples), samples)
+            held = {}
+            for team, anchor in anchors.items():
+                if team == leaving:
+                    continue
+                before = [row for row in anchor["grid_samples"] if row["tick"] <= before_tick]
+                if not before or before[-1]["cell"] != cell:
+                    continue
+                interval = [row for row in anchor["icon_samples"]
+                            if before_frame <= row["frame"] <= rejoined[-1]["frame"]]
+                if not interval or interval[0]["frame"] != before_frame or not interval[0]["grid"]:
+                    continue
+                self.assertTrue(all(row["drawn"] and row["grid"] for row in interval), (team, interval))
+                self.assertEqual(len({tuple(row["screen"]) for row in interval}), 1, (team, interval))
+                held[team] = interval[0]["screen"]
+            self.assertGreaterEqual(len(held), 7, held)
 
 
     def test_right_clicking_an_enemy_squadron_icon_attacks_the_squadron(self):

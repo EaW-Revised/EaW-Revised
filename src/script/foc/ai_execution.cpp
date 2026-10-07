@@ -52,7 +52,7 @@ sim::EntityId Engine::producer(const tactical::PlayerId player, const tactical::
         ++producer_work_.candidates;
         if (host_->world->pads().contains(id)) {
             if (preferred != 0 && preferred != id) continue;
-            bool reserved = false;
+            bool reserved = pad_reservations_.contains(id);
             for (const auto& [plan_id, plan] : running_) {
                 static_cast<void>(plan_id);
                 reserved = reserved || std::find(plan.reserved_pads.begin(), plan.reserved_pads.end(), id) != plan.reserved_pads.end();
@@ -70,10 +70,44 @@ const tactical::BuildOption* Engine::build_option(const tactical::PlayerId playe
     return host_->world->build_option(player, producer_id, type);
 }
 
-void Engine::service_execution(PlayerAi& player) {
+void Engine::observe_purchases(PlayerAi& player, const tactical::TacticalSnapshot& snapshot) {
+    // WAS-26/WBP-48: consume only accepted station work. A pad consumes its
+    // reservation after precheck; a request yielding no child refunds that cost once.
+    // Read every tick, so queue cancellation before the next execution service cannot
+    // be mistaken for an unstarted purchase and refunded a second time on release.
+    for (const auto& event : snapshot.events()) {
+        if ((event.kind != tactical::EventKind::order_accepted && event.kind != tactical::EventKind::order_rejected)
+            || (event.order != tactical::OrderKind::buy && event.order != tactical::OrderKind::pad_build)) continue;
+        if (event.player != player.player) continue;
+        const auto task = std::find_if(player.tasks.begin(), player.tasks.end(), [&](const auto& entry) {
+            return entry.source == 2 && entry.issued == event.tick && !entry.acknowledged
+                && entry.producer == event.unit && entry.pad_build == (event.order == tactical::OrderKind::pad_build);
+        });
+        if (task == player.tasks.end()) continue;
+        task->acknowledged = true;
+        const auto force = taskforces_.find(task->taskforce);
+        const auto* plan = force != taskforces_.end() ? this->plan(force->second.plan) : nullptr;
+        if (event.kind == tactical::EventKind::order_rejected) {
+            if (task->pad_build && task->prepaid) change_wallet(event.player, task->generic_cost);
+            if (task->pad_build) {
+                pad_reservations_.erase(task->producer);
+                if (plan != nullptr) if (auto running = running_.find(plan->id); running != running_.end())
+                    std::erase(running->second.reserved_pads, task->producer);
+            }
+            task->finished = task->failed = true;
+        } else if (!task->pad_build && task->prepaid && plan != nullptr) {
+            const auto funds = player.reserved_credits.find(plan->goal);
+            if (funds != player.reserved_credits.end())
+                funds->second = std::max(Real{}, funds->second - task->generic_cost);
+        }
+    }
+}
+
+void Engine::service_execution(PlayerAi& player, const bool direct_pad_only) {
     std::set<std::uint64_t> touched;
     for (BuildTask& task : player.tasks) {
-        if (task.finished) continue;
+        if (direct_pad_only && !task.direct_pad) continue;
+        if (task.finished) { touched.insert(task.block); continue; }
         auto tf = taskforces_.find(task.taskforce);
         if (tf == taskforces_.end()) {
             task.finished = task.failed = true;
@@ -92,7 +126,45 @@ void Engine::service_execution(PlayerAi& player) {
             if (task.issued == 0) {
                 if (task.producer == 0) task.producer = producer(player.player, task.type);
                 const auto* option = build_option(player.player, task.type, task.producer);
-                if (option == nullptr || account->credits < option->price) { task.finished = task.failed = true; continue; }
+                task.prepaid = player.reserved_credits.contains(plan->goal);
+                if (option == nullptr || (!task.prepaid && host_->credits(player.player) < option->price)
+                    || !host_->world->build_allowed(player.player, task.producer, task.type)) {
+                    task.finished = task.failed = true; continue;
+                }
+                task.pad_build = option->kind == tactical::BuildKind::structure;
+                if (task.pad_build) {
+                    const auto reservation = pad_reservations_.find(task.producer);
+                    if (task.prepaid && (reservation == pad_reservations_.end() || reservation->second.consumed
+                        || reservation->second.player != player.player || reservation->second.goal != plan->goal
+                        || reservation->second.type != task.type)) {
+                        task.finished = task.failed = true; continue;
+                    }
+                    const auto* pad = host_->view->find(task.producer);
+                    const auto state = host_->world->pads().find(task.producer);
+                    const auto* profile = pad != nullptr ? host_->world->economy().pads.point(pad->type) : nullptr;
+                    if (profile == nullptr || state == host_->world->pads().end()
+                        || !tactical::pad_construction_allowed(*profile, state->second, player.player,
+                            host_->world->players(), host_->view->capture_candidates,
+                            host_->world->economy().pads, task.producer, pad->position)) {
+                        task.finished = task.failed = true; continue;
+                    }
+                }
+                const auto* info = host_->type(task.type);
+                task.generic_cost = fixed(info != nullptr && info->tactical_cost ? *info->tactical_cost : option->price);
+                if (task.pad_build && task.prepaid) {
+                    auto& funds = player.reserved_credits.at(plan->goal);
+                    funds = std::max(Real{}, funds - task.generic_cost);
+                    pad_reservations_.at(task.producer).consumed = true;
+                    pad_reservations_.at(task.producer).issued = static_cast<std::uint64_t>(frame_);
+                }
+                if (task.direct_pad) {
+                    for (std::size_t index = 0; index < tf->second.types.size(); ++index) {
+                        if (tf->second.types[index] == task.type && tf->second.producers[index] == task.producer) {
+                            tf->second.types[index] = 0;
+                            break;
+                        }
+                    }
+                }
                 task.completion = 1;
                 if (const auto built = account->lifetime.find(task.type); built != account->lifetime.end()) task.completion += built->second;
                 for (const auto& queue : account->queues) for (const auto& entry : queue) if (entry.type == task.type) ++task.completion;
@@ -105,9 +177,9 @@ void Engine::service_execution(PlayerAi& player) {
                 buy.verb = std::string(option->kind == tactical::BuildKind::structure ? verb_pad_build : verb_buy);
                 buy.arguments = {Value::number(real(player.player)), Value{authoritative::Handle{handle_game_object, task.producer}},
                     Value{authoritative::Handle{handle_type, task.type}}};
+                if (!task.pad_build) buy.arguments.push_back(Value{task.prepaid});
                 orders_.push_back(std::move(buy));
                 task.issued = static_cast<std::uint64_t>(frame_);
-                task.pad_build = option->kind == tactical::BuildKind::structure;
                 task.child_floor = host_->world->next_entity_id();
                 record(plan, player.player, "buy", std::to_string(task.type));
             } else if (task.pad_build) {
@@ -190,22 +262,20 @@ void Engine::service_execution(PlayerAi& player) {
             }
         }
     }
-    for (const auto& task : player.tasks) if (task.finished && task.source == 2) {
+    // WBP-48: an early refusal retains the allocation as well as its refundable funds.
+    for (const auto& task : player.tasks) if (task.finished && task.source == 2 && task.issued != 0
+        && (!direct_pad_only || task.direct_pad)) {
+        pad_reservations_.erase(task.producer);
         const auto tf = taskforces_.find(task.taskforce);
         if (tf != taskforces_.end()) if (auto running = running_.find(tf->second.plan); running != running_.end())
             std::erase(running->second.reserved_pads, task.producer);
     }
-    std::erase_if(player.tasks, [](const BuildTask& task) { return task.finished; });
-    for (auto& [goal, amount] : player.reserved_credits) {
-        bool waiting = false;
-        for (const auto& task : player.tasks) {
-            const auto tf = taskforces_.find(task.taskforce);
-            const auto* plan = tf != taskforces_.end() ? this->plan(tf->second.plan) : nullptr;
-            if (plan != nullptr && plan->goal == goal && task.source == 2 && (task.issued == 0 || task.issued >= static_cast<std::uint64_t>(frame_))) waiting = true;
-        }
-        if (!waiting) amount = Real{};
-    }
-    service_reinforcements(player);
+    // A pad-only service must leave other finished tasks for ordinary execution
+    // to settle their blocks, including station refusals observed earlier this tick.
+    std::erase_if(player.tasks, [direct_pad_only](const BuildTask& task) {
+        return task.finished && (!direct_pad_only || task.direct_pad);
+    });
+    if (!direct_pad_only) service_reinforcements(player);
 }
 
 std::optional<math::Vec3> reinforcement_candidate(const math::Vec3& requested, const std::uint32_t attempt,

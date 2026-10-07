@@ -174,6 +174,17 @@ void write_catalog(const std::filesystem::path& root) {
   <Model_Name>eawr_scene_plain.alo</Model_Name>
   <Layer_Z_Adjust>invalid</Layer_Z_Adjust>
 </SpaceProp>
+<Projectile Name="EAWR_SCENE_PARTICLE_ROUND">
+  <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
+  <Scale_Factor>3</Scale_Factor>
+</Projectile>
+<Projectile Name="EAWR_SCENE_PARTICLE_BAD_SCALE">
+  <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
+  <Scale_Factor>-1</Scale_Factor>
+</Projectile>
+<SpaceProp Name="EAWR_SCENE_PARTICLE_PROP">
+  <Space_Model_Name>eawr_scene_particle.alo</Space_Model_Name>
+</SpaceProp>
 </Objects>)xml");
 }
 

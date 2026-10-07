@@ -166,7 +166,9 @@ class MapCameraGraphical(unittest.TestCase):
                 "reset restores authored pose",
                 "input callbacks reached map adapter", "capture lock isolates input",
                 "Ctrl grabbed motion rotates yaw and tilts", "Ctrl click keeps the view",
-                "middle click resets the view around the target"})
+                "middle click resets the view around the target",
+                "wheel ignored during middle translation", "wheel ignored during middle rotation",
+                "full width drags preserve yaw continuity"})
             self.assertTrue(all(entry["passed"] for entry in camera["selftest"]["checks"]))
             # #348 owner deviation: FoC land tilts 0 per mouse unit, the project tilts land at
             # FoC space's -1.5 within 5..85; the middle click reset the view and its tilt.

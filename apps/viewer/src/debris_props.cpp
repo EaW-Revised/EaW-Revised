@@ -1,4 +1,5 @@
 #include "debris_props.hpp"
+#include "presentation_constants.hpp"
 
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
@@ -396,7 +397,7 @@ bool DebrisProps::follow(const Effect& effect, const std::uint64_t sample) {
 bool DebrisProps::step(Effect& effect, const std::uint64_t sample, bool& gone) {
     gone = false;
     if (!follow(effect, sample)) return false;
-    auto advanced = registry_->advance(effect.handle, 1.0F / 30.0F, camera_frame_);
+    auto advanced = registry_->advance(effect.handle, presentation_constants::logical_frame_seconds, camera_frame_);
     if (!advanced) {
         failure_ = "breakoff effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
@@ -429,7 +430,7 @@ bool DebrisProps::advance_until(const std::uint64_t target) {
             if (!follow(effect, samples_)) return false;
             batch_handles_.push_back(effect.handle);
         }
-        if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_);
+        if (auto advanced = registry_->advance_all(batch_handles_, presentation_constants::logical_frame_seconds, camera_frame_, batch_stats_);
             !advanced) {
             failure_ = "breakoff effect: " + core::format_diagnostic(advanced.error());
             return false;

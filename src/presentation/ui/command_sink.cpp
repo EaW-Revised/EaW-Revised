@@ -40,6 +40,11 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
     case TacticalVerb::ability:
         // #76: a modelled unit ability becomes an ability command (space-abilities AB-50).
         if (intent.unit_ability != tactical::AbilityKind::none) {
+            // WAD-38: BARRAGE activates on a world point through its area command.
+            if (intent.unit_ability == tactical::AbilityKind::barrage
+                && intent.ability_action == tactical::AbilityAction::activate) {
+                return Payload::success(tactical::AreaAbilityPayload{intent.unit_ability, intent.destination});
+            }
             tactical::AbilityPayload payload{intent.unit_ability, intent.ability_action};
             if (intent.unit_ability == tactical::AbilityKind::weaken_enemy
                 && intent.ability_action == tactical::AbilityAction::activate) payload.position = intent.destination;
@@ -59,13 +64,18 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
         }
         return Payload::failure(failure(diagnostic_codes::unsupported_intent,
             "targeted special abilities have no tactical command yet"));
+    case TacticalVerb::repair_hardpoint:
+        if (intent.hardpoint >= 255) return Payload::failure(failure(diagnostic_codes::invalid_intent, "invalid repair hardpoint"));
+        return Payload::success(tactical::RepairHardpointPayload{intent.hardpoint});
     case TacticalVerb::buy: return Payload::success(tactical::BuyPayload{intent.type});
     case TacticalVerb::pad_build: return Payload::success(tactical::PadBuildPayload{intent.type});
     case TacticalVerb::intentional_quit: return Payload::success(tactical::QuitPayload{});
     case TacticalVerb::pad_sell: return Payload::success(tactical::PadSellPayload{});
     case TacticalVerb::cancel:
-        return Payload::success(tactical::CancelPayload{static_cast<std::uint32_t>(intent.queue), intent.index});
-    case TacticalVerb::reinforce: return Payload::success(tactical::ReinforcePayload{intent.type, intent.destination});
+        if (intent.queue_entry_id == 0) return Payload::failure(failure(diagnostic_codes::invalid_intent,
+            "cancel requires a displayed queue entry identity"));
+        return Payload::success(tactical::CancelPayload{static_cast<std::uint32_t>(intent.queue), 0, intent.queue_entry_id});
+    case TacticalVerb::reinforce: return Payload::success(tactical::ReinforcePayload{intent.type, intent.destination, 0, intent.reinforcement_facing});
     }
     return Payload::failure(failure(diagnostic_codes::invalid_intent, "unknown order verb"));
 }
@@ -85,7 +95,7 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
     if (quitting && !units.empty()) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "intentional quit names no unit"));
     }
-    if ((intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::pad_build || intent.verb == TacticalVerb::pad_sell) && units.size() != 1) {
+    if ((intent.verb == TacticalVerb::buy || intent.verb == TacticalVerb::pad_build || intent.verb == TacticalVerb::pad_sell || intent.verb == TacticalVerb::repair_hardpoint) && units.size() != 1) {
         return core::Result<void>::failure(failure(diagnostic_codes::invalid_intent, "a buy names one station"));
     }
     if (economy && intent.verb != TacticalVerb::buy && intent.verb != TacticalVerb::pad_build

@@ -19,6 +19,186 @@ from battle_input_test_support import (
 
 
 class BattleInputProductionCases:
+    def test_reinforcement_wheel_facing_persists_and_leaves_camera_still(self):
+        import xml.etree.ElementTree as ET
+        from tools.inventory.corpus import Corpus
+        with tempfile.TemporaryDirectory(prefix="eawr-deploy-facing-") as temporary:
+            directory = pathlib.Path(temporary)
+            xml = directory / "menu/Data/XML"
+            xml.mkdir(parents=True)
+            (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+            corpus = Corpus(os.environ["EAWR_EAW_GAME_ROOT"])
+            source = corpus.read_effective("foc", "data/xml/starbases.xml")
+            self.assertIsNotNone(source)
+            tree = ET.fromstring(source.data)
+            station = next(node for node in tree if node.get("Name") == "Skirmish_Rebel_Star_Base_1")
+            for child in list(station):
+                if child.tag == "Tactical_Buildable_Objects_Multiplayer": station.remove(child)
+            ET.SubElement(station, "Tactical_Buildable_Objects_Multiplayer").text = "Rebel, Corellian_Corvette, Rebel_X-Wing_Squadron"
+            (xml / "starbases.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
+            source = corpus.read_effective("foc", "data/xml/spaceunitscorvettes.xml")
+            self.assertIsNotNone(source)
+            tree = ET.fromstring(source.data)
+            corvette = next(node for node in tree if node.get("Name") == "Corellian_Corvette")
+            for tag, value in (("Tactical_Build_Time_Seconds", "1"), ("Tactical_Build_Cost_Multiplayer", "100"),
+                               ("Tech_Level", "0")):
+                for child in list(corvette):
+                    if child.tag == tag: corvette.remove(child)
+                ET.SubElement(corvette, tag).text = value
+            (xml / "spaceunitscorvettes.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
+            # Four ship drops followed by a separate formation preview.
+            common = ["--eawr-mod-root", str(xml.parents[1]), "--eawr-live-ai", "off", "--eawr-audio", "off",
+                      "--eawr-live-reveal", "on", "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                      "--eawr-live-input", f"10:click:unit={STAR_BASE}"]
+            for tick, card in ((20, 0), (25, 0), (30, 0), (35, 0)):
+                common += ["--eawr-live-input", f"{tick}:click:card={card}"]
+            common += ["--eawr-live-input", "650:click:hud=b_reinforcement"]
+            gestures = []
+            for index, tick in enumerate((660, 700, 740, 780)):
+                place = f"@{STAR_BASE_POSITION[0] + 700 + 300 * index},{STAR_BASE_POSITION[1] - 500},0"
+                gestures += ["--eawr-live-input", f"{tick}:press:hud=r_0000",
+                             "--eawr-live-input", f"{tick + 5}:hover:{place}"]
+                if index in (0, 3): gestures += ["--eawr-live-input", f"{tick + 10}:wheel:{'in' if index == 0 else 'out'}"]
+                gestures += ["--eawr-live-input", f"{tick + 15}:release:{place}"]
+            # Buy the squadron afterwards so slot zero has one type throughout each sequence.
+            squadron = f"@{STAR_BASE_POSITION[0] + 700},{STAR_BASE_POSITION[1] - 900},0"
+            gestures += ["--eawr-live-input", "805:click:card=1",
+                         "--eawr-live-input", "1300:press:hud=r_0000",
+                         "--eawr-live-input", f"1305:hover:{squadron}",
+                         "--eawr-live-input", "1315:wheel:in"]
+            for label, wheels in (("default", False), ("rotated", True)):
+                inputs = gestures if wheels else [item for i, item in enumerate(gestures)
+                    if not (item == "--eawr-live-input" and i + 1 < len(gestures) and ":wheel:" in gestures[i + 1]) and ":wheel:" not in item]
+                code, result = self._run(directory, label, (*common, *inputs,
+                    "--eawr-live-input", "1490:mclick:centre"), end_tick=1500)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertEqual(result["live_session"]["economy_requests"]["reinforcements"], 4, result["battle_input"]["log"])
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                arrivals = [row for row in result["live_session"]["arrivals"] if row["owner"] == 1]
+                self.assertEqual(len(arrivals), 4, arrivals)
+                arrivals.sort(key=lambda row: row["first_tick"])
+                if not wheels:
+                    reference = result
+                    default_yaw = arrivals[0]["facing_yaw"]
+                else:
+                    for row in arrivals[:3]:
+                        self.assertAlmostEqual((row["facing_yaw"] - default_yaw) % 360, 15, delta=0.01)
+                    self.assertAlmostEqual((arrivals[3]["facing_yaw"] - default_yaw) % 360, 0, delta=0.01)
+                    # The middle click samples the rendered pose before resetting camera zoom.
+                    self.assertEqual(result["battle_input"]["camera_samples"][-2]["eye"],
+                                     reference["battle_input"]["camera_samples"][-2]["eye"])
+                    samples = [row for row in result["live_session"]["placement_preview"]["samples"] if len(row["clones"]) == 5]
+                    self.assertTrue(samples)
+                    self.assertGreater(len({row["facing_yaw"] for row in samples}), 1, samples)
+                    before, after = samples[0], samples[-1]
+                    self.assertAlmostEqual((after["facing_yaw"] - before["facing_yaw"]) % 360, 15, delta=0.01)
+                    # Compare craft offsets around the centroid so cursor movement cannot
+                    # satisfy the formation rotation contract by translating the squadron.
+                    centres = [tuple(sum(point[axis] for point in row["clones"]) / 5
+                                     for axis in (0, 1)) for row in (before, after)]
+                    angle = math.radians(15)
+                    for old, new in zip(before["clones"], after["clones"]):
+                        dx, dy = old[0] - centres[0][0], old[1] - centres[0][1]
+                        self.assertAlmostEqual(new[0] - centres[1][0], dx * math.cos(angle) - dy * math.sin(angle), delta=0.05)
+                        self.assertAlmostEqual(new[1] - centres[1][1], dx * math.sin(angle) + dy * math.cos(angle), delta=0.05)
+            # A normal wheel gesture after release still reaches camera zoom.
+            code, zoomed = self._run(directory, "zoomed", (*common, *gestures,
+                "--eawr-live-input", f"1320:release:{squadron}", "--eawr-live-input", "1400:wheel:out",
+                "--eawr-live-input", "1490:mclick:centre"), end_tick=1500)
+            self.assertEqual(code, 0, zoomed.get("failure"))
+            self.assertNotEqual(zoomed["battle_input"]["camera_samples"][-2]["eye"],
+                                result["battle_input"]["camera_samples"][-2]["eye"])
+
+    def test_deployment_overlay_follows_pane(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory(prefix="eawr-deploy-overlay-") as temporary:
+            directory = pathlib.Path(temporary)
+            common = ("--eawr-live-ai", "off", "--eawr-audio", "off",
+                      "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                      "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                      "--eawr-live-input", "20:click:card=0",
+                      "--eawr-live-input", "500:click:hud=b_reinforcement")
+            reports = []
+            for label, extra in (("open", ()), ("closed", ("--eawr-live-input", "520:click:hud=r_close"))):
+                code, result = self._run(directory, label, (*common, *extra), end_tick=550)
+                self.assertEqual(code, 0, result.get("failure"))
+                fog = result["live_fog"]
+                self.assertEqual(fog["deploy_overlay"], label == "open", fog)
+                self.assertEqual(result["hud"]["production"]["pane_open"], label == "open")
+                self.assertGreater(fog["prevention_circles"], 0) if label == "open" else None
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                reports.append(result)
+            self.assertEqual(reports[0]["live_session"]["final_state_sha256"], reports[1]["live_session"]["final_state_sha256"])
+            red_counts = []
+            for label in ("open", "closed"):
+                with Image.open(directory / f"{label}.png") as picture:
+                    # The fog boundary crosses the top strip, above the reinforcement pane.
+                    red_counts.append(sum(r > g + 20 and r > b + 20
+                        for r, g, b in picture.convert("RGB").crop((0, 0, 1280, 90)).getdata()))
+            self.assertGreater(red_counts[0], red_counts[1] + 20, red_counts)
+
+    def test_deployment_overlay_enemy_circle_rejects_drop(self):
+        from live_session_test_support import EMPIRE_STATION
+        with tempfile.TemporaryDirectory(prefix="eawr-deploy-circle-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, layout = self._run(directory, "layout", ("--eawr-live-ai", "off",), end_tick=3)
+            self.assertEqual(code, 0, layout.get("failure"))
+            station = next(row for row in layout["live_session"]["start_markers"]
+                           if row["player"] == 2 and row["use"] == "station")
+            x, y, _ = station["position"]
+            camera = directory / "circle-camera.xml"
+            camera.write_text(re.sub(r"<initial [^>]*/>",
+                f'<initial target_x="{x - 1800}" target_y="{y}" target_height="0" zoom="0.5" yaw_degrees="0"/>',
+                CAMERA.read_text(encoding="utf-8")), encoding="utf-8")
+            shutil.copyfile(CAMERA.parent / "space-live-camera-bindings.json", directory / "space-live-camera-bindings.json")
+            orders = [argument for hardpoint in range(2, 7)
+                      for argument in ("--eawr-live-order", f"1:damage:{EMPIRE_STATION}@100000,{hardpoint}")]
+            for enemy in (11, 12):
+                orders += ["--eawr-live-order", f"1:damage:{enemy}@1000000"]
+            # One scout reveals both sides of the 2000-unit boundary while outside weapon reach.
+            orders += ["--eawr-live-order", f"15:move:{CORVETTE}@{x - 2400},{y},0"]
+            code, result = self._run(directory, "circle", (*orders,
+                "--eawr-live-ai", "off", "--eawr-live-step", "10", "--eawr-audio", "off",
+                "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}", "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "3400:click:hud=b_reinforcement",
+                "--eawr-live-input", "3500:press:hud=r_0000",
+                "--eawr-live-input", f"3520:hover:@{x - 1800},{y},0",
+                "--eawr-live-input", f"3540:release:@{x - 1800},{y},0",
+                "--eawr-live-input", "3580:press:hud=r_0000",
+                "--eawr-live-input", f"3600:hover:@{x - 2700},{y},0",
+                "--eawr-live-input", f"3620:release:@{x - 2700},{y},0"), camera=camera, end_tick=3850)
+            self.assertEqual(code, 0, result.get("failure"))
+            requests = result["live_session"]["economy_requests"]
+            self.assertFalse(any("not on screen" in entry for entry in result["battle_input"]["log"]))
+            self.assertEqual((requests["refused"], requests["reinforcements"]), (1, 1), requests)
+            fog = result["live_fog"]
+            self.assertTrue(fog["deploy_overlay"], fog)
+            self.assertTrue(any(row["blocked_points"] > 0 for row in fog["overlay_samples"]), fog)
+            self.assertTrue(result["live_session"]["headless_hashes_equal"])
+
+    def test_reinforcement_slots_ignore_completion_order(self):
+        # WR-08/EUS-14: compare grouped slots within one definition set, without
+        # claiming any particular stock ordering across loads.
+        with tempfile.TemporaryDirectory(prefix="eawr-pool-order-") as temporary:
+            directory = pathlib.Path(temporary)
+            panels = []
+            for label, first, second in (("a_b", 0, 1), ("b_a", 1, 0)):
+                code, result = self._run(directory, label, (
+                    "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                    "--eawr-live-input", f"20:click:card={first}",
+                    "--eawr-live-input", f"25:click:card={second}",
+                    "--eawr-live-input", "1100:click:hud=b_reinforcement"), end_tick=1150)
+                self.assertEqual(code, 0, result.get("failure"))
+                self.assertEqual(result["live_session"]["economy_requests"]["buys"], 2)
+                panel = result["hud"]["production"]
+                self.assertTrue(panel["pane_open"], panel)
+                self.assertEqual(len(panel["pool"]), 2, panel)
+                self.assertTrue(result["live_session"]["headless_hashes_equal"])
+                panels.append([(slot["slot"], slot["type"], slot["text"], slot["enabled"])
+                               for slot in panel["pool"]])
+            self.assertEqual(panels[0], panels[1])
+
     def test_second_teammate_buys_and_deploys_from_shared_station(self):
         # WPR-11/30/32/33: the local second teammate uses its own credits, queue and pool.
         place = (STAR_BASE_POSITION[0] + 700.0, STAR_BASE_POSITION[1] - 500.0)
@@ -135,6 +315,42 @@ class BattleInputProductionCases:
                 self.assertIn(selected[0], [unit["entity"] for unit in live["own_units"]])
                 self.assertTrue(result["hud"]["unit_cards"]["drawn"], result["hud"])
 
+
+    def test_paused_drop_leaves_the_reserve_pane(self):
+        # TM-10: a drop made while paused waits for the next tick. Until that tick runs, the pane
+        # leaves the dropped unit out, so a second press on its slot finds it empty: the squadron
+        # is sent once and nothing is rejected on resume (the second drop used to reach the
+        # simulation as not_in_pool, and units arrived where the first drop pointed).
+        first = (STAR_BASE_POSITION[0] + 700.0, STAR_BASE_POSITION[1] - 500.0)
+        second = (STAR_BASE_POSITION[0] + 1000.0, STAR_BASE_POSITION[1] + 440.0)
+        with tempfile.TemporaryDirectory(prefix="eawr-battle-paused-drop-") as temporary:
+            directory = pathlib.Path(temporary)
+            code, result = self._run(directory, "paused_drop", (
+                "--eawr-live-step", "10",
+                "--eawr-live-input", f"10:click:unit={STAR_BASE}",
+                "--eawr-live-input", "20:click:card=0",
+                "--eawr-live-input", "500:click:hud=b_reinforcement",
+                "--eawr-live-input", "510:click:hud=pause",
+                "--eawr-live-input", "f80:press:hud=r_0000",
+                "--eawr-live-input", f"f85:hover:@{first[0]},{first[1]},0",
+                "--eawr-live-input", f"f90:release:@{first[0]},{first[1]},0",
+                "--eawr-live-input", "f100:press:hud=r_0000",
+                "--eawr-live-input", f"f105:hover:@{second[0]},{second[1]},0",
+                "--eawr-live-input", f"f110:release:@{second[0]},{second[1]},0",
+                "--eawr-live-input", "f120:click:hud=resume"), end_tick=720)
+            self.assertEqual(code, 0, result.get("failure"))
+            battle, live = result["battle_input"], result["live_session"]
+            self.assertEqual(battle["scripted_fired"], 11, battle["log"])
+            self.assertEqual(battle["production"]["placements"], 1, battle["log"])
+            # The second press found the slot empty: one placement began.
+            self.assertEqual(sum(row.startswith("reinforce placing") for row in battle["log"]), 1, battle["log"])
+            requests = live["economy_requests"]
+            self.assertEqual((requests["buys"], requests["reinforcements"], requests["refused"]), (1, 1, 0), requests)
+            self.assertEqual(live["rejected"], [])
+            arrivals = [row for row in live["arrivals"] if row["owner"] == 1]
+            self.assertGreaterEqual(len(arrivals), 2, live["arrivals"])
+            self.assertEqual(live["economy"]["pool"], [], live["economy"])
+            self.assertIs(live["headless_hashes_equal"], True)
 
     def test_station_buys_a_squadron_that_arrives(self):
         # #530 (docs/behaviour/space-purchasing.md PU-60 to PU-68): selecting the Rebel station turns

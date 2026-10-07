@@ -48,7 +48,7 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     listener_viewport_->add_child(listener_);
     host_->add_child(listener_viewport_);
     // BA-45: FoC's volume sliders at their defaults, 0.75 each, a channel's level its slider times
-    // the master's. The SFX (3D), the unit responses (2D) and the music play on their own buses
+    // the master's. Localized WAVs, other WAVs and music play on their own buses (SND-60)
     // at the channel slider into a mix bus at the master slider, which feeds Master; the report
     // meters each (a muted Master still meters the buses that feed it).
     godot::AudioServer* server = godot::AudioServer::get_singleton();
@@ -80,6 +80,7 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     // A bus sends only to a bus before it: the mix first.
     open_bus(buses_[3], "Master", true);
     for (std::size_t index = 0; index < 3; ++index) open_bus(buses_[index], buses_[3].name, false);
+    set_mix_levels(options_.levels);
     for (std::size_t index = 0; index < audio::Voices::voices_3d; ++index) {
         auto* player = memnew(godot::AudioStreamPlayer3D);
         // BA-11: the falloff is FoC's, applied as the player's volume; Godot only pans.
@@ -94,7 +95,19 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
     }
     for (std::size_t index = 0; index < audio::Voices::voices_2d; ++index) {
         auto* player = memnew(godot::AudioStreamPlayer);
-        player->set_bus(buses_[1].name);
+        const godot::String name = godot::String("EAWR_Pan_") + godot::String::num_int64(static_cast<std::int64_t>(index));
+        auto& bus = pan_buses_[index];
+        bus = server->get_bus_index(name);
+        if (bus < 0) {
+            bus = server->get_bus_count();
+            server->add_bus();
+            server->set_bus_name(bus, name);
+        }
+        while (server->get_bus_effect_count(bus) > 0) server->remove_bus_effect(bus, 0);
+        panners_[index].instantiate();
+        server->add_bus_effect(bus, panners_[index]);
+        server->set_bus_send(bus, buses_[1].name);
+        player->set_bus(name);
         host_->add_child(player);
         players_2d_.push_back(player);
     }
@@ -113,9 +126,31 @@ BattleAudio::BattleAudio(godot::Node3D& host, const vfs::Vfs& filesystem, const 
 
 BattleAudio::~BattleAudio() { release(); }
 
+void BattleAudio::set_mix_levels(const audio::MixLevels& levels) {
+    options_.levels = levels;
+    auto* server = godot::AudioServer::get_singleton();
+    const std::array gains{levels.sfx, levels.speech, levels.music, levels.master};
+    for (std::size_t index = 0; index < buses_.size(); ++index) {
+        server->set_bus_volume_db(buses_[index].index, decibels(std::clamp(gains[index], 0.0, 1.0)));
+    }
+}
+
 void BattleAudio::release() {
     if (released_) return;
     released_ = true;
+    const auto backend = event_backend();
+    for (const auto& [handle, state] : event_states_) {
+        (void)state;
+        events_.stop(handle, backend);
+    }
+    event_states_.clear();
+    (void)events_.service(0.0, false, {}, random_, registry_, backend);
+    for (std::size_t voice = 0; voice < voice_states_.size(); ++voice) {
+        voices_.finished(voice);
+        end_voice(voice);
+    }
+    speech_stream_.finished(false);
+    while (speech_queue_.front()) speech_queue_.pop();
     for (godot::AudioStreamPlayer3D* player : players_3d_) {
         player->stop();
         player->queue_free();

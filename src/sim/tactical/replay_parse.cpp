@@ -103,6 +103,7 @@ core::Result<TacticalReplay> parse_replay(
     std::uint64_t unit_count{};
     std::uint64_t command_count{};
     TacticalReplay replay;
+    std::vector<EntityId> disabled_garrisons;
     if (!reader.read_bytes(magic) || !reader.read_u16(format) || !reader.read_u16(header_size)
         || !reader.read_u32(rules) || !reader.read_u32(decoded_math) || !reader.read_u32(decoded_bits)
         || !reader.read_u32(numerator) || !reader.read_u32(denominator)
@@ -155,6 +156,58 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_free_garrison) {
+                const auto end = reader.offset() + length;
+                std::uint32_t version{}, players{};
+                if (length < 8 || !reader.read_u32(version) || !reader.read_u32(players)
+                    || version != 1 || players == 0 || players > max_players) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid GARR extension header", logical_path);
+                }
+                for (std::uint32_t row = 0; row < players; ++row) {
+                    FreeGarrisonSetup binding;
+                    std::uint32_t types{}, objects{};
+                    if (end - reader.offset() < 16 || !reader.read_u32(binding.player)
+                        || !reader.read_u32(binding.delay_frames) || !reader.read_u32(types) || !reader.read_u32(objects)
+                        || types == 0 || types > 1024U || types > (end - reader.offset()) / 8U
+                        || objects > (end - reader.offset()) / 8U - types) {
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid GARR extension row", logical_path);
+                    }
+                    binding.templates.resize(types);
+                    binding.registered.resize(objects);
+                    for (auto& type : binding.templates) if (!reader.read_u64(type))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated GARR template", logical_path);
+                    for (auto& id : binding.registered) if (!reader.read_u64(id))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated GARR object", logical_path);
+                    replay.setup.free_garrisons.push_back(std::move(binding));
+                }
+                if (reader.offset() != end)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid GARR extension length", logical_path);
+                continue;
+            }
+            if (tag == replay_extension_garrison_disabled) {
+                if (length == 0 || length % 8U != 0) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid GSPN extension length", logical_path);
+                }
+                EntityId previous{};
+                for (std::size_t offset = 0; offset < length; offset += 8U) {
+                    EntityId id{};
+                    if (!reader.read_u64(id) || id <= previous) {
+                        return fail<Parsed>(diagnostic_codes::malformed,
+                            "GSPN entity IDs must be nonzero and strictly increasing", logical_path);
+                    }
+                    disabled_garrisons.push_back(id);
+                    previous = id;
+                }
+                continue;
+            }
+            if (tag == replay_extension_queue_identities) {
+                std::uint32_t version{};
+                if (length != 4 || !reader.read_u32(version) || version != 1) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid QIDS extension body", logical_path);
+                }
+                replay.setup.queue_identities = true;
+                continue;
+            }
             if (tag == replay_extension_skirmish_setup) {
                 if (replay.setup.skirmish || length > 65000U) {
                     return fail<Parsed>(diagnostic_codes::malformed, "duplicate or oversized SKSU extension", logical_path);
@@ -185,7 +238,9 @@ core::Result<TacticalReplay> parse_replay(
             replay.setup.match_policy = SkirmishMatchPolicy{
                 (flags & 1U) == 0, (flags & 2U) == 0, (flags & 4U) == 0, (flags & 8U) == 0};
         }
-        if (reader.offset() != header_size || (!replay.setup.match_policy && !replay.setup.skirmish)) {
+        if (reader.offset() != header_size
+            || (!replay.setup.match_policy && !replay.setup.skirmish && !replay.setup.queue_identities
+                && disabled_garrisons.empty() && replay.setup.free_garrisons.empty())) {
             return fail<Parsed>(diagnostic_codes::malformed, "invalid replay header extension length", logical_path);
         }
     }
@@ -243,6 +298,16 @@ core::Result<TacticalReplay> parse_replay(
                 "nonzero reserved unit field at index " + std::to_string(index), logical_path);
         }
         replay.setup.units.push_back(unit);
+    }
+    auto disabled = disabled_garrisons.begin();
+    for (auto& unit : replay.setup.units) {
+        if (disabled != disabled_garrisons.end() && unit.entity_id == *disabled) {
+            unit.garrison_enabled = false;
+            ++disabled;
+        }
+    }
+    if (disabled != disabled_garrisons.end()) {
+        return fail<Parsed>(diagnostic_codes::malformed, "GSPN references an absent initial entity", logical_path);
     }
     if (squadrons) {
         // Each record is at least 24 bytes: container, member count, reserved and one member.
@@ -347,6 +412,16 @@ core::Result<TacticalReplay> parse_replay(
                     logical_path);
             }
             command.payload = attack;
+        } else if (opcode == detail::opcode_repair_hardpoint) {
+            RepairHardpointPayload repair;
+            std::uint32_t repair_reserved{};
+            if (!reader.read_u32(repair.hardpoint) || !reader.read_u32(repair_reserved)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated repair payload" + at, logical_path);
+            }
+            if (repair_reserved != 0) {
+                return fail<Parsed>(diagnostic_codes::version, "nonzero reserved repair field" + at, logical_path);
+            }
+            command.payload = repair;
         } else if (opcode == detail::opcode_attack_hardpoint) {
             AttackPayload attack;
             std::uint32_t hardpoint_reserved{};
@@ -441,8 +516,9 @@ core::Result<TacticalReplay> parse_replay(
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated pad build payload" + at, logical_path);
             }
             command.payload = pad;
-        } else if (opcode == 9) {
+        } else if (opcode == 9 || opcode == detail::opcode_prepaid_buy) {
             BuyPayload buy;
+            buy.prepaid = opcode == detail::opcode_prepaid_buy;
             if (!reader.read_u64(buy.type)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated buy payload" + at, logical_path);
             }
@@ -451,13 +527,25 @@ core::Result<TacticalReplay> parse_replay(
             std::int64_t amount{};
             if (!reader.read_i64(amount)) return fail<Parsed>(diagnostic_codes::malformed, "truncated credit grant" + at, logical_path);
             command.payload = CreditGrantPayload{math::Fixed::from_raw(amount)};
+        } else if (opcode == detail::opcode_ai_reservation_debit) {
+            std::int64_t amount{};
+            if (!reader.read_i64(amount)) return fail<Parsed>(diagnostic_codes::malformed, "truncated reservation debit" + at, logical_path);
+            command.payload = AiReservationDebitPayload{math::Fixed::from_raw(amount)};
+        } else if (opcode == detail::opcode_cancel_entry) {
+            CancelPayload cancel;
+            if (!reader.read_u32(cancel.queue) || !reader.read_u32(cancel.index)
+                || !reader.read_u64(cancel.entry_id) || cancel.index != 0 || cancel.entry_id == 0
+                || !replay.setup.queue_identities) {
+                return fail<Parsed>(diagnostic_codes::malformed, "invalid cancel entry payload or missing QIDS extension" + at, logical_path);
+            }
+            command.payload = cancel;
         } else if (opcode == 10) {
             CancelPayload cancel;
             if (!reader.read_u32(cancel.queue) || !reader.read_u32(cancel.index)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated cancel payload" + at, logical_path);
             }
             command.payload = cancel;
-        } else if (opcode == 11 || opcode == detail::opcode_reserved_reinforce) {
+        } else if (opcode == 11 || opcode == detail::opcode_reserved_reinforce || opcode == detail::opcode_reinforce_facing) {
             ReinforcePayload reinforce;
             if (!reader.read_u64(reinforce.type) || !read_vec3(reader, reinforce.position)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated reinforce payload" + at, logical_path);
@@ -465,6 +553,13 @@ core::Result<TacticalReplay> parse_replay(
             if (opcode == detail::opcode_reserved_reinforce
                 && (!reader.read_u64(reinforce.pool_token) || reinforce.pool_token == 0)) {
                 return fail<Parsed>(diagnostic_codes::malformed, "invalid reinforcement purchase token" + at, logical_path);
+            }
+            if (opcode == detail::opcode_reinforce_facing) {
+                std::int64_t yaw{};
+                if (!reader.read_u64(reinforce.pool_token) || !reader.read_i64(yaw)) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated reinforcement facing" + at, logical_path);
+                }
+                reinforce.facing_yaw = math::Fixed::from_raw(yaw);
             }
             command.payload = reinforce;
         } else if (opcode == 4) {

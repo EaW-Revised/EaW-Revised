@@ -52,9 +52,21 @@ bool BattleInput::build_click(const std::size_t slot, LiveSessionView& live) {
     return issued;
 }
 
-void BattleInput::begin_placement(const sim::tactical::TypeId type) {
+void BattleInput::cancel_placement(LiveSessionView& live) {
+    if (!placing_) return;
+    live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::cancelled, *placing_);
+    placing_.reset();
+    ++placements_cancelled_;
+    note("reinforce placement cancelled");
+}
+
+void BattleInput::begin_placement(const sim::tactical::TypeId type, LiveSessionView& live) {
     if (placing_) return; // WR-11: only one active drag
+    const auto* ledger = live.local_economy();
+    if (!live.reinforcement_allowed() || !ledger
+        || std::find(ledger->pool.begin(), ledger->pool.end(), type) == ledger->pool.end()) return;
     placing_ = type;
+    live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::placement, type);
     note("reinforce placing " + std::to_string(type));
 }
 

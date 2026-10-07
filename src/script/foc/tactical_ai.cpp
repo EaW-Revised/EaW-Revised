@@ -63,7 +63,7 @@ public:
     core::Result<authoritative::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const tactical::TacticalSession& world, const tactical::TacticalTick& tick, ScriptScheduler& scripts) override {
         using OptionsResult = core::Result<authoritative::ServiceOptions>;
-        host_->view = build_view(world, *tick.snapshot);
+        host_->view = build_view(world, *tick.snapshot, &executor);
         host_->world = &world;
         host_->snapshot = tick.snapshot;
         const std::uint64_t next = scripts.completed_tick() + 1;
@@ -208,7 +208,7 @@ core::Result<authoritative::ScriptedTacticalSession> create_session(
     }
     auto session = authoritative::ScriptedTacticalSession::create(std::move(world), std::move(scripts).value());
     if (!session) return session;
-    for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reveal_all}) {
+    for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all}) {
         if (auto added = session.value().register_verb(verb, translate_order); !added) return SessionResult::failure(added.error());
     }
     if (auto set = session.value().set_engine(std::make_shared<FreestoreEngine>(host, goals)); !set) return SessionResult::failure(set.error());
@@ -217,7 +217,7 @@ core::Result<authoritative::ScriptedTacticalSession> create_session(
 
 std::vector<std::string> unsupported_plan_calls() {
     return {
-        "HUNT is unsupported; recharge/expiration ability plan events remain pending (environmental cancel/ready signals are supported)",
+        "recharge/expiration ability plan events remain pending (environmental cancel/ready signals are supported)",
         "exploration sweep (Explore_Area): the TaskForce moves to the area's centre",
         "star base Fire_Special_Weapon answers nil (FH-27); missing: GameObject.Fire_Special_Weapon on other objects, Garrison, Leave_Garrison, Get_Parent_Object, "
         "Get_Combat_Rating, Get_All_Projectile_Types",

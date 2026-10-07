@@ -140,6 +140,7 @@ struct StartFaction final {
 struct FactionForces final {
     std::string faction;
     std::vector<std::string> space_skirmish_default_forces; // Space_Skirmish_AI_Default_Forces
+    std::optional<std::uint32_t> garrison_delay_frames{}; // Garrison_Reinforcement_Delay_Seconds x 30
 };
 
 struct LobbyColour final {

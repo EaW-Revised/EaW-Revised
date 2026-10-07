@@ -213,6 +213,13 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         if (battle) {
             TacticalHud* named = hud.get();
             battle->set_hud_point([named](const std::string& name) { return named->control_point(name); });
+            BattleInput* input = battle.get();
+            hud->set_order_handler([input, live](const std::string_view name) {
+                const ui::OrderMode mode = name == "attack" ? ui::OrderMode::attack
+                    : name == "attack_move" ? ui::OrderMode::attack_move : name == "guard" ? ui::OrderMode::guard
+                    : name == "move" ? ui::OrderMode::move : ui::OrderMode::none;
+                input->command_click(mode, name == "stop", *live, ui::CommandOrigin::hud_button);
+            });
         }
         sync_battle_hud();
     }
@@ -239,7 +246,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             if (live_session) {
                 const LiveSessionView* live = live_session.get();
                 cards->set_clock([live]() {
-                    // As BattleInput::now: real time when interactive, the presented tick in a driven run.
+                    // Card clicks use wall time when interactive, presented time in a driven run.
                     if (live->options().real_time) {
                         using clock = std::chrono::steady_clock;
                         static const clock::time_point start = clock::now();
@@ -289,17 +296,19 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         if (EawrProductionPanel* production = hud->production()) {
             BattleInput* input = battle.get();
             LiveSessionView* live = live_session.get();
-            production->set_cancel([live](const std::size_t component) {
+            production->set_cancel([live](const std::size_t component, const std::uint64_t entry_id) {
                 const bool upgrades = component < presentation::ui::queue_slot_count;
                 const auto queue = upgrades ? sim::tactical::BuildQueue::upgrades : sim::tactical::BuildQueue::units;
-                const auto index = static_cast<std::uint32_t>(upgrades ? component : component - presentation::ui::queue_slot_count);
-                static_cast<void>(live->cancel_build(queue, index));
+                static_cast<void>(live->cancel_build(queue, entry_id));
             });
             production->set_pick([this, input](const std::size_t slot) {
-                if (live_session->reinforcement_allowed() && slot < pool_types.size()) input->begin_placement(pool_types[slot]);
+                if (live_session->reinforcement_allowed() && slot < pool_types.size()) input->begin_placement(pool_types[slot], *live_session);
             });
+            production->set_open([live] { live->reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::pane); });
             production->set_drag([input](const Vector2 point) { input->placement_move({point.x, point.y}); },
-                [input, live](const Vector2 point) { input->placement_drop({point.x, point.y}, *live); });
+                [input, live](const Vector2 point) { input->placement_drop({point.x, point.y}, *live); },
+                [input, live] { input->cancel_placement(*live); },
+                [live](const double detents) { static_cast<void>(live->rotate_reinforcement(detents)); });
         }
     }
     // #455 MM-11: a left press or drag on the minimap looks at the point; a right click orders the
@@ -313,7 +322,9 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             [battle_space](const double x, const double y) {
                 battle_space->live_camera_focus(static_cast<float>(x), static_cast<float>(y));
             },
-            [input, live](const double x, const double y) { static_cast<void>(input->minimap_move(x, y, *live)); });
+            [input, live](const double x, const double y, const bool double_click) {
+                static_cast<void>(input->minimap_move(x, y, double_click, *live));
+            });
         battle->set_minimap_point([minimap_hud](const double x, const double y) { return minimap_hud->minimap_point(x, y); });
     }
     return true;
@@ -334,6 +345,11 @@ void MapMode::State::fill_type_names() {
 
 void MapMode::State::sync_cards() {
     if (!hud || !battle) return;
+    if (live_session && live_session->order_input()) {
+        const auto mode = live_session->order_input()->mode();
+        hud->set_order_mode(mode == ui::OrderMode::attack ? "attack" : mode == ui::OrderMode::attack_move ? "attack_move"
+            : mode == ui::OrderMode::guard ? "guard" : mode == ui::OrderMode::move ? "move" : "");
+    }
     if (battle->production_station()) {
         if (EawrUnitCards* cards = hud->unit_cards(); cards && production_menu_cache.refresh(battle->build_buttons())) {
             if (production_menu_cache.layout_changed || !cards->update_build_states(battle->build_buttons())) {
@@ -385,7 +401,7 @@ void MapMode::State::sync_production() {
             production_queues = economy->queues;
             view.queue.clear();
             for (const auto& slot : presentation::ui::layout_build_queue(economy->queues, 0))
-                view.queue.push_back({slot.component, name_of(slot.type), slot.progress, slot.percent});
+                view.queue.push_back({slot.component, name_of(slot.type), slot.progress, slot.percent, slot.entry_id});
         }
         const auto frame = static_cast<std::uint64_t>(std::max(0.0, live.presented_tick()));
         for (auto& slot : view.queue) {
@@ -410,15 +426,20 @@ void MapMode::State::sync_production() {
             }
             return 0U;
         };
-        if (production_pool_cache.refresh(*economy)) {
-            const auto pool = presentation::ui::layout_pool(economy->pool, economy->population, economy->population_cap, population_of);
+        // A drop made while paused leaves the pane before its command runs (TM-10).
+        const std::size_t pending = live.pending_reinforcements();
+        if (production_pool_cache.refresh(*economy) || pending != production_pool_pending) {
+            production_pool_pending = pending;
+            const auto pool = presentation::ui::layout_pool(live.reinforcement_pool(),
+                economy->population + live.pending_reinforcement_population(), economy->population_cap, population_of);
             view.pool.clear();
             pool_types.clear();
             for (const auto& slot : pool) {
                 view.pool.push_back({slot.slot, name_of(slot.type), slot.text, slot.enabled});
                 pool_types.push_back(slot.type);
             }
-            view.population = presentation::ui::population_text(economy->population, economy->population_cap);
+            view.population = presentation::ui::population_text(economy->population + live.pending_reinforcement_population(),
+                                                                economy->population_cap);
             view.rows = presentation::ui::pool_rows(pool.size());
         }
     }
@@ -503,7 +524,26 @@ void MapMode::State::sync_minimap() {
         if (count > 0) minimap_height = sum / static_cast<double>(count);
     }
     TacticalHud::MinimapView view;
+    if (battle_audio) {
+        for (const auto& warning : battle_audio->radar_warnings()) {
+            view.warnings.push_back({warning.position[0], warning.position[1], warning.age});
+        }
+    }
     view.extents = presentation::ui::minimap_extents(bounds->min_x, bounds->max_x, bounds->min_y, bounds->max_y);
+    if (const auto& cells = live.battle_frame().fog) {
+        const auto& rules = cells->rules;
+        view.cells = presentation::ui::MinimapFogCells{to_double(rules.map_left), to_double(rules.map_top),
+            to_double(rules.cell_size), rules.cells_wide, rules.cells_tall,
+            {}, std::shared_ptr<const std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>>(cells, &cells->values)};
+    }
+    const auto owner_colour = [&](const sim::tactical::PlayerId owner) {
+        if (const auto colour = live.player_colour(owner)) return data::ui::Rgba8{(*colour)[0], (*colour)[1], (*colour)[2], 255};
+        return hud->faction_colour(live.player_faction(owner)).value_or(data::ui::Rgba8{100, 100, 100, 255});
+    };
+    std::vector<presentation::ui::MinimapPlayerColour> radar_players;
+    for (const auto& player : latest->players()) {
+        radar_players.push_back({player.player_id, player.team_id, player.neutral, owner_colour(player.player_id)});
+    }
     // WHZ-70/72: all hazard flags share the static mask, regardless of radar visibility or fog.
     for (const auto& instance : latest->instances()) {
         const auto name = minimap_type_names.find(instance.type_id);
@@ -566,28 +606,59 @@ void MapMode::State::sync_minimap() {
         if (name != minimap_type_names.end()) blip.type = name->second;
         // MM-07: the owner's lobby colour; a player without one (a map's Neutral or Pirates owner)
         // takes its faction's Factions.xml colour, else Neutral's grey.
-        if (const auto colour = live.player_colour(owner)) {
-            blip.owner_colour = {(*colour)[0], (*colour)[1], (*colour)[2], 255};
-        } else {
-            blip.owner_colour = hud->faction_colour(live.player_faction(owner)).value_or(data::ui::Rgba8{100, 100, 100, 255});
-        }
+        blip.owner_colour = owner_colour(owner);
         blip.hostile = hostile;
         blip.selected = battle->selected(entity);
         return blip;
     };
     std::vector<const LiveSessionView::VisibleUnit*> visible;
     visible.reserve(live.visible_units().size());
-    for (const LiveSessionView::VisibleUnit& unit : live.visible_units()) {
-        visible.push_back(&unit);
+    for (const auto& unit : live.visible_units()) visible.push_back(&unit);
+    std::sort(visible.begin(), visible.end(), [](const auto* left, const auto* right) { return left->entity < right->entity; });
+    // WNO-41: candidates come from copied live snapshots, independently of model visibility.
+    for (const auto& instance : latest->instances()) {
+        const auto entity = instance.entity_id;
         // MM-15: members contribute to their team's identity instead of submitting another blip.
-        if (live.squadron_of().contains(unit.entity) || live.squadron_members().contains(unit.entity)) continue;
-        auto blip = make_blip(unit.entity, unit.type, unit.owner, unit.hostile);
-        if (const auto* instance = live.snapshot_index().instance(unit.entity)) blip.in_nebula = instance->in_nebula;
-        blip.x = unit.position[0];
-        blip.y = unit.position[1];
-        blip.yaw_degrees = unit.yaw;
+        if (live.squadron_of().contains(entity) || live.squadron_members().contains(entity)) continue;
+        auto blip = make_blip(entity, instance.type_id, instance.owner,
+            sim::tactical::players_hostile(latest->players(), instance.owner, live.local_player()));
+        blip.radar = live.radar_state(entity);
+        blip.in_nebula = instance.in_nebula;
+        const auto pose = live.unit_frame(entity);
+        blip.x = pose ? pose->position[0] : to_double(instance.fixed_transform.rows[0][3]);
+        blip.y = pose ? pose->position[1] : to_double(instance.fixed_transform.rows[1][3]);
+        blip.yaw_degrees = pose ? pose->yaw_degrees : 0.0;
+        const auto* type = live.tables() ? live.tables()->find(blip.type) : nullptr;
+        blip.radar.capital_layer = type && type->movement.space_layer == "Capital";
+        if (const auto* profile = live.economy().pads.point(instance.type_id)) {
+            const auto capture_colour = [&](const sim::tactical::PlayerId owner) {
+                auto fallback = owner_colour(owner);
+                if (profile->community_property) {
+                    const auto player = std::find_if(radar_players.begin(), radar_players.end(),
+                        [owner](const auto& p) { return p.player == owner; });
+                    // WNO-43: Neutral capture endpoints use faction colour, not community fallback.
+                    if (player != radar_players.end() && player->neutral) return fallback;
+                    if (player == radar_players.end() || player->team == 0xffffffffU) {
+                        const auto unassigned = hud->minimap_looks(blip.type).no_colorization;
+                        fallback = unassigned && *unassigned != data::ui::Rgba8{0,0,0,0} ? *unassigned
+                            : hud->faction_colour(live.player_faction(owner), true).value_or(fallback);
+                    }
+                    // Tactical starts use multiplayer lobby bindings, including their recorded replays.
+                    fallback = presentation::ui::minimap_community_colour(radar_players, owner,
+                        live.local_player(), true, fallback);
+                }
+                return fallback;
+            };
+            const auto* pad = live.pad_view(entity);
+            const auto target = pad && pad->state.progress.raw() > 0 ? pad->state.target : instance.owner;
+            const bool raw_fog = view.cells && !view.cells->revealed(blip.x, blip.y);
+            blip.capture = presentation::ui::MinimapCaptureColour{raw_fog, capture_colour(instance.owner),
+                capture_colour(target), pad ? to_double(pad->state.progress) : 0.0};
+        }
         if (hud->minimap_looks(blip.type).draw_to_scale && space_population) {
-            if (const auto box = space_population->live_ship_box(unit.ship)) {
+            const auto shown = std::lower_bound(visible.begin(), visible.end(), entity,
+                [](const auto* unit, const auto id) { return unit->entity < id; });
+            if (shown != visible.end() && (*shown)->entity == entity) if (const auto box = space_population->live_ship_box((*shown)->ship)) {
                 for (std::size_t row = 0; row < 2; ++row) for (std::size_t axis = 0; axis < 3; ++axis) {
                     blip.world_half_size[row] += std::abs(to_double(box->model_to_world.rows[row][axis]))
                         * static_cast<double>(box->high[axis] - box->low[axis]) * 0.5;
@@ -596,7 +667,6 @@ void MapMode::State::sync_minimap() {
         }
         view.units.push_back(std::move(blip));
     }
-    std::sort(visible.begin(), visible.end(), [](const auto* left, const auto* right) { return left->entity < right->entity; });
     std::vector<presentation::ui::MinimapSquadronMember> members;
     for (const auto& [squadron, ids] : live.squadron_members()) {
         const auto* container = live.snapshot_index().instance(squadron);
@@ -632,14 +702,27 @@ void MapMode::State::sync_minimap() {
         view.units.push_back(std::move(blip));
     }
     std::sort(view.units.begin(), view.units.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
+    // WNO-44: retained copies never enter visible_units(), selection or attack cursor queries.
+    for (const auto& [entity, stored] : live.radar_memories()) {
+        if (!stored.retained_model) continue;
+        const auto name = minimap_type_names.find(stored.type);
+        if (name == minimap_type_names.end()) continue;
+        presentation::ui::MinimapMemory memory;
+        memory.id = entity;
+        memory.type = name->second;
+        memory.owner_colour = owner_colour(stored.owner);
+        memory.hostile = sim::tactical::players_hostile(latest->players(), stored.owner, live.local_player());
+        memory.capture_point = stored.capture_point;
+        memory.previously_revealed = true;
+        memory.retained_model = true;
+        memory.x = stored.position[0];
+        memory.y = stored.position[1];
+        memory.yaw_degrees = stored.yaw;
+        memory.world_half_size = stored.world_half_size;
+        view.memories.push_back(std::move(memory));
+    }
     // MM-10: the local player's fog cells where the battle has them (#494: the cells the fog in
     // the world draws), else the local team's units with a sensor range reveal.
-    if (const auto& cells = live.battle_frame().fog) {
-        const auto& rules = cells->rules;
-        view.cells = presentation::ui::MinimapFogCells{to_double(rules.map_left), to_double(rules.map_top),
-            to_double(rules.cell_size), rules.cells_wide, rules.cells_tall,
-            {}, std::shared_ptr<const std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>>(cells, &cells->values)};
-    }
     for (const auto& revealer : live.snapshot_index().revealers()) {
         view.revealers.push_back({revealer.x, revealer.y, revealer.range});
     }

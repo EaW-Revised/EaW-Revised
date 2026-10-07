@@ -17,11 +17,18 @@ core::Result<void> Engine::before_service(const tactical::TacticalSession& world
     const tactical::TacticalSnapshot& snapshot, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence,
     const sim::PartitionExecutor* executor) {
     const auto preparation = grid_.prepare(executor, *host_, *host_->view);
+    perception_executor_ = executor;
+    host_->credit_changes.clear(); // preceding commands are now in the authoritative snapshot
     frame_ = static_cast<std::int64_t>(world.completed_tick());
     event_tick_ = scripts.completed_tick() + 1;
-    sequence_ = &sequence;
+    sequence_ = sequence;
     scripts_ = &scripts;
-    events_.clear();
+    // Direct pad builds can emit callbacks after Lua has serviced this tick.
+    // Retain them and assign fresh keys alongside this barrier's engine events.
+    for (auto& event : events_) {
+        event.key.tick = event_tick_;
+        event.key.sequence = sequence_++;
+    }
     work_ = TickCost{};
     producers_prepared_ = false;
     for (auto& [key, candidates] : producers_) {
@@ -101,6 +108,7 @@ core::Result<void> Engine::before_service(const tactical::TacticalSession& world
             initialize_goals(player);
         }
     }
+    for (auto& player : players_) observe_purchases(player, snapshot); // before plan abandonment
     track_damage(snapshot);
     grid_.service(*host_->view, *host_, frame_);
     update_targets();
@@ -143,12 +151,13 @@ core::Result<void> Engine::before_service(const tactical::TacticalSession& world
             prune(player.plan_outcomes);
         }
     }
-    if (auto attached = drain_attaches(scripts, sequence); !attached) return attached;
+    if (auto attached = drain_attaches(scripts, sequence_); !attached) return attached;
     work_.plans_deferred = static_cast<std::uint32_t>(pending_attach_.size());
     for (ScriptEvent& event : events_) {
         if (auto submitted = scripts.submit_event(std::move(event)); !submitted) return submitted;
     }
     events_.clear();
+    sequence = sequence_;
     return core::Result<void>::success();
 }
 
@@ -210,7 +219,28 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         PlayerAi* player = player_ai(plan->player);
         if (player == nullptr) continue;
         const std::uint64_t id = block_id(command.issuer, command.sequence);
-        if (operation == "produce" && tf != taskforces_.end()) {
+        if (operation == "build_pad" && tf != taskforces_.end() && arguments.size() == 4) {
+            const auto pad = handle_id(arguments[2], handle_game_object);
+            const auto type = handle_id(arguments[3], handle_type);
+            if (!pad || !type) continue;
+            for (std::size_t index = 0; index < tf->second.types.size(); ++index) {
+                if (tf->second.types[index] != *type || index >= tf->second.producers.size()
+                    || tf->second.producers[index] != *pad || tf->second.sources[index] != 2) continue;
+                BuildTask task;
+                task.taskforce = tf->second.id; task.block = id;
+                task.type = *type; task.producer = *pad; task.source = 2;
+                task.direct_pad = true;
+                player->tasks.push_back(task);
+                Block block;
+                block.kind = Block::Kind::produce; block.id = id;
+                block.instance = command.issuer; block.taskforce = tf->second.id;
+                blocks_.emplace(id, std::move(block));
+                // WBP-47/48: explicit Lua Build keeps its current-barrier timing and
+                // uses the same reservation precheck as ordinary pad production.
+                service_execution(*player, true);
+                break;
+            }
+        } else if (operation == "produce" && tf != taskforces_.end()) {
             // EX-10: one build task per type the TaskForce still has to produce.
             Block block;
             block.kind = Block::Kind::produce;
@@ -218,6 +248,7 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             block.instance = command.issuer;
             block.taskforce = tf->second.id;
             for (std::size_t index = 0; index < tf->second.types.size(); ++index) {
+                if (tf->second.types[index] == 0) continue;
                 BuildTask task;
                 task.taskforce = tf->second.id;
                 task.block = id;
@@ -227,7 +258,8 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
                 task.pool_token = index < tf->second.pool_tokens.size() ? tf->second.pool_tokens[index] : 0;
                 player->tasks.push_back(task);
             }
-            if (tf->second.types.empty()) block.finished = true;
+            if (std::all_of(tf->second.types.begin(), tf->second.types.end(), [](const auto type) { return type == 0; }))
+                block.finished = true;
             tf->second.types.clear();
             tf->second.sources.clear();
             tf->second.producers.clear();
@@ -332,12 +364,16 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
             if (const auto value = number_of(arguments[2])) globals_[text_of(arguments[1])] = *value;
         }
     }
+    std::vector<authoritative::ScriptCommand> ordered;
+    ordered.reserve(orders_.size() + kept.size());
     for (authoritative::ScriptCommand& order : orders_) {
         order.tick = report.tick;
-        kept.push_back(std::move(order));
+        ordered.push_back(std::move(order));
     }
     orders_.clear();
-    report.commands = std::move(kept);
+    perception_executor_ = nullptr;
+    for (auto& command : kept) ordered.push_back(std::move(command));
+    report.commands = std::move(ordered);
     return core::Result<void>::success();
 }
 

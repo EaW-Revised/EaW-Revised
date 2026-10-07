@@ -44,7 +44,7 @@ inline constexpr std::int64_t max_damage_multiplier = 256;
 [[nodiscard]] core::Result<math::Fixed> diminishing_factor(const DamageRules& rules, std::uint64_t frames);
 
 // What arrives at a unit: a projectile's hit (DG-01) or scripted damage (DG-20).
-enum class HitKind : std::uint8_t { ordinary, asteroid };
+enum class HitKind : std::uint8_t { ordinary, asteroid, delayed };
 // WHZ-12: coordinator-reserved keyed service stream, sequential within a unit/frame.
 inline constexpr std::uint32_t asteroid_service_slot = 0xfffe0004U;
 struct Hit {
@@ -181,6 +181,8 @@ struct FlightState {
     std::uint64_t age_frames{};
     math::Fixed path_distance{};
     bool path_initialized{};
+    bool shield_redirected{}; // RFL-07: sticky even when entry cannot rebuild a detour
+    math::Fixed shield_allowance{}; // retained target-radius allowance after a detour attempt
     std::vector<RocketSegment> path{};
     friend bool operator==(const FlightState&, const FlightState&) = default;
 };
@@ -211,7 +213,7 @@ struct Projectile {
     // and its aim offset in the target's frame (applied only when all three parts are nonzero).
     bool homing{};
     bool locked{};
-    math::Fixed turn_rate{};
+    math::Fixed turn_rate{}; // WPJ-17: also retained by direct projectiles with a positive turn limit
     math::Fixed yaw{};
     math::Fixed pitch{};
     math::Vec3 offset{};
@@ -224,6 +226,7 @@ struct Projectile {
     std::optional<std::uint32_t> disable_engines_frames{}; // EN-08, captured at launch
     std::optional<FlightState> flight{};
     std::uint64_t muzzle_delay_until{}; // positive only: PROJ bit11, appended expiry frame
+    math::Fixed damage_delay{};
     friend bool operator==(const Projectile&, const Projectile&) = default;
 };
 

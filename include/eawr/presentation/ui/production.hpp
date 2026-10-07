@@ -168,10 +168,11 @@ inline constexpr std::size_t queue_slot_count = 5; // per queue: tqueue00..04, t
 struct QueueSlot {
     std::size_t component{};            // tqueue<component>
     sim::tactical::BuildQueue queue{sim::tactical::BuildQueue::units};
-    std::size_t index{};                // entry index in its queue (the cancel command's)
+    std::size_t index{};                // displayed entry position
     sim::tactical::TypeId type{};
     double progress{1.0};               // PU-64: the front's completed fraction, 1 for the others
     std::optional<std::string> percent; // PU-64: "<n>%" on the front entry only
+    std::uint64_t entry_id{};           // PU-17: the cancel command's stable identity
 };
 
 // PU-63, PU-64: the queued entries at `frame` (the snapshot's completed tick), front first.
@@ -190,7 +191,8 @@ struct PoolSlot {
     bool enabled{};                     // PU-66: its population fits the room
 };
 
-// PU-66: the pool folded by type, in first-completion order, one slot each up to `slots`.
+// WR-08/EUS-14: count by definition identity, then traverse TypeId keys up to `slots`.
+// Completion order does not choose slots; exact retail order across loads is unverified.
 // `population_of` gives a type's population value.
 [[nodiscard]] std::vector<PoolSlot> layout_pool(std::span<const sim::tactical::TypeId> pool,
     std::uint32_t population, std::uint32_t population_cap,

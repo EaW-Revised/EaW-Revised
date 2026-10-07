@@ -99,6 +99,18 @@ def read(path: str) -> str:
     return source_text(path)
 
 
+def squadron_members(result, container, squadron_type):
+    """Resolve craft from the live roster, which also includes authored map hazards."""
+    live = result["live_session"]
+    fleet = [row for row in live["start_fleet"] if row["entity"] == container]
+    if len(fleet) != 1 or fleet[0]["type"] != squadron_type:
+        raise AssertionError((container, squadron_type, fleet))
+    teams = [row for row in live["squadrons"] if row["container"] == container]
+    if len(teams) != 1 or not teams[0]["members"]:
+        raise AssertionError((container, teams))
+    return tuple(teams[0]["members"])
+
+
 class BattleInputRunner:
     def _run(self, directory: pathlib.Path, name: str, extra=(), camera=CAMERA, end_tick=END_TICK,
              map_path=CORUSCANT, session="m2", env=None, engine_args=()):
@@ -132,7 +144,8 @@ class BattleInputRunner:
     # the target, beyond its own sight and its 800-unit weapons, so any hit it lands comes from the
     # order: it closes (OR-02 to OR-06) and fires. The AI is off so the Empire stays where the debug
     # moves put it; the camera follows the corvette, then the spotter.
-    def _attack_through_fog(self, directory, name, target, target_point, order_tick, end_tick, reticle=False):
+    def _attack_through_fog(self, directory, name, target, target_point, order_tick, end_tick, reticle=False,
+                            disarm_spotter=False):
         camera = directory / f"{name}-camera.xml"
         shutil.copy(CAMERA.parent / "space-live-camera-bindings.json", directory)
         camera.write_text(re.sub(r"<initial [^>]*/>", f'<initial target_x="{ATTACKER_POINT[0]}" '
@@ -143,6 +156,9 @@ class BattleInputRunner:
             # #531: the run draws every unit (the Acclamator may not be spotted yet at the hover);
             # the sim's fog and the order are unchanged.
             *(("--eawr-live-reveal", "on") if reticle else ()),
+            # Keep the spotter alive for sight, but unable to kill this target before the attacker.
+            *(arg for index in range(4) if disarm_spotter
+              for arg in ("--eawr-live-order", f"1:damage:{NEBULON}@100000,{index}")),
             "--eawr-live-order", f"1:move:{CORVETTE}@{ATTACKER_POINT[0]},{ATTACKER_POINT[1]},0",
             "--eawr-live-order", f"1:move:{NEBULON}@{SPOTTER_POINT[0]},{SPOTTER_POINT[1]},0",
             "--eawr-live-order", f"1:move:{target}@{target_point[0]},{target_point[1]},0",
@@ -175,7 +191,7 @@ class BattleInputRunner:
         return int(match.group(match.lastindex)), live
 
 
-    def _dogfight_run(self, directory, name, inputs, end_tick=DOGFIGHT_TICK):
+    def _dogfight_run(self, directory, name, inputs, end_tick=DOGFIGHT_TICK, orders=(), extra=()):
         # The #435 dogfight (X-wing squadron 2 and TIE squadron 9 in one combat cell at DOGFIGHT_TICK,
         # the live camera over the meeting point) with `inputs` (--eawr-live-input values) added.
         meeting = f"{MEETING[0]},{MEETING[1]},0"
@@ -192,5 +208,7 @@ class BattleInputRunner:
             "--eawr-live-order", f"1:move:{OTHER_TIE_SQUADRON}@{clear}",
             "--eawr-live-order", f"{DOGFIGHT_ORDER_TICK}:attack:{X_WING_SQUADRON}@{TIE_SQUADRON}",
             "--eawr-live-order", f"{DOGFIGHT_ORDER_TICK}:attack:{TIE_SQUADRON}@{X_WING_SQUADRON}",
+            *(arg for value in orders for arg in ("--eawr-live-order", value)),
+            *extra,
             *(arg for value in inputs for arg in ("--eawr-live-input", value))),
             camera=camera, end_tick=end_tick)

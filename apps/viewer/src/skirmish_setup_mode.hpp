@@ -22,6 +22,7 @@ public:
     explicit SkirmishSetupMode(Options options);
     ~SkirmishSetupMode();
     [[nodiscard]] bool ready(godot::Node3D& host);
+    [[nodiscard]] const std::string& failure() const;
     void process();
     void request_start();
     [[nodiscard]] std::optional<skirmish::FixtureOptions> take_start();

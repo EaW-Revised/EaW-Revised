@@ -59,7 +59,7 @@ The rules follow [Phase 1](../phase-1/README.md#how-acceptance-works):
 ## Before Phase 2
 
 M1 was signed off on 2026-09-25. The M1.5 refactor merged to `main` on 2026-09-26:
-the move-only T1â€“T10 splits, build and graphics offload, the owner-approved FP-1â€“FP-5
+the move-only T1–T10 splits, build and graphics offload, the owner-approved FP-1–FP-5
 Forward+ switch and the P1 fidelity follow-ups (terrain texture rotation, space/land
 prop idle clips, vegetation wind and others) are done. One item is left:
 T11 long-function extraction (legacy EAWR-116). Its first half (the
@@ -73,7 +73,7 @@ The owner asked for a triage on 2026-09-29: "now with all these new bugs etc it 
 good time to triage the board and also update the estimates for P2 tickets and thus moving up
 P3 etc." Every open issue (131 at the start) now has a Status, Priority, Size, Estimate,
 milestone and phase label on the private planning board. Dates are on the board for all but the owner queues,
-the nice-to-haves (owner: after the main goals) and the fresh public-repository release (legacy EAWR-445), which waits for the ownerâ€™s go. The
+the nice-to-haves (owner: after the main goals) and the fresh public-repository release (legacy EAWR-445), which waits for the owner’s go. The
 measured pace, the method and the calendar are in
 [docs/estimate.md](../../docs/estimate.md#status-and-re-estimate-2026-09-29).
 
@@ -208,7 +208,7 @@ with every ship type and the fighters fighting, and see who won.
 | Abilities: TURBO, POWER_TO_WEAPONS, DEFEND with the Nebulon-B script, SPOILER_LOCK, ION_CANNON_SHOT, HUNT; AI ability use | the space abilities work (legacy EAWR-76) | 10 | 18 | 32 | evidence: what makes FoC fire DEFEND (U-08) |
 | Ability buttons, autofire marks and recharge dials in the command bar | none (part of the tactical HUD and team colours (legacy EAWR-83)) | 4 | 7 | 12 | owner: eye check |
 | Victory or defeat shown on screen; the battle ends 7 s later | none (part of the tactical HUD and team colours (legacy EAWR-83), the victory and defeat rules (legacy EAWR-77)) | 3 | 5 | 9 | owner: eye check |
-| Follow-up fixes from eye checks (measured: about one per visual feature) | â€” | 6 | 12 | 24 | owner |
+| Follow-up fixes from eye checks (measured: about one per visual feature) | — | 6 | 12 | 24 | owner |
 | **Milestone A** | | **52** | **94** | **176** | |
 | | agent-days | 2.2 | 3.9 | 7.3 | |
 
@@ -237,16 +237,16 @@ with every ship type and the fighters fighting, and see who won.
 | Plus the AI goal system (D1) | 104 h (4.3 d) | 185 h (7.7 d) | 332 h (13.8 d) |
 | Plus mod parity (D3) | 123 h (5.1 d) | 215 h (9.0 d) | 382 h (15.9 d) |
 
-Not counted: T11b (the long-function extraction (legacy EAWR-116), M1.5, 6â€“12 h, after sign-off) and the retail list, empty-value and boolean parsing (legacy EAWR-273) (low, before the unit tables
+Not counted: T11b (the long-function extraction (legacy EAWR-116), M1.5, 6–12 h, after sign-off) and the retail list, empty-value and boolean parsing (legacy EAWR-273) (low, before the unit tables
 load types outside the M2 fleet; moved to Phase 3).
 
 ## Timeline
 
 Capacity: up to 9 implementation agents and 3 reviewers when the owner's PC is free, about 6
-when the owner uses it. At the measured pace that is 90â€“140 agent-hours a day. The remaining effort is therefore
-1.5â€“4 days of capacity. The calendar is set by the dependency chain, the owner's eye checks
-(measured: median 2.5 h, 75th percentile 4.2 h, captures 10â€“15 h when they run overnight;
-owner hours 08:30â€“23:00) and FoC evidence, not by the number of agents.
+when the owner uses it. At the measured pace that is 90–140 agent-hours a day. The remaining effort is therefore
+1.5–4 days of capacity. The calendar is set by the dependency chain, the owner's eye checks
+(measured: median 2.5 h, 75th percentile 4.2 h, captures 10–15 h when they run overnight;
+owner hours 08:30–23:00) and FoC evidence, not by the number of agents.
 
 Critical path to milestone A:
 
@@ -314,7 +314,7 @@ asked.
 
 - **D1, the AI opponent.** The initial FoC tactical AI host runs the original FoC freestore script, which sends every AI
   unit to attack. The FoC battle plans (flanking, bombing runs, turbo attacks) need the AI goal
-  system, which is not built: about 1.5 agent-days and 1â€“2 calendar days more. Should M2 ship
+  system, which is not built: about 1.5 agent-days and 1–2 calendar days more. Should M2 ship
   with the freestore opponent and move the plans to Phase 3, or keep the plans in M2?
 - **D2, hyperspace arrivals.** Cut them from the live battle presentation work (legacy EAWR-80) (the fixed-force start has no arrivals), or build
   them in M2?
@@ -329,7 +329,7 @@ asked.
 |---|---|
 | Skirmish lock, data, tactical world, start, visibility and recordings | Pin M2 and load FoC data. Set up tactical replay, start and visibility, and record fixed-force FoC scenarios. The existing original-game recording lane (legacy EAWR-43) stays the observation lane for Outrider targeting cases. |
 | Movement through victory and defeat | Implement movement, formations, hardpoint damage, targeting, projectiles, squadrons, abilities and fixed-force victory/defeat. |
-| the hardpoint state-art work (legacy EAWR-136) | Render intact, damaged and destroyed hardpoint variants from the data. This provides the per-hardpoint state hook that the hardpoint damage work (legacy EAWR-72) uses. Size S, 1â€“10 worker-hours, on the viewer lane before the live battle presentation work (legacy EAWR-80). |
+| the hardpoint state-art work (legacy EAWR-136) | Render intact, damaged and destroyed hardpoint variants from the data. This provides the per-hardpoint state hook that the hardpoint damage work (legacy EAWR-72) uses. Size S, 1–10 worker-hours, on the viewer lane before the live battle presentation work (legacy EAWR-80). |
 | AI host and fallback | Use the original FoC tactical AI scripts where feasible. The fallback opponent (legacy EAWR-78) is the small project-authored fallback if the FoC tactical AI host (legacy EAWR-79) proves them infeasible. |
 | Battle presentation through audio | Present and control the live battle: tactical animation, camera, HUD, team colours and audio. |
 | the M2 sign-off (legacy EAWR-85) | Owner sign-off, five-target CI and the Phase 3 estimate. |
@@ -365,12 +365,15 @@ Known differences and deferred work. None of these block M2.
 - Map capture points now participate in capture and pad construction (build-pads G1/G2); other map objects retain their SK-32 admission policy.
 - Starting credits are 0; the retail lobby default is 6000 and runs the station income (SK-30, SK-31).
 - Projectile collision (legacy EAWR-536): the remake meets each unit's collision meshes and its hardpoints' `Collision_Mesh` meshes like FoC (space-damage DG-36 to DG-38), but among several units it takes the nearest along the step where FoC takes the first its collision tree reports (DG-30), tests on a 1/32-unit grid, sizes the craft sphere from the unit-frame box (DG-37, unverified against FoC's object box) and finds the shield mesh by its name `shield` (DG-38, unverified).
-- Time to kill (tests/fidelity S-43 to S-50) (legacy EAWR-536): the Nebulon-B against a held Tartan still ends about 8 % sooner than recorded (FoC lands 83 % of those turbolaser shots, the remake about 97 %; no scatter to speak of at a corvette, so the remaining misses are unexplained). Squadron matchups (S-47 to S-49) follow the squadron flight gaps of space-fighters G-F2 to G-F7, not the damage rules. The Acclamator against a held Nebulon-B (S-45) empties the shield in the recorded range, but the frigate's hull lasts about 850 ticks longer: in FoC the Acclamator's TIE bombers kill the far-side hardpoints sooner, and the hull falls with the last of them (HS-02). That is the bombers' attack runs, not the damage rules.
+- Time to kill (tests/fidelity S-43 to S-50) (legacy EAWR-536): the Nebulon-B against a held Tartan still has a hit-rate gap (FoC lands 83% of those turbolaser shots, the remake about 97%; the remaining misses are unexplained). Squadron matchups (S-47 to S-49) also need the flight comparisons of space-fighters G-F2 to G-F7. The former roughly 850-tick Acclamator hull delay is no longer the current S-45 result; the remaining measured gaps follow, with the refreshed table in [space damage](../../docs/behaviour/space-damage.md#current-time-to-kill-comparison).
+- S-45 Acclamator against a held Nebulon-B: hull death at tick 1585 versus retail 1522–1564 (21–63 ticks later), with zero direct hull loss beyond the hardpoint coupling (DG-39). This is inside the existing 15% gate but still differs from the recorded timing; the shield empties at 1210 versus 1032–1122 (2026-10-05 run; collision/TTK follow-ups) (legacy EAWR-596).
+- S-48 Y-wing against a held Tartan: hull death at tick 1272 versus retail 1374 (102 ticks, 7.4% earlier), with 24 shots and 23 hits. This remains an informational fidelity gap; the cause needs a flight/aim comparison rather than an inferred damage-rule change (2026-10-05 run; collision/TTK follow-ups) (legacy EAWR-596).
 - FoC rig references taken at the rig's stored `ScreenAA` 2 have no stencil shadows; shadow comparisons need `-GraphicsPreset Highest` captures (AA 1), and each sidecar's `graphics` says which a reference is.
 - UI text is rasterised by the engine (FreeType with default hinting), not by GDI, so glyph pixels differ from retail at small sizes; golden hashes come with UI-08.
 - Without `Arial Unicode MS` (stock Windows, Linux) the UI-F3 Unicode step lands on EaW-Medium, which has no Cyrillic or CJK glyphs; only non-English text is affected (D5, the local font provisioning).
 - Squadrons launch once and are never replaced; retail replenishes station and Acclamator squadrons from their reserves. The hangar implements the retail reserve rule (space-fighters FL-02, FL-08) but the M2 table sets every reserve to 0 (FL-11). Starbase hangars are tested later (SK-36, the starting-force, replenishment and AI-role decisions).
 - Squadron craft: no dogfight pairing (combat cells, chase timers), no collision avoidance between craft or with ships, no move orders for squadrons, and the tick-zero craft placement is the unverified formation-slot rule (space-fighters G-F2 to G-F6, the squadron simulation work). In S-28 the remake's squadrons kill the corvette at tick 775 against the recorded 883; since the capital-ship fire against fighters the first wave dies on retail's schedule, but the corvette's hardpoints all take the same craft and the later fighters circle at its sides, so the Acclamator finishes it alone (G-F7). A craft without a squadron target idles and holds fire as in retail (FT-07); a craft whose target turns unsuitable waits for its squadron, where retail's craft rescans for itself (G-F5).
+- S-98 bomber interception (space-fighters FD-13): the 2026-10-05 runner loses four bombers at ticks 738, 960, 1000 and 1166, versus retail three at 723, 929 and 1110. Exact base `cb980a98` has the same result; this pre-existing flight/targeting gap remains outside the scenario-staging and collision-budget changes.
 - The live viewer draws the tick-zero X-wing craft; the `Y-Wing` and `TIE_Interceptor` models report no drawable FoC model through the placed-ship path (cause untraced). It also does not draw squadrons launched later: it composes models only for start units, so a launched craft is simulated and hidden until the live battle presentation work (legacy EAWR-80) composes units that spawn after tick zero.
 - Damage emitters on a bone that no listed hardpoint names stay drawn at spawn. Examples are the `Skirmish_Hutt_Asteroid_Base` fighter-bay bone, `Executor_Super_Star_Destroyer_No_Tractor` and `Empire_Training_Station`. Their retail visibility is unconfirmed.
 - Land objects with `HardPoints` (e.g. `U_Ground_Palace`) still draw their damage emitters at spawn: the hardpoint state-art rule covers the space population only.
@@ -390,7 +393,7 @@ Known differences and deferred work. None of these block M2.
 - FoC does not push overlapping ships apart (space-movement PL-09); the remake adds no separation. The owner's wish that units unclip themselves is a [Question] under the owner question queue (legacy EAWR-128) (legacy EAWR-597).
 - The Empire's tick-zero census (station on record 54, companies on record 57) follows the same data and search rule but is not seen in a slot-1 capture: the AI side is under fog and moves at once.
 - TED owner index 7 (the eight `Orbital_Resource_Container`) is Hutts in the FoC faction load order (`scene::faction_order`); SK-04 names it Hostile, the base-EaW order. The owner confirmed the containers are Hutt-owned in play, orange on the minimap, and destructible neutral mines (owner the Hutt-container ownership capture); tick zero uses Hutts.
-- The non-playable skirmish players (Pirates, Neutral, Hostile, Sarlacc, Hutts) each get a team of their own; retail puts them on no team (âˆ’1) and sets their relationships in a later pass that was not traced.
+- The non-playable skirmish players (Pirates, Neutral, Hostile, Sarlacc, Hutts) each get a team of their own; retail puts them on no team (−1) and sets their relationships in a later pass that was not traced.
 - The two-player setup follows measured 720p lobby geometry; animated background, preview start icons, saved selections, text metrics and native-resolution layout remain deferred (the map and faction setup screen, R-SETUP-01 to R-SETUP-05).
 - Setup discovery inherits SC-01's space-map filename policy; header-based official/custom filtering and broader mod-map discovery are tracked by the custom-map metadata and eligibility work (legacy EAWR-991) (WSS-03 to WSS-07).
 - The retail map-object ownership pass runs over every object, markers and props included; tick zero applies it to the map objects it makes units of. A prop or marker of a playable faction is deleted in retail, and the viewer still draws such props.
@@ -456,7 +459,7 @@ Known differences and deferred work. None of these block M2.
 - The HUD's time-panel buttons (help, holocron, pause, fast forward) are inert art in their normal state. A Button's blank texture under its icon is not drawn; both are the same size and opaque. The options button takes clicks only on its 24 x 24 mesh, as FoC's mesh pick does; its art overhangs it (static reading, runtime click in the overhang not yet recorded; the tactical HUD shell).
 - Death clones use the `Damage_Normal` entry of `Death_Clone`; retail picks the entry by the killing blow's damage type, which the snapshot does not carry (unverified; unit-animation UA-P1, the tactical unit clips (legacy EAWR-81)).
 - A death clone keeps its unit's position, height included: FoC creates it without its own `Layer_Z_Adjust` (space-movement LZ-02, the per-unit flight-height correction).
-- `SpaceProp` placements are drawn at their TED position; FoC raises them by their `Layer_Z_Adjust` like every created object (space-movement LZ-01). The tagâ€™s row is tracked in the movement tag audit (legacy EAWR-649).
+- `SpaceProp` placements are drawn at their TED position; FoC raises them by their `Layer_Z_Adjust` like every created object (space-movement LZ-01). The tag’s row is tracked in the movement tag audit (legacy EAWR-649).
 - Ships of one space layer that meet in play are not checked against retail after the per-unit flight-height correction (unverified; FoC has no runtime ship collision, avoidance is as S-14 measures it). The map-object height (LZ-01) has synthetic coverage only: no M2 map object carries `Layer_Z_Adjust`.
 - A death clone's fade (`Death_Fade_Time`) is shown as removal at the end of the fade; stations are the only M2 clones that fade (unit-animation UA-P5, the tactical unit clips (legacy EAWR-81)).
 - The X-wing S-foil clips (`DEPLOY`/`UNDEPLOY` on `SPOILER_LOCK`) wait for abilities in the snapshot (legacy EAWR-76); X-wings keep their bind pose (unit-animation UA-06, the tactical unit clips (legacy EAWR-81)).

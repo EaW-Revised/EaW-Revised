@@ -5,7 +5,9 @@
 #include "station_allocations.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -217,13 +219,183 @@ void test_cancel_releases_team_reservation() {
             "WPR-62: cancelled player's query sees only the new allied reservation");
     }
 }
+void test_level_up_completion_boundary() {
+    // WSL-31/WFO-31: the late queue completes the purchase after object services.
+    for (const auto buyer : {1U, 3U}) {
+        auto world = create(); if (!world) return;
+        expect(static_cast<bool>(world->submit(buy(0, buyer, 0, 1, 91))), "WSL-31 boundary level-up submits");
+        expect(static_cast<bool>(world->submit(buy(1, 1, buyer == 1 ? 1 : 0, 1, 10))), "WSL-34 owner queues behind level-up");
+        expect(static_cast<bool>(world->submit(buy(1, 2, 0, 1, 10))), "WSL-34 ally queues at old producer");
+        const auto events = through(*world, 5);
+        const auto units = world->units();
+        expect(std::any_of(units.begin(), units.end(), [](const auto& unit) {
+            return unit.entity_id == 1 && unit.type_id == 40;
+        }), "WSL-31 completion snapshot retains old station type/model identity");
+        expect(account(*world, buyer).lifetime.at(91) == 1
+            && std::any_of(account(*world, buyer).completed.begin(), account(*world, buyer).completed.end(),
+                [](const auto& held) { return held.type == 91 && held.station == 1 && held.object != 0; }),
+            "WPR-22 completed purchase has one held level-up object");
+        for (const auto player : {1U, 2U, 3U, 4U})
+            expect(account(*world, player).tech_level == 1, "WSL-31 completion does not advance allied tech");
+        for (const auto player : {1U, 2U})
+            expect(account(*world, player).queues[0].size() == 1
+                && account(*world, player).queues[0].front().station == 1,
+                "WSL-31 completion preserves owner/allied producer references");
+        expect(std::none_of(events.begin(), events.end(), [](const auto& event) {
+            return event.kind == t::EventKind::station_replaced || event.kind == t::EventKind::unit_destroyed
+                || event.kind == t::EventKind::victory;
+        }), "WSL-31 completion sends no selection-transfer, kill or victory event");
+        expect(static_cast<bool>(world->stage_remove(1)), "WSL-31 remove producer between completion and ability service");
+        const auto later = through(*world, 7);
+        expect(std::none_of(later.begin(), later.end(), [](const auto& event) {
+            return event.kind == t::EventKind::station_replaced;
+        }) && account(*world, buyer).completed.empty(),
+            "WSL-31 vanished holder consumes pending level-up without replacement");
+        expect(account(*world, buyer).tech_level == 1 && account(*world, buyer).lifetime.at(91) == 1,
+            "WSL-31 holder loss does not undo completed purchase or award replacement tech");
+    }
+}
+void test_level_up_without_next_type() {
+    auto rules = economy();
+    for (auto& menu : rules.menus) menu.next_level = 0;
+    auto world = create(rules); if (!world) return;
+    expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 91))), "WSL-32 terminal station level-up submits");
+    through(*world, 5);
+    expect(account(*world, 1).completed.size() == 1, "WSL-31 terminal purchase is held at queue completion");
+    const auto events = through(*world, 20);
+    expect(account(*world, 1).completed.empty() && account(*world, 1).lifetime.at(91) == 1,
+        "WSL-31 terminal level-up attempts once and removes its held object");
+    expect(account(*world, 1).tech_level == 1 && std::none_of(events.begin(), events.end(), [](const auto& event) {
+        return event.kind == t::EventKind::station_replaced || event.kind == t::EventKind::unit_destroyed
+            || event.kind == t::EventKind::victory;
+    }), "WSL-32 failed replacement leaves station and tech intact without combat events");
+}
+void test_level_up_death_while_held() {
+    for (const bool ai : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto count : {1U, 2U, 4U, 8U}) {
+            auto rules = economy(); rules.players[0].ai = ai;
+            for (auto& menu : rules.menus) for (auto& entry : menu.options)
+                if (entry.type == 91) entry.build_frames = entry.ai_build_frames = 2;
+            auto result = create(rules); if (!result) return;
+            auto world = std::move(*result);
+            expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 91))), "WSL-31 doomed held purchase submits");
+            expect(static_cast<bool>(world.submit({{3, 1, 1}, {1}, t::DamagePayload{whole(100000)}})),
+                "WSL-31 lethal damage submits after completion, before the due ability service");
+            eawr::platform::ThreadWorkerAdapter workers(count);
+            bool died = false;
+            while (world.completed_tick() < 7) {
+                const auto tick = world.completed_tick();
+                const auto stepped = world.step(workers);
+                expect(static_cast<bool>(stepped), "WSL-31 doomed held purchase steps");
+                if (!stepped) return;
+                const auto hash = stepped.value().state_sha256 + stepped.value().snapshot->sha256();
+                if (count == 1) reference.push_back(hash);
+                else expect(hash == reference[tick], "WSL-31 held-holder death is deterministic at 1/2/4/8 workers");
+                if (tick == 2) expect(account(world, 1).completed.size() == 1
+                    && account(world, 1).completed.front().level_up_service_frame == 4,
+                    "WSL-31 completed two-frame phase remains held before lethal damage");
+                for (const auto& event : stepped.value().snapshot->events()) {
+                    if (event.kind == t::EventKind::unit_destroyed && event.unit == 1 && event.tick == 3) died = true;
+                    expect(event.kind != t::EventKind::station_replaced, "WSL-31 killed held producer never resurrects");
+                }
+            }
+            expect(died && account(world, 1).completed.empty() && account(world, 1).tech_level == 1,
+                "WSL-31 actual combat death consumes pending level-up without tech advancement");
+            expect(account(world, 1).lifetime.at(91) == 1 && account(world, 1).credits == whole(5990),
+                "WSL-31 completed purchase remains paid and counted after holder death, including AI");
+        }
+    }
+}
+void test_level_up_service_boundary() {
+    // WSL-31: inclusive creation + 0..2 deadline; the completed late queue misses traversal.
+    // Seed 540 / held object 6 pin all three initial phases with the reserved keyed draw.
+    struct ServiceCase { unsigned duration; unsigned phase; };
+    for (const auto scenario : {ServiceCase{1, 1}, ServiceCase{2, 2}, ServiceCase{4, 0}, ServiceCase{5, 2}})
+    for (const auto buyer : {1U, 3U}) {
+        const auto duration = scenario.duration;
+        const auto service_tick = duration + std::max(1U, scenario.phase);
+        std::vector<std::string> reference;
+        for (const auto count : {1U, 2U, 4U, 8U}) {
+            auto rules = economy();
+            for (auto& menu : rules.menus) {
+                for (auto& entry : menu.options) if (entry.type == 91) entry.build_frames = entry.ai_build_frames = duration;
+                if (menu.station == 41) std::erase_if(menu.options, [](const auto& entry) { return entry.type == 90; });
+            }
+            auto result = create(rules); if (!result) return;
+            auto world = std::move(*result);
+            expect(static_cast<bool>(world.submit(buy(0, buyer, 0, 1, 91))), "WSL-31 phased level-up submits");
+            expect(static_cast<bool>(world.submit(buy(0, 1, buyer == 1 ? 1 : 0, 1, 10))), "WSL-34 owner queue submits");
+            expect(static_cast<bool>(world.submit(buy(0, 2, 0, 1, 10))), "WSL-34 allied queue submits");
+            eawr::platform::ThreadWorkerAdapter workers(count);
+            unsigned replacements = 0;
+            while (world.completed_tick() < duration + 5) {
+                const auto tick = world.completed_tick();
+                if (count != 1) world.scramble_storage_for_testing();
+                const auto stepped = world.step(workers);
+                expect(static_cast<bool>(stepped), "WSL-31 phased level-up steps");
+                if (!stepped) return;
+                const auto hash = stepped.value().state_sha256 + stepped.value().snapshot->sha256();
+                if (count == 1) reference.push_back(hash);
+                else expect(hash == reference[tick], "WSL-31 completion and service hashes/snapshots equal at 1/2/4/8 workers");
+                const auto events = stepped.value().snapshot->events();
+                const auto bytes = world.canonical_state_bytes();
+                constexpr std::array<std::uint8_t, 4> service_tag{'L', 'S', 'V', 'C'};
+                const auto service_block = std::search(bytes.begin(), bytes.end(), service_tag.begin(), service_tag.end());
+                if (tick < duration || tick >= service_tick)
+                    expect(service_block == bytes.end(), "WSL-31 LSVC is absent before completion and after one-shot service");
+                for (const auto& event : events) {
+                    expect(event.kind != t::EventKind::unit_destroyed && event.kind != t::EventKind::victory,
+                        "WSL-37 ability replacement has no combat death or victory event");
+                    if (event.kind != t::EventKind::station_replaced) continue;
+                    ++replacements;
+                    expect(event.tick > duration, "WSL-31 replacement follows the queue-completion frame");
+                    expect(event.tick == service_tick,
+                        "WSL-31 replacement runs on the sourced first eligible ability service");
+                    const auto instances = stepped.value().snapshot->instances();
+                    const auto replacement = std::find_if(instances.begin(), instances.end(), [&](const auto& unit) {
+                        return unit.entity_id == event.sequence;
+                    });
+                    expect(event.unit == 1 && replacement != instances.end() && replacement->type_id == 41
+                        && replacement->owner == 1, "WSL-34 selection-transfer event names old/new station model identities");
+                    for (const auto player : {1U, 2U})
+                        expect(account(world, player).queues[0].size() == 1
+                            && account(world, player).queues[0].front().station == event.sequence,
+                            "WSL-34 owner and allied queues transfer at the ability service");
+                    expect(account(world, buyer).completed.empty() && account(world, 1).tech_level == 2
+                        && account(world, 2).tech_level == 2 && account(world, 3).tech_level == 2
+                        && account(world, 4).tech_level == 1, "WSL-34 held level-up retires and allied tech changes at service");
+                    expect(!world.build_allowed(1, event.sequence, 90), "WSL-31 replacement uses its new menu at service");
+                }
+                if (tick >= duration && tick < service_tick) {
+                    expect(world.build_allowed(1, 1, 90) && account(world, 1).tech_level == 1,
+                        "WSL-31 completion and not-yet-due snapshots retain the old menu and tech");
+                    const auto& held = account(world, buyer).completed;
+                    expect(held.size() == 1 && held.front().level_up_service_frame == duration + scenario.phase,
+                        "WSL-31 completed purchase retains its inclusive first-service deadline");
+                    // Documented LSVC v1 packet: one owner/object/deadline row, little-endian.
+                    const std::array<std::uint8_t, 44> expected{
+                        'L', 'S', 'V', 'C', 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+                        static_cast<std::uint8_t>(buyer), 0, 0, 0, 0, 0, 0, 0,
+                        6, 0, 0, 0, 0, 0, 0, 0,
+                        static_cast<std::uint8_t>(duration + scenario.phase), 0, 0, 0, 0, 0, 0, 0};
+                    expect(service_block != bytes.end()
+                        && static_cast<std::size_t>(bytes.end() - service_block) >= expected.size()
+                        && std::equal(expected.begin(), expected.end(), service_block),
+                        "WSL-31 canonical pending state includes the exact initialized deadline");
+                }
+            }
+            expect(replacements == 1, "WSL-31 exactly one replacement across completion and later services");
+        }
+    }
+}
 void test_level_up() {
     auto world = create(); if (!world) return;
     expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 90))), "buy upgrade beside levelup");
     expect(static_cast<bool>(world->submit(buy(0, 1, 1, 1, 91))), "buy levelup");
     expect(static_cast<bool>(world->submit({{1, 1, 2}, {1}, t::DamagePayload{whole(200), 1}})), "destroy old station hardpoint");
     expect(static_cast<bool>(world->submit(buy(1, 2, 0, 1, 10))), "ally queues at old station");
-    auto events = through(*world, 5);
+    auto events = through(*world, 7);
     const auto replaced = std::find_if(events.begin(), events.end(), [](const auto& event) { return event.kind == t::EventKind::station_replaced; });
     expect(replaced != events.end(), "WPR-52 emits replacement event");
     if (replaced == events.end()) return;
@@ -250,8 +422,8 @@ void test_level_up() {
     // WPR-33: this synthetic fixture has a second allied L1 station. Remove it so
     // neither the buyer nor an ally can satisfy the obsolete L1 prerequisite.
     expect(static_cast<bool>(world->stage_remove(2)), "remove the remaining allied prerequisite station");
-    expect(static_cast<bool>(world->submit(buy(5, 1, 3, id, 91))), "submit obsolete levelup");
-    events = through(*world, 6);
+    expect(static_cast<bool>(world->submit(buy(7, 1, 3, id, 91))), "submit obsolete levelup");
+    events = through(*world, 8);
     expect(events.back().reason == t::RejectReason::cannot_produce, "WPR-33 old station prerequisite prevents repeat levelup");
     expect(world->durability_state(id)->hardpoints[1].raw() > 0 && t::hardpoint_disabled(*world->durability_state(id), 1),
         "WPR-52 disabled state survives ECS and later ticks");
@@ -262,7 +434,7 @@ void test_teammate_level_up() {
     expect(static_cast<bool>(world->submit(buy(0, 3, 0, 1, 91))), "second teammate buys station level-up");
     expect(static_cast<bool>(world->submit(buy(1, 1, 0, 1, 10))), "owner queues during teammate's level-up");
     expect(static_cast<bool>(world->submit(buy(1, 2, 0, 1, 10))), "another ally queues at same producer");
-    const auto events = through(*world, 5);
+    const auto events = through(*world, 7);
     const auto replaced = std::find_if(events.begin(), events.end(), [](const auto& event) {
         return event.kind == t::EventKind::station_replaced;
     });
@@ -319,7 +491,7 @@ void test_repair_carryover() {
 }
 void test_replay_determinism() {
     t::TacticalReplay input{setup(), 15, {buy(0, 1, 0, 1, 90), buy(0, 1, 1, 1, 91), buy(1, 2, 0, 1, 10),
-        {{1, 1, 2}, {1}, t::DamagePayload{whole(200), 1}}, buy(5, 1, 3, 8, 92)}};
+        {{1, 1, 2}, {1}, t::DamagePayload{whole(200), 1}}, buy(7, 1, 3, 8, 92)}};
     // Replay commands must be in canonical key order.
     std::sort(input.commands.begin(), input.commands.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
     const auto run = [&](const t::TacticalReplay& replay, const eawr::sim::PartitionExecutor& executor, bool scramble) {
@@ -405,6 +577,50 @@ void test_replacement_attack() {
         expect(replacement != 0, "target fixture actually replaced station");
     }
 }
+// The commands phase inserts a reinforcement into the staged units, which moves them. An attack
+// order later in the same tick reads its target's health and health profile from the staged
+// unit: an upgraded unit keeps its profile in the unit itself, so the targeting view's copy of
+// that pointer no longer names it (a use after free in has_aim_hardpoint before the fix).
+void test_order_after_reinforcement() {
+    t::CombatTable combat;
+    for (const auto type : {10ULL, 40ULL, 41ULL}) {
+        t::CombatProfile profile; profile.type_id = type;
+        profile.max_attack_distance = whole(500);
+        profile.hardpoints = {{0, {}, true}};
+        combat.profiles.push_back(profile);
+    }
+    t::MotionTable motion;
+    motion.rules.arc_degrees = whole(15);
+    motion.rules.expansion_distance = whole(300);
+    t::MotionProfile ship;
+    ship.type_id = 10; ship.max_speed = whole(3); ship.rate_of_turn = whole(2); ship.turn_in_place_slowdown = whole(1);
+    ship.acceleration = decimal("0.05"); ship.deceleration = decimal("0.05");
+    motion.profiles = {ship};
+    auto initial = setup();
+    initial.units[4].position = {whole(3000), {}, {}}; // player 4's ship, out of reach
+    const std::vector<t::SensorProfile> sensors{{10, whole(20000)}, {40, whole(20000)}, {41, whole(20000)}};
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto made = t::TacticalSession::create(initial, sensors, durability(), motion, std::nullopt, combat, {}, {}, economy());
+        expect(static_cast<bool>(made), "reinforcement order fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 90))), "buy the hull upgrade");
+        expect(static_cast<bool>(world.submit(buy(0, 1, 1, 1, 10))), "buy a ship to reinforce");
+        expect(static_cast<bool>(world.submit({{22, 1, 2}, {}, t::ReinforcePayload{10, {whole(-2000), {}, {}}}})),
+            "reinforce in the attack's tick");
+        expect(static_cast<bool>(world.submit({{22, 4, 0}, {5}, t::AttackPayload{3}})), "attack the upgraded ship");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        bool upgraded = false;
+        for (unsigned tick = 0; tick < 25; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "reinforcement order fixture steps"); if (!stepped) return;
+            if (tick == 21) upgraded = world.durability_state(3) && world.durability_state(3)->hull == decimal("125");
+        }
+        expect(upgraded, "the target carries its upgrade bonus before the order");
+        const auto state = world.combat_state(5);
+        expect(state && state->direct && state->attack_target == 3, "the order after a reinforcement takes its target");
+        expect(account(world, 1).pool.empty(), "the reinforcement left the pool in the order's tick");
+    }
+}
 void test_destroyed_station() {
     for (const bool ai : {false, true}) {
         auto rules = economy(); rules.players[0].ai = ai;
@@ -441,7 +657,7 @@ void test_replacement_projectiles() {
     expect(!before.empty() && before.front().target == 1, "homing shot is in flight before replacement");
     if (before.empty()) return;
     const auto shot_id = before.front().id;
-    const auto events = through(world, 5);
+    const auto events = through(world, 7);
     eawr::sim::EntityId replacement{};
     for (const auto& event : events) if (event.kind == t::EventKind::station_replaced) replacement = event.sequence;
     through(world, 6);
@@ -451,9 +667,19 @@ void test_replacement_projectiles() {
         "WPR-53: the same homing projectile remains locked on the replacement");
 }
 void test_hangar_replacement() {
-    for (const bool reordered : {false, true}) for (const auto reserve : {-1, 0, 2}) {
+    for (const bool disabled : {false, true}) for (const bool reordered : {false, true}) for (const auto reserve : {-1, 0, 2}) {
+      std::vector<std::string> hashes;
+      for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto launch_setup = setup();
         std::erase_if(launch_setup.units, [](const auto& unit) { return unit.entity_id == 2; });
+        launch_setup.units.front().garrison_enabled = !disabled;
+        if (disabled) {
+            launch_setup.units.push_back({6, 30, 1, {}, m::identity_quat(), {}});
+            launch_setup.units.push_back({7, 20, 1, {}, m::identity_quat(), {}});
+            launch_setup.units.push_back({8, 30, 1, {}, m::identity_quat(), {}});
+            launch_setup.units.push_back({9, 20, 1, {}, m::identity_quat(), {}});
+            launch_setup.squadrons = {{6, {7}}, {8, {9}}};
+        }
         auto health = durability(); auto craft_health = health.profiles.front(); craft_health.type_id = 20;
         health.profiles.insert(health.profiles.begin() + 1, craft_health);
         t::MotionTable motion;
@@ -472,20 +698,519 @@ void test_hangar_replacement() {
         }
         auto made = t::TacticalSession::create(launch_setup, {}, health, motion, std::nullopt, {}, {}, {}, economy());
         expect(static_cast<bool>(made), "hangar replacement fixture creates"); if (!made) return;
-        auto carrier = std::move(made).value(); through(carrier, 100);
-        expect(carrier.squadrons().size() == 1, "cap-one hangar initially launches one squadron");
+        auto carrier = std::move(made).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto advance = [&](std::uint64_t until) {
+            std::vector<t::Event> events;
+            while (carrier.completed_tick() < until) {
+                const auto tick = carrier.completed_tick();
+                if (workers != 1) carrier.scramble_storage_for_testing();
+                const auto step = carrier.step(executor);
+                expect(static_cast<bool>(step), "hangar upgrade steps at every worker count");
+                if (!step) break;
+                const auto emitted = step.value().snapshot->events();
+                events.insert(events.end(), emitted.begin(), emitted.end());
+                const auto hash = carrier.state_sha256();
+                if (workers == 1) hashes.push_back(hash);
+                else expect(hash == hashes[tick], "FL-13: hangar upgrade hashes agree at 1/2/4/8 workers and shuffled storage");
+            }
+            return events;
+        };
+        advance(100);
+        expect(carrier.squadrons().size() == (disabled ? 2U : 1U), "FL-13: disabled station retains only its free starting set");
         expect(static_cast<bool>(carrier.submit(buy(100, 1, 0, 1, 91))), "hangar levelup submits");
-        const auto events = through(carrier, 200);
+        const auto events = advance(200);
         eawr::sim::EntityId replacement{};
         for (const auto& event : events) if (event.kind == t::EventKind::station_replaced) replacement = event.sequence;
-        expect(replacement != 0 && carrier.squadrons().size() == 1, "WPR-56: retained squadron consumes replacement cap");
+        expect(replacement != 0 && carrier.squadrons().size() == (disabled ? 2U : 1U),
+            "FL-13/WPR-56: station replacement adds no fresh squadrons");
+        if (disabled) {
+            const auto units = carrier.units();
+            const auto station = std::find_if(units.begin(), units.end(), [=](const auto& unit) { return unit.entity_id == replacement; });
+            expect(station != units.end() && !station->garrison_enabled, "FL-13: replacement preserves the object garrison flag");
+            expect(std::ranges::equal(carrier.squadrons(), launch_setup.squadrons),
+                "FL-13: the two free starting squadrons retain their IDs and craft");
+            expect(static_cast<bool>(carrier.submit({{200, 1, 1}, {7, 9}, t::DamagePayload{whole(10000)}})), "free starting craft destruction submits");
+            advance(300);
+            expect(carrier.squadrons().empty(), "FL-13: authored station reserves cannot replace free starting squads");
+            continue;
+        }
         if (carrier.squadrons().empty()) continue;
         const auto squadron = carrier.squadrons().front(); const auto mind = carrier.squadron_state(squadron.container);
         expect(mind && mind->spawner == replacement && mind->entry == (reordered ? 1U : 0U), "WPR-56: entry matched by type");
         expect(static_cast<bool>(carrier.submit({{200, 1, 1}, squadron.members, t::DamagePayload{whole(10000)}})), "retained craft destruction submits");
-        through(carrier, 300);
+        advance(300);
         expect(carrier.squadrons().size() == (reserve == 0 ? 0U : 1U), "WPR-56: retained death releases correct entry without replenishing spent reserve");
+      }
     }
+}
+t::MotionTable free_garrison_motion() {
+    t::MotionTable motion;
+    t::CraftProfile craft;
+    craft.type_id = 20; craft.max_speed = whole(5); craft.min_speed = whole(1);
+    craft.rate_of_turn = whole(6); craft.lift = whole(6); craft.thrust = decimal("0.2");
+    craft.roll_rate = whole(6); craft.bank_angle = whole(70); craft.strafe_distance = whole(200);
+    motion.squadrons.craft = {craft};
+    motion.squadrons.squadrons = {{30, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)},
+        {31, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)}};
+    for (const auto type : {40ULL, 41ULL}) {
+        t::SpawnerProfile hangar; hangar.type_id = type; hangar.entries = {{31, 1, -1}};
+        hangar.delay_frames = 30; hangar.bays = {{0, {whole(100), {}, {}}, {whole(1), {}, {}}}};
+        hangar.starbase = true;
+        motion.squadrons.spawners.push_back(hangar);
+    }
+    return motion;
+}
+t::DurabilityTable free_garrison_health() {
+    auto health = durability();
+    auto craft = health.profiles.front(); craft.type_id = 20;
+    health.profiles.insert(health.profiles.begin() + 1, craft);
+    return health;
+}
+t::TacticalSetup free_garrison_setup() {
+    auto value = setup();
+    value.units = {{1, 40, 2, {}, m::identity_quat(), {}},
+        {6, 30, 1, {}, m::identity_quat(), {}}, {7, 20, 1, {}, m::identity_quat(), {}},
+        {8, 30, 1, {}, m::identity_quat(), {}}, {9, 20, 1, {}, m::identity_quat(), {}}};
+    value.units.front().garrison_enabled = false;
+    value.squadrons = {{6, {7}}, {8, {9}}};
+    value.free_garrisons = {{1, 600, {30, 30}, {7, 9}}};
+    return value;
+}
+void test_free_garrison_replenishment() {
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = free_garrison_setup();
+        const auto motion = free_garrison_motion();
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), motion,
+            std::nullopt, {}, {}, {}, economy());
+        expect(static_cast<bool>(made), "FL-14: free garrison fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        bool checked_bay = false;
+        const auto advance = [&](const std::uint64_t until) {
+            while (world.completed_tick() < until) {
+                const auto tick = world.completed_tick();
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "FL-14: depletion/replenishment steps"); if (!step) return;
+                const auto hash = world.state_sha256();
+                if (workers == 1) hashes.push_back(hash);
+                else expect(hash == hashes[tick], "FL-14: every tick agrees on 1/2/4/8 and shuffled storage");
+                if (!checked_bay && tick >= 1350 && !world.squadrons().empty()) {
+                    const auto squadron = world.squadrons().front();
+                    const auto units = world.units();
+                    const auto craft = std::find_if(units.begin(), units.end(), [&](const auto& unit) {
+                        return unit.entity_id == squadron.members.front();
+                    });
+                    expect(craft != units.end() && craft->owner == 1 && craft->position.x == whole(100),
+                        "FL-14: allied station launches player-owned craft from its bay");
+                    const auto mind = world.squadron_state(squadron.container);
+                    expect(mind && mind->spawner == 0 && squadron.container > 9,
+                        "FL-14: pending births have new identities and no authored garrison counter");
+                    checked_bay = true;
+                }
+            }
+        };
+        advance(100);
+        expect(static_cast<bool>(world.submit({{100, 1, 0}, {7}, t::DamagePayload{whole(10000)}})), "partial loss submits");
+        advance(750);
+        expect(world.squadrons().size() == 1 && world.squadrons().front().container == 8,
+            "FL-14: partial depletion does not replenish after the faction delay");
+        expect(static_cast<bool>(world.submit({{750, 1, 1}, {9}, t::DamagePayload{whole(10000)}})), "full loss submits");
+        expect(static_cast<bool>(world.submit(buy(800, 2, 0, 1, 91))), "station upgrades while player waits");
+        advance(1350);
+        expect(world.squadrons().empty(), "FL-14: full depletion waits all 600 faction-delay frames");
+        advance(1420);
+        expect(checked_bay && world.squadrons().size() == 2, "FL-14: ordered duplicate templates both launch after the delay");
+        expect(world.ledgers()[0].credits == whole(6000) && world.ledgers()[0].pool.empty(),
+            "FL-14: free launches spend no credits and use no purchase pool");
+        std::vector<eawr::sim::EntityId> members;
+        for (const auto& squadron : world.squadrons()) members.insert(members.end(), squadron.members.begin(), squadron.members.end());
+        std::sort(members.begin(), members.end());
+        expect(static_cast<bool>(world.submit({{1420, 1, 2}, members, t::DamagePayload{whole(10000)}})), "replacement loss submits");
+        advance(2020);
+        expect(world.squadrons().empty(), "FL-14: replacement craft register for the next full depletion delay");
+        advance(2090);
+        expect(world.squadrons().size() == 2, "FL-14: another full set replenishes after repeated depletion");
+    }
+}
+void test_free_garrison_timer_order() {
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = free_garrison_setup();
+        expect(t::initial_spawner(initial.seed, 1, 1).next_service_frame == 15,
+            "FL-14: seed 540 pins hangar service at frame 15 plus 30n");
+        constexpr std::uint64_t due = 615;
+        initial.free_garrisons.front().delay_frames = 600;
+        initial.free_garrisons.front().templates = {30};
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion());
+        expect(static_cast<bool>(made), "FL-14: coincident timer/hangar fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{14, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})),
+            "FL-14: full depletion at frame 15 starts the 600-frame timer");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto advance = [&](const std::uint64_t until) {
+            while (world.completed_tick() < until) {
+                const auto tick = world.completed_tick();
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "FL-14: timer boundary steps"); if (!step) return false;
+                const auto hash = world.state_sha256();
+                if (workers == 1) hashes.push_back(hash);
+                else expect(hash == hashes[tick], "FL-14: timer boundary every tick agrees on 1/2/4/8");
+            }
+            return true;
+        };
+        if (!advance(due)) return;
+        expect(world.squadrons().empty(), "FL-14: frame 615 timer maturation cannot feed the same-frame hangar pass");
+        if (!advance(due + 29)) return;
+        expect(world.squadrons().empty(), "FL-14: matured queue remains unlaunched through frame 644");
+        if (!advance(due + 30)) return;
+        expect(world.squadrons().size() == 1, "FL-14: first replacement launches exactly at frame 645");
+    }
+}
+void test_free_garrison_pending_and_generic() {
+    {
+        auto initial = free_garrison_setup();
+        initial.units.insert(initial.units.begin() + 1, {2, 41, 1, {}, m::identity_quat(), {}});
+        auto motion = free_garrison_motion();
+        motion.squadrons.spawners.back().starbase = false;
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), motion);
+        expect(static_cast<bool>(made), "FL-14: carrier-loss fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        through(world, 100);
+        std::vector<eawr::sim::EntityId> carrier_craft;
+        for (const auto& squadron : world.squadrons()) {
+            const auto mind = world.squadron_state(squadron.container);
+            if (mind && mind->spawner == 2)
+                carrier_craft.insert(carrier_craft.end(), squadron.members.begin(), squadron.members.end());
+        }
+        expect(!carrier_craft.empty(), "FL-14: an authored carrier squadron launches normally");
+        if (!carrier_craft.empty()) expect(static_cast<bool>(world.submit(
+            {{100, 1, 0}, carrier_craft, t::DamagePayload{whole(10000)}})), "authored carrier loss submits");
+        through(world, 800);
+        const auto units = world.units();
+        expect(std::count_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 30; }) == 2,
+            "FL-14: authored carrier losses do not replenish the player's free starting force");
+    }
+    {
+        auto initial = free_garrison_setup(); initial.free_garrisons.front().delay_frames = 60;
+        initial.units.front().owner = 4;
+        initial.players.back().team_id = 0;
+        initial.players.back().faction_id = 999;
+        t::CombatTable relationships; relationships.pad_neutral_factions = {999};
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion(),
+            std::nullopt, relationships);
+        expect(static_cast<bool>(made), "FL-14: neutral same-team station fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})),
+            "neutral-station depletion submits");
+        through(world, 100);
+        expect(world.squadrons().empty(), "FL-14: neutral ownership cannot claim an allied free-force queue");
+        t::UnitState station{0, 41, 3, {}, m::identity_quat(), {}}; station.garrison_enabled = false;
+        expect(static_cast<bool>(world.stage_spawn(station)), "a real allied station enters beside the neutral station");
+        through(world, 200);
+        expect(world.squadrons().size() == 2, "FL-14: the real allied station consumes the retained pending queue");
+    }
+    for (const bool generic : {false, true}) for (const bool quit : {false, true}) {
+        auto initial = free_garrison_setup(); initial.free_garrisons.front().delay_frames = 60;
+        if (generic) initial.free_garrisons.front().templates = {10};
+        auto motion = free_garrison_motion();
+        motion.squadrons.spawners.front().starbase = false; // a carrier cannot claim a player pending queue
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), motion);
+        expect(static_cast<bool>(made), "FL-14: pending queue fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})), "pending fixture depletion submits");
+        if (quit) expect(static_cast<bool>(world.submit({{1, 1, 1}, {}, t::QuitPayload{}})), "pending player quits");
+        through(world, 100);
+        expect(world.squadrons().empty(), "FL-14: non-starbase cannot launch pending free forces");
+        t::UnitState station{0, 41, 3, {}, m::identity_quat(), {}}; station.garrison_enabled = false;
+        const auto born = world.stage_spawn(station);
+        expect(static_cast<bool>(born), "an allied eligible station arrives after the timer");
+        through(world, 200);
+        const auto units = world.units();
+        const auto created = std::count_if(units.begin(), units.end(), [](const auto& unit) {
+            return unit.owner == 1 && (unit.type_id == 10 || unit.type_id == 20);
+        });
+        expect(created == (quit ? 0 : generic ? 1 : 2), "FL-14: pending queue survives missing eligibility; quit players cannot replenish");
+        if (generic && !quit) {
+            expect(world.squadrons().empty(), "FL-14: a generic free company creates one actual object without a team container");
+            const auto ship = std::find_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 10; });
+            if (ship != units.end()) expect(static_cast<bool>(world.submit({{200, 1, 1}, {ship->entity_id}, t::DamagePayload{whole(10000)}})),
+                "generic free object loss submits");
+            through(world, 300);
+            const auto after = world.units();
+            expect(std::count_if(after.begin(), after.end(), [](const auto& unit) { return unit.type_id == 10; }) == 1,
+                "FL-14: a generic replacement is registered and replenishes again");
+        }
+    }
+}
+void test_free_garrison_bays_and_claims() {
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = free_garrison_setup();
+        auto second = initial.units.front(); second.entity_id = 2; second.owner = 3;
+        initial.units.insert(initial.units.begin() + 1, second);
+        initial.units[4].owner = initial.units[5].owner = 2;
+        initial.free_garrisons = {{1, 0, {30}, {7}}, {2, 0, {31}, {9}}};
+        for (initial.seed = 0; initial.seed < 4096; ++initial.seed) {
+            if (t::initial_spawner(initial.seed, 1, 1).next_service_frame
+                == t::initial_spawner(initial.seed, 1, 2).next_service_frame) break;
+        }
+        expect(initial.seed < 4096, "FL-14: competing stations share a service frame");
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion());
+        expect(static_cast<bool>(made), "FL-14: competing stations fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {7}, t::DamagePayload{whole(10000)}})), "first allied player depleted");
+        expect(static_cast<bool>(world.submit({{0, 2, 0}, {9}, t::DamagePayload{whole(10000)}})), "second allied player depleted");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        while (world.completed_tick() < 100) {
+            const auto tick = world.completed_tick();
+            if (workers != 1) world.scramble_storage_for_testing();
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "FL-14: concurrent allied queue claims step"); if (!step) return;
+            const auto hash = world.state_sha256();
+            if (workers == 1) hashes.push_back(hash);
+            else expect(hash == hashes[tick], "FL-14: overlapping claims agree across all worker counts");
+        }
+        expect(world.squadrons().size() == 2, "FL-14: two stations claim each pending company exactly once");
+        const auto units = world.units();
+        expect(std::count_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 30 && unit.owner == 1; }) == 1
+            && std::count_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 31 && unit.owner == 2; }) == 1,
+            "FL-14: shared station service preserves each pending player's template and ownership");
+    }
+    auto initial = free_garrison_setup(); initial.free_garrisons.front().delay_frames = 60;
+    auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion());
+    expect(static_cast<bool>(made), "FL-14: destroyed bay fixture creates"); if (!made) return;
+    auto world = std::move(made).value();
+    expect(static_cast<bool>(world.submit({{0, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})), "bay fixture depletes free craft");
+    expect(static_cast<bool>(world.submit({{0, 2, 0}, {1}, t::DamagePayload{whole(200), 0}})), "bay fixture destroys the launch hardpoint");
+    through(world, 100);
+    const auto health = world.durability_state(1);
+    expect(health && health->hardpoints[0] == Fixed{} && world.squadrons().empty(),
+        "FL-14: a destroyed fighter bay holds matured pending forces");
+    t::UnitState station{0, 41, 3, {}, m::identity_quat(), {}}; station.garrison_enabled = false;
+    expect(static_cast<bool>(world.stage_spawn(station)), "another allied intact bay enters");
+    through(world, 200);
+    expect(world.squadrons().size() == 2, "FL-14: an intact allied bay consumes the held pending queue");
+
+    std::vector<std::string> restored_hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto restored_setup = free_garrison_setup();
+        restored_setup.free_garrisons.front().delay_frames = 60;
+        auto restored = t::TacticalSession::create(restored_setup, {}, free_garrison_health(), free_garrison_motion(),
+            std::nullopt, {}, {}, {}, economy());
+        expect(static_cast<bool>(restored), "FL-03: disabled upgraded bay fixture creates");
+        if (!restored) return;
+        auto restored_world = std::move(restored).value();
+        expect(static_cast<bool>(restored_world.submit({{0, 1, 0}, {7, 9}, t::DamagePayload{whole(10000)}})),
+            "FL-14: upgraded bay fixture depletes free craft");
+        expect(static_cast<bool>(restored_world.submit({{0, 2, 0}, {1}, t::DamagePayload{whole(200), 0}})),
+            "FL-03: upgraded bay fixture destroys its only bay");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto advance = [&](const auto until) {
+            while (restored_world.completed_tick() < until) {
+                const auto tick = restored_world.completed_tick();
+                if (workers != 1) restored_world.scramble_storage_for_testing();
+                const auto step = restored_world.step(executor);
+                expect(static_cast<bool>(step), "FL-03: disabled upgraded bay steps");
+                if (!step) return false;
+                const auto hash = restored_world.state_sha256();
+                if (workers == 1) restored_hashes.push_back(hash);
+                else expect(hash == restored_hashes[tick], "FL-03: disabled bay launches agree across workers");
+            }
+            return true;
+        };
+        if (!advance(100U)) return;
+        const auto destroyed = restored_world.durability_state(1);
+        expect(destroyed && destroyed->hardpoints[0] == Fixed{} && restored_world.squadrons().empty(),
+            "FL-03: destroyed bay cannot consume the matured pending queue");
+        expect(static_cast<bool>(restored_world.submit(buy(100, 2, 1, 1, 91))),
+            "FL-03: upgrade restores the destroyed bay");
+        if (!advance(107U)) return; // WSL-31: include the latest first eligible ability service.
+        const auto units = restored_world.units();
+        const auto replacement = std::find_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 41; });
+        expect(replacement != units.end(), "FL-03: upgraded station exists");
+        if (replacement == units.end()) return;
+        const auto disabled_bay = restored_world.durability_state(replacement->entity_id);
+        expect(disabled_bay && disabled_bay->hardpoints[0] == decimal("0.1") && t::hardpoint_disabled(*disabled_bay, 0),
+            "FL-03/WPR-52: replacement bay is disabled at positive 0.1 health");
+        if (!advance(200U)) return;
+        expect(restored_world.squadrons().size() == 2,
+            "FL-03/14: disabled restored bay launches both pending free companies");
+    }
+}
+void test_disabled_authored_bay() {
+    std::vector<std::string> hashes;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = free_garrison_setup();
+        initial.units = {{1, 40, 2, {}, m::identity_quat(), {}}};
+        initial.squadrons.clear();
+        initial.free_garrisons.clear();
+        auto made = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion(),
+            {}, {}, {}, {}, economy());
+        expect(static_cast<bool>(made), "FL-03: disabled authored bay fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{0, 2, 0}, {1}, t::DamagePayload{whole(200), 0}})),
+            "FL-03: authored bay is destroyed before service");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto advance = [&](const std::uint64_t until) {
+            while (world.completed_tick() < until) {
+                const auto tick = world.completed_tick();
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "FL-03: disabled authored bay steps"); if (!step) return false;
+                const auto hash = world.state_sha256();
+                if (workers == 1) hashes.push_back(hash);
+                else expect(hash == hashes[tick], "FL-03: disabled authored bay every tick agrees on 1/2/4/8");
+            }
+            return true;
+        };
+        if (!advance(100)) return;
+        expect(world.squadrons().empty(), "FL-03: destroyed authored bay cannot launch");
+        expect(static_cast<bool>(world.submit(buy(100, 2, 1, 1, 91))), "FL-03: authored bay upgrade submits");
+        if (!advance(107)) return; // WSL-31: include the latest first eligible ability service.
+        const auto units = world.units();
+        const auto station = std::find_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 41; });
+        expect(station != units.end(), "FL-03: authored bay upgrade replaces station");
+        if (station == units.end()) return;
+        const auto health = world.durability_state(station->entity_id);
+        expect(health && health->hardpoints[0] == decimal("0.1") && t::hardpoint_disabled(*health, 0),
+            "FL-03: upgraded authored bay survives disabled at 0.1 health");
+        if (!advance(200)) return;
+        expect(!world.squadrons().empty(), "FL-03: disabled surviving authored bay launches a company");
+    }
+}
+void test_free_garrison_replay() {
+    auto initial = free_garrison_setup(); initial.queue_identities = true;
+    const auto snapshot = t::TacticalSession::create(initial);
+    expect(snapshot && snapshot.value().units().size() == initial.units.size(),
+        "FL-14: tableless tick-zero snapshots retain free-garrison bindings without requiring creation tables");
+    const auto health_only = t::TacticalSession::create(initial, {}, free_garrison_health());
+    expect(health_only && health_only.value().durability_state(7).has_value(),
+        "FL-14: health-only worlds retain the free roster without requiring an unbound hangar creation table");
+    const auto bytes = t::write_replay({initial, 0, {}});
+    const auto parsed = bytes ? t::parse_replay(bytes.value()) : eawr::core::Result<t::TacticalReplay>::failure(bytes.error());
+    expect(parsed && parsed.value().setup == initial, "FL-14: mixed GSPN/QIDS/GARR replay roundtrips");
+    if (parsed) expect(t::write_replay(parsed.value()).value() == bytes.value(), "FL-14: pending setup has one wire encoding");
+    if (bytes) {
+        std::size_t tag = t::replay_header_size + 4;
+        const auto u16 = [&](std::size_t offset) {
+            return static_cast<unsigned>(bytes.value()[offset])
+                | (static_cast<unsigned>(bytes.value()[offset + 1]) << 8);
+        };
+        while (u16(tag) != t::replay_extension_free_garrison) tag += 4 + u16(tag + 2);
+        const auto body = tag + 4;
+        const auto corrupt = [&](std::size_t offset, std::uint32_t value) {
+            auto malformed = bytes.value();
+            for (unsigned i = 0; i < 4; ++i)
+                malformed[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
+            expect(!t::parse_replay(malformed), "FL-14: malformed GARR version/count/owner/object is rejected");
+        };
+        corrupt(body, 2); // unsupported version
+        corrupt(body + 4, 0); corrupt(body + 4, 65); // empty/oversized player table
+        corrupt(body + 8, 9); // undeclared owner
+        corrupt(body + 16, 0); corrupt(body + 16, 1025); // invalid template count
+        corrupt(body + 20, 0xffffffffU); // object count exceeds bounded record
+        corrupt(body + 40, 6); // team container is not an actual registered object
+        for (const auto length : {0U, 7U, 23U, 57U}) {
+            auto malformed = bytes.value();
+            malformed[tag + 2] = static_cast<std::uint8_t>(length);
+            malformed[tag + 3] = 0;
+            expect(!t::parse_replay(malformed), "FL-14: partial or trailing GARR record is rejected");
+        }
+        auto truncated = bytes.value(); truncated.resize(body + 55);
+        expect(!t::parse_replay(truncated), "FL-14: truncated GARR body is rejected");
+    }
+    for (const auto kind : {0, 1, 2, 3, 4, 5}) {
+        auto malformed = initial;
+        if (kind == 0) malformed.free_garrisons.front().player = 9;
+        if (kind == 1) malformed.free_garrisons.front().registered = {9, 7};
+        if (kind == 2) malformed.free_garrisons.front().registered = {7, 7};
+        if (kind == 3) malformed.free_garrisons.front().registered = {6};
+        if (kind == 4) malformed.free_garrisons.front().registered = {1};
+        if (kind == 5) malformed.free_garrisons.front().templates = {};
+        expect(!t::write_replay({malformed, 0, {}}), "FL-14: invalid free player/object/template binding is rejected");
+    }
+    auto unknown = initial; unknown.free_garrisons.front().templates = {999};
+    expect(!t::TacticalSession::create(unknown, {}, free_garrison_health(), free_garrison_motion()),
+        "FL-14: a replay cannot bind an unknown creation template");
+    auto different = initial; ++different.free_garrisons.front().delay_frames;
+    const auto first = t::TacticalSession::create(initial, {}, free_garrison_health(), free_garrison_motion());
+    const auto second = t::TacticalSession::create(different, {}, free_garrison_health(), free_garrison_motion());
+    expect(first && second && first.value().state_sha256() != second.value().state_sha256(),
+        "FL-14: waiting/configuration state affects canonical hashes");
+    auto oversized = initial;
+    for (eawr::sim::EntityId id = 10; id < 8200; ++id) {
+        oversized.units.push_back({id, 20, 1, {}, m::identity_quat(), {}});
+        oversized.free_garrisons.front().registered.push_back(id);
+    }
+    expect(!t::write_replay({oversized, 0, {}}), "FL-14: combined GARR header cannot wrap uint16");
+}
+void test_garrison_replay_extension() {
+    auto initial = setup();
+    const auto legacy = t::write_replay({initial, 0, {}});
+    expect(legacy && legacy.value().size() == t::replay_header_size + 24U * initial.players.size()
+        + 80U * initial.units.size(), "FL-13: all-enabled setup retains the legacy wire layout");
+    const auto enabled = t::TacticalSession::create(initial);
+    initial.units[0].garrison_enabled = initial.units[1].garrison_enabled = false;
+    const auto disabled = t::TacticalSession::create(initial);
+    expect(enabled && disabled && enabled.value().state_sha256() != disabled.value().state_sha256(),
+        "FL-13: the object flag binds canonical state");
+    for (const bool squadrons : {false, true}) {
+        auto recorded = initial;
+        if (squadrons) {
+            recorded.units[3].owner = 1;
+            recorded.squadrons = {{3, {4}}};
+        }
+        const auto bytes = t::write_replay({recorded, 0, {}});
+        expect(static_cast<bool>(bytes), "GSPN replay writes");
+        if (!bytes) return;
+        expect(t::peek_replay_format_version(bytes.value()) == (squadrons ? 5U : 4U),
+            "GSPN uses tagged format with or without squadrons");
+        const auto parsed = t::parse_replay(bytes.value());
+        expect(parsed && parsed.value().setup == recorded, "GSPN round-trips disabled entity IDs");
+        if (parsed) {
+            const auto rewritten = t::write_replay(parsed.value());
+            expect(rewritten && rewritten.value() == bytes.value(), "GSPN has one canonical wire encoding");
+        }
+        for (const auto id : {0U, 2U, 9U}) {
+            auto malformed = bytes.value();
+            for (std::size_t offset = 0; offset < 8; ++offset) malformed[112 + offset] = 0;
+            malformed[112] = static_cast<std::uint8_t>(id);
+            expect(!t::parse_replay(malformed), "GSPN rejects zero, duplicate and absent IDs");
+        }
+        auto unordered = bytes.value();
+        unordered[112] = 2; unordered[120] = 1;
+        expect(!t::parse_replay(unordered), "GSPN rejects descending IDs");
+        for (const auto length : {0U, 7U, 24U}) {
+            auto malformed = bytes.value();
+            malformed[110] = static_cast<std::uint8_t>(length);
+            expect(!t::parse_replay(malformed), "GSPN rejects empty, partial and oversized bodies");
+        }
+        auto truncated = bytes.value(); truncated.resize(119);
+        expect(!t::parse_replay(truncated), "GSPN rejects truncated header data");
+    }
+    auto combined = initial;
+    combined.queue_identities = true;
+    const auto combined_bytes = t::write_replay({combined, 0, {}});
+    expect(static_cast<bool>(combined_bytes), "GSPN and QIDS write together");
+    if (combined_bytes) {
+        const auto parsed = t::parse_replay(combined_bytes.value());
+        expect(parsed && parsed.value().setup == combined, "GSPN and QIDS round-trip together");
+        if (parsed) {
+            const auto rewritten = t::write_replay(parsed.value());
+            expect(rewritten && rewritten.value() == combined_bytes.value(),
+                "GSPN precedes QIDS in one canonical encoding");
+        }
+    }
+    initial.units.clear();
+    for (eawr::sim::EntityId id = 1; id <= 8200; ++id) {
+        initial.units.push_back({id, 40, 1, {}, m::identity_quat(), {}});
+        initial.units.back().garrison_enabled = false;
+    }
+    expect(!t::write_replay({initial, 0, {}}), "GSPN header size cannot wrap uint16");
 }
 class ProductionExecutor final : public eawr::sim::PartitionExecutor {
 public:
@@ -765,18 +1490,264 @@ void test_signed_command_reduction() {
     expect(capped == t::CombatBonuses{decimal("-0.99"), whole(-1), whole(-1), whole(-1), decimal("0.75"), decimal("-0.99")},
         "WHE-55: caps apply after addition with the same fixed rounding as XML percentages");
 }
+void test_bound_production_relationships() {
+    const std::vector<t::SnapshotPlayer> relationships{{1, 0, false}, {2, 0, false}, {3, 0, true}};
+    expect(t::players_allied(relationships, 1, 2) && t::players_allied(relationships, 1, 1)
+        && !t::players_allied(relationships, 1, 3) && !t::players_allied(relationships, 1, 99),
+        "WPR-33: bound neutral or absent players never become allies through numeric teams");
+    for (const bool prerequisite : {false, true}) {
+        auto start = setup();
+        start.players[3].team_id = 0;
+        start.players[3].faction_id = 300;
+        start.units = {{1, 40, 1, {}, m::identity_quat(), {}},
+            {5, prerequisite ? 10ULL : 90ULL, 4, {}, m::identity_quat(), {}}};
+        auto rules = economy();
+        if (prerequisite) for (auto& menu : rules.menus) menu.options[1].requirements.prerequisites = {10};
+        t::CombatTable combat;
+        combat.pad_neutral_factions = {300};
+        auto created = t::TacticalSession::create(start, {}, durability(), {}, std::nullopt, combat, {}, {}, rules);
+        expect(static_cast<bool>(created), "WPR-33 neutral relationship session starts");
+        if (!created) continue;
+        expect(created.value().build_allowed(1, 1, 90) == !prerequisite,
+            "WPR-33: neutral objects neither consume allied limits nor satisfy allied prerequisites");
+        expect(static_cast<bool>(created.value().submit(buy(0, 1, 0, 1, 91))), "WPR-02 level-up records");
+        through(created.value(), 6);
+        expect(account(created.value(), 1).tech_level == 2 && account(created.value(), 4).tech_level == 1,
+            "WPR-02: station level-up excludes a neutral with a matching team");
+    }
+}
+
+void test_live_station_repair() {
+    auto health = durability();
+    for (auto& profile : health.profiles) profile.max_shields = {}; // isolate hardpoint repair from shield absorption
+    for (auto& profile : health.profiles) for (auto& hp : profile.hardpoints) {
+        hp.repair_amount_per_frame = decimal("0.5"); hp.repair_cost_per_frame = decimal("1.5");
+    }
+    const auto station = [&](t::TacticalSession& world, eawr::sim::EntityId id) -> const t::TacticalInstance& {
+        const auto instances = world.snapshot()->instances();
+        return *std::find_if(instances.begin(), instances.end(), [&](const auto& unit) { return unit.entity_id == id; });
+    };
+    const auto make = [&](m::Fixed credits, m::Fixed amount = decimal("0.5")) {
+        auto rules = economy();
+        for (auto& player : rules.players) player.credits = credits;
+        auto table = health;
+        for (auto& profile : table.profiles) for (auto& hp : profile.hardpoints) hp.repair_amount_per_frame = amount;
+        auto result = t::TacticalSession::create(setup(), {}, table, {}, std::nullopt, {}, {}, {}, rules);
+        expect(static_cast<bool>(result), "WSL repair fixture creates");
+        return std::move(result).value();
+    };
+    const auto command = [&](t::TacticalSession& world, std::uint64_t tick, t::PlayerId payer, std::uint64_t sequence,
+                             eawr::sim::EntityId id, const t::CommandPayload& payload) {
+        expect(static_cast<bool>(world.submit({{tick, payer, sequence}, {id}, payload})), "WSL repair command submits");
+    };
+    for (const auto credits : {decimal("1.4"), decimal("1.5"), whole(100)}) {
+        auto world = make(credits);
+        expect(account(world, 1).credits == credits, "WSL-38 setup performs no service or debit");
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 1, 2, 1, t::RepairHardpointPayload{0}); // duplicate payer is idempotent
+        through(world, 1);
+        const bool affordable = credits >= decimal("1.5");
+        const auto& hp = station(world, 1).durability->hardpoints[0];
+        expect(hp.health == (affordable ? decimal("98.5") : whole(98)), "WSL-41 damaged own station pays once per frame");
+        expect(account(world, 1).credits == (affordable ? m::Fixed::from_raw(credits.raw() - decimal("1.5").raw()) : credits),
+            "WSL-41 exactly sufficient credits debit; insufficient credits do not");
+        expect(hp.repairing_players.size() == (affordable ? 1U : 0U), "WSL-41 unpaid payer drops out");
+        through(world, 5);
+        if (credits == whole(100)) {
+            expect(station(world, 1).durability->hardpoints[0].health == whole(100), "WSL-42 completes at maximum");
+            expect(station(world, 1).durability->hardpoints[0].repairing_players.empty(), "WSL-42 full clears all payers");
+            expect(account(world, 1).credits == whole(94), "WSL-42 no charge after full completion");
+        } else expect(station(world, 1).durability->hardpoints[0].repairing_players.empty(), "WSL-41 insolvency stops next frame");
+    }
+    {
+        auto world = make(whole(100));
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 2, 0, 1, t::RepairHardpointPayload{0});
+        through(world, 1);
+        expect(station(world, 1).durability->hardpoints[0].health == whole(99), "WSL-41 two payers contribute in one service");
+        expect(account(world, 1).credits == decimal("98.5") && account(world, 2).credits == decimal("98.5"),
+            "WSL-40 event/service permit a second payer without an ownership gate");
+        through(world, 3);
+        expect(account(world, 1).credits == whole(97) && account(world, 2).credits == whole(97), "WSL-42 two payers stop after completion");
+    }
+    {
+        auto world = make(whole(100));
+        command(world, 0, 1, 0, 1, t::DamagePayload{decimal("0.5"), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 2, 0, 1, t::RepairHardpointPayload{0});
+        through(world, 2);
+        expect(account(world, 1).credits == decimal("98.5") && account(world, 2).credits == whole(100),
+            "WSL-41 completing payer prevents a later payer debit");
+    }
+    {
+        auto world = make(decimal("1.5"));
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 1, 1, t::DamagePayload{whole(2), 1});
+        command(world, 0, 1, 2, 2, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 3, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 1, 4, 1, t::RepairHardpointPayload{1});
+        command(world, 0, 1, 5, 2, t::RepairHardpointPayload{0});
+        through(world, 1);
+        expect(station(world, 1).durability->hardpoints[0].health == decimal("98.5")
+            && station(world, 1).durability->hardpoints[1].health == whole(98)
+            && station(world, 2).durability->hardpoints[0].health == whole(98),
+            "WSL-41 shared account arbitration orders station, slot, payer without overspending");
+    }
+    {
+        auto world = make(whole(100));
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(100), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        const auto events = through(world, 1);
+        expect(events.back().kind == t::EventKind::order_rejected && events.back().reason == t::RejectReason::hardpoint_invalid,
+            "WSL-40 destroyed hardpoint rejects repair");
+        expect(account(world, 1).credits == whole(100), "WSL-41 destroyed rejection has no debit");
+    }
+    {
+        auto world = make(whole(100));
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 1, 2, 1, t::DamagePayload{whole(1000), t::hull_target});
+        through(world, 1);
+        expect(account(world, 1).credits == whole(100), "WSL-38 deletion pending parent never charges repair");
+    }
+    {
+        auto world = make(whole(100), whole(0));
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(2), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        through(world, 2);
+        expect(station(world, 1).durability->hardpoints[0].health == whole(98) && account(world, 1).credits == whole(97),
+            "WSL-42 zero authored repair amount pays without progressing");
+    }
+    {
+        auto before = t::full_durability(health.profiles[1]);
+        before.hardpoints[0] = whole(98); before.repairing_players = {{99, 1, 2}, {}};
+        std::array<t::RepairBudget, 2> budgets{{{1, decimal("1.4")}, {2, decimal("1.5")}}};
+        const auto paid = t::reserve_hardpoint_repairs(health.profiles[1], before, budgets);
+        expect(paid[0] == std::vector<t::PlayerId>{2} && budgets[0].credits == decimal("1.4") && budgets[1].credits == whole(0),
+            "WSL-41 missing and insolvent payer removal does not skip the shifted next payer");
+    }
+    for (const bool active : {false, true}) {
+        auto world = make(whole(1000));
+        command(world, 0, 1, 0, 1, t::DamagePayload{active ? whole(10) : whole(100), 0});
+        if (active) command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        expect(static_cast<bool>(world.submit(buy(0, 1, active ? 2 : 1, 1, 91))), "WSL-33 upgrade submits during repair");
+        const auto events = through(world, 7);
+        const auto replaced = std::find_if(events.begin(), events.end(), [](const auto& event) { return event.kind == t::EventKind::station_replaced; });
+        expect(replaced != events.end(), "WSL-33 replacement event exists");
+        if (replaced == events.end()) continue;
+        const auto replacement_id = replaced->sequence;
+        const auto& replacement = station(world, replacement_id);
+        const auto hp = replacement.durability->hardpoints[0];
+        expect(replacement.type_id == 41 && !hp.enabled, "WSL-33 upgrade transfers disabled repair state by index");
+        if (active) expect(hp.health == decimal("93.5") && hp.repairing_players == std::vector<t::PlayerId>{1},
+            "WSL-33 current health and payers survive replacement and subsequent paid service");
+        else {
+            expect(hp.health == decimal("0.1"), "WSL-33 destroyed slot becomes disabled at 0.1");
+            command(world, 7, 1, 2, replacement_id, t::RepairHardpointPayload{0});
+        }
+        through(world, 210);
+        expect(station(world, replacement_id).durability->hardpoints[0].enabled
+            && station(world, replacement_id).durability->hardpoints[0].health == whole(100), "WSL-42 upgrade repair re-enables slot at full");
+    }
+    {
+        auto rules = economy();
+        for (auto& player : rules.players) { player.credits = whole(1000); player.max_tech = 5; }
+        rules.menus.clear();
+        auto table = health;
+        for (const auto type : {42ULL, 43ULL, 44ULL}) {
+            auto profile = health.profiles.back(); profile.type_id = type; table.profiles.push_back(profile);
+        }
+        for (const auto type : {40ULL, 41ULL, 42ULL, 43ULL, 44ULL}) for (const auto faction : {100ULL, 200ULL}) {
+            auto level = option(91, t::BuildKind::upgrade, t::BuildQueue::units, 4);
+            level.requirements.current_allies = 1; level.requirements.prerequisites = {type};
+            t::StationMenu menu;
+            menu.station = type; menu.faction = faction; menu.options.push_back(std::move(level));
+            menu.next_level = type < 44 ? type + 1 : 0;
+            rules.menus.push_back(std::move(menu));
+        }
+        auto result = t::TacticalSession::create(setup(), {}, table, {}, std::nullopt, {}, {}, {}, rules);
+        expect(static_cast<bool>(result), "WSL-33 levels one through five fixture creates");
+        if (!result) return;
+        auto world = std::move(result).value();
+        command(world, 0, 1, 0, 1, t::DamagePayload{whole(50), 0});
+        command(world, 0, 1, 1, 1, t::RepairHardpointPayload{0});
+        command(world, 0, 2, 0, 1, t::RepairHardpointPayload{0});
+        eawr::sim::EntityId current = 1;
+        for (std::uint64_t level = 1; level < 5; ++level) {
+            const auto tick = world.completed_tick();
+            expect(static_cast<bool>(world.submit(buy(tick, 1, level + 1, current, 91))), "WSL-33 next level submits with active repair");
+            const auto events = through(world, tick + 7);
+            const auto replaced = std::find_if(events.begin(), events.end(), [](const auto& event) { return event.kind == t::EventKind::station_replaced; });
+            expect(replaced != events.end(), "WSL-33 each level replaces the station");
+            if (replaced == events.end()) break;
+            current = replaced->sequence;
+            const auto& slot = station(world, current).durability->hardpoints[0];
+            expect(station(world, current).type_id == 40 + level && !slot.enabled
+                && slot.repairing_players == std::vector<t::PlayerId>{1, 2}, "WSL-33 both payers and disabled repair state carry through levels two to five");
+        }
+        through(world, 100);
+        expect(station(world, current).type_id == 44 && station(world, current).durability->hardpoints[0].enabled
+            && station(world, current).durability->hardpoints[0].repairing_players.empty(), "WSL-42 level five completes repair and clears both payers");
+    }
+    t::TacticalReplay replay{setup(), 24, {
+        {{0, 1, 0}, {1}, t::DamagePayload{whole(10), 0}},
+        {{0, 1, 1}, {1}, t::RepairHardpointPayload{0}},
+        {{0, 2, 0}, {1}, t::RepairHardpointPayload{0}},
+        buy(1, 1, 2, 1, 91)}};
+    const auto encoded = t::write_replay(replay);
+    expect(static_cast<bool>(encoded), "WSL-40 repair opcode writes");
+    if (!encoded) return;
+    const auto parsed = t::parse_replay(encoded.value());
+    expect(parsed && parsed.value() == replay, "WSL-40 repair replay round trip");
+    const auto run = [&](const eawr::sim::PartitionExecutor& executor, bool scrambled) {
+        auto result = t::TacticalSession::from_replay(replay, {}, health, {}, std::nullopt, {}, {}, {}, economy());
+        expect(static_cast<bool>(result), "WSL repair replay loads");
+        auto world = std::move(result).value();
+        if (scrambled) world.scramble_storage_for_testing();
+        std::vector<std::string> hashes;
+        while (world.completed_tick() < replay.final_tick_count) {
+            auto tick = world.step(executor); expect(static_cast<bool>(tick), "WSL repair replay steps");
+            if (!tick) break;
+            hashes.push_back(tick.value().state_sha256 + tick.value().snapshot->sha256());
+        }
+        return hashes;
+    };
+    eawr::sim::InlineExecutor inline_executor;
+    const auto reference = run(inline_executor, false);
+    for (const auto count : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter workers(count);
+        expect(run(workers, false) == reference && run(workers, true) == reference,
+            "WSL-41 repair and upgrade hashes/snapshots equal at 1/2/4/8 workers and scrambled storage");
+    }
+}
+
 } // namespace
 int main() {
+    test_level_up_completion_boundary();
+    test_level_up_without_next_type();
+    test_level_up_death_while_held();
+    test_level_up_service_boundary();
+    test_live_station_repair();
     test_limits(); test_bonuses_and_completion(); test_level_up(); test_roster_gate(); test_repair_carryover(); test_replay_determinism();
     test_cancel_releases_team_reservation();
+    test_garrison_replay_extension();
+    test_free_garrison_replenishment();
+    test_free_garrison_timer_order();
+    test_free_garrison_pending_and_generic();
+    test_free_garrison_bays_and_claims();
+    test_disabled_authored_bay();
+    test_free_garrison_replay();
     test_teammate_level_up();
-    test_no_upgrade_layout(); test_replacement_attack(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
+    test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work();
     test_staged_source_removal();
     test_upgrade_holder_loss();
     test_respawn_inherits_upgrade();
     test_hero_command_ledger();
     test_hero_worker_determinism();
     test_signed_command_reduction();
+    test_bound_production_relationships();
     if (failures) return 1;
     std::cout << "station upgrade contracts passed\n";
 }

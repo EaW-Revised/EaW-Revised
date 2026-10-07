@@ -162,7 +162,7 @@ struct Facing {
     return next;
 }
 
-// MS-03: where a homing projectile steers: its target hardpoint, else the target's position, plus
+// MS-03/07, WWP-64/72: steering uses the target hardpoint, else its height-adjusted position, plus
 // its offset turned by the target's rotation when every part of the offset is nonzero.
 [[nodiscard]] math::Vec3 homing_point(motion_detail::Calc& calc, const CombatUnit& target, const Projectile& projectile) {
     math::Vec3 local{};
@@ -181,15 +181,51 @@ struct Facing {
     if (offset) {
         local = math::Vec3{calc.add(local.x, o.x), calc.add(local.y, o.y), calc.add(local.z, o.z)};
     }
-    if (!on_hardpoint && !offset) return target.position;
+    auto adjusted = target.position;
+    if (!on_hardpoint && target.profile != nullptr) adjusted.z = calc.add(adjusted.z, target.profile->ranged_target_z_adjust);
+    if (!on_hardpoint && !offset) return adjusted;
     const auto& m = target.transform.rows;
     const auto row = [&](const std::size_t i, const Fixed origin) {
         return calc.add(origin, calc.add(calc.add(calc.mul(m[i][0], local.x), calc.mul(m[i][1], local.y)), calc.mul(m[i][2], local.z)));
     };
-    return math::Vec3{row(0, target.position.x), row(1, target.position.y), row(2, target.position.z)};
+    return math::Vec3{row(0, adjusted.x), row(1, adjusted.y), row(2, adjusted.z)};
 }
 
 } // namespace
+
+core::Result<void> ProjectileDefenceRegistry::rebuild(std::vector<ProjectileDefenceSource> registered) {
+    std::vector<SpaceBody> bodies;
+    math::Fixed extent{};
+    for (std::size_t slot = 0; slot < registered.size(); ++slot) {
+        const auto& source = registered[slot];
+        const auto radius = source.radius();
+        if (radius.raw() < 0 || radius > whole(max_combat_distance)) return core::Result<void>::failure(
+            diagnostic(diagnostic_codes::invalid_setup, "projectile defence radius out of range"));
+        auto height = math::subtract(source.adjusted_position.z, source.position.z);
+        if (!height) return core::Result<void>::failure(height.error());
+        if (height.value() < whole(-max_combat_distance) || height.value() > whole(max_combat_distance)) {
+            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_setup, "projectile defence height out of range"));
+        }
+        auto bound = math::add(radius, absolute(height.value()));
+        if (!bound) return core::Result<void>::failure(bound.error());
+        extent = std::max(extent, bound.value());
+        bodies.push_back({slot + 1, source.owner, source.position});
+    }
+    auto built = SpaceIndex::build(bodies);
+    if (!built) return core::Result<void>::failure(built.error());
+    sources = std::move(registered); index = std::move(built).value(); query_radius = extent;
+    return core::Result<void>::success();
+}
+
+std::vector<std::size_t> ProjectileDefenceRegistry::candidates(const math::Vec3& position,
+    std::uint64_t* const inspected) const {
+    std::vector<std::uint32_t> positions;
+    index.box_positions(position, {query_radius, query_radius, query_radius}, positions, inspected);
+    std::sort(positions.begin(), positions.end());
+    std::vector<std::size_t> result;
+    for (const auto ordinal : positions) result.push_back(ordinal);
+    return result;
+}
 
 core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotProfile& profile, const PlayerId owner,
     const bool allow_diminishing_firepower, const std::uint64_t id, const math::Vec3& offset, const math::Fixed target_radius) {
@@ -209,8 +245,10 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     projectile.target_hardpoint = shot.target_hardpoint;
     projectile.position = shot.origin;
     projectile.speed = profile.speed;
+    projectile.turn_rate = profile.turn_rate;
     projectile.damage = profile.damage;
     projectile.blast = profile.blast;
+    projectile.damage_delay = profile.damage_delay;
     projectile.damage_type = profile.damage_type;
     projectile.shield_damage = profile.shield_damage;
     projectile.hitpoint_damage = profile.hitpoint_damage;
@@ -245,29 +283,82 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     }
     if (q.error) return core::Result<Projectile>::failure(*q.error);
     // MS-02: a homing projectile faces the aim point and holds its target.
-    if (profile.homing) {
+    if (profile.homing || profile.turn_rate.raw() > 0) {
         motion_detail::Calc calc;
         const auto facing = facing_toward(calc, shot.origin, shot.aim);
-        projectile.homing = true;
-        projectile.locked = shot.target != invalid_entity_id;
+        projectile.homing = profile.homing;
+        projectile.locked = profile.homing && shot.target != invalid_entity_id;
         projectile.turn_rate = profile.turn_rate;
         projectile.yaw = facing.yaw;
         projectile.pitch = facing.pitch;
         projectile.offset = offset;
-        projectile.step = scaled(calc, direction(calc, facing.yaw, facing.pitch), profile.speed);
+        if (profile.homing) projectile.step = scaled(calc, direction(calc, facing.yaw, facing.pitch), profile.speed);
         if (!calc.ok()) return core::Result<Projectile>::failure(calc.error("missile launch"));
     }
     return core::Result<Projectile>::success(projectile);
 }
 
+core::Result<Projectile> redirect_projectile(Projectile& original,
+    const ShotProfile& projectile_type, const ProjectileRedirect& request) {
+    if (!request.source || request.new_id == 0 || request.new_id == original.id
+        || (request.target && original.speed.raw() <= 0)
+        || (request.add_pitch && (request.pitch_draw < whole(-60) || request.pitch_draw > whole(30)))) {
+        return core::Result<Projectile>::failure(diagnostic(diagnostic_codes::invalid_setup, "invalid projectile redirect request"));
+    }
+    motion_detail::Calc calc;
+    Facing facing = original.homing || original.turn_rate.raw() > 0
+        ? Facing{original.yaw, original.pitch} : facing_toward(calc, {}, original.step);
+    math::Vec3 aim{};
+    if (request.target) {
+        const auto& target = *request.target;
+        aim = target.position;
+        if (target.profile) aim.z = calc.add(aim.z, target.profile->ranged_target_z_adjust);
+        const auto time = original.speed.raw() > 0 ? calc.div(calc.length(math::Vec3{
+            calc.sub(aim.x, original.position.x), calc.sub(aim.y, original.position.y), calc.sub(aim.z, original.position.z)}), original.speed) : Fixed{};
+        aim = math::Vec3{calc.add(aim.x, calc.mul(calc.sub(target.position.x, target.previous_position.x), time)),
+            calc.add(aim.y, calc.mul(calc.sub(target.position.y, target.previous_position.y), time)),
+            calc.add(aim.z, calc.mul(calc.sub(target.position.z, target.previous_position.z), time))};
+        facing = facing_toward(calc, original.position, aim);
+    } else {
+        facing.yaw = wrap_difference(calc.add(calc.add(facing.yaw, whole(180)), request.yaw_spread_draw));
+        if (facing.yaw.raw() < 0) facing.yaw = calc.add(facing.yaw, whole(360));
+        facing.pitch = request.add_pitch ? request.pitch_draw : Fixed{};
+        const auto ahead = scaled(calc, direction(calc, facing.yaw, facing.pitch), whole(1));
+        aim = {calc.add(original.position.x, ahead.x), calc.add(original.position.y, ahead.y), calc.add(original.position.z, ahead.z)};
+    }
+    const bool rocket = projectile_type.flight && projectile_type.flight->kind == FlightKind::rocket;
+    if (rocket) {
+        // WPJ-42: the redirect endpoint is 300 units ahead in XY, independent of pitch.
+        aim = {calc.add(original.position.x, calc.mul(whole(300), calc.cos_deg(facing.yaw))),
+            calc.add(original.position.y, calc.mul(whole(300), calc.sin_deg(facing.yaw))), original.position.z};
+    }
+    if (!calc.ok()) return core::Result<Projectile>::failure(calc.error("projectile redirect"));
+    CombatEvent shot;
+    shot.shooter = request.source->id; shot.target = request.target ? request.target->id : invalid_entity_id;
+    shot.target_hardpoint = no_hardpoint; shot.weapon = original.weapon; shot.origin = original.position; shot.aim = aim;
+    auto profile = projectile_type; profile.appearance_delay_frames = 0;
+    profile.damage = original.damage; profile.damage_type = original.damage_type;
+    auto created = launch_projectile(shot, profile, request.source->owner, true, request.new_id, {});
+    if (!created) return created;
+    auto& redirected = created.value();
+    redirected.internal_damage_misc = false; // WPJ-42: redirected damage bypasses the misc gate
+    redirected.max_travel = projectile_type.max_travel;
+    redirected.yaw = facing.yaw; redirected.pitch = facing.pitch;
+    redirected.step = scaled(calc, direction(calc, facing.yaw, facing.pitch), redirected.speed);
+    if (!calc.ok()) return core::Result<Projectile>::failure(calc.error("projectile redirect facing"));
+    if (rocket) original.max_travel = whole(300);
+    return created;
+}
+
 core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Projectile& projectile,
-    ProjectileScratch& scratch) {
+    ProjectileScratch& scratch, MeshCollisionWork* const mesh_work) {
     Arithmetic q;
     ProjectileStep result;
     result.projectile = projectile;
     result.from = projectile.position;
     if (projectile.explosion_requested) {
         result.expired = true;
+        result.expiry_reason = ProjectileExpiryReason::explicit_request;
         return core::Result<ProjectileStep>::success(std::move(result));
     }
     // WAD-37/40: equality makes it visible but still does not move it. The source resets
@@ -292,6 +383,7 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
                 // the current pose without another collision query or snapping to aim.
                 result.projectile.travelled = q.take(math::add(projectile.travelled, projectile.speed));
                 result.expired = true;
+                result.expiry_reason = ProjectileExpiryReason::rocket_path_exhausted;
                 if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
                 return core::Result<ProjectileStep>::success(std::move(result));
             }
@@ -307,7 +399,7 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
         const auto* target = world.find(projectile.target);
         if (target == nullptr) {
             result.projectile.locked = false;
-        } else {
+        } else if (!target->sensor_jammed) {
             motion_detail::Calc calc;
             const auto wanted = facing_toward(calc, projectile.position, homing_point(calc, *target, projectile));
             const auto next = turned(calc, Facing{projectile.yaw, projectile.pitch}, wanted, projectile.turn_rate);
@@ -315,6 +407,50 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
             result.projectile.pitch = next.pitch;
             result.projectile.step = scaled(calc, direction(calc, next.yaw, next.pitch), projectile.speed);
             if (!calc.ok()) return core::Result<ProjectileStep>::failure(calc.error("missile steering"));
+        }
+    }
+    if (path_point) {
+        if (projectile.turn_rate.raw() > 0) {
+            motion_detail::Calc calc;
+            const auto next = turned(calc, Facing{projectile.yaw, projectile.pitch},
+                facing_toward(calc, projectile.position, *path_point), projectile.turn_rate);
+            result.projectile.yaw = next.yaw; result.projectile.pitch = next.pitch;
+            if (!calc.ok()) return core::Result<ProjectileStep>::failure(calc.error("rocket facing"));
+        }
+        const auto& registry = world.projectile_defences;
+        for (const auto slot : registry.candidates(*path_point, &scratch.defence_inspected)) {
+            ++scratch.defence_candidates;
+            const auto& source = registry.sources[slot];
+            if (players_allied(world.relationships, projectile.owner, source.owner)
+                || !(source.active_shield || source.passive_shield || source.sensor_jammed)
+                || !within_range(*path_point, source.position, source.radius(), RangeMetric::spatial)
+                || strictly_within_range(projectile.position, source.position, source.radius(), RangeMetric::spatial)) continue;
+            // RFL-07: entry is inclusive at both ends; each source keeps registration order.
+            // The current point is already chosen, while the new route serves later frames.
+            auto repathed = repath_rocket(result.projectile, source.position, projectile.step);
+            if (!repathed) return core::Result<ProjectileStep>::failure(repathed.error());
+        }
+    } else {
+        const auto& registry = world.projectile_defences;
+        for (const auto slot : registry.candidates(projectile.position, &scratch.defence_inspected)) {
+            ++scratch.defence_candidates;
+            const auto& source = registry.sources[slot];
+            if (players_allied(world.relationships, projectile.owner, source.owner)
+                || !(source.active_shield || source.passive_shield || source.sensor_jammed)
+                || !strictly_within_range(projectile.position, source.adjusted_position,
+                    source.radius(), RangeMetric::spatial)) continue;
+            if (projectile.turn_rate.raw() == 0) break;
+            motion_detail::Calc calc;
+            auto away = math::Vec3{calc.sub(projectile.position.x, source.adjusted_position.x),
+                calc.sub(projectile.position.y, source.adjusted_position.y), calc.sub(projectile.position.z, source.adjusted_position.z)};
+            if (away == math::Vec3{}) away.x = whole(1); // WPJ-17: exact coincidence is world +X
+            const auto current = Facing{projectile.yaw, projectile.pitch};
+            // WPJ-17: deflection replaces desired guidance before one independent yaw/pitch turn.
+            const auto next = turned(calc, current, facing_toward(calc, {}, away), projectile.turn_rate);
+            result.projectile.yaw = next.yaw; result.projectile.pitch = next.pitch;
+            result.projectile.step = scaled(calc, direction(calc, next.yaw, next.pitch), projectile.speed);
+            if (!calc.ok()) return core::Result<ProjectileStep>::failure(calc.error("projectile defence steering"));
+            break;
         }
     }
     const auto& step = result.projectile.step;
@@ -377,7 +513,7 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
                     return !(unit->durability_profile->hardpoints[source].max_health.raw() > 0
                              && unit->durability->hardpoints[source].raw() <= 0);
                 };
-                auto meshes = segment_hits_meshes(profile.meshes, enabled, unit->transform, from, to);
+                auto meshes = segment_hits_meshes(profile.meshes, enabled, unit->transform, from, to, mesh_work);
                 if (!meshes) return core::Result<ProjectileStep>::failure(meshes.error());
                 if (meshes.value()) {
                     entry = meshes.value()->fraction;
@@ -424,15 +560,22 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
     result.projectile.position = to;
     result.projectile.travelled = q.take(math::add(projectile.travelled, projectile.speed));
     bool terminal = result.projectile.travelled >= projectile.max_travel;
+    auto reason = terminal ? ProjectileExpiryReason::travel_limit : ProjectileExpiryReason::none;
     if (result.projectile.flight) {
         const auto& flight = *result.projectile.flight;
         terminal = projectile.max_travel.raw() > 0
             ? result.projectile.travelled >= projectile.max_travel
             : flight.profile.lifetime && flight.age_frames
                 > static_cast<std::uint64_t>(flight.profile.lifetime->raw() * 30 / Fixed::scale);
+        reason = terminal ? (projectile.max_travel.raw() > 0 ? ProjectileExpiryReason::travel_limit
+            : ProjectileExpiryReason::lifetime) : ProjectileExpiryReason::none;
         if (flight.profile.target_radius) {
             if (flight.profile.kind == FlightKind::rocket) {
-                terminal = terminal || flight.path_distance >= flight.profile.authored_distance;
+                const auto allowance = flight.shield_redirected ? flight.shield_allowance : flight.profile.authored_distance;
+                if (!terminal && flight.path_distance >= allowance) {
+                    terminal = true;
+                    reason = ProjectileExpiryReason::target_radius;
+                }
             } else if (flight.profile.kind == FlightKind::default_projectile) {
                 // RFL-08: exact squared spatial displacement; equality does not expire.
                 namespace wide = math::detail;
@@ -445,11 +588,15 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
                     }
                     return total;
                 };
-                terminal = terminal || wide::compare(squared(to), squared(flight.aim)) > 0;
+                if (!terminal && wide::compare(squared(to), squared(flight.aim)) > 0) {
+                    terminal = true;
+                    reason = ProjectileExpiryReason::target_radius;
+                }
             }
         }
     }
     result.expired = !result.hit && terminal;
+    if (result.expired) result.expiry_reason = reason;
     if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
     return core::Result<ProjectileStep>::success(std::move(result));
 }
@@ -471,7 +618,10 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
             | (projectile.ion_stun ? 128U : 0U) | (projectile.blast.enabled() ? 256U : 0U)
             | (projectile.explosion_requested ? 512U : 0U) | (projectile.flight ? 1024U : 0U)
             | (projectile.muzzle_delay_until != 0 ? 2048U : 0U)
-            | (projectile.disable_engines_frames ? 4096U : 0U)); // coordinator-reserved bit 12, EN-08
+            | (projectile.disable_engines_frames ? 4096U : 0U)
+            | (projectile.damage_delay.raw() > 0 ? 8192U : 0U)
+            | (!projectile.homing && projectile.turn_rate.raw() != 0 ? 16384U : 0U)
+            | (projectile.flight && projectile.flight->shield_redirected ? 32768U : 0U)); // reserved bits 14/15, WPJ-17/RFL-07
     sim::detail::append_u32(bytes, 0);
     for (const auto& point : {projectile.position, projectile.step}) {
         sim::detail::append_i64(bytes, point.x.raw());
@@ -533,6 +683,13 @@ void append_projectile(std::vector<std::uint8_t>& bytes, const Projectile& proje
         }
     }
     if (projectile.muzzle_delay_until != 0) sim::detail::append_u64(bytes, projectile.muzzle_delay_until);
+    if (projectile.damage_delay.raw() > 0) sim::detail::append_i64(bytes, projectile.damage_delay.raw());
+    if (!projectile.homing && projectile.turn_rate.raw() != 0) {
+        for (const auto value : {projectile.turn_rate, projectile.yaw, projectile.pitch}) sim::detail::append_i64(bytes, value.raw());
+    }
+    if (projectile.flight && projectile.flight->shield_redirected) {
+        sim::detail::append_i64(bytes, projectile.flight->shield_allowance.raw());
+    }
 }
 
 } // namespace eawr::sim::tactical::detail

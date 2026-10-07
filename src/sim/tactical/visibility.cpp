@@ -67,6 +67,11 @@ core::Result<void> validate_sensors(const std::span<const SensorProfile> sensors
             return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "sensor table: type " + std::to_string(sensor.type_id) + " has a negative reveal range"));
         }
+        if (sensor.dense_multiplier.raw() < 0 || sensor.dense_multiplier.raw() > math::Fixed::scale
+            || sensor.half_extents.x.raw() < 0 || sensor.half_extents.y.raw() < 0 || sensor.flash_radius.raw() < 0) {
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "sensor table: invalid dense multiplier or fog bounds"));
+        }
     }
     return core::Result<void>::success();
 }
@@ -135,12 +140,17 @@ std::uint64_t SensorField::team_mask(const PlayerId player) const noexcept {
 }
 
 std::optional<math::Fixed> SensorField::reveal_range(const TypeId type_id) const noexcept {
+    const auto* found = profile(type_id);
+    return found != nullptr && found->reveals ? std::optional{found->reveal_range} : std::nullopt;
+}
+
+const SensorProfile* SensorField::profile(const TypeId type_id) const noexcept {
     const auto found = std::lower_bound(sensors_.begin(), sensors_.end(), type_id,
         [](const SensorProfile& sensor, const TypeId id) { return sensor.type_id < id; });
     if (found == sensors_.end() || found->type_id != type_id) {
-        return std::nullopt;
+        return nullptr;
     }
-    return found->reveal_range;
+    return &*found;
 }
 
 std::uint64_t SensorField::visible_to(const PlayerId owner, const math::Vec3& position) const {

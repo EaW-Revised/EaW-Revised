@@ -4,6 +4,9 @@
 
 namespace eawr::sim::tactical::detail {
 
+[[nodiscard]] core::Result<math::Fixed> projectile_delivery_delay(const Projectile& projectile,
+    math::Fixed area_delay, CombatRandom& random);
+
 struct BlastRecipient {
     EntityId id{};
     math::Fixed amount{};
@@ -29,7 +32,7 @@ struct BlastStep {
 // The flight service already applied the aimed-mesh override; retain its final selector for WAD-20.
 [[nodiscard]] std::string_view direct_blast_mesh(const CombatWorld& world, const ProjectileStep& flight);
 [[nodiscard]] core::Result<Hit> area_hit(const Projectile& projectile, const BlastRecipient& recipient,
-    math::Fixed defense);
+    math::Fixed defense, std::optional<math::Fixed> source_damage_factor = std::nullopt);
 
 [[nodiscard]] core::Result<math::Fixed> blast_factor(const BlastProfile& profile,
     math::Fixed distance, math::Fixed radius);

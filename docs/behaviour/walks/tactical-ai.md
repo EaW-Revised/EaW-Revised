@@ -498,17 +498,24 @@ which no M2 input reaches).
   off is taken straight back by a plan (G-04), or flees towards the nearest friendly rather than
   the defended cell (G-06).
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | Ordinary non-direct space retaliation sets the object/team attack target and weapon-hardpoint targets. That wrapper does not create a movement destination; movement through existing formation/attack-positioning or an ability callback is a separate path. Do not add a chase destination just because retaliation acquired a target. | EUS-23 |
+| U-05 | Object-based Attack_Move retains an object destination with attack/repeat enabled and can expose that hostile object through the formation attack-target interface used by attack positioning. A position-only Attack_Move has no object target merely because its command name contains attack; later diversion is a separate path. | EUS-20 |
+| U-06 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-07 | An ordinary populated position formation remains after reaching its destination, including a formation of one. Done state is not the finished predicate. Cleanup is reached when the base destination is uninitialized, an object destination has lost its target, or membership is empty. Thus ordinary move completion does not restore the no-formation retaliation case. | EUS-19 |
+
 ## Unverified
 
 | ID | Question | How to settle |
 |---|---|---|
-| U-01 | Whether a retaliation order (WTA-29) also moves a mobile unit towards the attacker, or only sets its target. | A debug-build read of the non-direct attack order's movement, or a retail capture of a ship shot from behind by a unit outside its scan. |
-| U-02 | When a priority-set override (WTA-21) is cleared: on release to the free store, at plan end, or never. | A debug-build read of the free store's release path. |
-| U-03 | What `Lock_Current_Orders` blocks beyond diverts (WMV-17): the free store's orders, retaliation, plan orders (WTA-24). | A debug-build read of the lock test in the order paths. |
-| U-04 | Whether the coin in WTA-39 is drawn on the synchronized stream, and which category the Lua call passes. | A short debug-build read of the call's arguments and the random function. |
-| U-05 | Whether attack positioning (WTA-27) reaches a unit whose plan used `Attack_Move` rather than `Attack_Target` (a formation attack target). | A debug-build read of the formation's attack-target assignment, or a retail capture of `destroyunit`. |
-| U-06 | The order of the unit-AI service against the unit's targeting and locomotor services within a frame. | A debug-build read of the behaviour service order. |
-| U-07 | Whether a ship keeps its formation (of one) after its order ends. If it does, no M2 ship retaliates once it has moved, and G-02 reaches only never-ordered ships, stations and the squadron containers' leaders (WTA-29). | Walk 4's read of the formation's release. |
+| U-02 | When a priority-set override (WTA-21) is cleared: on release to the free store, at plan end, or never. **Sweep:** Still unverified: Free-store removal and plan-build removal do not resolve a priority-set reset. The targeting override setter/reset query did not return the relevant body, so neither permanent retention nor clearing is asserted. | A debug-build read of the free store's release path. Retained sweep boundary: EUS-37. |
+| U-03 | What `Lock_Current_Orders` blocks beyond diverts (WMV-17): the free store's orders, retaliation, plan orders (WTA-24). **Sweep:** Still unverified: Non-direct retaliation has no ordinary movement destination in its wrapper; Lock_Current_Orders is checked by the diversion interface. Other free-store/plan order writers and lock enforcement remain unresolved and cannot be inferred from that check. | A debug-build read of the lock test in the order paths. Retained sweep boundary: EUS-23. |
+| U-04 | Whether the coin in WTA-39 is drawn on the synchronized stream, and which category the Lua call passes. **Sweep:** The public Get_Most_Defended_Position Lua binding passes all object categories for both tactical modes; space uses a square evaluator region centered on the input position. Still unverified: The binding does not expose the tie-coin generator; synchronized-stream identity remains unverified until the inner grid evaluator/random helper is traced. | A short debug-build read of the call's arguments and the random function. Retained sweep boundary: EUS-29. |
 
 ## Capture needs
 

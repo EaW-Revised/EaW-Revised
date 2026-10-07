@@ -179,6 +179,15 @@ void test_wheel_and_rotate_deltas() {
     send(adapter, motion(640.0F, 360.0F, 20.0F, 5.0F), "motion without grab");
     expect_close(step(adapter).rotate_units, 0.0F, "motion without a grab does not rotate");
     send(adapter, button(input::mouse_code::middle, true), "grab");
+    const auto ignored = adapter.counters().ignored_ineligible;
+    send(adapter, wheel(input::mouse_code::wheel_up, 2.0F), "wheel during grab");
+    expect_close(step(adapter).zoom_detents, 0.0F, "middle grab suppresses wheel zoom");
+    expect(adapter.counters().ignored_ineligible == ignored + 1U, "suppressed wheel is counted");
+    send(adapter, button(input::mouse_code::middle, false), "release grab");
+    expect_close(step(adapter).zoom_detents, 0.0F, "release does not replay suppressed wheel");
+    send(adapter, wheel(input::mouse_code::wheel_up, 1.0F), "wheel after release");
+    expect_close(step(adapter).zoom_detents, -1.0F, "wheel resumes after release");
+    send(adapter, button(input::mouse_code::middle, true), "fresh grab");
     send(adapter, motion(650.0F, 360.0F, 20.0F, 5.0F), "drag");
     send(adapter, motion(660.0F, 360.0F, 4.0F, 5.0F), "drag");
     // Without screen_mouse_units (the host and free-fixture tables) a scaled

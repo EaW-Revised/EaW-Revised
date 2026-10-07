@@ -71,7 +71,7 @@ struct EngineContractAccess {
     static core::Result<void> attach(Engine& engine, PlayerAi& player, Goal& goal,
         authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
         engine.event_tick_ = 1;
-        engine.sequence_ = &sequence;
+        engine.sequence_ = sequence;
         engine.scripts_ = &scripts;
         return engine.attach_plan(player, goal, scripts, sequence);
     }
@@ -87,7 +87,7 @@ struct EngineContractAccess {
     static std::vector<authoritative::ScriptEvent> hazard_events(Engine& engine,
         authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
         engine.scripts_ = &scripts;
-        engine.sequence_ = &sequence;
+        engine.sequence_ = sequence;
         engine.event_tick_ = 1;
         Plan plan;
         plan.id = plan.instance = 1;
@@ -124,10 +124,67 @@ struct EngineContractAccess {
         task.producer = 1;
         player.tasks.push_back(task);
         player.reserved_credits[1] = real(100);
+        engine.pad_reservations_[1] = {player.player, 1, 30};
     }
     static void service(Engine& engine, PlayerAi& player, std::int64_t frame) {
         engine.frame_ = frame;
+        if (engine.host_->snapshot) engine.observe_purchases(player, *engine.host_->snapshot);
         engine.service_execution(player);
+    }
+    static PlayerAi& rejected_station_fixture(Engine& engine) {
+        auto& player = collect_fixture(engine);
+        Block block; block.id = block.taskforce = 1; block.kind = Block::Kind::produce;
+        engine.blocks_.emplace(1, block);
+        BuildTask task; task.taskforce = task.block = 1; task.type = 50; task.source = 2;
+        task.issued = 1; task.finished = task.failed = true;
+        player.tasks.push_back(task);
+        return player;
+    }
+    static void direct_pad_service(Engine& engine, PlayerAi& player) { engine.service_execution(player, true); }
+    static void reserve(Engine& engine, PlayerAi& player, Goal& goal) { engine.reserve(player, goal); }
+    static void bind_scripts(Engine& engine, authoritative::ScriptScheduler& scripts, std::uint64_t& sequence) {
+        engine.scripts_ = &scripts; engine.sequence_ = sequence; engine.event_tick_ = scripts.completed_tick() + 1;
+    }
+    static void pause_planning(Engine& engine) {
+        engine.initialized_ = true;
+        for (auto& player : engine.players_) {
+            player.next_goal = player.next_planning = player.next_execution = player.next_learning = 1000000;
+        }
+    }
+    static void release(Engine& engine, PlayerAi& player, const Goal& goal, bool refund = true) {
+        engine.release(player, goal, refund);
+    }
+    static void perception_executor(Engine& engine, const sim::PartitionExecutor* executor) {
+        engine.perception_executor_ = executor;
+    }
+    static std::vector<authoritative::ScriptCommand> take_orders(Engine& engine) {
+        auto orders = std::move(engine.orders_); engine.orders_.clear(); return orders;
+    }
+    static void return_orders(Engine& engine, authoritative::ServiceReport& report) {
+        engine.orders_ = std::move(report.commands);
+    }
+    static void purchase(Engine& engine, PlayerAi& player, const Goal& goal,
+        tactical::TypeId type, sim::EntityId producer) {
+        Plan plan; plan.id = plan.instance = plan.goal = goal.id; plan.player = player.player;
+        if (engine.host_->world->pads().contains(producer)) plan.reserved_pads = {producer};
+        plan.taskforces = {goal.id}; engine.running_[goal.id] = plan;
+        TaskForce force; force.id = force.plan = goal.id; engine.taskforces_[goal.id] = force;
+        Block block; block.id = block.taskforce = goal.id; block.kind = Block::Kind::produce;
+        engine.blocks_[goal.id] = block;
+        BuildTask task; task.taskforce = task.block = goal.id; task.type = type;
+        task.producer = producer; task.source = 2; player.tasks.push_back(task);
+    }
+    static void abandon_goal(Engine& engine, PlayerAi& player, std::uint64_t id, authoritative::ScriptScheduler& scripts) {
+        engine.finish_plan(player, id, scripts, true);
+    }
+    static PlayerAi& direct_pad_fixture(Engine& engine, tactical::TypeId type, sim::EntityId pad) {
+        PlayerAi player; player.player = 2; engine.players_.push_back(std::move(player));
+        Goal goal; goal.id = 1; purchase(engine, engine.players_.back(), goal, type, pad);
+        engine.players_.back().tasks.clear();
+        engine.plan_of_instance_[1] = 1; engine.running_.at(1).reserved_pads = {pad};
+        auto& force = engine.taskforces_.at(1); force.types = {type}; force.sources = {2}; force.producers = {pad};
+        engine.frame_ = static_cast<std::int64_t>(engine.host_->world->completed_tick());
+        return engine.players_.back();
     }
     static void seed_purchases(Engine& engine, PlayerAi& player, authoritative::ScriptScheduler& scripts) {
         seed(engine, player, scripts);
@@ -202,7 +259,7 @@ struct EngineContractAccess {
     static void movement_fixture(Engine& engine, authoritative::ScriptScheduler& scripts,
         std::uint64_t& sequence) {
         engine.scripts_ = &scripts;
-        engine.sequence_ = &sequence;
+        engine.sequence_ = sequence;
         engine.event_tick_ = 1;
         Plan plan;
         plan.id = plan.instance = 1;
@@ -229,6 +286,7 @@ struct EngineContractAccess {
         engine.frame_ = frame;
         engine.service_blocks();
     }
+    static std::uint64_t event_sequence(const Engine& engine) { return engine.sequence_; }
     static bool movement_finished(const Engine& engine, std::uint64_t id) {
         return engine.blocks_.at(id).finished;
     }
@@ -250,6 +308,8 @@ namespace {
 namespace ai = eawr::script::foc::ai;
 namespace auth = eawr::script::authoritative;
 namespace foc = eawr::script::foc;
+namespace sim = eawr::sim;
+namespace tactical = eawr::sim::tactical;
 using ai::Real;
 
 int failures = 0;
@@ -343,6 +403,7 @@ struct World {
         unit.id = 10;
         unit.type = 1;
         unit.owner = 2;
+        unit.visible_to = 3;
         view->units.push_back(unit);
         host->view = view;
     }
@@ -367,6 +428,7 @@ void capture_target_application() {
     for (const auto& [id, type] : {std::pair{10U, 1U}, std::pair{11U, 2U}, std::pair{12U, 1U}}) {
         ai::ViewUnit unit;
         unit.id = id; unit.type = type; unit.owner = 4;
+        unit.visible_to = 3;
         world.view->units.push_back(unit);
     }
     eawr::sim::tactical::TacticalSetup setup;
@@ -436,6 +498,129 @@ void capture_target_application() {
     world.view->units[1].owner = 2;
     expect(matches(build, {"FRIENDLY_BUILD_PAD"}) && !matches(build, {"FRIENDLY_STRUCTURE"}),
         "GS-11: an allied real pad keeps its pad kind without economy");
+}
+
+void forced_object_fog() {
+    const auto handle = [](std::uint32_t kind, std::uint64_t id) { return auth::Value{auth::Handle{kind, id}}; };
+    for (const bool requester_ai : {false, true}) for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        World world;
+        world.host->setup.players[0].ai = requester_ai;
+        world.host->setup.players.push_back(foc::AiPlayer{7, "HUTTS", false, false, ""});
+        world.host->setup.players.push_back(foc::AiPlayer{9, "NEUTRAL", true, false, ""});
+        world.host->players.clear();
+        for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
+        // Player IDs intentionally differ from the raw visibility bit indexes.
+        world.view->players = {{1, 1, 0}, {2, 2, 1}, {7, 7, 2}, {9, 9, 3}};
+        auto container = world.host->setup.content.types.front();
+        container.name = "CONTAINER"; container.category_bits = 4; container.property_bits = 8;
+        container.locomotor = false; container.space_evaluator = false;
+        auto station = container;
+        station.type_id = 2; station.name = "STATION"; station.property_bits = 0;
+        station.star_base = true; station.space_evaluator = true;
+        world.host->setup.content.types = {container, station};
+        world.host->setup.content.categories.emplace("STRUCTURE", 4);
+        world.host->setup.content.properties.emplace("NOTOPPORTUNITYTARGET", 8);
+        world.host->types.clear(); world.host->types_by_name.clear();
+        for (const auto& type : world.host->setup.content.types) {
+            world.host->types.emplace(type.type_id, &type);
+            world.host->types_by_name.emplace(type.name, &type);
+        }
+        world.view->units.clear();
+        const auto add = [&](sim::EntityId id, tactical::TypeId type, tactical::PlayerId owner, int x, int z) {
+            ai::ViewUnit unit; unit.id = id; unit.type = type; unit.owner = owner; unit.visible_to = 1;
+            unit.position.x = eawr::sim::math::Fixed::from_integer(x).value();
+            unit.position.z = eawr::sim::math::Fixed::from_integer(z).value();
+            world.view->units.push_back(unit);
+        };
+        add(10, 1, 1, 0, 0); add(11, 2, 2, 20, 0); add(12, 2, 2, 20, 0);
+        add(13, 1, 7, 10, 0); add(14, 2, 9, 1, 0);
+        auth::ModuleManifest manifest;
+        expect(manifest.add("FOG.LUA", "function Check(source, mask, player, ally)\n"
+            "if player then Record(Find_Nearest(source, mask, player, ally))\n"
+            "else Record(Find_Nearest(source, mask)) end end\n").has_value(), "WNO-11: nearest fixture loads");
+        auth::SessionConfig config; config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        if (!scripts) { expect(false, "WNO-11: nearest scheduler starts"); return; }
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_globals(scripts.value(), world.host, errors);
+        expect(scripts.value().register_binding("Record", [](auth::BindingContext& context, const auth::ValueList& args) {
+            context.issue_command("nearest", args);
+            return eawr::core::Result<auth::ValueList>::success({});
+        }).has_value(), "WNO-11: nearest result recorder registers");
+        expect(errors.empty() && scripts.value().create_instance(1, "FOG.LUA").has_value(), "WNO-11: nearest instance starts");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto query = [&](const std::string& mask, std::optional<tactical::PlayerId> player, bool ally,
+            sim::EntityId expected, const char* message) {
+            auth::ScriptEvent event;
+            event.key = {scripts.value().completed_tick() + 1, auth::first_simulation_producer, 1, 0};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Check";
+            event.arguments = {handle(foc::handle_game_object, 10), auth::Value{mask},
+                player ? handle(foc::handle_player, *player) : auth::Value{}, auth::Value{ally}};
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "WNO-11: query submits");
+            const auto report = scripts.value().service(executor);
+            expect(report && report.value().diagnostics.empty() && report.value().commands.size() == 1,
+                "WNO-11: production nearest query runs");
+            if (!report || report.value().commands.size() != 1) return;
+            const auto& args = report.value().commands.front().arguments;
+            const auto* result = args.empty() ? nullptr : std::get_if<auth::Handle>(&args.front().data);
+            expect(expected == 0 ? result == nullptr : result != nullptr && result->id == expected, message);
+        };
+        query("Structure", 1, false, 13, "WNO-11: visible Hutt container beats enemy structures despite property/evaluator");
+        world.view->units[3].visible_to = 2;
+        query("Structure", 1, false, 11, "WNO-11: Hutt fog uses requester bits and equal-distance retains first enemy");
+        query("NotOpportunityTarget", 1, false, 0, "WNO-11: property filter respects raw fog");
+        query("CONTAINER", 1, false, 0, "WNO-11: exact type filter respects raw fog");
+        query("Structure", std::nullopt, false, 13, "WNO-11: no player filter ignores fog and still skips Neutral");
+        query("NotOpportunityTarget", std::nullopt, false, 13, "WNO-11: property query excludes its source");
+        world.view->units[1].visible_to = world.view->units[2].visible_to = 2;
+        query("Structure", 1, false, 0, "WNO-11: hidden enemy structures excluded for human and AI");
+        query("STATION", std::nullopt, false, 11, "WNO-11: no-filter exact type retains first tie");
+        world.view->units[3].visible_to = 1;
+        query("CONTAINER", 1, false, 13, "WNO-11: visible exact Hutt type admitted");
+        query("NotOpportunityTarget", 1, false, 13, "WNO-11: visible Hutt property admitted");
+        query("Corvette", 1, false, 0, "WNO-11: category masks stay intact");
+        query("Structure", 1, true, 0, "WNO-11: allied mask and source exclusion stay intact");
+        world.view->units[1].visible_to = world.view->units[2].visible_to = 1;
+        world.view->units[3].position.z = eawr::sim::math::Fixed::from_integer(30).value();
+        query("Structure", 1, false, 11, "WNO-11: nearest uses height as well as planar distance");
+        world.view->units[3].position.z = {};
+        ai::Engine engine(world.host, {}, {});
+        ai::Target target; target.object = 11;
+        for (unsigned flags = 0; flags != 4; ++flags) {
+            auto& type = world.host->setup.content.types[1];
+            type.initial_state_visible_under_fow = (flags & 1U) != 0;
+            type.last_state_visible_under_fow = (flags & 2U) != 0;
+            for (const std::uint64_t visibility : {0U, 1U, 2U}) {
+                world.view->units[1].visible_to = visibility;
+                expect(ai::EngineContractAccess::matches(engine, 1, {"ENEMY_STRUCTURE"}, target) ==
+                    (visibility == 1 || flags != 0), "WNO-13: raw requester fog or either authored flag admits goal");
+                expect(!ai::EngineContractAccess::matches(engine, 1, {"ENEMY_UNIT"}, target),
+                    "WNO-13: fog exception preserves category classification");
+            }
+        }
+        world.host->setup.content.types[1].initial_state_visible_under_fow = false;
+        world.host->setup.content.types[1].last_state_visible_under_fow = false;
+        world.host->setup.content.types[1].star_base = false;
+        world.host->setup.content.types[1].capture_point = true;
+        world.view->units[1].visible_to = 1; world.view->units[1].owner = 9;
+        expect(ai::EngineContractAccess::matches(engine, 1, {"ENEMY_STRUCTURE"}, target),
+            "WNO-14: visible Neutral merchant remains a nonallied structure goal");
+        world.view->units[1].visible_to = 0;
+        expect(!ai::EngineContractAccess::matches(engine, 1, {"ENEMY_STRUCTURE"}, target),
+            "WNO-13: hidden Neutral merchant without authored exception is rejected");
+        target.object = 0;
+        expect(ai::EngineContractAccess::matches(engine, 1, {"TACTICAL_LOCATION"}, target),
+            "WNO-13: region goals retain their separate admission");
+        ai::ThreatGrid grid;
+        grid.partition(foc::AiBounds{ai::real(-100), ai::real(100), ai::real(100), ai::real(-100)}, 5, 5, ai::Constants{});
+        world.view->units[1].owner = 2;
+        for (auto& unit : world.view->units) unit.visible_to = 0;
+        grid.service(*world.view, *world.host, 0);
+        const ai::Rect area{ai::real(-100), ai::real(-100), ai::real(200), ai::real(200)};
+        const auto force = grid.force(*world.host, *world.view, area, 4, 1, false, Real{}, 0);
+        expect(requester_ai ? force > Real{} : force == Real{},
+            "SK-45: unforced planning force keeps its independent AI fog preference");
+    }
 }
 
 void collect_free_categories() {
@@ -796,6 +981,8 @@ void shared_station_perception() {
 
 void economy_inputs() {
     World world;
+    foc::AiType other; other.type_id = 2; other.name = "OTHER";
+    world.host->types.emplace(2, &other); world.host->types_by_name.emplace(other.name, &other);
     world.host->setup.perception.campaign_game = false;
     const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
     auto equations = ai::EquationSet::parse({{"economy.xml", "<Root>"
@@ -858,7 +1045,7 @@ void economy_inputs() {
         world.host->setup.content.types[0].base_level = 3;
         world.host->setup.content.types[0].tech_level = 7;
         expect(engine.evaluate("Level", 1, nullptr) == ai::real(3), "SAE-02: station level uses Base_Level, independently of Tech_Level");
-        expect(engine.evaluate("Structures", 1, nullptr) == ai::real(2), "SAE-02: completed structure counts filter type and player");
+        expect(engine.evaluate("Structures", 1, nullptr) == Real{}, "WAS-10: unbuilt pads are not completed structures");
         expect(session.value().production_counts(1, 1).owned_player == 2, "SAE-03: ownership cache starts from live units");
         expect(session.value().production_counts(99, 1).current_allies == 0,
             "SAE-02: an undeclared AI service slot has no production ownership");
@@ -1010,11 +1197,14 @@ void production_lifecycle() {
 
     // Rejection, constructor removal, pad destruction and failed final replacement all
     // finish the block and release its reservation; the ordinary successful build still waits.
+    // The allied pad owner remains a combatant; neutral capture ownership is a distinct player.
     for (const int scenario : {0, 1, 2, 3, 4}) {
+        start.players = {{1, 1, 100, 1}, {2, 1, 200, 1}, {3, 3, 300, 0}};
         start.units = {{1, 20, 2}};
+        rules.players = {{1, q(1000), 20, true}, {2, q(1000), 20}, {3, q(1000), 20}};
         rules.menus = {{20, 100, {{30, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}, 0, false},
             {20, 200, {{31, t::BuildKind::structure, t::BuildQueue::units, q(900), 30, 30, 0, true}}, 0, false}};
-        rules.pads.neutral = 2;
+        rules.pads.neutral = 3;
         rules.pads.capture = {{20, q(100), q(1), {100, 200}, false, true, true}};
         rules.pads.construction = {{30, 40, q(100), 1, 1}, {31, 41, q(100), 1, 1}};
         rules.pads.influence = {{20, false}, {30, false}, {40, false}};
@@ -1067,6 +1257,557 @@ void production_lifecycle() {
             "SAE-03: pad outcome completes the production block with the correct result");
         expect(pad_engine.plan(1)->reserved_pads.empty() && player.reserved_credits.at(1) == Real{},
             "SAE-03: completed or failed pad task releases pad and credit reservations");
+    }
+}
+
+void spending_pad_states() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        t::TacticalSetup start;
+        start.players = {{1, 1, 100, 1}, {2, 1, 100, 1}, {3, 2, 200, 1}, {4, 1, 300, 1}};
+        start.units = {{1, 20, 1}, {2, 20, 2}, {3, 20, 3}, {4, 20, 4}, {5, 10, 1}};
+        for (std::size_t i = 0; i < start.units.size(); ++i) start.units[i].position.x = q(static_cast<std::int64_t>(i) * 1000);
+        t::EconomyRules rules;
+        rules.players = {{1, q(1000), 20}, {2, q(1000), 20, true}, {3, q(1000), 20, true}, {4, q(1000), 20}};
+        rules.pads.neutral = 4;
+        rules.pads.capture = {{20, q(100), q(1), {100, 200, 300}, true, true, true, {}, false, 6}};
+        rules.pads.construction = {{30, 40, q(100), 1, 1}, {31, 41, q(100), 1, 1}, {32, 42, q(100), 1, 1}};
+        rules.pads.influence = {{10, false}, {20, false}, {30, false}, {31, false}, {32, false}, {40, false}, {41, false}, {42, false}};
+        for (const auto& [faction, type] : {std::pair{100U, 30U}, std::pair{200U, 31U}, std::pair{300U, 32U}})
+            rules.menus.push_back({20, faction, {{type, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}, 0, false});
+        t::DurabilityTable health;
+        for (const auto type : {20U, 30U, 31U, 32U, 40U, 41U, 42U}) {
+            t::DurabilityProfile row; row.type_id = type; row.max_hull = q(300); health.profiles.push_back(row);
+        }
+        auto made = t::TacticalSession::create(start, {}, health, {}, {}, {}, {}, {}, rules);
+        expect(static_cast<bool>(made), "WAS-10/11: typed allied pad fixture starts");
+        if (!made) continue;
+        auto& world = made.value();
+        auto host = std::make_shared<ai::Host>(); host->world = &world;
+        for (const auto& [type, name] : {std::pair{20U, "PAD"}, {30U, "UC_E"}, {31U, "UC_R"}, {32U, "UC_U"},
+                {40U, "MINE_E"}, {41U, "MINE_R"}, {42U, "MINE_U"}}) {
+            foc::AiType row; row.type_id = type; row.name = name; host->setup.content.types.push_back(row);
+        }
+        for (const auto& type : host->setup.content.types) {
+            host->types.emplace(type.type_id, &type); host->types_by_name.emplace(type.name, &type);
+        }
+        host->setup.players = {{1, "EMPIRE", false, false, "", true}, {2, "EMPIRE", false, true, ""},
+            {3, "REBEL", false, true, ""}, {4, "NEUTRAL", true, false, ""}};
+        for (const auto& player : host->setup.players) host->players.emplace(player.player, &player);
+        const auto refresh = [&] {
+            host->snapshot = world.snapshot(); host->view = foc::detail::build_view(world, *host->snapshot, &executor);
+            host->credit_changes.clear();
+        };
+        refresh();
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        auto parsed = ai::EquationSet::parse({{"spending.xml", "<Root>"
+            "<Resources>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"MINE_E\", Parameter_Type=\"MINE_R\", Parameter_Type=\"MINE_U\"}</Resources>"
+            "<ResourceDesire>Function_Resources.Evaluate > 0</ResourceDesire>"
+            "<Constructors>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"UC_E\"}</Constructors>"
+            "<Open>Variable_Self.OpenBuildPadCount</Open>"
+            "<Menu>Variable_Self.OpenBuildPadCount{Parameter_Type=\"UC_E\"}</Menu>"
+            "<Multiple>Variable_Self.OpenBuildPadCount{Parameter_Type=\"PAD\", Parameter_Type=\"UC_E\", Parameter_Type=\"PAD\"}</Multiple>"
+            "<WrongMenu>Variable_Self.OpenBuildPadCount{Parameter_Type=\"UC_R\"}</WrongMenu>"
+            "<Unknown>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"UNKNOWN\"}</Unknown>"
+            "<Savings>(Function_Menu.Evaluate > 0) * (Variable_Self.CreditsUnnormalized < 1500)</Savings>"
+            "</Root>"}}, converters);
+        expect(static_cast<bool>(parsed), "WAS-10/12: resource and savings equations parse");
+        if (!parsed) continue;
+        ai::AiData data; data.equations = std::move(parsed).value();
+        ai::Engine engine(host, std::move(data), {});
+        ai::EngineContractAccess::perception_executor(engine, &executor);
+        const auto value = [&](const char* equation) { return engine.evaluate(equation, 2, nullptr); };
+        auto& pads = const_cast<std::map<eawr::sim::EntityId, t::PadState>&>(world.pads());
+        pads.at(2).cooldown_until = 6;
+        expect(value("Open") == ai::real(1) && value("Menu") == ai::real(1)
+            && value("Multiple") == ai::real(1) && value("WrongMenu") == Real{},
+            "WAS-11: eligible human ally matches faction menu once, hostile/neutral/cooldown pads do not");
+        expect(value("Savings") == ai::real(1), "WAS-12: allied menu-capable open pad enables refinery savings");
+        expect(!value("Unknown"), "WAS-10: unknown resource type fails evaluation");
+        ai::PlayerAi player; player.player = 2;
+        for (const auto type : {30U, 31U, 32U}) {
+            ai::Goal goal; goal.id = type; goal.potential = ai::PotentialPlan{};
+            goal.potential->valid = true; goal.potential->sources = {2}; goal.potential->units = {type};
+            goal.potential->producers = {1}; goal.potential->cost = ai::real(100);
+            ai::EngineContractAccess::reserve(engine, player, goal);
+            expect(value("Resources") == ai::real(1) && value("ResourceDesire") == ai::real(1),
+                "WAS-10: every faction's pending constructor alias enables resource-gated desire before completion");
+            expect(value("Open") == Real{}, "WAS-11: pending reservation excludes the last eligible pad");
+            ai::EngineContractAccess::release(engine, player, goal);
+            expect(value("Resources") == Real{} && value("Menu") == ai::real(1),
+                "WAS-10/11: abandonment releases typed and open-pad reservation inputs");
+        }
+        for (int frame = 0; frame < 5; ++frame) expect(world.step(executor).has_value(), "WAS-11: cooldown advances");
+        refresh();
+        expect(value("Open") == ai::real(1), "WAS-11: cooldown still excludes the pad before its deadline");
+        expect(world.step(executor).has_value(), "WAS-11: cooldown reaches deadline");
+        refresh();
+        expect(value("Open") == ai::real(2), "WAS-11: cooldown deadline is inclusive");
+        expect(world.submit({{6, 1, 0}, {1}, t::PadBuildPayload{30}}).has_value()
+            && world.step(executor).has_value(), "WAS-10: human allied construction starts");
+        refresh();
+        expect(value("Menu") == ai::real(1), "WAS-11: actual construction excludes its pad");
+        // WAS-10: the fallback tests the actual child's type when no reservation is stored.
+        const auto child = world.pads().at(1).under_construction;
+        expect(child != 0, "WAS-10: under-construction child is live");
+        expect(value("Constructors") == ai::real(1) && value("Resources") == Real{},
+            "WAS-10: an unreserved allied child matches its actual type, without a completed-type alias");
+        for (int frame = 0; frame < 31; ++frame) expect(world.step(executor).has_value(), "WAS-10: mine completes");
+        refresh();
+        expect(value("Resources") == ai::real(1) && value("Menu") == ai::real(1),
+            "WAS-10/11: completed human mine remains visible to allied AI and excludes open-pad count");
+        expect(world.stage_remove(world.pads().at(1).constructed).has_value(), "WAS-10: completed mine destruction stages");
+        refresh();
+        expect(value("Resources") == Real{}, "WAS-10: destroyed mine cannot retain the resource gate");
+        const auto hash = world.step(executor);
+        expect(static_cast<bool>(hash), "WAS-10/11: post-destruction tick commits");
+        if (hash) {
+            const auto digest = hash.value().state_sha256;
+            if (workers == 1) baseline.push_back(digest);
+            else expect(digest == baseline.front(), "WAS-10/11: pad state hashes equal on 1/2/4/8 workers");
+        }
+    }
+}
+
+void spending_pad_refunds() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    std::vector<std::string> baseline;
+    std::vector<std::string> callback_baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+      {
+        auto host = std::make_shared<ai::Host>();
+        ai::Engine engine(host, ai::AiData{}, {ai::PlanDef{}});
+        auth::SessionConfig config; config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, auth::ModuleManifest{});
+        expect(scripts.has_value(), "WAS-26: station refusal interleaving scheduler starts");
+        if (scripts) {
+            std::uint64_t sequence = 0;
+            ai::EngineContractAccess::bind_scripts(engine, scripts.value(), sequence);
+            auto& player = ai::EngineContractAccess::rejected_station_fixture(engine);
+            ai::EngineContractAccess::direct_pad_service(engine, player);
+            expect(player.tasks.size() == 1 && !engine.block(1)->finished,
+                "WAS-26/WBP-47: pad-only service retains observed station refusal for ordinary execution");
+            ai::EngineContractAccess::service(engine, player, 2);
+            expect(player.tasks.empty() && engine.block(1)->finished && !engine.block(1)->result,
+                "WAS-26: ordinary execution settles the retained station refusal block");
+        }
+      }
+      for (const auto multiplier : {1, 2}) {
+       for (const auto scenario : {0, 1, 2, 3, 4}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        t::TacticalSetup start; start.players = {{1, 1, 100, 1}, {2, 1, 100, 1}, {3, 3, 300, 0}};
+        start.units = {{1, 20, 1}};
+        t::EconomyRules rules; rules.players = {{1, q(1000), 20}, {2, q(1000), 20, true}};
+        rules.players[1].credit_multiplier = q(multiplier);
+        rules.menus = {{20, 100, {{30, t::BuildKind::structure, t::BuildQueue::units, q(300), 30, 30, 0, true}}, 0, false}};
+        rules.pads.capture = {{20, q(100), q(1), {100}, false, true, true}};
+        rules.pads.neutral = 3;
+        rules.pads.construction = {{30, 40, q(300), 100, 100}};
+        rules.pads.influence = {{20, false}, {30, false}, {40, false}};
+        t::DurabilityTable health;
+        for (const auto type : {20U, 30U, 40U}) {
+            if ((scenario == 1 || scenario == 3) && type == 30) continue; // Core refuses creation after AI precheck.
+            t::DurabilityProfile row; row.type_id = type; row.max_hull = q(300); health.profiles.push_back(row);
+        }
+        auto made = t::TacticalSession::create(start, {}, health, {}, {}, {}, {}, {}, rules);
+        expect(static_cast<bool>(made), "WBP-47/48: pad refund fixture starts"); if (!made) continue;
+        auto& world = made.value(); auto host = std::make_shared<ai::Host>(); host->world = &world;
+        foc::AiType constructor; constructor.type_id = 30; constructor.name = "UC"; constructor.tactical_cost = q(100);
+        host->setup.content.types = {constructor}; host->types.emplace(30, &host->setup.content.types.front());
+        host->types_by_name.emplace("UC", &host->setup.content.types.front());
+        const auto refresh = [&] {
+            host->snapshot = world.snapshot(); host->view = foc::detail::build_view(world, *host->snapshot, &executor);
+            host->credit_changes.clear();
+        };
+        expect(world.step(executor).has_value(), "WBP-47: initial barrier completes"); refresh();
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        auto parsed = ai::EquationSet::parse({{"pad.xml", "<Root><Resource>Variable_Self.TacticalBuiltStructureCount{Parameter_Type=\"UC\"}</Resource></Root>"}}, converters);
+        expect(static_cast<bool>(parsed), "WAS-10: refund fixture resource equation parses"); if (!parsed) continue;
+        ai::AiData data; data.equations = std::move(parsed).value();
+        ai::Engine engine(host, std::move(data), {ai::PlanDef{}}); ai::PlayerAi player; player.player = 2;
+        auth::SessionConfig callback_config; callback_config.tick_duration = {1, 30};
+        auto callbacks = auth::ScriptScheduler::create(callback_config, auth::ModuleManifest{});
+        expect(static_cast<bool>(callbacks), "WBP-47/48: execution callback scheduler starts"); if (!callbacks) continue;
+        ai::Goal goal; goal.id = 1; goal.potential = ai::PotentialPlan{};
+        goal.potential->valid = true; goal.potential->cost = ai::real(300);
+        goal.potential->sources = {2}; goal.potential->units = {30}; goal.potential->producers = {1};
+        std::uint64_t sequence = 0;
+        ai::EngineContractAccess::bind_scripts(engine, callbacks.value(), sequence);
+        const auto deliver = [&] {
+            for (const auto& command : ai::EngineContractAccess::take_orders(engine)) {
+                const auto order = foc::tactical_ai_detail::translate_order(command);
+                expect(static_cast<bool>(order), "WBP-47/48: pad accounting command translates");
+                if (order) expect(world.submit({{world.completed_tick(), order.value().issuer, sequence++},
+                    order.value().units, order.value().payload}).has_value(), "WBP-47/48: pad accounting command submits");
+            }
+            expect(world.step(executor).has_value(), "WBP-47/48: pad accounting barrier commits"); refresh();
+        };
+        ai::EngineContractAccess::reserve(engine, player, goal); deliver();
+        expect(engine.evaluate("Resource", 2, nullptr) == ai::real(1), "WAS-10: pad reservation enables the resource gate");
+        if (scenario == 3 || scenario == 4) {
+            host->engine = &engine;
+            auto& installed = ai::EngineContractAccess::direct_pad_fixture(engine, 30, 1); installed = player;
+            auth::ModuleManifest manifest;
+            expect(manifest.add("PAD.LUA", "refused = 0\nfunction Default_No_Units_Remaining(tf) refused = refused + 1 end\n"
+                "function Request(tf,pad) tf.Build(\"UC\",pad) rest = tf.Build_All() end\n")
+                .has_value(), "WBP-47: direct pad Lua loads");
+            auth::SessionConfig config; config.tick_duration = {1, 30};
+            auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+            expect(static_cast<bool>(scripts), "WBP-47: direct pad scheduler starts"); if (!scripts) continue;
+            std::vector<eawr::core::Diagnostic> errors;
+            ai::EngineContractAccess::bind_scripts(engine, scripts.value(), sequence);
+            foc::detail::register_plan_bindings(scripts.value(), host, errors);
+            expect(errors.empty() && scripts.value().create_instance(1, "PAD.LUA").has_value(), "WBP-47: direct pad binding registers");
+            if (scenario == 4) {
+                const_cast<std::map<eawr::sim::EntityId, t::PadState>&>(world.pads()).at(1).cooldown_until = 100;
+                ai::EngineContractAccess::pause_planning(engine);
+                // The caller's event counter expires before after_service executes.
+                const auto prepare = [&] {
+                    std::uint64_t temporary_sequence = 7;
+                    return engine.before_service(world, *host->snapshot, scripts.value(), temporary_sequence, &executor);
+                };
+                expect(prepare().has_value(), "WBP-47: direct refusal preparation completes before Lua service");
+            }
+            auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, 0};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Request";
+            event.arguments = {auth::Value{auth::Handle{ai::handle_taskforce, 1}}, auth::Value{auth::Handle{foc::handle_game_object, 1}}};
+            expect(scripts.value().submit_event(std::move(event)).has_value(), "WBP-47: direct pad call submits");
+            auto report = scripts.value().service(executor);
+            expect(report && engine.after_service(report.value()).has_value(), "WBP-47: direct pad call applies in its current barrier");
+            if (!report) continue;
+            if (scenario == 4) {
+                expect(report.value().commands.empty(), "WBP-47: cooldown refuses the direct purchase");
+                expect(ai::EngineContractAccess::attachment_events(engine).size() == 1,
+                    "WBP-47: direct refusal queues its callback after preparation returned");
+                const auto next_service = [&] {
+                    std::uint64_t temporary_sequence = 7;
+                    expect(engine.before_service(world, *host->snapshot, scripts.value(), temporary_sequence, &executor).has_value(),
+                        "WBP-47: deferred callback receives a future tick and unique sequence");
+                    expect(scripts.value().service(executor).has_value(), "WBP-47: deferred callback services");
+                };
+                next_service();
+                next_service();
+                const auto refused = scripts.value().read_global(1, "refused");
+                expect(refused && refused.value() && std::get<Real>(refused.value()->data) == ai::real(1),
+                    "WBP-47: direct refusal callback is delivered exactly once across service boundaries");
+                const auto hash = scripts.value().state_hash();
+                expect(hash.has_value(), "WBP-47: deferred callback state hashes");
+                if (hash) {
+                    if (workers == 1) callback_baseline.push_back(hash.value());
+                    else expect(hash.value() == callback_baseline[static_cast<std::size_t>(multiplier - 1)],
+                        "WBP-47: deferred callback hashes equal on 1/2/4/8 workers");
+                }
+                continue;
+            }
+            expect(report.value().commands.size() == 1 && report.value().commands.front().verb == foc::verb_pad_build
+                && installed.tasks.size() == 1 && installed.tasks.front().issued == world.completed_tick(),
+                "WBP-47: direct Lua Build runs precheck now and Build_All cannot duplicate the allocation");
+            const auto rest = scripts.value().read_global(1, "rest");
+            expect(rest && rest.value() && engine.block(std::get<auth::Handle>(rest.value()->data).id)->finished,
+                "WBP-47: Build_All with no remaining allocation returns a completed block");
+            player = installed; ai::EngineContractAccess::return_orders(engine, report.value());
+            ai::EngineContractAccess::bind_scripts(engine, callbacks.value(), sequence);
+        } else {
+            ai::EngineContractAccess::purchase(engine, player, goal, 30, 1);
+            if (scenario == 0)
+                const_cast<std::map<eawr::sim::EntityId, t::PadState>&>(world.pads()).at(1).cooldown_until = 100;
+            ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        }
+        expect(player.reserved_credits.at(1) == ai::real(scenario == 0 ? 300 : 200),
+            "WBP-47/48: only a passed precheck consumes the generic tactical cost");
+        if (scenario == 0) expect(engine.plan(1)->reserved_pads == std::vector<eawr::sim::EntityId>{1},
+            "WBP-48: early refusal retains the pad allocation for a later retry or plan release");
+        deliver();
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        expect(engine.evaluate("Resource", 2, nullptr) == ai::real(scenario == 1 || scenario == 3 ? 0 : 1),
+            "WAS-10: Core no-child refusal clears its typed gate; pending and live child states keep it");
+        if (scenario == 2) {
+            const auto child = world.pads().at(1).under_construction;
+            expect(child != 0 && world.submit({{world.completed_tick(), 2, sequence++}, {child},
+                t::DamagePayload{q(1000), t::attack_hull}}).has_value(), "WBP-48: accepted child destruction submits");
+            expect(world.step(executor).has_value(), "WBP-48: accepted child destruction commits"); refresh();
+            expect(engine.evaluate("Resource", 2, nullptr) == Real{},
+                "WAS-10: destroyed construction child clears the gate before the next execution service");
+            ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        }
+        const auto expected_immediate = 700 + (scenario == 1 || scenario == 3 ? 100 * multiplier : 0);
+        expect(host->credits(2) == q(expected_immediate),
+            "WBP-48: no-child Core refusal refunds once; early refusal and later child death do not");
+        // A second observation of the same rejection must not repeat its direct refund.
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        expect(host->credits(2) == q(expected_immediate), "WBP-48: repeated observation cannot duplicate a refund");
+        ai::EngineContractAccess::release(engine, player, goal); deliver();
+        expect(world.ledgers()[1].credits == q(700 + (scenario == 2 ? 200 : 300) * multiplier),
+            "WBP-47/48: abandonment refunds only the unconsumed pad allocation through the positive-credit path");
+        const auto result = world.step(executor);
+        expect(static_cast<bool>(result), "WBP-47/48: final pad refund tick commits");
+        if (result) {
+            const auto index = static_cast<std::size_t>((multiplier - 1) * 4 + scenario);
+            if (workers == 1) baseline.push_back(result.value().state_sha256);
+            else expect(result.value().state_sha256 == baseline[index], "WBP-47/48: refund hashes equal on 1/2/4/8 workers");
+        }
+       }
+      }
+    }
+}
+
+void spending_wallet_reservations() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+      for (const auto multiplier : {1, 2}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        t::TacticalSetup start; start.players = {{1, 1, 100, 1}, {2, 1, 100, 1}};
+        start.units = {{1, 10, 1}};
+        t::EconomyRules rules;
+        rules.players = {{1, q(1000), 20}, {2, q(1000), 20, true}};
+        rules.players[1].credit_multiplier = q(multiplier);
+        rules.menus = {{10, 100, {{50, t::BuildKind::unit, t::BuildQueue::units, q(300), 100, 100, 0, true}}}};
+        rules.menus.front().options.front().requirements.current_allies = 1;
+        rules.menus.front().options.push_back({51, t::BuildKind::unit, t::BuildQueue::units, q(300), 100, 100, 0, true});
+        auto made = t::TacticalSession::create(start, {}, {}, {}, {}, {}, {}, {}, rules);
+        expect(static_cast<bool>(made), "WAS-25/26: reservation accounting fixture starts");
+        if (!made) continue;
+        auto& world = made.value();
+        auto host = std::make_shared<ai::Host>(); host->world = &world;
+        foc::AiType station; station.type_id = 10; station.name = "STATION"; station.star_base = true;
+        foc::AiType unit; unit.type_id = 50; unit.name = "SHIP"; unit.tactical_cost = q(200);
+        host->setup.content.types = {station, unit};
+        for (const auto& type : host->setup.content.types) {
+            host->types.emplace(type.type_id, &type); host->types_by_name.emplace(type.name, &type);
+        }
+        const auto refresh = [&] {
+            host->snapshot = world.snapshot(); host->view = foc::detail::build_view(world, *host->snapshot, &executor);
+            host->credit_changes.clear();
+        };
+        expect(world.step(executor).has_value(), "WAS-25: first barrier completes"); refresh();
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        auto parsed = ai::EquationSet::parse({{"wallet.xml", "<Root><Wallet>Variable_Self.CreditsUnnormalized</Wallet></Root>"}}, converters);
+        expect(static_cast<bool>(parsed), "WAS-05: wallet equation parses");
+        if (!parsed) continue;
+        ai::AiData data; data.equations = std::move(parsed).value(); ai::Engine engine(host, std::move(data), {ai::PlanDef{}});
+        auth::ModuleManifest manifest;
+        expect(manifest.add("WALLET.LUA", "function Read(player) wallet = player.Get_Credits() end\n").has_value(), "WAS-05: wallet Lua loads");
+        auth::SessionConfig config; config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(manifest));
+        expect(static_cast<bool>(scripts), "WAS-05: wallet scheduler starts"); if (!scripts) continue;
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::tactical_ai_detail::register_methods(scripts.value(), host, errors);
+        expect(errors.empty() && scripts.value().create_instance(1, "WALLET.LUA").has_value(), "WAS-05: player credit binding registers");
+        std::uint64_t event_sequence = 0, command_sequence = 0;
+        ai::EngineContractAccess::bind_scripts(engine, scripts.value(), event_sequence);
+        const auto wallet = [&](const std::int64_t expected) {
+            expect(engine.evaluate("Wallet", 2, nullptr) == ai::real(expected), "WAS-05/25: perception sees reservation-time wallet");
+            auth::ScriptEvent event; event.key = {scripts.value().completed_tick() + 1, auth::first_simulation_producer, 1, event_sequence++};
+            event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Read";
+            event.arguments = {auth::Value{auth::Handle{foc::handle_player, 2}}};
+            expect(scripts.value().submit_event(std::move(event)).has_value() && scripts.value().service(executor).has_value(), "WAS-05: Lua wallet read runs");
+            const auto value = scripts.value().read_global(1, "wallet");
+            expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected), "WAS-05: Get_Credits sees the same immediate wallet");
+        };
+        t::TacticalReplay replay; replay.setup = start;
+        const auto deliver = [&] {
+            for (const auto& command : ai::EngineContractAccess::take_orders(engine)) {
+                const auto order = foc::tactical_ai_detail::translate_order(command);
+                expect(static_cast<bool>(order), "WAS-25/26: reservation/refund/prepaid command translates");
+                if (!order) continue;
+                t::PlayerCommand routed{{world.completed_tick(), order.value().issuer, command_sequence++}, order.value().units, order.value().payload};
+                expect(world.submit(routed).has_value(), "WAS-25/26: deterministic accounting command submits"); replay.commands.push_back(routed);
+            }
+            expect(world.step(executor).has_value(), "WAS-25/26: accounting command commits"); refresh();
+        };
+        ai::PlayerAi player; player.player = 2;
+        ai::Goal goal; goal.id = 1; goal.potential = ai::PotentialPlan{}; goal.potential->valid = true; goal.potential->cost = ai::real(300);
+        ai::Goal competing = goal; competing.id = 2; competing.potential->cost = ai::real(100);
+        wallet(1000);
+        ai::EngineContractAccess::reserve(engine, player, goal); wallet(700);
+        ai::EngineContractAccess::reserve(engine, player, goal); wallet(700);
+        ai::EngineContractAccess::reserve(engine, player, competing); wallet(600);
+        expect(goal.potential->cost == Real{} && player.reserved_credits.at(1) == ai::real(300), "WAS-25: pending cost clears and remainder persists");
+        ai::EngineContractAccess::release(engine, player, competing, false); competing.potential->reserved = false;
+        ai::EngineContractAccess::reserve(engine, player, competing); wallet(600);
+        deliver(); wallet(600);
+        ai::EngineContractAccess::release(engine, player, competing); wallet(600 + 100 * multiplier);
+        ai::EngineContractAccess::release(engine, player, competing); wallet(600 + 100 * multiplier);
+        deliver();
+        ai::EngineContractAccess::purchase(engine, player, goal, 50, 1);
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        deliver();
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        expect(player.reserved_credits.at(1) == ai::real(100), "WAS-26: accepted effective-price purchase consumes generic cost only");
+        wallet(600 + 100 * multiplier);
+        expect(world.ledgers()[1].queues[0].size() == 1 && world.ledgers()[1].queues[0].front().paid == q(300),
+            "WAS-26: prepaid queue entry keeps its ordinary cancellation price");
+        const t::PlayerCommand cancel{{world.completed_tick(), 2, command_sequence++}, {}, t::CancelPayload{0, 0}};
+        replay.commands.push_back(cancel);
+        expect(world.submit(cancel).has_value()
+            && world.step(executor).has_value(), "WPR-31: started queue cancellation commits"); refresh();
+        wallet(600 + 400 * multiplier);
+        ai::EngineContractAccess::release(engine, player, goal); wallet(600 + 500 * multiplier); deliver();
+        wallet(600 + 500 * multiplier);
+        const auto prior = 600 + 500 * multiplier;
+        ai::Goal partial; partial.id = 3; partial.potential = ai::PotentialPlan{};
+        partial.potential->valid = true; partial.potential->cost = ai::real(600);
+        ai::EngineContractAccess::reserve(engine, player, partial); deliver();
+        ai::EngineContractAccess::purchase(engine, player, partial, 50, 1);
+        ai::EngineContractAccess::purchase(engine, player, partial, 50, 1);
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        deliver();
+        ai::EngineContractAccess::service(engine, player, static_cast<std::int64_t>(world.completed_tick()));
+        expect(world.ledgers()[1].queues[0].size() == 1 && player.reserved_credits.at(3) == ai::real(400),
+            "WAS-26: partial start consumes one generic allocation; refused shared-limit work stays refundable");
+        ai::EngineContractAccess::abandon_goal(engine, player, 3, scripts.value());
+        wallet(prior - 600 + 400 * multiplier); deliver();
+        expect(!player.reserved_credits.contains(3), "WAS-26: plan abandonment returns the unused remainder once");
+        const auto human_tick = world.completed_tick();
+        for (const auto& payload : {t::CommandPayload{t::AiReservationDebitPayload{q(100)}},
+                t::CommandPayload{t::BuyPayload{51, true}}}) {
+            const t::PlayerCommand control{{human_tick, 1, command_sequence++},
+                std::holds_alternative<t::BuyPayload>(payload) ? std::vector<eawr::sim::EntityId>{1} : std::vector<eawr::sim::EntityId>{}, payload};
+            expect(world.submit(control).has_value(), "WAS-25/26: human account control submits"); replay.commands.push_back(control);
+        }
+        const t::PlayerCommand too_large{{human_tick, 2, command_sequence++}, {}, t::AiReservationDebitPayload{q(5000)}};
+        expect(world.submit(too_large).has_value(), "WAS-25: unaffordable reservation debit submits"); replay.commands.push_back(too_large);
+        expect(world.step(executor).has_value() && world.ledgers()[0].credits == q(1000)
+            && world.ledgers()[0].queues[0].empty() && world.ledgers()[1].credits == q(prior - 600 + 400 * multiplier),
+            "WAS-25/26: human accounts cannot debit AI reservations or use prepaid buys"); refresh();
+        replay.final_tick_count = world.completed_tick();
+        const auto bytes = t::write_replay(replay);
+        expect(static_cast<bool>(bytes), "WAS-25/26: new opcodes encode");
+        if (bytes) {
+            const auto decoded = t::parse_replay(bytes.value());
+            expect(decoded && decoded.value() == replay, "WAS-25/26: reservation/prepaid opcodes round-trip exactly");
+        }
+        const auto result = world.step(executor);
+        expect(static_cast<bool>(result), "WAS-25/26: final accounting tick commits");
+        if (result) {
+            if (workers == 1) baseline.push_back(result.value().state_sha256);
+            else expect(result.value().state_sha256 == baseline[static_cast<std::size_t>(multiplier - 1)], "WAS-25/26: wallet/queue hashes equal on 1/2/4/8 workers");
+        }
+      }
+    }
+}
+
+void allied_resource_upgrade_selection() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    t::TacticalSetup start;
+    start.players = {{1, 1, 100, 1}, {2, 1, 100, 1}, {3, 1, 100, 1}, {4, 2, 200, 1}};
+    start.units = {{1, 10, 1}, {2, 20, 1}, {3, 20, 4}, {6, 21, 1}, {7, 21, 4}};
+    t::EconomyRules rules;
+    for (const auto player : {1U, 2U, 3U, 4U}) rules.players.push_back({player, q(1000), 20, false, {}, 1, 5});
+    t::BuildOption option{50, t::BuildKind::upgrade, t::BuildQueue::upgrades, q(100), 10, 10, 0, true};
+    option.requirements.current_allies = 1;
+    option.requirements.prerequisites = {20};
+    rules.menus = {{10, 100, {option, {20, t::BuildKind::unit, t::BuildQueue::units, q(100), 50, 50, 0, true}}}};
+    rules.upgrades = {{50, false, true, 0, {}}};
+    rules.pads.capture = {{21, q(100), q(1), {100, 200}, false, true, true}};
+    rules.pads.neutral = 4;
+    auto made = t::TacticalSession::create(start, {}, {}, {}, {}, {}, {}, {}, rules);
+    expect(static_cast<bool>(made), "SAE-12: human owns the shared station and resource structure");
+    if (!made) return;
+    auto& placed_pads = const_cast<std::map<eawr::sim::EntityId, t::PadState>&>(made.value().pads());
+    placed_pads.at(6).constructed = 2; placed_pads.at(7).constructed = 3;
+    auto host = std::make_shared<ai::Host>();
+    host->setup.perception.campaign_game = false;
+    foc::AiType station; station.type_id = 10; station.name = "STATION"; station.star_base = true; station.base_level = 1;
+    foc::AiType mine; mine.type_id = 20; mine.name = "MINE";
+    foc::AiType upgrade; upgrade.type_id = 50; upgrade.name = "RESEARCH"; upgrade.category_bits = 1;
+    host->setup.content.types = {station, mine, upgrade};
+    for (const auto& type : host->setup.content.types) {
+        host->types.emplace(type.type_id, &type);
+        host->types_by_name.emplace(type.name, &type);
+    }
+    host->world = &made.value();
+    const auto refresh = [&] {
+        host->snapshot = made.value().snapshot();
+        host->view = foc::detail::build_view(made.value(), *host->snapshot);
+    };
+    refresh();
+    const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+    auto equations = ai::EquationSet::parse({{"resources.xml", "<Root>"
+        "<Resources>Variable_Self.TacticalBuiltStructureCount{Parameter_Type = \"MINE\"}</Resources>"
+        "<Desire>Function_Resources.Evaluate > 0</Desire></Root>"}}, converters);
+    expect(static_cast<bool>(equations), "SAE-12: resource-gated upgrade equation parses");
+    if (!equations) return;
+    ai::AiData data; data.equations = std::move(equations).value();
+    ai::PlanDef plan; plan.ignore_target = true; plan.allow_free_store = false; plan.required_categories = {1};
+    ai::TaskForceDef force;
+    ai::TeamDef team; team.types = {50}; team.min_count = team.max_count = 1;
+    force.teams = {team}; plan.taskforces = {force};
+    ai::Engine engine(host, std::move(data), {plan});
+    for (const auto player_id : {2U, 3U}) {
+        expect(made.value().production_counts(player_id, 20).owned_player == 0,
+            "SAE-12: AI has no own resource structure");
+        expect(engine.evaluate("Resources", player_id, nullptr) == ai::real(1)
+            && engine.evaluate("Desire", player_id, nullptr) == ai::real(1),
+            "SAE-12: human's resource enables both allied AI upgrade desires");
+        ai::PlayerAi player; player.player = player_id;
+        ai::PotentialPlan potential;
+        expect(ai::EngineContractAccess::selection(engine, player, potential, 7)
+            && potential.units == std::vector<t::TypeId>{50} && potential.sources == std::vector<std::uint8_t>{2},
+            "SAE-12: each AI can select research from the human's shared station");
+    }
+    eawr::sim::InlineExecutor executor;
+    expect(made.value().submit({{0, 2, 0}, {1}, t::BuyPayload{50}}).has_value()
+        && made.value().step(executor).has_value(), "SAE-12: AI research starts normally");
+    refresh();
+    expect(!made.value().build_allowed(3, 1, 50), "WPR-33: teammate reserves the research slot");
+    expect(made.value().submit({{1, 2, 1}, {}, t::CancelPayload{1, 0}}).has_value()
+        && made.value().step(executor).has_value(), "WPR-31: AI cancels research");
+    refresh();
+    expect(made.value().build_allowed(3, 1, 50), "WPR-33: cancellation releases the team slot");
+    expect(made.value().submit({{2, 3, 0}, {1}, t::BuyPayload{50}}).has_value(), "SAE-12: other AI purchases research");
+    for (int tick = 0; tick < 12; ++tick) expect(made.value().step(executor).has_value(), "SAE-12: research completes");
+    for (const auto& account : made.value().ledgers())
+        expect(account.tech_level == (account.player == 4 ? 1U : 2U), "WPR-22: AI research advances the human and both allies only");
+    expect(made.value().stage_remove(2).has_value(), "SAE-12: human's last mine is lost");
+    expect(engine.evaluate("Resources", 2, nullptr) == Real{} && engine.evaluate("Desire", 2, nullptr) == Real{},
+        "SAE-12: enemy mine cannot keep the allied upgrade desire enabled");
+    const auto counted = made.value().production_counts(2, 50);
+    expect(counted.owned_allies == 1 && counted.owned_player == 0,
+        "SAE-12: held research ownership is queryable independently of the buyer");
+    expect(made.value().submit({{14, 2, 2}, {1}, t::BuyPayload{20}}).has_value()
+        && made.value().step(executor).has_value(), "SAE-12: queue a type used by the resource filter");
+    expect(made.value().production_counts(2, 20).queued_allies == 1
+        && engine.evaluate("Resources", 2, nullptr) == Real{}, "SAE-12: queue entries are not completed resource structures");
+    for (int tick = 0; tick < 52; ++tick) expect(made.value().step(executor).has_value(), "SAE-12: purchase reaches pool");
+    expect(made.value().production_counts(2, 20).current_allies == 1
+        && made.value().production_counts(2, 20).owned_allies == 0
+        && engine.evaluate("Resources", 2, nullptr) == Real{}, "SAE-12: undeployed pool entries are not completed resource structures");
+
+    auto neutral_start = start;
+    neutral_start.players.push_back({5, 1, 300, 0});
+    neutral_start.units.push_back({4, 20, 5});
+    neutral_start.units.push_back({8, 21, 5});
+    std::sort(neutral_start.units.begin(), neutral_start.units.end(), [](const auto& a, const auto& b) {
+        return a.entity_id < b.entity_id;
+    });
+    t::CombatTable neutral_rules;
+    neutral_rules.pad_neutral_factions = {300};
+    auto neutral_world = t::TacticalSession::create(neutral_start, {}, {}, {}, {}, neutral_rules, {}, {}, rules);
+    expect(static_cast<bool>(neutral_world), "SAE-12: neutral owner may share an ally's raw team number");
+    if (neutral_world) {
+        auto& neutral_pads = const_cast<std::map<eawr::sim::EntityId, t::PadState>&>(neutral_world.value().pads());
+        neutral_pads.at(6).constructed = 2; neutral_pads.at(7).constructed = 3; neutral_pads.at(8).constructed = 4;
+        const foc::AiPlayer neutral_player{5, "NEUTRAL", true, false, ""};
+        host->players.emplace(5, &neutral_player);
+        host->world = &neutral_world.value();
+        host->snapshot = neutral_world.value().snapshot();
+        host->view = foc::detail::build_view(neutral_world.value(), *host->snapshot);
+        expect(host->neutral(5), "SAE-12: neutral relationship is also bound in the AI host");
+        expect(engine.evaluate("Resources", 2, nullptr) == ai::real(1),
+            "SAE-12: bound neutral owner is excluded despite its matching team number");
+        expect(neutral_world.value().production_counts(5, 20).owned_allies == 0,
+            "SAE-12: neutral buyers have no allied resource view");
+        expect(neutral_world.value().stage_remove(2).has_value(), "SAE-12: lose the only non-neutral allied mine");
+        expect(engine.evaluate("Resources", 2, nullptr) == Real{} && engine.evaluate("Desire", 2, nullptr) == Real{},
+            "SAE-12: a neutral same-team mine cannot enable upgrade desires");
     }
 }
 
@@ -1388,6 +2129,8 @@ void reinforcement_service_budget() {
             eawr::platform::ThreadWorkerAdapter executor(workers);
             expect(world.submit({{0, 1, 0}, {1}, t::BuyPayload{1}}).has_value(), "SAE-10: ring fixture buys pooled unit");
             expect(world.step(executor).has_value() && world.step(executor).has_value(), "SAE-10: purchase reaches pool before search");
+            const auto before_search = world.record().commands.size();
+            const auto wallet = world.ledgers().front().credits;
             expect(world.submit_reinforcement_search({{world.completed_tick(), 1, 1}, {}, t::ReinforcePayload{1, {}}}, {7, 0}).has_value(),
                 "SAE-10: submit initial whole-ring search");
             const auto first = world.step(executor);
@@ -1401,6 +2144,17 @@ void reinforcement_service_budget() {
             if (radius == 1250) {
                 expect(!result->valid && result->candidates == 10 && result->next_attempt == 21,
                     "SAE-10: blocked radius-1000 ring tests all ten angles in one service and advances to 1500");
+                expect(std::none_of(first.value().snapshot->events().begin(), first.value().snapshot->events().end(),
+                    [](const auto& event) { return event.kind == t::EventKind::order_rejected
+                        || event.kind == t::EventKind::order_accepted; }),
+                    "SAE-10: a blocked search does not submit an ordinary command");
+                expect(world.record().commands.size() == before_search,
+                    "SAE-10: a blocked search is not replay-recorded");
+                expect(world.ledgers().front().credits == wallet
+                    && world.ledgers().front().pool == std::vector<t::TypeId>{1},
+                    "SAE-10: a blocked search consumes neither credits nor its pooled unit");
+                auto blocked = world.reinforcement_point(1, 1, result->position);
+                expect(blocked && !blocked.value(), "WR-22: the shared placement predicate rejects the blocked ring point");
                 expect(first.value().reinforcement_rejections_by_check[1] >= 10,
                     "SAE-10: every prevention-blocked angle gets a placement verdict");
                 expect(world.submit_reinforcement_search({{world.completed_tick(), 1, 2}, {}, t::ReinforcePayload{1, {}}}, {7, result->next_attempt}).has_value(),
@@ -1442,7 +2196,9 @@ void reinforcement_service_budget() {
             const auto empty_pool = world.step(executor);
             const auto held = world.reinforcement_search_result(1, 9);
             expect(empty_pool && held && held->candidates == 0 && held->next_attempt == 21
-                && empty_pool.value().snapshot->events().front().reason == t::RejectReason::not_in_pool,
+                && std::none_of(empty_pool.value().snapshot->events().begin(), empty_pool.value().snapshot->events().end(),
+                    [](const auto& event) { return event.kind == t::EventKind::order_rejected
+                        || event.kind == t::EventKind::order_accepted; }),
                 "SAE-03/10: absent pool entry does no ring work and retains its radius");
         }
     }
@@ -1586,7 +2342,9 @@ void reinforcement_population_wait() {
     const auto result = world.reinforcement_search_result(1, 10);
     expect(waiting && result && result->candidates == 0 && result->next_attempt == 21
         && world.ledgers().front().pool.size() == 1
-        && waiting.value().snapshot->events().front().reason == t::RejectReason::no_population_room,
+        && std::none_of(waiting.value().snapshot->events().begin(), waiting.value().snapshot->events().end(),
+            [](const auto& event) { return event.kind == t::EventKind::order_rejected
+                || event.kind == t::EventKind::order_accepted; }),
         "SAE-03/10: no population room preserves the pool and current ring without placement work");
 }
 
@@ -1777,6 +2535,32 @@ void threat_preparation() {
     expect(refused, "PG-06: preparation executor failure cannot fabricate a threat result");
     expect(grid.total_force(*world.host, *world.view, all, 0, true, Real{}).repr != 0,
         "PG-06: failure unwinds preparation before later const readers");
+}
+
+void plan_definition_paths() {
+    World world;
+    const std::string path = "Data/Scripts/AI/ai_plan_expansiongeneric_generatemagiccashdrop.lua";
+    const std::map<std::string, std::string> modules{{path, R"LUA(
+function Base_Definitions()
+    Category = "Skirmish_Generate_Magic_Cash_Drop_Space"
+    TaskForce = { { "CashForce", "MinimumTotalSize = 0" } }
+    MagicPlan = true
+    IgnoreTarget = true
+    AllowFreeStoreUnits = false
+end
+)LUA"}};
+    std::vector<std::string> notes;
+    const auto plans = foc::tactical_ai_detail::load_plans(world.host, modules, notes);
+    expect(plans && plans.value().size() == 1,
+        "L-03a / PL-10: an admitted plan outside SpaceMode loads from its logical path");
+    if (!plans || plans.value().size() != 1) return;
+    const auto& plan = plans.value().front();
+    expect(plan.module == path && plan.magic && plan.ignore_target && !plan.allow_free_store
+        && plan.goals == std::vector<std::string>{"SKIRMISH_GENERATE_MAGIC_CASH_DROP_SPACE"},
+        "PL-10: root-level cash definition retains its category and flags");
+    expect(std::none_of(notes.begin(), notes.end(), [](const auto& note) {
+        return note.starts_with("ai_plan_expansiongeneric_generatemagiccashdrop:");
+    }), "L-03a: the cash plan has no module-resolution diagnostic");
 }
 
 void taskforce_definitions() {
@@ -2268,7 +3052,7 @@ void squadron_movement_blocks() {
             "EX-31: travelling container has formation motion and no ship Motion");
         ai::EngineContractAccess::movement_service(engine, 2);
         expect(!ai::EngineContractAccess::movement_finished(engine, 1) &&
-            !ai::EngineContractAccess::movement_finished(engine, 2) && sequence == 0,
+            !ai::EngineContractAccess::movement_finished(engine, 2) && ai::EngineContractAccess::event_sequence(engine) == 0,
             "EX-31: move and ambush blocks do not finish or signal two ticks after departure");
         while (world.completed_tick() < 5000 && world.squadron_state(10)->mode == tactical::SquadronMode::move) {
             if (!world.step(executor)) { expect(false, "EX-31: travelling world steps"); return; }
@@ -2278,10 +3062,10 @@ void squadron_movement_blocks() {
         host->view = foc::detail::build_view(world, *world.snapshot());
         ai::EngineContractAccess::movement_service(engine, static_cast<std::int64_t>(world.completed_tick()));
         expect(ai::EngineContractAccess::movement_finished(engine, 1) &&
-            ai::EngineContractAccess::movement_finished(engine, 2) && sequence == 2,
+            ai::EngineContractAccess::movement_finished(engine, 2) && ai::EngineContractAccess::event_sequence(engine) == 2,
             "EX-31: both blocks finish and signal exactly once at actual formation arrival");
         ai::EngineContractAccess::movement_service(engine, static_cast<std::int64_t>(world.completed_tick() + 1));
-        expect(sequence == 2, "EX-31: completed formation blocks do not signal again");
+        expect(ai::EngineContractAccess::event_sequence(engine) == 2, "EX-31: completed formation blocks do not signal again");
         if (!baseline_arrival) baseline_arrival = world.completed_tick();
         else expect(world.completed_tick() == *baseline_arrival, "EX-31: arrival agrees on 1/2/4/8 workers");
     }
@@ -2310,21 +3094,21 @@ void guard_block_lifecycle() {
         ai::EngineContractAccess::guard_fixture(engine, scripts.value(), sequence);
         ai::EngineContractAccess::movement_service(engine, 2);
         expect(!ai::EngineContractAccess::movement_finished(engine, 1)
-            && ai::EngineContractAccess::movement_finished(engine, 2) && sequence == 2,
+            && ai::EngineContractAccess::movement_finished(engine, 2) && ai::EngineContractAccess::event_sequence(engine) == 2,
             "EX-36: stopped movers signal arrival once; only the ordinary move completes");
         for (const auto owner : {1U, 2U, 0U}) {
             world.view->units.back().owner = owner;
             ai::EngineContractAccess::movement_service(engine, 1802);
-            expect(!ai::EngineContractAccess::movement_finished(engine, 1) && sequence == 2,
+            expect(!ai::EngineContractAccess::movement_finished(engine, 1) && ai::EngineContractAccess::event_sequence(engine) == 2,
                 "EX-36: guard survives neutral, friendly and hostile ownership after its mover list empties");
         }
         if (lose_force) ai::EngineContractAccess::empty_guard_force(engine);
         else world.view->units.pop_back();
         ai::EngineContractAccess::movement_service(engine, 1803);
         expect(ai::EngineContractAccess::movement_finished(engine, 1)
-            && sequence == (lose_force ? 2U : 3U), "EX-36: force loss or target death releases the guard");
+            && ai::EngineContractAccess::event_sequence(engine) == (lose_force ? 2U : 3U), "EX-36: force loss or target death releases the guard");
         ai::EngineContractAccess::movement_service(engine, 1804);
-        expect(sequence == (lose_force ? 2U : 3U), "EX-36: released guard emits no duplicate events");
+        expect(ai::EngineContractAccess::event_sequence(engine) == (lose_force ? 2U : 3U), "EX-36: released guard emits no duplicate events");
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         expect(scripts.value().service(executor).has_value(), "EX-36: lifecycle callbacks service on every worker count");
     }
@@ -2546,16 +3330,26 @@ void faction_controller_inventory() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2) {
+        const std::string mode = argv[1];
+        if (mode == "--spending-pad-states") spending_pad_states();
+        else if (mode == "--spending-wallet") spending_wallet_reservations();
+        else if (mode == "--spending-pad-refunds") spending_pad_refunds();
+        else return 2;
+        return failures == 0 ? 0 : 1;
+    }
     equations();
     random_and_hash();
     initial_goal_budget();
     capture_target_application();
+    forced_object_fog();
     collect_free_categories();
     order_destinations();
     selection_team_starts();
     threat_grid();
     threat_preparation();
+    plan_definition_paths();
     taskforce_definitions();
     required_category_unions();
     scheduler_reads();
@@ -2573,6 +3367,10 @@ int main() {
     shared_station_perception();
     tactical_activation_estimate();
     production_lifecycle();
+    spending_pad_states();
+    spending_pad_refunds();
+    spending_wallet_reservations();
+    allied_resource_upgrade_selection();
     completed_purchases_are_available();
     reinforcement_work_budget();
     reinforcement_service_budget();

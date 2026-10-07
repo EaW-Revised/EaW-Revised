@@ -374,6 +374,14 @@ walks; “satellite” does not imply a new environmental damage algorithm.
   and damage call the existing subsystem interfaces with the object's current
   owner. This walk does not redefine those internals or turn every prop into
   a combatant.
+  Coruscant's resource containers belong to the Hutt player and are destructible
+(RO-2, SK-04); their positive `Tactical_Health` and
+  `Collidable_By_Projectile_Living=Yes` require live durability and combat
+  profiles even without capture behavior. The loader admits damageable map
+  objects alongside capture points, preserving their footprint admission.
+  Their `NotOpportunityTarget` property retains the R-09 priority exclusion;
+  an explicit hostile attack can still fire at them. This adds no exception to
+  the neutral-owner relationship gate in WHZ-51.
 - **WHZ-51** (**debug build**, EHZ-26, EHZ-40, EHZ-45, EHZ-53; WWP-66;
   **data**) Default relationships make either neutral faction non-hostile,
   self/same faction allied, otherwise use faction `Allies`/`Enemies` lists.
@@ -522,7 +530,7 @@ claim that our land trigger is implemented.
 | WHZ-45 | no capture progress/modifiers | missing | G-6 |
 | WHZ-46 | no capture completion/change-owner handoff | missing | G-6 |
 | WHZ-47 | no capture animations/radar events/progress | missing | G-6 |
-| WHZ-50 | `unit_tables.cpp` loads footprints, not neutral-object combat/economy profiles | missing | G-6 |
+| WHZ-50 | `unit_tables.cpp` loads footprints and live combat/durability profiles for capture points and damageable map objects; resource economy/death rewards remain outside this admission fix | partial: damageable object profiles applied | G-6 |
 | WHZ-51 | `src/sim/tactical/session.cpp`, `players_hostile`; ordinary orders, targeting, snapshot cursor classification and projectile contact reject neutral players; living projectile permission gates the persistent owner trees | agrees for neutral eligibility and DG-30 first-contact owner order | G-10 |
 | WHZ-52 | ordinary typed tactical respawn with neutral capture ownership and rounded deadlines | same | `TacticalSession::step`, `respawn_after_death`; exceptional branches remain U-05 |
 | WHZ-53 | scene population renders placed props; no invented scenery damage/capture | same | no new mechanic |
@@ -599,18 +607,25 @@ reinforcement-point announcements and gravity-well abilities remain with their
 existing production, reinforcement and ability owners. No new tags are applied
 by this PR.
 
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | **Settled ordinary schedule:** early fog decay, most recent service-registration first object turns, general `Behavior` then `SpaceBehavior`, periodic services in attachment order | Previously sourced in this walk |
+| U-04 | Zero authored transition duration subtracts one on an admitted rollback service and clamps progress to zero, mirroring the forward one-step fallback. Nonzero rollback divides by authored duration and logical FPS, then multiplies the service interval. The default capture-influence value is already sourced as true by WBP-46; the getter reads that field. | EUS-09 |
+
 ## Unverified, and what would settle it
 
 | ID | Open question | Next evidence / retail capture |
 |---|---|---|
-| U-01 | **Settled ordinary schedule:** early fog decay, most recent service-registration first object turns, general `Behavior` then `SpaceBehavior`, periodic services in attachment order | [WFO-08/12/15..19](frame-order.md), debug build. Exceptional duplicate/runtime reattachment remains UFO-04 there; field/storm crossing and same-frame shield mesh remain U-02. |
-| U-02 | Exact shield-mesh refresh on the same frame that storm membership enters/exits | Read all mesh-update callers. Capture entry/exit while firing at an Endor storm occupant with shields above zero; distinguish pool from collision/absorption. |
-| U-03 | Whether dense grids rebuild when a hazard moves, is destroyed or is spawned | Read dense-grid invalidation callers. A controlled destroyable-asteroid capture with fixed revealers would show whether the dense region persists. |
-| U-04 | Zero transition duration during capture rollback; default capture influence for types without an authored tag | Read scalar defaults and zero-time branch. A controlled point with zero transition and selected eligible/noneligible unit types can confirm safely. Stock five-map durations are positive. |
-| U-05 | Exact due-frame creation order for respawns and exceptional destruction routes | Read scheduled-object creation and special destroy branches. Capture pad/dock destruction through at least 80 seconds with battle-frame timestamps and verify neutral ownership and identical placement. |
+| U-02 | Exact shield-mesh refresh on the same frame that storm membership enters/exits **Sweep:** Still unverified: Shield collision refresh is sourced separately from storm membership. Same-frame mesh state requires membership/refresh call ordering and the target’s later shield service, not either reader alone. | Read all mesh-update callers. Capture entry/exit while firing at an Endor storm occupant with shields above zero; distinguish pool from collision/absorption. Retained sweep boundary: EUS-37. |
+| U-03 | Whether dense grids rebuild when a hazard moves, is destroyed or is spawned **Sweep:** The retained initializer and its direct/thunk callers show map-load construction of dense hazard grids. No move, spawn or destruction refresh caller appears in that reference set. This settles the traced caller set, but cannot exclude an indirect dispatch not represented by named callers. Still unverified: Indirect dispatch and save/load reconstruction remain unproven; a moved/spawned/destroyed-hazard capture must distinguish load-time footprints from dynamic updates. | Read dense-grid invalidation callers. A controlled destroyable-asteroid capture with fixed revealers would show whether the dense region persists. Retained sweep boundary: EUS-10. |
+| U-05 | Exact due-frame creation order for respawns and exceptional destruction routes **Sweep:** Still unverified: Ordinary detach and pending creation endpoints are traced, but equal due-frame insertion and exceptional destruction caller order remain unresolved. A due predicate alone does not select competing creations. | Read scheduled-object creation and special destroy branches. Capture pad/dock destruction through at least 80 seconds with battle-frame timestamps and verify neutral ownership and identical placement. Retained sweep boundary: EUS-31. |
 | U-06 | Modded space mine arming, placement and damage; no stock example in the five-map census | Establish a real space-capable type and reachable placement path first. Only then capture hostile/friendly/projectile crossings at known radii; do not infer a ship minefield from the land trigger. |
-| U-07 | Exact minimap integer fringe quantization, exceptional render-model bounds and dynamic invalidation; nebula blend/material application and ordinary registration coordinates are settled by the targeted debug-build follow-up in WHZ-71/72 | Lit retail entry/exit plus minimap recordings on Bespin/Endor check appearance. Follow exceptional model bounds and dynamic field changes separately; do not substitute render interpolation for sim state. |
-| U-08 | Movement-entry audio for asteroid fields/nebulas | Read the locomotor's SFX consumers. Record one entry/re-entry and a stationary occupant, distinguishing entry sounds from damage-hit sounds. |
+| U-07 | Exact minimap integer fringe quantization, exceptional render-model bounds and dynamic invalidation; nebula blend/material application and ordinary registration coordinates are settled by the targeted debug-build follow-up in WHZ-71/72 **Sweep:** Still unverified: Map raster construction is traced, but exact integer fringe conversion, exceptional model bounds and dynamic invalidation are separate unresolved consumers. The existing WHZ-71/72 material/coordinate rules remain settled. | Lit retail entry/exit plus minimap recordings on Bespin/Endor check appearance. Follow exceptional model bounds and dynamic field changes separately; do not substitute render interpolation for sim state. Retained sweep boundary: EUS-37. |
+| U-08 | Movement-entry audio for asteroid fields/nebulas **Sweep:** Still unverified: Hazard membership and capture services expose no established movement-entry audio dispatch. The specific ambient/entry sound caller remains unresolved; absence here does not prove silence. | Read the locomotor's SFX consumers. Record one entry/re-entry and a stationary occupant, distinguishing entry sounds from damage-hit sounds. Retained sweep boundary: EUS-37. |
 
 No capture is required to establish the verified probability, cache, overlap,
 neutral relationship or capture-progress rules above. Captures would validate

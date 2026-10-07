@@ -29,6 +29,8 @@ struct HardpointStatus {
     HardpointState state{HardpointState::intact};
     bool enabled{true};
     math::Fixed health{};
+    math::Fixed max_health{}; // WSL-40: repair admission uses the current effective maximum.
+    std::vector<PlayerId> repairing_players{};
     friend constexpr bool operator==(const HardpointStatus&, const HardpointStatus&) noexcept = default;
 };
 
@@ -99,6 +101,8 @@ struct TacticalInstance {
     // Presentation only; neither field participates in canonical_bytes() or hashes.
     std::optional<math::Vec3> craft_velocity_per_frame{};
     std::optional<bool> squadron_in_idle_grid{};
+    // WSU-34: the held idle point, independent of the craft's orbit. Render input only.
+    std::optional<math::Vec3> squadron_idle_anchor{};
     bool in_asteroid_field{}; // WHZ-13: presence of the recorded contact, without age grace
     bool in_nebula{}; // WHZ-25: cached service, member union, or hard-box fallback
     bool in_ion_storm{}; // WHZ-31: shield service's cached contact, never a zeroed pool
@@ -110,6 +114,9 @@ struct TacticalInstance {
     // SND-46: locomotor path presence for presentation audio, not velocity or idle orbiting.
     // A squadron publishes its members' shared move/approach here. Excluded from canonical bytes.
     bool has_movement_path{};
+    // SND-67: sampled ordinary-space walk speed for audio, published in existing worker slots.
+    // Absent for craft/non-locomotor objects; excluded from canonical bytes.
+    std::optional<math::Fixed> locomotor_speed_per_frame{};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 
@@ -155,6 +162,7 @@ struct SnapshotPlayer {
 // WHZ-51: ordinary combat excludes either neutral player and players on the same team.
 // Both simulation and presentation use the same immutable player relationship table.
 [[nodiscard]] bool players_hostile(std::span<const SnapshotPlayer> players, PlayerId owner, PlayerId target) noexcept;
+[[nodiscard]] bool players_allied(std::span<const SnapshotPlayer> players, PlayerId owner, PlayerId target) noexcept;
 
 // Immutable published copy of one completed tick: the players in ascending ID order,
 // ascending-ID instances with their per-player visibility, and the events emitted while

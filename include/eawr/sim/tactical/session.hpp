@@ -192,7 +192,7 @@ public:
     [[nodiscard]] std::optional<ReinforcementSearchResult> reinforcement_search_result(
         PlayerId player, std::uint64_t token) const;
     [[nodiscard]] core::Result<bool> reinforcement_point(PlayerId player, TypeId type, const math::Vec3& point,
-        PlacementWork* work = nullptr) const;
+        PlacementWork* work = nullptr, std::optional<math::Fixed> facing_yaw = {}) const;
     // The decided battle (#77, docs/behaviour/space-victory.md), or nothing while undecided.
     [[nodiscard]] const std::optional<BattleOutcome>& outcome() const noexcept;
     // Live units in ascending ID; a unit leaves the list when its hull reaches zero.

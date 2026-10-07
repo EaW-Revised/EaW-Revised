@@ -4,6 +4,7 @@
 // (drawing, the pointer, the commands) runs in the viewer (tests/presentation/renderer).
 
 #include "eawr/presentation/ui/production.hpp"
+#include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/pads.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "ui_test_support.hpp"
@@ -86,9 +87,25 @@ void test_buttons() {
 
 void test_queue() {
     std::array<std::vector<tactical::QueueEntry>, tactical::build_queue_count> queues;
-    queues[0] = {{x_wing, 1, credits(500), 450, 460}, {y_wing, 1, credits(550), 510, 0}};
+    queues[0] = {{x_wing, 1, credits(500), 450, 460, 12}, {y_wing, 1, credits(550), 510, 0, 13}};
     auto slots = ui::layout_build_queue(queues, 235);
     expect(slots.size() == 2, "PU-63: every entry");
+    expect(slots[0].entry_id == 12 && slots[1].entry_id == 13, "PU-17: rendered slots retain the purchase identity");
+    ui::TacticalIntent cancel;
+    cancel.verb = ui::TacticalVerb::cancel;
+    cancel.queue = slots[1].queue;
+    cancel.queue_entry_id = slots[1].entry_id;
+    ui::CommandScheduler scheduler(1);
+    expect(static_cast<bool>(scheduler.issue(cancel)) && static_cast<bool>(scheduler.issue(cancel)),
+        "PU-17: two clicks on the displayed entry enter the command scheduler");
+    queues[0].erase(queues[0].begin());
+    const auto commands = scheduler.take(1);
+    expect(commands.size() == 2 && std::get<tactical::CancelPayload>(commands[0].payload).entry_id == 13
+        && commands[0].payload == commands[1].payload,
+        "PU-17: a shifted snapshot cannot retarget queued clicks to a different identity");
+    queues[0].insert(queues[0].begin(), {x_wing, 1, credits(500), 450, 460, 12});
+    cancel.queue_entry_id = 0;
+    expect(!scheduler.issue(cancel), "PU-17: UI never falls back to index cancellation");
     expect(slots[0].component == 5 && slots[1].component == 6, "PU-63: units take tqueue05 on");
     expect(slots[0].percent == "50%" && slots[0].progress == 0.5, "PU-64: the front at 225 of 450 frames");
     expect(!slots[1].percent && slots[1].progress == 1.0, "PU-64: the others show full and no text");
@@ -173,11 +190,34 @@ void test_pool() {
     const std::vector<tactical::TypeId> pool{y_wing, x_wing, y_wing, y_wing};
     const auto value = [](const tactical::TypeId type) { return type == y_wing ? 2U : 1U; };
     auto slots = ui::layout_pool(pool, 20, 25, value);
-    expect(slots.size() == 2 && slots[0].type == y_wing && slots[1].type == x_wing, "PU-66: by type, first completion first");
-    expect(slots[0].count == 3 && slots[0].text == "x3" && slots[1].text.empty(), "PU-66: x<n> for more than one");
+    expect(slots.size() == 2 && slots[0].type == x_wing && slots[1].type == y_wing,
+        "WR-08/EUS-14: traverse grouped definition identities, independently of completion order");
+    expect(slots[1].count == 3 && slots[1].text == "x3" && slots[0].text.empty(), "PU-66: x<n> for more than one");
     expect(slots[0].enabled && slots[1].enabled, "PU-66: room for both");
     slots = ui::layout_pool(pool, 24, 25, value);
-    expect(!slots[0].enabled && slots[1].enabled, "PU-66: a type whose population exceeds the room is disabled");
+    expect(slots[0].enabled && !slots[1].enabled, "PU-66: a type whose population exceeds the room is disabled");
+    const auto same = [](const auto& left, const auto& right) {
+        return std::equal(left.begin(), left.end(), right.begin(), right.end(), [](const auto& a, const auto& b) {
+            return a.slot == b.slot && a.type == b.type && a.count == b.count && a.text == b.text && a.enabled == b.enabled;
+        });
+    };
+    const std::vector<tactical::TypeId> reversed{x_wing, y_wing, y_wing, y_wing};
+    for (const auto limit : {0U, 1U, 2U, 20U}) {
+        expect(same(ui::layout_pool(pool, 24, 25, value, limit), ui::layout_pool(reversed, 24, 25, value, limit)),
+            "WR-08/EUS-14: completion order cannot change slots or admitted types at a slot limit");
+    }
+    const auto single = ui::layout_pool(std::vector<tactical::TypeId>{y_wing, x_wing}, 24, 25, value);
+    expect(single.size() == 2 && single[0].type == slots[0].type && single[1].type == slots[1].type
+        && single[1].count == 1 && single[1].text.empty(),
+        "WR-09: copies change counts and labels without shifting other types");
+    const auto removed = ui::layout_pool(std::vector<tactical::TypeId>{y_wing}, 24, 25, value);
+    const auto rebuilt = ui::layout_pool(std::vector<tactical::TypeId>{y_wing, x_wing}, 24, 25, value);
+    expect(removed.size() == 1 && removed[0].type == y_wing && same(rebuilt, single),
+        "WR-08/EUS-14: rebuilding a removed type restores its definition-key position");
+    const auto over_cap = ui::layout_pool(pool, 30, 25, [](const auto type) { return type == x_wing ? 0U : 2U; });
+    expect(over_cap[0].enabled && !over_cap[1].enabled,
+        "WR-09: zero-population types remain enabled even above the cap");
+    expect(ui::layout_pool({}, 0, 25, value).empty(), "WR-09: an empty pool clears every slot");
     expect(ui::pool_rows(0) == 0 && ui::pool_rows(4) == 0 && ui::pool_rows(5) == 1 && ui::pool_rows(20) == 4
                && ui::pool_rows(40) == 4,
            "PU-67: rows past the first");

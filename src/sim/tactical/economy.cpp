@@ -3,12 +3,34 @@
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "tactical_internal.hpp"
+#include "../math/wide.hpp"
 
 #include <algorithm>
 #include <array>
 #include <string>
 
 namespace eawr::sim::tactical {
+
+bool reinforcement_prevention_blocks(const math::Vec3& centre, const math::Fixed radius,
+    const math::Vec3& point) noexcept {
+    if (radius.raw() <= 0) return false;
+    const auto distance = [](const std::int64_t a, const std::int64_t b) {
+        return a >= b ? static_cast<std::uint64_t>(a) - static_cast<std::uint64_t>(b)
+                      : static_cast<std::uint64_t>(b) - static_cast<std::uint64_t>(a);
+    };
+    const auto dx = distance(centre.x.raw(), point.x.raw());
+    const auto dy = distance(centre.y.raw(), point.y.raw());
+    auto across = math::detail::multiply_u64(dx, dx);
+    if (math::detail::add_magnitude(across, math::detail::multiply_u64(dy, dy))) return false;
+    const auto limit = static_cast<std::uint64_t>(radius.raw());
+    return math::detail::compare(across, math::detail::multiply_u64(limit, limit)) < 0;
+}
+
+bool reinforcement_inside_bounds(const std::optional<std::array<math::Fixed, 4>>& bounds,
+    const math::Vec3& point) noexcept {
+    return !bounds || (point.x >= (*bounds)[0] && point.y >= (*bounds)[1]
+        && point.x <= (*bounds)[2] && point.y <= (*bounds)[3]);
+}
 
 namespace {
 
@@ -176,6 +198,7 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
         }
         if (!amount(entry.credits)) return invalid("player " + std::to_string(entry.player) + " credits out of range");
         if (entry.start_tech > entry.max_tech) return invalid("starting tech exceeds maximum");
+        if (!amount(entry.credit_multiplier)) return invalid("credit multiplier out of range");
     }
     for (std::size_t index = 0; index < rules.menus.size(); ++index) {
         const auto& menu = rules.menus[index];
@@ -267,27 +290,59 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
 }
 
 RejectReason queue_build(PlayerEconomy& state, const EconomyPlayer& player, const EconomyRules& rules,
-    const BuildOption& option, const EntityId station, const std::uint64_t frame) {
+    const BuildOption& option, const EntityId station, const std::uint64_t frame, const bool prepaid) {
+    if (prepaid && !player.ai) return RejectReason::cannot_produce;
     if (!option.available || rules.disabled_types.contains(option.type)) {
         return RejectReason::cannot_produce;
     }
     auto& queue = state.queues[static_cast<std::size_t>(option.queue)];
     if (!player.ai && queue.size() >= rules.max_queue) return RejectReason::queue_full;
-    if (state.credits < option.price) return RejectReason::insufficient_credits;
-    state.credits = math::Fixed::from_raw(state.credits.raw() - option.price.raw());
+    if (!prepaid) {
+        if (state.credits < option.price) return RejectReason::insufficient_credits;
+        state.credits = math::Fixed::from_raw(state.credits.raw() - option.price.raw());
+    }
     QueueEntry entry{option.type, station, option.price, player.ai ? option.ai_build_frames : option.build_frames, 0};
+    entry.entry_id = state.next_queue_entry_id++;
     if (queue.empty()) entry.complete_frame = frame + entry.frames;
     queue.push_back(entry);
     return RejectReason::none;
 }
 
-bool cancel_build(PlayerEconomy& state, const BuildQueue which, const std::uint32_t index, const std::uint64_t frame) {
+core::Result<void> change_credits(PlayerEconomy& state, const EconomyPlayer& player, math::Fixed amount) {
+    // WPR-12: credits in a forced skirmish have no balance cap. Lobby maxima constrain
+    // starting cash only; positive AI changes include refunds and bonuses.
+    if (player.ai && amount.raw() > 0) {
+        const auto adjusted = math::multiply(amount, player.credit_multiplier);
+        if (!adjusted) return core::Result<void>::failure(adjusted.error());
+        amount = adjusted.value();
+    }
+    if (amount.raw() < 0 && amount.raw() <= -state.credits.raw()) {
+        state.credits = {};
+        return core::Result<void>::success();
+    }
+    const auto balance = math::add(state.credits, amount);
+    if (!balance) return core::Result<void>::failure(balance.error());
+    state.credits = balance.value();
+    return core::Result<void>::success();
+}
+
+core::Result<bool> cancel_build(PlayerEconomy& state, const EconomyPlayer& player, const BuildQueue which, const std::uint32_t index, const std::uint64_t frame) {
     auto& queue = state.queues[static_cast<std::size_t>(which)];
-    if (index >= queue.size()) return false;
-    state.credits = math::Fixed::from_raw(state.credits.raw() + queue[index].paid.raw());
+    if (index >= queue.size()) return core::Result<bool>::success(false);
+    const auto refunded = change_credits(state, player, queue[index].paid);
+    if (!refunded) return core::Result<bool>::failure(refunded.error());
     queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(index));
     if (index == 0 && !queue.empty()) queue.front().complete_frame = frame + queue.front().frames;
-    return true;
+    return core::Result<bool>::success(true);
+}
+
+core::Result<bool> cancel_build_entry(PlayerEconomy& state, const EconomyPlayer& player, const BuildQueue which, const std::uint64_t entry_id, const std::uint64_t frame) {
+    const auto& queue = state.queues[static_cast<std::size_t>(which)];
+    if (entry_id == 0) return core::Result<bool>::success(false);
+    const auto found = std::find_if(queue.begin(), queue.end(),
+        [entry_id](const QueueEntry& entry) { return entry.entry_id == entry_id; });
+    if (found == queue.end()) return core::Result<bool>::success(false);
+    return cancel_build(state, player, which, static_cast<std::uint32_t>(found - queue.begin()), frame);
 }
 
 std::uint32_t population_count(const std::int64_t shares) noexcept {

@@ -39,6 +39,102 @@
 
 namespace eawr::sim::tactical {
 
+core::Result<void> detail::prepare_projectile_defences(CombatWorld& world,
+    const std::span<const ProjectileDefenceAbilityInput> abilities, const PartitionExecutor& executor,
+    const std::span<const EntityId> registration_order) {
+    if (abilities.size() != world.units.size()) return core::Result<void>::failure(
+        diagnostic(diagnostic_codes::invalid_setup, "projectile defence inputs must match combat units"));
+    const auto live = [](const CombatUnit& unit) {
+        return unit.profile && (!unit.durability || unit.durability->hull.raw() > 0);
+    };
+    std::vector<SpaceBody> emitters;
+    std::vector<std::optional<SpaceBody>> emitter_inputs(world.units.size());
+    std::vector<math::Fixed> radii(world.units.size());
+    const auto copied = executor.execute_phase("projectile-jamming-inputs", tick_partition_count,
+        [&](const std::size_t partition) {
+        const auto range = partition_range(partition, world.units.size());
+        for (auto slot = range.begin; slot < range.end; ++slot) {
+            const auto& unit = world.units[slot];
+            if (!abilities[slot].active_jamming || !live(unit) || unit.in_nebula) continue;
+            emitter_inputs[slot] = SpaceBody{slot + 1, unit.owner, unit.position};
+            radii[slot] = abilities[slot].jamming_radius.value_or(unit.profile->passive_missile_shield_radius);
+        }
+    });
+    if (!copied) return copied;
+    math::Fixed reach{};
+    for (std::size_t slot = 0; slot < abilities.size(); ++slot) {
+        if (!emitter_inputs[slot]) continue;
+        emitters.push_back(*emitter_inputs[slot]);
+        reach = std::max(reach, radii[slot]);
+    }
+    const auto built = SpaceIndex::build(emitters);
+    if (!built) return core::Result<void>::failure(built.error());
+    const auto& index = built.value();
+    std::vector<std::optional<ProjectileDefenceSource>> sources(world.units.size());
+    std::vector<std::uint8_t> static_sources(world.units.size());
+    std::vector<std::optional<core::Diagnostic>> errors(world.units.size());
+    const auto prepared = executor.execute_phase("projectile-defence-recipients", tick_partition_count,
+        [&](const std::size_t partition) {
+        const auto range = partition_range(partition, world.units.size());
+        for (auto slot = range.begin; slot < range.end; ++slot) {
+            auto& unit = world.units[slot];
+            const auto& ability = abilities[slot];
+            unit.sensor_jammed = false; // WHE-32: a stamp belongs only to this frame.
+            if (!live(unit)) continue;
+            // Death clones and deleted objects are absent from the live-unit copy;
+            // projectiles have their own storage. Combat data and a locomotor are required.
+            if (unit.combat && world.motion && (world.motion->find(unit.type_id)
+                || world.motion->squadrons.find_craft(unit.type_id))) {
+                for (const auto id : index.range(unit.position, reach, RangeMetric::spatial)) {
+                    const auto source_slot = static_cast<std::size_t>(id - 1);
+                    const auto& emitter = world.units[source_slot];
+                    const auto radius = abilities[source_slot].jamming_radius.value_or(
+                        emitter.profile->passive_missile_shield_radius);
+                    if (!world.hostile(emitter.owner, unit.owner)
+                        && within_range(emitter.position, unit.position, radius, RangeMetric::spatial)) {
+                        unit.sensor_jammed = true;
+                        break;
+                    }
+                }
+            }
+            const auto passive = unit.profile->passive_missile_shield_radius;
+            static_sources[slot] = passive.raw() > 0 || ability.shield_radius ? 1U : 0U;
+            if (!ability.active_shield && passive.raw() <= 0 && !ability.active_jamming
+                && !(ability.shield_radius && unit.sensor_jammed)) continue;
+            auto height = math::add(unit.position.z, unit.profile->ranged_target_z_adjust);
+            if (!height) { errors[slot] = height.error(); continue; }
+            ProjectileDefenceSource source;
+            source.id = unit.id; source.owner = unit.owner; source.position = unit.position;
+            source.adjusted_position = {unit.position.x, unit.position.y, height.value()};
+            source.active_shield = ability.active_shield;
+            source.passive_shield = passive.raw() > 0;
+            source.sensor_jammed = unit.sensor_jammed;
+            source.passive_radius = passive;
+            source.shield_radius = ability.shield_radius;
+            source.jamming_radius = ability.jamming_radius;
+            sources[slot] = source;
+        }
+    });
+    if (!prepared) return prepared;
+    std::vector<ProjectileDefenceSource> registered;
+    world.static_projectile_defences.clear();
+    for (std::size_t slot = 0; slot < sources.size(); ++slot) {
+        if (errors[slot]) return core::Result<void>::failure(*errors[slot]);
+        if (static_sources[slot]) world.static_projectile_defences.push_back(world.units[slot].id);
+    }
+    for (const auto id : registration_order) {
+        const auto unit = std::lower_bound(world.units.begin(), world.units.end(), id,
+            [](const CombatUnit& candidate, const EntityId value) { return candidate.id < value; });
+        if (unit == world.units.end() || unit->id != id) continue;
+        auto& source = sources[static_cast<std::size_t>(unit - world.units.begin())];
+        if (source) { registered.push_back(*source); source.reset(); }
+    }
+    for (const auto& source : sources) {
+        if (source) registered.push_back(*source);
+    }
+    return world.projectile_defences.rebuild(std::move(registered));
+}
+
 core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vector<LiveUnit>& units,
     const std::vector<std::pair<EntityId, math::Vec3>>& starts, const std::uint64_t frame,
     const PartitionExecutor& executor) const {
@@ -57,6 +153,7 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
         world.units.resize(units.size());
         std::vector<SpaceBody> bodies(units.size());
         std::vector<std::optional<core::Diagnostic>> errors(units.size());
+        std::vector<detail::ProjectileDefenceAbilityInput> defence_inputs(units.size());
         const auto instances = current_snapshot->instances();
         const auto filled = executor.execute_phase("combat-world", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, units.size());
@@ -121,6 +218,15 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 entry.object_fire_rate = ability_factor(unit, AbilityModifier::fire_rate);
                 if (unit.abilities) {
                     const auto& profile = *abilities.find(state.type_id);
+                    auto& defence = defence_inputs[slot];
+                    if (const auto shield = ability_slot(profile, AbilityKind::missile_shield)) {
+                        defence.shield_radius = profile.abilities[*shield].effective_radius;
+                        defence.active_shield = unit.abilities->slots[*shield].active;
+                    }
+                    if (const auto jammer = ability_slot(profile, AbilityKind::sensor_jamming)) {
+                        defence.jamming_radius = profile.abilities[*jammer].effective_radius;
+                        defence.active_jamming = unit.abilities->slots[*jammer].active;
+                    }
                     const auto index = ability_slot(profile, AbilityKind::barrage);
                     if (index && unit.abilities->slots[*index].active) {
                         entry.barrage_target = unit.abilities->slots[*index].target;
@@ -131,9 +237,11 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
             }
         });
         if (!filled) return core::Result<detail::CombatWorld>::failure(filled.error());
-        for (auto& error : errors) {
-            if (error) return core::Result<detail::CombatWorld>::failure(std::move(*error));
+        for (std::size_t slot = 0; slot < errors.size(); ++slot) {
+            if (errors[slot]) return core::Result<detail::CombatWorld>::failure(std::move(*errors[slot]));
         }
+        auto defences = detail::prepare_projectile_defences(world, defence_inputs, executor, projectile_defence_order);
+        if (!defences) return core::Result<detail::CombatWorld>::failure(defences.error());
         auto index = SpaceIndex::build(bodies);
         if (!index) {
             return core::Result<detail::CombatWorld>::failure(index.error());
@@ -176,7 +284,7 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
     }
 
 core::Result<std::optional<detail::CollectionTrees::Member>> TacticalSession::Impl::collection_member(
-    LiveUnit& unit) const {
+    LiveUnit& unit, const bool projectile) const {
         using Member = std::optional<detail::CollectionTrees::Member>;
         const auto& state = unit.state;
         const auto* profile = combat.find(state.type_id);
@@ -185,7 +293,16 @@ core::Result<std::optional<detail::CollectionTrees::Member>> TacticalSession::Im
         if (profile->collision) {
             auto transform = level_transform(unit);
             if (!transform) return core::Result<Member>::failure(transform.error());
-            const auto& box = *profile->collision;
+            auto box = *profile->collision;
+            // DG-36b: attached geometry can extend outside the parent model's box.
+            // Retain those candidates; the narrow phase still decides mesh eligibility.
+            if (projectile && profile->mesh_bounds) {
+                const auto& meshes = *profile->mesh_bounds;
+                box.min = {std::min(box.min.x, meshes.min.x), std::min(box.min.y, meshes.min.y),
+                    std::min(box.min.z, meshes.min.z)};
+                box.max = {std::max(box.max.x, meshes.max.x), std::max(box.max.y, meshes.max.y),
+                    std::max(box.max.z, meshes.max.z)};
+            }
             for (int corner = 0; corner < 8; ++corner) {
                 const math::Vec3 local{(corner & 1) != 0 ? box.max.x : box.min.x,
                     (corner & 2) != 0 ? box.max.y : box.min.y, (corner & 4) != 0 ? box.max.z : box.min.z};

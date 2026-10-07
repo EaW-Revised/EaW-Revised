@@ -180,7 +180,8 @@ void register_taskforce(ScriptScheduler& scripts, const HostPtr& host, std::vect
         const auto* pad = as_handle(arguments[2], handle_game_object);
         if (type == host->types_by_name.end() || pad == nullptr
             || std::find(plan->reserved_pads.begin(), plan->reserved_pads.end(), pad->id) == plan->reserved_pads.end()) return none();
-        context.issue_command(std::string(verb_pad_build), {number(LuaNumber(plan->player)), arguments[2], handle(handle_type, type->second->type_id)});
+        stage(context, "build_pad", {handle(ai::handle_taskforce, taskforce->id), arguments[2],
+            handle(handle_type, type->second->type_id)});
         return none();
     });
     method("Attack_Target", taskforce_move(host, "attack", false));

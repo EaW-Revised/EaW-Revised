@@ -223,7 +223,7 @@ CollisionMesh collision_mesh(std::vector<CollisionTriangle> triangles, const std
 
 core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const CollisionMesh> meshes,
     const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
-    const math::Vec3& to) {
+    const math::Vec3& to, MeshCollisionWork* work) {
     using Out = core::Result<std::optional<MeshHit>>;
     const auto& m = transform.rows;
     const math::Vec3 origin{m[0][3], m[1][3], m[2][3]};
@@ -264,10 +264,12 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
     for (std::size_t index = 0; index < meshes.size(); ++index) {
         const auto& mesh = meshes[index];
         if (mesh.nodes.empty() || !enabled(index)) continue;
+        if (work != nullptr) ++work->meshes;
         stack.assign(1, 0);
         while (!stack.empty()) {
             const auto& node = mesh.nodes[stack.back()];
             stack.pop_back();
+            if (work != nullptr) ++work->boxes;
             if (!meets_box(start, delta, grid(node.min), grid(node.max))) continue;
             if (node.count == 0) {
                 stack.push_back(node.second);
@@ -276,6 +278,7 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
             }
             for (std::uint32_t t = node.first; t < node.first + node.count; ++t) {
                 const auto& triangle = mesh.triangles[t];
+                if (work != nullptr) ++work->triangles;
                 const auto hit = meets_triangle(start, delta, grid(triangle.a), grid(triangle.b), grid(triangle.c));
                 // The first along the segment; on a tie the earlier mesh, then the triangle met first.
                 if (hit && (!best || less(*hit, *best))) {

@@ -229,6 +229,34 @@ void box_eligibility_and_icons() {
         && selection.units() == std::vector<sim::EntityId>{5}, "WSU-15: type selection filters decorations and half-open edges");
 }
 
+void select_all() {
+    auto units = fleet();
+    units[4].mouse_sensitive = false; // keyboard selection needs no pointer contact
+    auto station = unit(20, 80, true, {}, std::nullopt);
+    station.locomotion = false;
+    auto decoration = unit(21, 81, true, {}, std::nullopt);
+    decoration.decoration = true;
+    auto unselectable = unit(22, 82, true, {}, std::nullopt);
+    unselectable.selectable = false;
+    auto neutral = unit(23, 83, true, {}, std::nullopt);
+    neutral.neutral = true;
+    auto craft = unit(30, 84, true, {}, std::nullopt);
+    craft.part = 31;
+    auto other_craft = craft;
+    other_craft.part = 32;
+    units.insert(units.end(), {station, decoration, unselectable, neutral, craft, other_craft,
+        unit(sim::invalid_entity_id, 85, true, {}, std::nullopt)});
+    ui::Selection selection;
+    selection.replace(std::array<sim::EntityId, 1>{20});
+    selection.assign_group(1);
+    expect(selection.all(units) && selection.units() == std::vector<sim::EntityId>({1, 2, 3, 4, 5, 30}),
+        "S-5a: all own selectable mobile units, including off screen and behind camera, once per squadron");
+    expect(!selection.all(units) && selection.group(1) == std::vector<sim::EntityId>{20},
+        "S-5a: repeating select-all preserves membership and control groups");
+    expect(selection.all(std::array{station, decoration, unselectable, neutral}) && selection.empty(),
+        "S-5a: no eligible units clears the previous selection");
+}
+
 void control_groups() {
     auto units = fleet();
     ui::Selection selection;
@@ -238,15 +266,22 @@ void control_groups() {
     selection.assign_group(2);
     expect(selection.group(1) == std::vector<sim::EntityId>{1, 2} && selection.group(2) == std::vector<sim::EntityId>{3},
            "Ctrl+n stores the selection");
-    expect(!selection.recall_group(1, false, 10.0, units) && selection.units() == std::vector<sim::EntityId>{1, 2},
+    expect(!selection.recall_group(1, false, 300.0, units) && selection.units() == std::vector<sim::EntityId>{1, 2},
            "n selects the group");
-    expect(!selection.recall_group(2, true, 10.2, units) && selection.units() == std::vector<sim::EntityId>{1, 2, 3},
+    expect(!selection.recall_group(2, true, 306.0, units) && selection.units() == std::vector<sim::EntityId>{1, 2, 3},
            "Shift+n adds it");
-    const auto focus = selection.recall_group(2, false, 10.9, units);
+    const auto focus = selection.recall_group(2, false, 327.0, units);
     expect(focus && close_to((*focus)[0], 80.0F) && close_to((*focus)[1], 0.0F),
-           "the same group again within a second focuses the camera on it");
-    expect(!selection.recall_group(2, false, 12.0, units), "a second later it only selects");
-    expect(!selection.recall_group(1, false, 12.5, units), "another group does not focus");
+           "the same group again within 30 logical frames focuses the camera");
+    expect(!selection.recall_group(2, false, 360.0, units), "31 or more logical frames later it only selects");
+    expect(!selection.recall_group(1, false, 375.0, units), "another group does not focus");
+
+    expect(selection.recall_group(1, false, 375.0, units).has_value(),
+           "paused logical frame still allows focus regardless of elapsed wall time");
+    expect(!selection.recall_group(1, false, 406.0, units), "31 frames expires the focus window");
+    expect(selection.recall_group(1, false, 435.0, units).has_value(), "29 frames still focuses");
+    expect(!selection.recall_group(1, false, 465.0, units), "exactly 30 frames expires the window");
+    expect(!selection.recall_group(1, false, 100.0, units), "rewinding the frame does not focus");
 
     // A unit is in one group at most.
     selection.clear();
@@ -254,14 +289,14 @@ void control_groups() {
     selection.assign_group(3);
     expect(selection.group(1) == std::vector<sim::EntityId>{1} && selection.group(3) == std::vector<sim::EntityId>{2},
            "assigning takes the unit out of its old group");
-    const auto joined = selection.add_to_group(1, 20.0, units);
+    const auto joined = selection.add_to_group(1, 600.0, units);
     expect(!joined && selection.group(1) == std::vector<sim::EntityId>{1, 2} && selection.group(3).empty()
                && selection.units() == std::vector<sim::EntityId>{2, 1}, "Alt+n adds the selection and selects the group");
 
     // Destroyed members: not selected, not counted in the focus.
     units.erase(units.begin());  // unit 1 is gone
-    selection.recall_group(1, false, 30.0, units);
-    const auto focus_survivor = selection.recall_group(1, false, 30.5, units);
+    selection.recall_group(1, false, 900.0, units);
+    const auto focus_survivor = selection.recall_group(1, false, 915.0, units);
     expect(selection.units() == std::vector<sim::EntityId>{2} && focus_survivor && close_to((*focus_survivor)[0], 40.0F),
            "only standing members are selected and focused");
 }
@@ -607,7 +642,7 @@ void replay_invariance() {
             selection.click(sim::EntityId{1}, {}, units, viewport);
             selection.box({0.0F, 0.0F, 250.0F, 150.0F}, true, units);
             selection.assign_group(1);
-            selection.recall_group(1, false, static_cast<double>(tick) * 0.5, units);
+            selection.recall_group(1, false, static_cast<double>(tick) * 15.0, units);
             input.set_selection(selection.units());
             if (orders && tick == 2) {
                 auto issued = input.world_command({{sim::math::Fixed::from_integer(50).value(), {}, {}}, sim::invalid_entity_id, false, false, false});
@@ -773,6 +808,23 @@ void hardpoint_mesh_orders() {
 
 int main() {
     {
+        ui::Selection previous, allied;
+        for (auto* selection : {&previous, &allied}) {
+            selection->replace(std::array<sim::EntityId, 2>{1, 2});
+            selection->assign_group(1);
+        }
+        previous.owner_changed(1, 1, 1, 1);
+        expect(previous.contains(1) && previous.group_of(1) == 1,
+            "WNO-23 same-owner retains selection and group");
+        previous.owner_changed(1, 1, 3, 1);
+        allied.owner_changed(1, 1, 3, 2);
+        expect(!previous.contains(1) && !previous.group_of(1) && previous.contains(2)
+            && previous.group(1) == std::vector<sim::EntityId>({2}),
+            "WNO-23 previous-owner selection and all group membership leave");
+        expect(allied.contains(1) && allied.group_of(1) == 1,
+            "WNO-23 allied observer selection and groups remain");
+    }
+    {
         ui::Selection selected;
         selected.replace(std::array<sim::EntityId, 2>{1, 2});
         selected.assign_group(1);
@@ -799,6 +851,7 @@ int main() {
     squadrons();
     clicks_and_boxes();
     box_eligibility_and_icons();
+    select_all();
     control_groups();
     overview();
     overview_yaw();

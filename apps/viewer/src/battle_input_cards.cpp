@@ -260,6 +260,8 @@ bool BattleInput::ability_click(const std::size_t index, const bool right, const
     const ui::AbilityState& state = ability_state_ != nullptr ? *ability_state_ : ready_abilities_;
     const auto request = ui::ability_click(ability_bar_.buttons[index], right, state);
     if (!request) {
+        // BA-28: left presses with no ready/eligible member request refusal feedback.
+        if (!right) negative_feedback();
         note("ability " + std::string(ui::ability_name(ability_bar_.buttons[index].ability)) + ": nothing can take it");
         return false;
     }

@@ -88,6 +88,10 @@ core::Result<void> validate_combat(const CombatTable& table) {
     for (std::size_t index = 0; index < table.profiles.size(); ++index) {
         const auto& profile = table.profiles[index];
         const auto name = "type " + std::to_string(profile.type_id) + ": ";
+        if (!distance_ok(profile.passive_missile_shield_radius)
+            || std::llabs(profile.ranged_target_z_adjust.raw()) > max_combat_distance * one_raw) {
+            return invalid(name + "projectile defence radius or height out of range");
+        }
         if (index != 0 && table.profiles[index - 1].type_id >= profile.type_id) {
             return invalid("type IDs must strictly increase");
         }
@@ -136,7 +140,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
                     && blast.max_delay.raw() >= 0 && blast.max_delay.raw() <= 3600 * one_raw;
                 const auto inaccuracy_ok = std::all_of(shot.inaccuracy.begin(), shot.inaccuracy.end(),
                     [&](const InaccuracyRow& row) { return distance_ok(row.distance); });
-                if (shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !distance_ok(shot.max_travel)
+                if (shot.damage_delay.raw() > 3600 * one_raw || shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !distance_ok(shot.max_travel)
+                    || !cone_ok(shot.turn_rate)
                     || !inaccuracy_ok || (shot.ion_stun && !valid_ion_stun(*shot.ion_stun))
                     || (shot.disable_engines_frames && *shot.disable_engines_frames > 30U * 3600U)
 
@@ -216,7 +221,22 @@ core::Result<void> validate_combat(const CombatTable& table) {
     // A shot that may meet a mesh moves at most max_mesh_extent units a frame (the segment test's bound).
     const bool meshes = std::any_of(table.profiles.begin(), table.profiles.end(),
         [](const CombatProfile& profile) { return !profile.meshes.empty(); });
+    CombatTable death_payloads;
     for (const auto& profile : table.profiles) {
+        if (!profile.death_projectiles.empty()) {
+            if (!within_distance(profile.ranged_target_z_adjust, max_combat_distance))
+                return invalid("death projectile height adjustment out of range");
+            CombatProfile payload;
+            payload.type_id = profile.type_id;
+            for (const auto& shot : profile.death_projectiles) {
+                if (meshes && shot.speed.raw() > max_mesh_extent * one_raw)
+                    return invalid("death projectile speed exceeds collision mesh bound");
+                WeaponProfile weapon;
+                weapon.shot = shot;
+                payload.weapons.push_back(std::move(weapon));
+            }
+            death_payloads.profiles.push_back(std::move(payload));
+        }
         for (const auto& weapon : profile.weapons) {
             if (meshes && weapon.shot && weapon.shot->speed.raw() > max_mesh_extent * one_raw) {
                 return invalid("type " + std::to_string(profile.type_id) + ": a shot faster than "
@@ -224,7 +244,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
             }
         }
     }
-    return core::Result<void>::success();
+    // WNO-29: death payloads pass the same projectile validation as ordinary weapons.
+    return death_payloads.profiles.empty() ? core::Result<void>::success() : validate_combat(death_payloads);
 }
 
 CombatRandom::CombatRandom(
@@ -281,6 +302,7 @@ std::string_view to_string(const CombatEventKind kind) noexcept {
     case CombatEventKind::target_acquired: return "target_acquired";
     case CombatEventKind::weapon_fired: return "weapon_fired";
     case CombatEventKind::projectile_hit: return "projectile_hit";
+    case CombatEventKind::projectile_expired: return "projectile_expired";
     }
     return "unknown";
 }

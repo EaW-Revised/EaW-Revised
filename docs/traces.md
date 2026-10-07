@@ -171,12 +171,10 @@ S-22 to S-27 use three kinds, read from their retail recordings:
   plus one begun before it, 25 for the Tartan and 20 and 28 for the Nebulon-B's 5- and
   7-pulse lasers. Retail holds 10 to 20 shots per sustained window.
 
-The fixture recordings pass every window. The remake passes every window that closes before
-either ship dies, S-26/S-27's onset and sustained windows included (the combat turn).
-The runner does not yet apply the target's `hold_fire`/`invulnerable` flags, so a ship dies
-early and the windows after that fail: S-23 and S-27 the last (the shooter dies at tick
-1511), S-25 the last two (its target dies at 1397), S-26 the last three (the shooter dies at
-780). `test_attack_turn_traces.py` checks every other window.
+The fixture recordings and the remake pass every fire window. The runner applies the
+staged target's `hold_fire` and `invulnerable` flags, preserving the target's health and
+hardpoints throughout these arc recordings (space-damage DG-40).
+
 
 ## Comparing and replaying
 
@@ -227,10 +225,13 @@ writes the remake's trace of it, all outputs or none:
   and shields are never summed into the container's fields. This trace metadata leaves
   combat durability and replay identity unchanged. A squadron's craft types get the revealed
   sensor too.
-- Of the staging flags only `hold_fire` is modelled: the held type's weapons reach
+- `hold_fire` is modelled: the held type's weapons reach
   nothing and may fire at no category, so every unit of that type in the scenario must hold
   fire. `hold_position` needs nothing (a unit without an order does not move) and
-  `invulnerable` is not modelled.
+  `invulnerable` blocks ordinary damage before shields and hardpoints (DG-40), including
+  squadron members. These private table overrides require every occurrence of an affected
+  type to agree; mixed protected/unprotected occurrences are rejected. Privileged `damage`
+  events still work. Ordinary skirmish and replay loading are unchanged.
 - A `move` may list further unit labels in `with`: one command then moves them all, a
   player's group move (space-fighters FO-07 to FO-11). The retail recorder's Lua orders move one
   object each and never reach FoC's group formation, so such a scenario is `record_only` for the

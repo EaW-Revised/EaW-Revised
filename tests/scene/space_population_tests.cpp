@@ -528,10 +528,10 @@ void foc_hardpoint_corpus() {
         }
         return cache.model("data/art/models/" + name);
     };
-    // MD-06: compose both stock rounds, including their transform and proxies.
+    // MD-06/BP-70: mesh-free proxy rounds and a root particle projectile.
     eawr::assets::Map rounds;
     rounds.kind = eawr::assets::MapKind::space;
-    for (const std::string id : {"Proj_Kedalbe_Mass_Driver", "Proj_Vengeance_Mass_Driver"}) {
+    for (const std::string id : {"Proj_Kedalbe_Mass_Driver", "Proj_Vengeance_Mass_Driver", "Proj_Harmonic_Bomb_Slave_I"}) {
         eawr::assets::Placement source;
         source.key.record_ordinal = static_cast<std::uint32_t>(rounds.placements.size());
         source.type_crc = 0U; // Synthetic placement with an explicit catalog identity.
@@ -549,7 +549,7 @@ void foc_hardpoint_corpus() {
     round_input.catalog = &catalog;
     round_input.access = cache.access();
     const auto round_scene = eawr::scene::build(round_input);
-    expect(round_scene.placements.size() == 2, "MD-06: both stock round placements compose");
+    expect(round_scene.placements.size() == 3, "MD-06/BP-70: stock effect-only projectile placements compose");
     for (const auto& round : round_scene.placements) {
         std::cout << "  stock round " << round.object_id << ": asset " << round.asset_id
                   << ", pose " << round.transform.has_value() << ", effects " << round.effects.size();

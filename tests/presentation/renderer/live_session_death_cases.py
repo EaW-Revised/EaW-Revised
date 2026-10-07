@@ -9,7 +9,7 @@ from live_session_test_support import (
     ROOT, S28, S28_LIVE_TICKS, STATION,
     decode_png, hit_rows_per_tick, json, os,
     pathlib, re, read, shutil,
-    source_text, strict_json, subprocess, sys,
+    source_text, strict_json, subprocess, sys, squadron_members,
     tempfile, time, unittest,
 )
 
@@ -344,20 +344,24 @@ class LiveSessionDeathCases:
 
     def test_killed_fighters_spin_away_and_explode(self):
         # #447 (docs/behaviour/space-fighter-deaths.md SP-02 to SP-08): under the M2 seed the
-        # X-wing 36 hit by the order of tick 150 (it dies in tick 151) spins away: its model flies
-        # on and rolls for 60 ticks, then explodes and leaves; the Y-wing 46 (order 152, dies in
-        # 153) only explodes. (The MC80 of #537 is unit 7, so craft IDs are one higher than before.)
+        # X-wing hit by the order of tick 150 (it dies in tick 151) spins away: its model flies
+        # on and rolls for 60 ticks, then explodes and leaves; the Y-wing (order 152, dies in
+        # 153) only explodes. Resolve both from the live roster, including its map hazards.
         with tempfile.TemporaryDirectory(prefix="eawr-live-session-spin-") as temporary:
             directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "spin-roster", ("--eawr-live-ticks", "1"))
+            self.assertEqual(code, 0, probe.get("failure"))
+            x_wing = squadron_members(probe, 2, "Rebel_X-Wing_Squadron")[0]
+            y_wing = squadron_members(probe, 4, "Y-Wing_Squadron")[0]
             code, result = self._run(directory, "spin", (
-                "--eawr-live-order", "150:damage:36@1000000", "--eawr-live-order", "152:damage:46@1000000",
-                "--eawr-live-follow", "36", "--eawr-live-ticks", "230", "--eawr-live-step", "2",
+                "--eawr-live-order", f"150:damage:{x_wing}@1000000", "--eawr-live-order", f"152:damage:{y_wing}@1000000",
+                "--eawr-live-follow", str(x_wing), "--eawr-live-ticks", "230", "--eawr-live-step", "2",
                 "--eawr-live-workers", "2"))
             self.assertEqual(code, 0, result.get("failure"))
             live = result["live_session"]
             self.assertEqual(live["rejected"], [])
             self.assertIs(live["headless_hashes_equal"], True)
-            self.assertEqual(live["spin_away"]["spins"], [{"unit": 36, "started": 151, "ended": 211}])
+            self.assertEqual(live["spin_away"]["spins"], [{"unit": x_wing, "started": 151, "ended": 211}])
             self.assertEqual((live["spin_away"]["drawn_max"], live["spin_away"]["ships_max"]), (1, 1))
             spawned = result["battle_effects"]["spawned"]
             self.assertEqual(spawned.get("spin_away:Small_Explosion_Space"), 1)
@@ -365,24 +369,40 @@ class LiveSessionDeathCases:
 
 
     def test_fighter_spin_away_in_a_seeded_dogfight(self):
-        # #447: the Acclamator leads its TIE escort into the Rebel squadrons; under the M2 seed
-        # some of the craft shot down in the dogfight spin away and explode 60 ticks later.
-        # 7500 ticks, not 5400 (#465 review): #465's lead and out-of-combat fire against fighters
-        # shifts which tick each craft dies on, so the three kills within the first 5400 ticks
-        # draw differently than before; the fight keeps producing kills past that window and the
-        # first one that spins away lands at tick 5589.
+        # SP-02..SP-08: some craft shot down in the seeded dogfight spin away,
+        # then explode. Marker stations have no authored garrison, so bring a
+        # starting TIE company into combat instead of relying on extra launches.
+        # Stage the opposing starting companies at the dogfight-grid fixture's
+        # meeting point with AI off so autonomous orders cannot replace the fight.
         with tempfile.TemporaryDirectory(prefix="eawr-live-session-dogfight-") as temporary:
             directory = pathlib.Path(temporary)
+            code, probe = self._run(directory, "dogfight-roster", ("--eawr-live-ticks", "1"))
+            self.assertEqual(code, 0, probe.get("failure"))
+            x_wings = squadron_members(probe, 2, "Rebel_X-Wing_Squadron")
+            ties = squadron_members(probe, 9, "TIE_Interceptor_Squadron")
+            camera = directory / "dogfight-camera.xml"
+            shutil.copy(CAMERA.parent / "space-live-camera-bindings.json", directory)
+            camera.write_text(re.sub(r"<initial [^>]*/>",
+                '<initial target_x="-950" target_y="900" target_height="0" zoom="0.5" yaw_degrees="0"/>',
+                CAMERA.read_text(encoding="utf-8")), encoding="utf-8")
             code, result = self._run(directory, "dogfight", (
-                "--eawr-live-order", "2:move:11@-4300,3900,0", "--eawr-live-ticks", "7500",
-                "--eawr-live-step", "30", "--eawr-live-workers", "2"))
+                "--eawr-live-ai", "off",
+                "--eawr-live-order", "1:move:2@-950,900,0",
+                "--eawr-live-order", "1:move:9@-950,900,0",
+                "--eawr-live-order", "1:move:10@3800,-4700,0",
+                "--eawr-live-order", "1450:attack:2@9",
+                "--eawr-live-order", "1450:attack:9@2", "--eawr-live-ticks", "7500",
+                "--eawr-live-step", "30", "--eawr-live-workers", "2"), camera=camera)
             self.assertEqual(code, 0, result.get("failure"))
             live = result["live_session"]
+            self.assertEqual(live["rejected"], [])
+            self.assertTrue(any(hit["shooter"] in ties and hit["target"] in x_wings
+                                for hit in live["first_hits"]), live["first_hits"])
             self.assertIs(live["headless_hashes_equal"], True)
             spins = live["spin_away"]["spins"]
             self.assertGreaterEqual(len(spins), 1)
             # 60 ticks, or 60 + k for a craft killed at a roll of exactly -20k degrees, whose path
-            # rebuilds k frames in (SP-04, SC-04; unit 81 here spins for 62).
+            # rebuilds k frames in (SP-04, SC-04).
             for spin in spins:
                 self.assertIn(spin["ended"] - spin["started"], range(60, 70), spin)
             self.assertGreaterEqual(live["spin_away"]["drawn_max"], 1)

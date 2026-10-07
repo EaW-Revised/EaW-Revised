@@ -56,12 +56,15 @@ eawr::assets::Bone bone(const std::string& name, const std::int32_t parent, cons
                         const bool rotate_quarter_turn = false);
 eawr::assets::Model model(const std::string& path, std::vector<eawr::assets::Bone> bones);
 std::map<std::string, eawr::assets::Model> models(const float engine_x);
-Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets);
+Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets,
+    std::string_view difficulty = "Normal_Default");
 bool has_row(const std::vector<eawr::units::Unresolved>& rows, const std::string_view owner,
              const std::string_view field, const std::string_view value = {});
 void object_weapon_defaults();
 void squadron_container_health();
 void living_collision_admission();
+void ship_suitability_content();
+void height_adjusted_aim();
 void presentation_admission();
 void print_rows(const std::string_view label, const std::vector<eawr::units::Unresolved>& rows);
 void mass_driver_type();
@@ -69,6 +72,7 @@ void synthetic_tables();
 void priority_rules();
 void content_identity();
 void bind_frame_errors();
+void hunt_tables();
 void foc_fleet();
 
 struct TempTree final {

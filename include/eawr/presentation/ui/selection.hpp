@@ -29,8 +29,8 @@ inline constexpr float minimum_drag_select_distance = 100.0F;
 inline constexpr float minimum_drag_distance = 4.0F;
 // Player.cpp NUM_CONTROL_GROUPS; keys 1..9 and 0 (group 0).
 inline constexpr std::size_t control_group_count = 10;
-// A control group selected again within one second (Logical_FPS frames) moves the camera to it.
-inline constexpr double control_group_double_tap_seconds = 1.0;
+// G-3: a second of logical frames, independent of wall time and playback speed.
+inline constexpr double control_group_double_tap_frames = sim::tactical::logical_frames_per_second;
 
 using Vec3f = std::array<float, 3>;
 
@@ -167,6 +167,9 @@ public:
     // selection without Shift. A structure-only box preserves it, like an empty box.
     bool box(const ScreenRect& rect, bool shift, std::span<const BattleUnit> units,
              std::span<const SquadronIcon> icons = {});
+    // S-5a: replaces the selection with all own selectable mobile units, including off screen.
+    // Repeated craft volumes contribute their squadron container only once.
+    bool all(std::span<const BattleUnit> units);
     // Adds the own units of `type` on screen (Select_All_Objects_Of_Type_On_Screen).
     bool type_on_screen(sim::tactical::TypeId type, std::span<const BattleUnit> units, const ScreenRect& viewport);
     // WSU-38 (#550): the same test for a craft type: adds every own squadron with a craft of
@@ -179,28 +182,31 @@ public:
     bool replace(std::span<const sim::EntityId> units);
     // WPR-52: transfer membership even when the replaced unit is not selected.
     void replace_entity(sim::EntityId previous, sim::EntityId replacement);
+    // WNO-23/42: only the previous owner's memberships leave on a real transfer.
+    void owner_changed(sim::EntityId entity, sim::tactical::PlayerId previous,
+                       sim::tactical::PlayerId current, sim::tactical::PlayerId observer);
 
     // Control groups. Ctrl+n: the selection becomes group n. Alt+n: the selection joins group n,
     // which is then selected. A unit belongs to one group at most.
     void assign_group(std::size_t group);
     // Shift+n adds group n to the selection; n alone replaces the selection with it. The same group
-    // selected again within control_group_double_tap_seconds returns the point to focus the camera
+    // selected again within control_group_double_tap_frames returns the point to focus the camera
     // on: the members' mean position. `alive` are the units standing now.
-    std::optional<Vec3f> recall_group(std::size_t group, bool add, double now_seconds,
+    std::optional<Vec3f> recall_group(std::size_t group, bool add, double logical_frame,
                                       std::span<const BattleUnit> alive);
-    std::optional<Vec3f> add_to_group(std::size_t group, double now_seconds, std::span<const BattleUnit> alive);
+    std::optional<Vec3f> add_to_group(std::size_t group, double logical_frame, std::span<const BattleUnit> alive);
     [[nodiscard]] const std::vector<sim::EntityId>& group(std::size_t index) const { return groups_.at(index); }
     // WSU-33, WSU-55: maintained on group edits, so drawing never scans group members.
     [[nodiscard]] std::optional<std::size_t> group_of(sim::EntityId entity) const noexcept;
 
 private:
     void add(sim::EntityId entity);
-    std::optional<Vec3f> selected_group(std::size_t group, double now_seconds, std::span<const BattleUnit> alive);
+    std::optional<Vec3f> selected_group(std::size_t group, double logical_frame, std::span<const BattleUnit> alive);
     std::vector<sim::EntityId> selected_;
     std::array<std::vector<sim::EntityId>, control_group_count> groups_{};
     std::map<sim::EntityId, std::size_t> group_numbers_;
     std::optional<std::size_t> last_group_;
-    double last_group_seconds_{};
+    double last_group_frame_{};
 };
 
 } // namespace eawr::presentation::ui

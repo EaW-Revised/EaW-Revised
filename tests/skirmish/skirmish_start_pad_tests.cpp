@@ -240,6 +240,7 @@ void foc_pad_capture_build(const skirmish::SkirmishStart& start, const skirmish:
     }
     auto setup = start.setup;
     setup.squadrons.clear();
+    setup.free_garrisons.clear(); // only the isolated ship and pad remain
     setup.units = {ship->state, pad->state};
     setup.units.front().position = pad->state.position;
     setup.units.front().position.x = Fixed::from_raw(setup.units.front().position.x.raw() + whole(350).raw());
@@ -323,23 +324,70 @@ void foc_pad_capture_build(const skirmish::SkirmishStart& start, const skirmish:
                     "WHZ-51: automatic weapons do not deliberately target the neutral mining pad");
             }
         }
-        combat_setup.units.back().owner = 2;
-        auto enemy_pad = tactical::TacticalSession::create(combat_setup, skirmish::sensor_table(tables),
-            health.value(), {}, {}, combat.value());
-        bool fired_at_enemy_pad = false;
-        if (enemy_pad) {
-            eawr::sim::InlineExecutor pool;
-            for (std::size_t frame = 0; frame < 60; ++frame) {
-                const auto stepped = enemy_pad.value().step(pool);
-                expect(static_cast<bool>(stepped), "Polus enemy-owned-pad combat frame succeeds");
-                if (!stepped) break;
-                const auto events = stepped.value().snapshot->combat_events();
-                fired_at_enemy_pad |= std::any_of(events.begin(), events.end(), [&](const auto& event) {
-                    return event.kind == tactical::CombatEventKind::weapon_fired && event.target == pad->state.entity_id;
-                });
+        // R-08 and WHZ-51 are independent: ownership cannot override the stock
+        // bare pad's collision rejection, and collision cannot override neutrality.
+        for (const bool collidable : {false, true}) {
+            auto collision_control = combat.value();
+            const auto pad_profile = std::find_if(collision_control.profiles.begin(), collision_control.profiles.end(),
+                [&](const auto& profile) { return profile.type_id == pad->state.type_id; });
+            expect(pad_profile != collision_control.profiles.end(), "Polus pad collision control resolves");
+            if (pad_profile == collision_control.profiles.end()) continue;
+            pad_profile->living_projectile_collision = collidable;
+            for (const bool neutral : {true, false}) {
+                auto owned_setup = combat_setup;
+                owned_setup.units.back().owner = neutral ? pad->state.owner : 2;
+                auto owned_pad = tactical::TacticalSession::create(owned_setup, skirmish::sensor_table(tables),
+                    health.value(), {}, {}, collision_control);
+                expect(static_cast<bool>(owned_pad), "Polus pad targeting control binds");
+                bool fired_at_pad = false;
+                if (owned_pad) {
+                    eawr::sim::InlineExecutor pool;
+                    for (std::size_t frame = 0; frame < 60; ++frame) {
+                        const auto stepped = owned_pad.value().step(pool);
+                        expect(static_cast<bool>(stepped), "Polus pad targeting control frame succeeds");
+                        if (!stepped) break;
+                        const auto events = stepped.value().snapshot->combat_events();
+                        fired_at_pad |= std::any_of(events.begin(), events.end(), [&](const auto& event) {
+                            return event.kind == tactical::CombatEventKind::weapon_fired && event.target == pad->state.entity_id;
+                        });
+                    }
+                }
+                expect(fired_at_pad == (collidable && !neutral),
+                    "R-08 / WHZ-51: only the explicitly collidable hostile pad is fired at");
             }
         }
-        expect(fired_at_enemy_pad, "neutral targeting boundary control still targets an enemy-owned pad");
+        // WBP-18/21: a completed mine is a separate object with its own profile.
+        // The stock Rebel mine inherits living collision permission from its base.
+        const auto* mine_profile = combat.value().find(child->constructed);
+        expect(mine_profile && mine_profile->living_projectile_collision,
+            "WBP-21 / R-08: the loaded completed mine permits living projectile collision");
+        if (mine_profile && mine_profile->living_projectile_collision) {
+            combat_setup.units.back().owner = 2;
+            auto mine = combat_setup.units.back();
+            mine.entity_id = construction_id;
+            mine.type_id = child->constructed;
+            combat_setup.units.push_back(mine);
+            auto occupied = tactical::TacticalSession::create(combat_setup, skirmish::sensor_table(tables),
+                health.value(), {}, {}, combat.value());
+            expect(static_cast<bool>(occupied), "Polus completed-mine combat control binds");
+            bool fired_at_mine = false;
+            if (occupied) {
+                eawr::sim::InlineExecutor pool;
+                for (std::size_t frame = 0; frame < 60; ++frame) {
+                    const auto stepped = occupied.value().step(pool);
+                    expect(static_cast<bool>(stepped), "Polus completed-mine combat frame succeeds");
+                    if (!stepped) break;
+                    const auto events = stepped.value().snapshot->combat_events();
+                    fired_at_mine |= std::any_of(events.begin(), events.end(), [&](const auto& event) {
+                        return event.kind == tactical::CombatEventKind::weapon_fired && event.target == mine.entity_id;
+                    });
+                    expect(std::none_of(events.begin(), events.end(), [&](const auto& event) {
+                        return event.kind == tactical::CombatEventKind::weapon_fired && event.target == pad->state.entity_id;
+                    }), "R-08: the hostile bare pad remains untargeted beside its completed mine");
+                }
+            }
+            expect(fired_at_mine, "WBP-21 / R-08: automatic weapons engage the stock hostile completed mine");
+        }
     }
     constexpr std::uint64_t build_tick = 320;
     const auto completion_tick = build_tick + static_cast<std::uint64_t>(child->seconds) * 30 + 1;

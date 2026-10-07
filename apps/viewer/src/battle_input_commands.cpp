@@ -46,6 +46,14 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
     }
     if (const auto* button = Object::cast_to<InputEventMouseButton>(event.ptr())) {
         const auto index = button->get_button_index();
+        if (placing_ && (index == MOUSE_BUTTON_WHEEL_UP || index == MOUSE_BUTTON_WHEEL_DOWN)) {
+            // WR-X01: claim both press and release so the camera cannot zoom during the drag.
+            if (button->is_pressed()) {
+                static_cast<void>(live.rotate_reinforcement(button->get_factor()
+                    * (index == MOUSE_BUTTON_WHEEL_UP ? 1.0 : -1.0)));
+            }
+            return true;
+        }
         if (index != MOUSE_BUTTON_LEFT && index != MOUSE_BUTTON_RIGHT) return false;
         ++events_;
         refresh(live, population, space);
@@ -127,17 +135,20 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         const auto placing_ray = ray(at[0], at[1]);
         const auto point = placing_ray ? ui::battle_plane_point(*placing_ray) : std::nullopt;
         if (!point) {
+            live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::cancelled, type);
             note("reinforce " + std::to_string(type) + ": no plane point");
             return;
         }
         auto x = scene::fixed_from_binary32((*point)[0]);
         auto y = scene::fixed_from_binary32((*point)[1]);
         if (!x || !y) {
+            live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::cancelled, type);
             note("reinforce " + std::to_string(type) + ": no plane point");
             return;
         }
         const bool issued = live.reinforce(type, sim::math::Vec3{x.value(), y.value(), sim::math::Fixed{}});
         if (issued) ++placements_;
+        else live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::cancelled, type);
         char where[96];
         std::snprintf(where, sizeof(where), "%.9g,%.9g,0", static_cast<double>((*point)[0]), static_cast<double>((*point)[1]));
         note("reinforce " + std::to_string(type) + (issued ? " @" : " refused @") + std::string(where));
@@ -164,18 +175,20 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         picked = *icon;
     }
     if (ability_target_) {
-        if (sim::tactical::ability_kind(ui::ability_name(ability_target_->ability)) == sim::tactical::AbilityKind::weaken_enemy) {
-            const auto aim_ray = ray(at[0], at[1]);
-            const auto point = aim_ray ? ui::battle_plane_point(*aim_ray) : std::nullopt;
-            if (!point) { cancel_ability_target("no plane point"); return; }
-            auto x = scene::fixed_from_binary32((*point)[0]);
-            auto y = scene::fixed_from_binary32((*point)[1]);
-            if (!x || !y) { cancel_ability_target("no plane point"); return; }
+        const auto kind = sim::tactical::ability_kind(ui::ability_name(ability_target_->ability));
+        // AB-09 / WAD-38: area abilities accept a world point, including empty space.
+        if (kind == sim::tactical::AbilityKind::weaken_enemy || kind == sim::tactical::AbilityKind::barrage) {
+            const auto point = ability_point(at, live);
+            if (!point) {
+                negative_feedback();
+                cancel_ability_target("invalid ability point");
+                return;
+            }
             auto request = *ability_target_;
-            request.position = sim::math::Vec3{x.value(), y.value(), sim::math::Fixed{}};
+            request.position = *point;
             ability_target_.reset();
             ++ability_targeted_;
-            note("ability WEAKEN_ENEMY at point");
+            note("ability " + std::string(ui::ability_name(request.ability)) + " at point");
             if (ability_commands_) ability_commands_->request(request);
             acknowledge(Acknowledgement::Kind::attack);
             return;
@@ -184,6 +197,8 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         const auto unit = std::find_if(units_.begin(), units_.end(),
             [&](const ui::BattleUnit& candidate) { return picked && candidate.entity == *picked; });
         if (unit == units_.end() || !unit->hostile) {
+            // BA-28: invalid targeted ability actions request refusal feedback; cancellation keys do not.
+            negative_feedback();
             cancel_ability_target(unit == units_.end() ? "empty space" : "not an enemy");
             return;
         }
@@ -198,12 +213,22 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         return;
     }
     ui::OrderInput* input = live.order_input();
-    if (input != nullptr && input->mode() != ui::OrderMode::none) {
+    const bool armed = input != nullptr && input->mode() != ui::OrderMode::none;
+    if (armed) {
         // An armed attack or move mode: a click on empty space or an own unit disarms it.
         const auto unit = std::find_if(units_.begin(), units_.end(),
             [&](const ui::BattleUnit& candidate) { return picked && candidate.entity == *picked; });
         if (!picked || (unit != units_.end() && unit->own)) input->cancel_mode();
         if (!picked) return;
+    }
+    if (!modifiers.ctrl && !modifiers.alt && !armed) {
+        if (const auto reticle = world_ui_->reticle_at(at);
+            reticle && live.repair_hardpoint(reticle->entity, reticle->hardpoint)) {
+            ++orders_;
+            world_ui_->flash_reticle(reticle->entity, reticle->hardpoint);
+            note("repair " + std::to_string(reticle->entity) + " hardpoint " + std::to_string(reticle->hardpoint));
+            return;
+        }
     }
     if (picked && live.pad_action_allowed(*picked)) {
         pad_palette_.open(*picked, true);
@@ -227,9 +252,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     right_start_.reset();
     if (placing_) {
         // #530 PU-68: a right click cancels the placement.
-        placing_.reset();
-        ++placements_cancelled_;
-        note("reinforce placement cancelled");
+        cancel_placement(live);
         return;
     }
     // #561 (AB-11): a right click cancels a waiting targeted ability and orders nothing.
@@ -248,6 +271,15 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
         break;
     }
     ui::OrderInput* input = live.order_input();
+    if (input != nullptr && input->mode() == ui::OrderMode::none && !modifiers.ctrl && !modifiers.alt) {
+        if (const auto reticle = world_ui_->reticle_at(at);
+            reticle && live.repair_hardpoint(reticle->entity, reticle->hardpoint)) {
+            ++orders_;
+            world_ui_->flash_reticle(reticle->entity, reticle->hardpoint);
+            note("repair " + std::to_string(reticle->entity) + " hardpoint " + std::to_string(reticle->hardpoint));
+            return;
+        }
+    }
     if (input == nullptr || selection_.empty()) return;
     const auto pick_ray = ray(at[0], at[1]);
     if (!pick_ray) return;
@@ -324,17 +356,21 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
             what = "attack-move @" + std::string(where);
         }
         note(what + " units " + units + " tick " + std::to_string(tick));
+        if (!attacked && move_feedback_ && local_order_selection(live)) {
+            move_feedback_(pick.point, guarding ? ui::OrderMode::guard
+                : attack_moving ? ui::OrderMode::attack_move : ui::OrderMode::move, right_double_click_, tick);
+        }
         // BA-25/26 (SND-20/23): retain the aimed hardpoint; guard has its own response.
         acknowledge(attacked ? Acknowledgement::Kind::attack
                              : guarding ? Acknowledgement::Kind::guard : Acknowledgement::Kind::move,
-                    pick.entity, pick.hardpoint);
+                    pick.entity, pick.hardpoint, pick.point);
     } else if (!issued) {
         ++refused_;
         note("refused: " + issued.error().message);
     }
 }
 
-bool BattleInput::minimap_move(const double x, const double y, LiveSessionView& live) {
+bool BattleInput::minimap_move(const double x, const double y, const bool double_click, LiveSessionView& live) {
     ui::OrderInput* input = live.order_input();
     if (input == nullptr || selection_.empty()) return false;
     auto fixed_x = scene::fixed_from_binary32(static_cast<float>(x));
@@ -343,6 +379,7 @@ bool BattleInput::minimap_move(const double x, const double y, LiveSessionView& 
     const ui::WorldPick pick{{fixed_x.value(), fixed_y.value(), sim::math::Fixed{}}, sim::invalid_entity_id, false};
     input->set_selection(selection_.units());
     const std::uint64_t tick = live.order_tick();
+    const ui::OrderMode mode = input->mode();
     auto issued = input->world_command(pick, ui::CommandOrigin::minimap);
     if (!issued) {
         ++refused_;
@@ -354,8 +391,16 @@ bool BattleInput::minimap_move(const double x, const double y, LiveSessionView& 
     char where[96];
     std::snprintf(where, sizeof(where), "%.9g,%.9g,0", x, y);
     note("minimap move @" + std::string(where) + " tick " + std::to_string(tick));
-    acknowledge(Acknowledgement::Kind::move);
+    acknowledge(Acknowledgement::Kind::move, sim::invalid_entity_id, sim::tactical::attack_hull, pick.point);
+    if (move_feedback_ && local_order_selection(live)) move_feedback_(pick.point, mode, double_click, tick);
     return true;
+}
+
+bool BattleInput::local_order_selection(const LiveSessionView& live) const {
+    return std::any_of(selection_.units().begin(), selection_.units().end(), [&](const auto entity) {
+        const auto* instance = live.snapshot_index().instance(entity);
+        return instance != nullptr && instance->owner == live.local_player();
+    });
 }
 
 bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, LiveSessionView& live,
@@ -364,6 +409,19 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
     // #561 (AB-11): Esc cancels a waiting targeted ability.
     if (ability_target_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) {
         cancel_ability_target("escape");
+        return true;
+    }
+    if (code == static_cast<std::int64_t>(KEY_A) && modifiers.ctrl && !modifiers.shift && !modifiers.alt) {
+        // S-5a: use the selection path, without issuing an order or focusing the camera.
+        auto own_units = units_;
+        for (auto& unit : own_units) {
+            // S-5a: allied community property is click-selectable, but select-all is owner-only.
+            const auto* instance = live.snapshot_index().instance(unit.entity);
+            unit.own = instance != nullptr && instance->owner == live.local_player();
+        }
+        selection_.all(own_units);
+        note("select all");
+        acknowledge(Acknowledgement::Kind::select);
         return true;
     }
     if (code >= static_cast<std::int64_t>(KEY_0) && code <= static_cast<std::int64_t>(KEY_9)) {
@@ -375,11 +433,11 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
             selection_.assign_group(group);
             note("assign group " + std::to_string(group));
         } else if (modifiers.alt) {
-            focus = selection_.add_to_group(group, now(live), units_);
+            focus = selection_.add_to_group(group, logical_frame(live), units_);
             note("add to group " + std::to_string(group));
             acknowledge(Acknowledgement::Kind::select);
         } else {
-            focus = selection_.recall_group(group, modifiers.shift, now(live), units_);
+            focus = selection_.recall_group(group, modifiers.shift, logical_frame(live), units_);
             note((modifiers.shift ? "add group " : "select group ") + std::to_string(group));
             acknowledge(Acknowledgement::Kind::select);
         }
@@ -420,16 +478,7 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
     }
     if (modifiers.ctrl || modifiers.alt || modifiers.shift) return false;
     if (code == static_cast<std::int64_t>(KEY_S)) {
-        if (input == nullptr) return true;
-        input->set_selection(selection_.units());
-        if (selection_.empty()) return true;
-        if (auto stopped = input->stop(ui::CommandOrigin::hotkey); stopped) {
-            ++orders_;
-            note("stop");
-            acknowledge(Acknowledgement::Kind::stop);
-        } else {
-            ++refused_;
-        }
+        command_click(ui::OrderMode::none, true, live, ui::CommandOrigin::hotkey);
         return true;
     }
     // OR-01: the default keys are A attack, M move, T attack-move and G guard; the key
@@ -449,8 +498,7 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
             mode = ui::OrderMode::guard;
             name = "guard mode";
         }
-        if (input->mode() == mode) input->cancel_mode();
-        else input->arm(mode);
+        command_click(mode, false, live, ui::CommandOrigin::hotkey);
         note(name);
         return true;
     }
@@ -463,11 +511,56 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
 }
 
 void BattleInput::acknowledge(const Acknowledgement::Kind kind, const sim::EntityId target,
-                              const std::uint32_t hardpoint) {
-    // FoC speaks only for a selection that holds units (Set_Selected_Objects_List, the group
-    // acknowledgements' highest ranking object).
+                              const std::uint32_t hardpoint, const std::optional<sim::math::Vec3> destination) {
+    // BA-20: a unit response needs a nonempty selection with a ranked speaker.
     if (selection_.empty()) return;
-    acknowledgements_.push_back({kind, selection_.units(), target, hardpoint});
+    Acknowledgement acknowledgement;
+    acknowledgement.kind = kind;
+    acknowledgement.units = selection_.units();
+    acknowledgement.target = target;
+    acknowledgement.hardpoint = hardpoint;
+    acknowledgement.destination = destination;
+    acknowledgements_.push_back(std::move(acknowledgement));
+}
+
+bool BattleInput::command_click(const ui::OrderMode mode, const bool stop, LiveSessionView& live,
+                                const ui::CommandOrigin origin) {
+    auto* input = live.order_input();
+    if (!input) return false;
+    audio::CommandCue cue = audio::CommandCue::none;
+    if (stop) {
+        input->set_selection(selection_.units());
+        if (!selection_.empty()) {
+            if (auto stopped = input->stop(origin); stopped) {
+                ++orders_;
+                note("stop");
+                acknowledge(Acknowledgement::Kind::stop);
+            } else ++refused_;
+        }
+        cue = audio::CommandCue::stop;
+    } else {
+        if (input->mode() == mode) input->cancel_mode();
+        else input->arm(mode);
+        switch (mode) {
+        case ui::OrderMode::attack: cue = audio::CommandCue::attack; break;
+        case ui::OrderMode::attack_move: cue = audio::CommandCue::attack_move; break;
+        case ui::OrderMode::guard: cue = audio::CommandCue::guard; break;
+        case ui::OrderMode::move: cue = audio::CommandCue::move; break;
+        case ui::OrderMode::none: break;
+        }
+    }
+    if (audio::command_cue_on_press(cue, input->mode() == mode)) {
+        Acknowledgement feedback;
+        feedback.cue = cue;
+        acknowledgements_.push_back(std::move(feedback));
+    }
+    return true;
+}
+
+void BattleInput::negative_feedback() {
+    Acknowledgement feedback;
+    feedback.cue = audio::CommandCue::negative;
+    acknowledgements_.push_back(std::move(feedback));
 }
 
 std::vector<BattleInput::Acknowledgement> BattleInput::take_acknowledgements() {

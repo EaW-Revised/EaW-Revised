@@ -300,6 +300,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"defend\": " << (options_.defend ? "true" : "false")
            << ", \"shield_flash\": " << (options_.shield_flash ? "true" : "false")
            << ", \"shield_flashes\": " << shield_flashes_
+           << ", \"shield_flash_samples\": " << shield_flash_samples_
+           << ", \"shield_flash_duration\": " << shield_flash_constants_.duration
+           << ", \"max_shield_flash_scale\": [" << max_shield_flash_scale_[0] << ','
+           << max_shield_flash_scale_[1] << ',' << max_shield_flash_scale_[2] << ']'
+
            << ", \"nebula_blends\": [" << [&] {
                   std::ostringstream rows;
                   bool first = true;
@@ -317,6 +322,25 @@ void LiveSessionView::write_report(std::ostream& output) const {
         output << (first_unit ? "" : ", ") << "{\"entity\": " << unit.entity << ", \"position\": [" << unit.position[0]
                << ", " << unit.position[1] << ", " << unit.position[2] << "], \"yaw\": " << unit.yaw << "}";
         first_unit = false;
+    }
+    output << "]"
+           << ", \"drawn_launch_colours\": [";
+    bool first_launch = true;
+    for (const VisibleUnit& unit : visible_) {
+        if (!launched_ship_of_entity_.contains(unit.entity)) continue;
+        const auto& ship = placed_ships_[unit.ship];
+        if (!ship.team_colour) continue;
+        const auto& rgb = *ship.team_colour;
+        output << (first_launch ? "" : ", ") << "{\"entity\": " << unit.entity
+               << ", \"player\": " << unit.owner << ", \"type\": " << json(ship.object_id)
+               << ", \"rgb\": [" << std::to_string(rgb[0]) << ", " << std::to_string(rgb[1]) << ", " << std::to_string(rgb[2]) << "]";
+        const auto clone = death_clones_.find(unit.entity);
+        if (clone != death_clones_.end() && placed_ships_[clone->second.ship].team_colour) {
+            const auto& death_rgb = *placed_ships_[clone->second.ship].team_colour;
+            output << ", \"death_rgb\": [" << std::to_string(death_rgb[0]) << ", " << std::to_string(death_rgb[1]) << ", " << std::to_string(death_rgb[2]) << "]";
+        }
+        output << "}";
+        first_launch = false;
     }
     output << "]"
            << ", \"hostile_units\": [";
@@ -424,7 +448,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
     for (const auto& [entity, row] : arrivals_) {
         output << (arrival_index++ ? ", " : "") << "{\"unit\": " << entity << ", \"owner\": " << row.owner
                << ", \"type\": " << row.type << ", \"first_tick\": " << row.first_tick << ", \"visible_tick\": "
-               << row.visible_tick << ", \"landed_tick\": " << row.landed_tick << "}";
+               << row.visible_tick << ", \"landed_tick\": " << row.landed_tick << ", \"facing_yaw\": " << row.facing_yaw << "}";
     }
     output << "], \"death_clones\": [";
     for (std::size_t index = 0; index < death_clone_rows_.size(); ++index) output << (index ? ", " : "") << death_clone_rows_[index];

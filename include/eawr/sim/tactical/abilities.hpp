@@ -6,6 +6,8 @@
 #include "eawr/sim/tactical/damage.hpp"
 
 #include <cstdint>
+#include <array>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -100,6 +102,17 @@ void delete_special_owner(std::span<const SpecialAbilityProfile>, SpecialAbility
 void delete_special_target(SpecialAbilityState&, EntityId target);
 void append_special_abilities(std::vector<std::uint8_t>&, const SpecialAbilityState&);
 
+// WAB-54: immutable candidates in the world's deterministic query order.
+struct HuntEnemy {
+    math::Vec3 position{};
+    bool fogged{}, force_sensitive{};
+};
+class CombatRandom;
+[[nodiscard]] core::Result<math::Vec3> hunt_destination(math::Vec3 position,
+    const std::optional<std::array<math::Fixed, 4>>& bounds, math::Fixed reveal_range,
+    bool force_sensitive, std::span<const HuntEnemy> enemies,
+    const std::function<bool(math::Vec3)>& fogged, CombatRandom& random);
+
 // The XML and Lua spelling (`DEFEND`, `TURBO`, `POWER_TO_WEAPONS`, `SPOILER_LOCK`,
 // `ION_CANNON_SHOT`), any case; none for every other name.
 [[nodiscard]] AbilityKind ability_kind(std::string_view name) noexcept;
@@ -185,6 +198,8 @@ struct UnitAbilityProfile {
     std::vector<AbilityProfile> abilities;
     bool defend_script{};
     std::vector<SpecialAbilityProfile> special{};
+    bool force_sensitive{}; // WAB-54: hunt preference and offset exemption
+    math::Fixed hunt_reveal_range{}; // authored range even without REVEAL
     friend bool operator==(const UnitAbilityProfile&, const UnitAbilityProfile&) = default;
 };
 

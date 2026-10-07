@@ -41,7 +41,8 @@
   `hardpoint_destroyed` and `unit_destroyed`.
 - Cadence: damage applies in the commands phase, in canonical command order. Then, once per
   tick, the systems phase services every live durable unit (HS rules). Units that died leave
-  before the visibility pass. The session never repairs (HR-07).
+  before the visibility pass. Active station hardpoint repairs are serviced in the
+  partitioned systems phase after damage, with ordered payer debits (HR-07).
 
 ## Rules
 
@@ -96,8 +97,8 @@ hardpoints (destroyed ones included) and S the sum of their current health; C th
 | HR-03 | A player who cannot pay a frame drops out of the repair. | research E72-08 |
 | HR-04 | After a paid frame, a hull fraction h below the combined hardpoint fraction c becomes a hull of H · (1 + c − h). | research E72-08 |
 | HR-05 | The repair ends when the hardpoint is back at full health; retail also re-enables it. | research E72-08 |
-| HR-06 | In the M2 roster only station hardpoints author repair values: 0.5 health per frame, for 1.3 credits (weapons), 1.5 credits (shield generator, fighter bay), and 1.5 (Rebel) or 1.3 (Empire) for the supply dock and comm array. Ship and craft hardpoints author none and cannot be repaired. | data; research IS-09, IS-10 (retail offers the repair order only on star-base hardpoints below full health and never reads the amount; a zero amount would repair without end) |
-| HR-07 | **Selected M2 behaviour: no repair.** The session has no repair command, so destroyed hardpoints stay destroyed and lost health never returns. Until station purchasing and reinforcements every M2 player had 0 credits, so a retail repair stopped on its first frame, unpaid; since the station purchasing and reinforcements work players have credits and income ([space purchasing](space-purchasing.md) PU-01 to PU-06), and the missing repair command is fidelity item PU-G11. `sim::tactical::repair_frame` implements HR-01 to HR-05 for it. | owner SK-30, SK-31; project |
+| HR-06 | In the M2 roster only station hardpoints author repair values: 0.5 health per frame, for 1.3 credits (weapons), 1.5 credits (shield generator, fighter bay), and 1.5 (Rebel) or 1.3 (Empire) for the supply dock and comm array. Ship and craft hardpoints author none; the live repair command admits station hardpoints. The pure service accepts zero authored amount and can pay without progress. | data; research IS-09, IS-10 (retail offers the repair order only on star-base hardpoints below full health and never reads the amount; a zero amount would repair without end) |
+| HR-07 | M2 station repair uses a replayable player command and a partitioned per-frame service. Each registered payer pays the authored cost once per service until insolvency, destruction or completion. Disabled positive-health upgrade slots can be repaired back to full and re-enabled. Unit repair abilities are separate. | project; WSL-38/40/41/42 |
 
 ### Scripted damage
 
@@ -133,6 +134,6 @@ oracle's hash, snapshot and event goldens.
 |---|---|---|
 | G-H1 | Retail applies hits during the projectile service of a frame. Their order relative to the object's hardpoint service in the same frame was not traced; here all of a tick's damage comes first. Within one object's service, the HS drag runs before that object's own weapons ([audit](debug-build-audit.md)). | A hit and the HS drag of the same tick may be one frame apart from retail. |
 | G-H3 | Temporarily disabled hardpoints (ion stun and other disables) are not modelled; no M2 weapon ion-stuns. | space ability implementation (legacy EAWR-76) adds them; a disabled weapon would also stop firing. |
-| G-H4 | Resolved in part: the repair event and the per-frame service check neither the owner nor the repair amount, and the click that issues the order requires a star-base object and a hardpoint below full health (IS-09, IS-10). Whether an enemy star base can receive the order was not traced (unverified). | None in M2 (HR-07). |
+| G-H4 | Resolved in part: the repair event and the per-frame service check neither the owner nor the repair amount, and the click that issues the order requires a star-base object and a hardpoint below full health (IS-09, IS-10). Whether an enemy star base can receive the order was not traced (unverified). | Live service keeps this no-ownership-gate boundary; the ordinary UI action is on an own station hardpoint (CU-11). |
 | G-H5 | "Damaged" (HD-04) is a remake presentation state; retail changes a hardpoint's art only when it is destroyed. | live battle presentation may draw intact art until destruction to match retail. The live battle does: a hardpoint's smoke and fire (its `Damage_Particles` emitters) start only when it is destroyed, and a unit whose engines go off-line (HD-11) stops its engine emitters ([battle presentation](battle-presentation.md#unit-emitters-engines-and-hardpoint-damage-394) BP-41, BP-42). |
 | G-H6 | Retail computes in binary32; the remake is exact in Q24 (HS-05). | Health can differ from retail by rounding, typically below 2^-20 of a unit per step. |

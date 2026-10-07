@@ -104,7 +104,7 @@ namespace map_mode_detail {
 void inject_map_key(godot::Key code, bool pressed);
 
 // Checks the land map camera self-test records; a run with any other count fails.
-constexpr std::size_t map_camera_selftest_check_count = 13;
+constexpr std::size_t map_camera_selftest_check_count = 16;
 constexpr std::array<std::string_view, 2> texture_suffixes{".tga", ".dds"};
 constexpr std::array<std::string_view, 1> model_suffixes{".alo"};
 

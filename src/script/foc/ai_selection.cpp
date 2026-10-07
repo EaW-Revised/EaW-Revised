@@ -128,10 +128,10 @@ bool Engine::select_units(PlayerAi& player, const Goal& goal, PotentialPlan& pot
     std::vector<Slot> layout;
     std::vector<tactical::TypeId> proposals;
     const auto* account = host_->economy(player.player);
-    Real credits = account != nullptr ? fixed(account->credits) : Real{};
-    for (const auto& [reserved_goal, amount] : player.reserved_credits) {
-        if (reserved_goal != goal.id) credits = credits - amount;
-    }
+    Real credits = fixed(host_->credits(player.player));
+    // WAS-25: a funded goal can restore its own allocation without charging again.
+    if (const auto own = player.reserved_credits.find(goal.id); own != player.reserved_credits.end())
+        credits = credits + own->second;
     const auto pooled_count = [&](tactical::TypeId type) {
         std::int64_t count = 0;
         if (account != nullptr) for (std::size_t index = 0; index < account->pool_tokens.size(); ++index) {
@@ -409,7 +409,8 @@ bool Engine::production_time_allowed(const PlayerAi&, const Goal&) const {
 bool Engine::test_valid(PlayerAi& player, Goal& goal) {
     if (!goal.potential || !goal.potential->valid) return false;
     if (goal.plan != 0) return running_.contains(goal.plan);
-    if (!goal.potential->reserved) return select_units(player, goal, *goal.potential) && production_time_allowed(player, goal);
+    if (!goal.potential->reserved && !goal.potential->funded)
+        return select_units(player, goal, *goal.potential) && production_time_allowed(player, goal);
     for (const sim::EntityId object : goal.potential->freestore) {
         if (object == 0) continue;
         const ViewUnit* unit = host_->view->find(object);
@@ -432,6 +433,7 @@ bool Engine::test_target_contrast(PlayerAi& player, Goal& goal) {
     if (!test_valid(player, goal)) return false;
     const PlanDef& plan = plans_[goal.potential->plan];
     if (plan.ignore_target || goal.target == 0) return true;
+    if (goal.potential->funded) return true; // WAS-25: restoration retains the original allocation
     return select_units(player, goal, *goal.potential);
 }
 

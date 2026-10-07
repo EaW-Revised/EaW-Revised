@@ -1,5 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "battle_effects.hpp"
+#include "eawr/presentation/particles/contact_frame.hpp"
+#include "eawr/presentation/space/snapshot_index.hpp"
 
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
@@ -32,6 +34,28 @@ constexpr std::uint32_t drain_limit_frames = 300;
 constexpr std::size_t shield_sample_limit = 64;
 [[nodiscard]] space::Vec3d dvec(const V value) { return {value.x, value.y, value.z}; }
 
+// WPJ-40: terminal decorations outside the view are not created.
+[[nodiscard]] bool terminal_in_frustum(const V position, const FixedCamera& camera) {
+    const auto dot = [](const V a, const V b) { return a.x * b.x + a.y * b.y + a.z * b.z; };
+    const auto cross = [](const V a, const V b) {
+        return V{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+    const auto normal = [&](const V value) {
+        const float length = std::sqrt(dot(value, value));
+        return length > 0.0F ? scale(value, 1.0F / length) : V{};
+    };
+    const V eye = vec(space::source_from_render(camera.eye));
+    const V forward = normal(sub(vec(space::source_from_render(camera.target)), eye));
+    const V right = normal(cross(forward, vec(space::source_from_render(camera.up))));
+    const V up = cross(right, forward);
+    const V relative = sub(position, eye);
+    const float depth = dot(relative, forward);
+    if (depth < camera.near_plane || depth > camera.far_plane) return false;
+    const float height = depth * std::tan(camera.vertical_fov_degrees * 0.5F * 3.14159265358979323846F / 180.0F);
+    const float aspect = static_cast<float>(camera.width) / static_cast<float>(std::max(camera.height, 1U));
+    return std::abs(dot(relative, up)) <= height && std::abs(dot(relative, right)) <= height * aspect;
+}
+
 [[nodiscard]] particles::Basis3 yaw_basis(const double yaw_degrees) {
     const double radians = yaw_degrees * 3.14159265358979323846 / 180.0;
     const auto c = static_cast<float>(std::cos(radians));
@@ -53,7 +77,9 @@ const std::string* BattleEffects::hit_pick(const std::vector<std::string>& list,
 }
 
 bool BattleEffects::spawn(const std::string& particle, const std::array<double, 3>& position,
-                          const particles::Basis3& basis, const std::string& reason, const std::uint64_t tick) {
+                          const particles::Basis3& basis, const std::string& reason, const std::uint64_t tick,
+                          const sim::EntityId owner, const std::uint32_t bone, bool* created) {
+    if (created) *created = false;
     if (particle.empty()) return true;
     const std::string key = reason + ":" + particle;
     const ParticleType* type = particle_type(particle);
@@ -88,7 +114,22 @@ bool BattleEffects::spawn(const std::string& particle, const std::array<double, 
     ++spawned_[key];
     const std::size_t row = spawn_log_.size() < spawn_log_limit ? spawn_log_.size() : spawn_log_limit;
     if (row < spawn_log_limit) spawn_log_.push_back({tick, key, std::nullopt});
-    LiveEffect effect{handle.value(), particle, birth_, 0U, type->lifetime_frames, false, false, row};
+    LiveEffect effect{handle.value(), particle, birth_, 0U, type->lifetime_frames, false, false, row, std::nullopt, 0U, frame};
+    if (type->attached_to_collision && owner != sim::invalid_entity_id) {
+        const auto posed = contact_bones_ ? contact_bones_(owner, bone) : std::nullopt;
+        const auto offset = posed ? particles::contact_local_frame(posed->frame, frame) : std::nullopt;
+        if (offset) {
+            effect.contact = LiveEffect::Contact{owner, bone, *offset, frame, false};
+            ++contact_attached_;
+            if (!posed->visible) {
+                if (!registry_->stop_emission(effect.handle)) return false;
+                effect.contact->hidden = true;
+                ++contact_hidden_;
+            }
+        } else {
+            ++contact_missing_;
+        }
+    }
     // Born before the clock's present (a tick the frames had already passed): it catches up.
     bool gone = false;
     for (std::uint64_t sample = birth_; sample < samples_ && !gone; ++sample) {
@@ -96,12 +137,13 @@ bool BattleEffects::spawn(const std::string& particle, const std::array<double, 
     }
     if (!gone) effects_.push_back(std::move(effect));
     max_live_effects_ = std::max<std::uint64_t>(max_live_effects_, effects_.size());
+    if (created) *created = true;
     return true;
 }
 
 bool BattleEffects::step_effect(LiveEffect& effect, bool& gone) {
     gone = false;
-    auto advanced = registry_->advance(effect.handle, 1.0F / 30.0F, camera_frame_);
+    auto advanced = registry_->advance(effect.handle, presentation_constants::logical_frame_seconds, camera_frame_);
     if (!advanced) {
         failure_ = "battle effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
@@ -114,15 +156,67 @@ void BattleEffects::after_step(LiveEffect& effect, const particles::EffectFrameS
     gone = false;
     particles_ += advanced.particles;
     ++effect.age;
+    if (effect.log < spawn_log_.size() && contact_samples_.size() < 8192
+        && (spawn_log_[effect.log].key.starts_with("damage_hit:") || spawn_log_[effect.log].key.starts_with("shield_hit:"))) {
+        contact_samples_.push_back({samples_, effect.handle, spawn_log_[effect.log].key, effect.age, effect.contact,
+            effect.frame, advanced.has_bounds, scale(add(advanced.bounds_min, advanced.bounds_max), 0.5F), effect.detached});
+    }
     if (!effect.detached && effect.age >= effect.lifetime) {
         // The particle object's lifetime ends: FoC detaches its system, which drains.
         auto detached = registry_->detach(effect.handle);
         effect.detached = true;
+        effect.drain_from = effect.age;
         gone = !detached || detached.value() == particles::EffectDetachState::released;
-    } else if (effect.detached && (advanced.finished || effect.age >= effect.lifetime + drain_limit_frames)) {
+    } else if (effect.detached && (advanced.finished || effect.age - effect.drain_from >= drain_limit_frames)) {
         static_cast<void>(registry_->release(effect.handle));
         gone = true;
     }
+}
+
+bool BattleEffects::follow_contacts(const tactical::TacticalSnapshot& latest) {
+    for (auto effect = effects_.begin(); effect != effects_.end();) {
+        if (!effect->contact || effect->detached) { ++effect; continue; }
+        auto& contact = *effect->contact;
+        const auto owner = space::find_instance(latest, contact.owner);
+        const auto posed = owner && contact_bones_ ? contact_bones_(contact.owner, contact.bone) : std::nullopt;
+        if (!owner || !posed) {
+            // PS-04: removal freezes the final frame and obeys the group's leave-particles flag.
+            auto detached = registry_->detach(effect->handle);
+            effect->detached = true;
+            effect->drain_from = effect->age;
+            ++contact_removed_;
+            if (!detached || detached.value() == particles::EffectDetachState::released) {
+                effect = effects_.erase(effect);
+                continue;
+            }
+        } else {
+            const auto frame = particles::contact_world_frame(posed->frame, contact.offset);
+            if (posed->visible && contact.hidden) {
+                // PS-03: showing the same bone resets its group; the particle object's timer continues.
+                const ParticleType* type = particle_type(effect->particle);
+                auto reset = type && type->system ? registry_->spawn(*type->system, seed_++, effect_capacity)
+                    : core::Result<particles::EffectHandle>::failure({.code = "EAWR-VIEWER-BATTLE-CONTACT", .message = "contact system missing"});
+                if (!reset) { failure_ = "battle contact group could not be reset"; return false; }
+                static_cast<void>(registry_->release(effect->handle));
+                effect->handle = reset.value();
+                contact.hidden = false;
+            }
+            if (!registry_->set_frame(effect->handle, frame)) {
+                failure_ = "battle contact frame could not be placed";
+                return false;
+            }
+            contact.last = frame;
+            effect->frame = frame;
+            if (!posed->visible && !contact.hidden) {
+                // PS-03: hidden bones stop births while the existing particles continue to drain.
+                if (!registry_->stop_emission(effect->handle)) return false;
+                contact.hidden = true;
+                ++contact_hidden_;
+            }
+        }
+        ++effect;
+    }
+    return true;
 }
 
 bool BattleEffects::advance_until(const std::uint64_t target) {
@@ -134,7 +228,7 @@ bool BattleEffects::advance_until(const std::uint64_t target) {
         for (const LiveEffect& effect : effects_) {
             if (effect.born <= samples_) batch_handles_.push_back(effect.handle);
         }
-        if (auto advanced = registry_->advance_all(batch_handles_, 1.0F / 30.0F, camera_frame_, batch_stats_);
+        if (auto advanced = registry_->advance_all(batch_handles_, presentation_constants::logical_frame_seconds, camera_frame_, batch_stats_);
             !advanced) {
             failure_ = "battle effect: " + core::format_diagnostic(advanced.error());
             return false;
@@ -152,9 +246,14 @@ bool BattleEffects::advance_until(const std::uint64_t target) {
 bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reached,
                           const tactical::TacticalSnapshot& previous, const tactical::TacticalSnapshot& latest,
                           const double alpha, const UnitLookup& units, const FixedCamera& camera,
-                          const double presented_tick, const SnapshotAt& snapshot_at) {
+                          const double presented_tick, const SnapshotAt& snapshot_at, const BoneLookup& bones,
+                          const FixedCamera* laser_camera) {
+    terminal_sounds_.clear();
     if (released_) return true;
     ++frames_;
+    const auto& depth_camera = laser_camera ? *laser_camera : camera;
+    effect_clips_ = {depth_camera.near_plane, depth_camera.far_plane};
+    contact_bones_ = bones;
     // The clock starts at the first frame, or earlier at the birth of the oldest event that frame
     // reaches: a session that ran ahead of its first frame (#370 re-review 2) still gives each
     // effect its own tick's birth and ages it by the ticks since.
@@ -185,6 +284,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
         else last_seen_.erase(craft.entity_id);
     }
     note_ability_shots(reached, latest, snapshot_at);
+    if (!follow_contacts(latest)) return false;
     // Events fire on the frame that first reaches their tick, oldest tick first; the effects
     // already live are aged up to each tick's birth before its effects are born.
     for (const platform::LiveTickEvents& record : reached) {
@@ -210,7 +310,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 if (shown && !spawn(type->second.replenish_particle, shown->position, {}, "hero_wingmen", record.tick)) return false;
             }
         }
-        // WHE-62: countdown expiration presents the spawned type's authored detonation.
+        // WHE-62/BP-70: retain bomb death effects; WAD-07 supplies the weaken fallback.
         const auto before_spawn = snapshot_at && record.tick > 0 ? snapshot_at(record.tick - 1) : nullptr;
         if (before_spawn) for (const auto& spawn_state : before_spawn->ability_spawns()) {
             if (spawn_state.detonated || spawn_state.due + 1 != record.tick || !units(spawn_state.source)) continue;
@@ -219,9 +319,36 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             const auto look = type->second.weapons.find(tactical::object_weapon);
             if (look == type->second.weapons.end()) continue;
             const std::array<double, 3> position{to_float(spawn_state.position.x), to_float(spawn_state.position.y), to_float(spawn_state.position.z)};
-            if (!spawn(look->second.lifetime_detonation, position, {}, "hero_detonation", record.tick)) return false;
+            const auto& terminal = look->second.death_explosion.empty()
+                ? look->second.lifetime_detonation : look->second.death_explosion;
+            if (!spawn(terminal, position, {}, "hero_detonation", record.tick)) return false;
         }
         for (const tactical::CombatEvent& event : record.combat_events) {
+            if (event.kind == tactical::CombatEventKind::projectile_expired) {
+                // WAD-07: retain the terminal event even after snapshot history is gone.
+                // Its projectile ID selects ability/barrage looks remembered at launch.
+                tactical::Projectile projectile;
+                projectile.id = event.target;
+                projectile.shooter = event.shooter;
+                projectile.weapon = event.weapon;
+                const auto visibility = projectile_visibility_.find(event.target);
+                const auto* look = visibility != projectile_visibility_.end() ? visibility->second.look : look_of(projectile);
+                if (look == nullptr) {
+                    ++spawn_failed_["lifetime_detonation:<unknown weapon>"];
+                    continue;
+                }
+                const V position = vec(event.aim);
+                const auto* terminal = particle_type(look->lifetime_detonation);
+                if (terminal && terminal->decoration
+                    && (!projectile_terminal_admitted(event) || !terminal_in_frustum(position, camera))) continue;
+                bool created = false;
+                if (!spawn(look->lifetime_detonation, {position.x, position.y, position.z}, {},
+                    "lifetime_detonation", record.tick, sim::invalid_entity_id, 0, &created)) return false;
+                // WPJ-35/37: successful service is not proof that a particle was created.
+                if (created) terminal_sounds_.push_back({look->projectile, {position.x, position.y, position.z},
+                    (event.weapon & 0xc0000000U) == tactical::death_projectile_slot_flag});
+                continue;
+            }
             if (event.kind != tactical::CombatEventKind::projectile_hit) continue;
             // Shown when the local player sees the target: a lethal hit's target has left the
             // session by that tick, and its last visible frame stands for it (#370 review 1).
@@ -298,7 +425,9 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
                 if (target_looks != types_.end()) {
                     if (const std::string* pick = hit_pick(target_looks->second.shield_hits, space::HitParticleList::shield,
                                                            event, snapshot_at);
-                        pick != nullptr && !spawn(*pick, place, basis, "shield_hit", record.tick)) {
+                        pick != nullptr && !spawn(*pick, place, basis, "shield_hit", record.tick, event.target,
+                            hit && hit->triangle < target_looks->second.collision_bones.size()
+                                ? target_looks->second.collision_bones[hit->triangle] : 0U)) {
                         return false;
                     }
                 }
@@ -313,7 +442,9 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             if (const auto target_looks = types_.find(last_seen_.at(event.target).type); target_looks != types_.end()) {
                 if (const std::string* pick = hit_pick(target_looks->second.damage_hits, space::HitParticleList::damage,
                                                        event, snapshot_at);
-                    pick != nullptr && !spawn(*pick, at, {}, "damage_hit", record.tick)) {
+                    pick != nullptr && !spawn(*pick, at, {}, "damage_hit", record.tick, event.target,
+                        event.target_hardpoint < target_looks->second.hardpoint_contact_bones.size()
+                            ? target_looks->second.hardpoint_contact_bones[event.target_hardpoint] : 0U)) {
                     return false;
                 }
             }
@@ -394,14 +525,29 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
             }
         }
     }
-    if (!draw_projectiles(previous, latest, alpha, units, camera)) return false;
+    if (!draw_projectiles(previous, latest, alpha, units, depth_camera)) return false;
+    if (!follow_contacts(latest)) return false;
     if (!advance_until(due)) return false;
+    batch_handles_.clear();
+    for (const LiveEffect& effect : effects_) {
+        if (effect.contact && !effect.detached) batch_handles_.push_back(effect.handle);
+    }
+    if (!batch_handles_.empty() && !registry_->present_all(batch_handles_, camera_frame_)) {
+        failure_ = "battle contact particles could not be presented";
+        return false;
+    }
     // What this frame draws: each new effect's age now is the one it is first seen at.
     for (LiveEffect& effect : effects_) {
         if (effect.drawn) continue;
         effect.drawn = true;
         if (effect.log < spawn_log_.size()) spawn_log_[effect.log].first_age = effect.age;
     }
+    std::erase_if(projectile_visibility_, [&](const auto& entry) {
+        const auto shots = latest.projectiles();
+        const auto found = std::lower_bound(shots.begin(), shots.end(), entry.first,
+            [](const auto& shot, const auto id) { return shot.id < id; });
+        return found == shots.end() || found->id != entry.first;
+    });
     return true;
 }
 

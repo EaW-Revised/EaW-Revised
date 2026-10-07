@@ -447,27 +447,37 @@ worker owns that bug (dogfight craft dispersion, dogfight scatter and burst timi
 `Can_Fighter_Fire_When_Idle`, GameConstants `Object_Max_Speed_Multiplier_Space` (1.2) and
 `Space_Idle_Movement_Speed` (not in the FoC data). The spawner's tags are FL-01's.
 
-Marked `todo` in `docs/tag-coverage/statuses.json`: `Container/Squadron_Formation_Error_Tolerance`
-and `Container/Squadron_Offsets` (fighter tag coverage (legacy EAWR-651); both are read through the unit tables, so the rows are
-stale), `Container/Idle_Chase_Range` and `SpaceUnit/Idle_Chase_Range` presentation tag coverage (legacy EAWR-653),
+The [fighter and AI coverage audit](../tag-coverage-fighters-ai.md) qualifies
+`Container/Squadron_Formation_Error_Tolerance` and `Container/Squadron_Offsets` as
+`deferred` for hero-team dispatch (TCFA-04), rather than stale applied rows:
+the existing unit-table reads are in the Squadron loader, not the Container body path.
+Marked `todo` in `docs/tag-coverage/statuses.json`: `Container/Idle_Chase_Range` and
+`SpaceUnit/Idle_Chase_Range` presentation tag coverage (legacy EAWR-653),
 `Container/Guard_Chase_Range`, `Container/Attack_Move_Response_Range`,
 `Container/Autonomous_Move_Extension_Vs_Attacker`, `Container/Max_Speed`, `Container/Min_Speed`
-Movement tag coverage (legacy EAWR-649), `Container/Targeting_Max_Attack_Distance` combat tag coverage (legacy EAWR-650), `SpaceUnit/Number_per_Squadron`,
-`SpaceUnit/Squadron_Capacity`, `Squadron/Max_Squad_Size`, `Squadron/Is_Bomber`, `Squadron/Is_Escort`
-Fighter tag coverage (legacy EAWR-651). None is `deferred`.
+Movement tag coverage (legacy EAWR-649), `Container/Targeting_Max_Attack_Distance` combat tag coverage (legacy EAWR-650).
+The same audit retains `foc-ignores` for `SpaceUnit/Number_per_Squadron` and
+`Squadron/Is_Bomber` (TCFA-14), scopes `SpaceUnit/Squadron_Capacity` to galactic
+packing (TCFA-03), keeps `Squadron/Max_Squad_Size` partial for results scoring
+(TCFA-06), and defers `Squadron/Is_Escort` classification (TCFA-05).
+
+## Settled questions from the unverified sweep
+
+Question IDs are retained; these boundaries no longer require a new source read. Opaque evidence IDs identify ignored research receipts. Runtime acceptance and explicitly remaining clauses stay below.
+
+| ID | Sourced disposition | Evidence |
+|---|---|---|
+| U-01 | Most recent service-registration first object traversal; each object runs periodic behaviours in attachment order, then its special/script/hardpoint services. Ordinary attachment follows general Behavior then SpaceBehavior XML lists. This is per-object order, not global subsystem phases (WFO-12/15/17/24). | EUS-04 |
+| U-04 | Formation override maximum speed is set during layer mapping and updated-path acceptance, and reset during replanning (WMV-19). This was already sourced by the movement walk. | EMV-13 |
+| U-05 | Settled by the debug build's constant initializer: `Space_Idle_Movement_Speed` defaults to 1 (WSQ-05). WMV-14's idle drift defaults to disabled. | Previously sourced in this walk |
 
 ## Unverified, and what would settle it
 
-- **U-01** The object manager's service order between a squadron's craft and its container
-  (Scope). Ghidra: the object manager's service loop.
 - **U-02** Creation/presence settled by WMV-18: a starting team registers a position formation,
   and completion preserves it. Retail S-99's 4150-unit chase does not establish absence of a
   formation; the remaining destination-stack and diversion timing differences need measurement.
 - **U-03** The gating of the pairing at target acquisition (WSQ-20): the pursue flag and when the
-  formation's attack target lags the craft's. Ghidra: the targeting interface's pursue getter.
-- **U-04** The escort's override maximum speed (WSQ-12). Movement walk.
-- **U-05** Settled by the debug build's constant initializer: `Space_Idle_Movement_Speed`
-  defaults to 1 (WSQ-05). WMV-14's idle drift defaults to disabled.
+  formation's attack target lags the craft's. Ghidra: the targeting interface's pursue getter. Sweep (EUS-37): Still unverified: The space targeting service contains virtual pursue/formation-target gates, but the pursue getter/setter was not resolved. Wrapper flags alone do not settle when formation target lags the craft.
 - **U-06** A retail capture of two squadrons launched by one carrier idling side by side would
   confirm WSQ-09 on screen (two holds 120 or more units apart): the capture-mod Lua staging of
   hardpoint breakoff debris can spawn two squadrons at one point and let them idle.

@@ -561,6 +561,30 @@ int main(int argc, char** argv) {
     test_zero_direct_blast();
     test_curve();
     test_hit_pipeline();
+    // DG-40: protection stops ordinary hits before all health/energy/stun state changes,
+    // without making the hardpoints non-destroyable to privileged scenario damage.
+    {
+        auto profile = frigate();
+        profile.scenario_invulnerable = true;
+        for (const auto shields : {0, 100}) {
+            for (const auto target : {tactical::hull_target, 0U}) {
+                auto state = tactical::full_durability(profile);
+                state.shields = units(shields);
+                const auto before = state;
+                tactical::Hit hit{units(100), 0, true, true, true, target};
+                hit.energy_damage = true;
+                const auto protected_hit = tactical::apply_hit(profile, rules(), state, hit, 10);
+                expect(protected_hit && state == before, "DG-40: ordinary damage preserves the complete durability state");
+                hit.projectile = false;
+                hit.kind = tactical::HitKind::asteroid;
+                const auto asteroid = tactical::apply_hit(profile, rules(), state, hit, 10);
+                expect(asteroid && state == before, "DG-40: environmental damage respects protection");
+                hit.kind = tactical::HitKind::ordinary;
+                const auto scripted = tactical::apply_hit(profile, rules(), state, hit, 10);
+                expect(scripted && state != before, "DG-40: privileged scripted damage bypasses protection");
+            }
+        }
+    }
     test_diminishing_gates();
     test_out_of_combat();
     test_arrival_vulnerability();

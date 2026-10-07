@@ -4,6 +4,161 @@
 
 namespace unit_tables_test_support {
 
+void ship_suitability_content() {
+    for (const bool override_valid : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto insert = [&](const std::string_view opening, const std::string& tags) {
+            xml.insert(xml.find(opening) + opening.size(), tags);
+        };
+        insert("<StarBase Name=\"Test_Base\">", "<Is_Valid_Target>No</Is_Valid_Target>");
+        if (override_valid) insert("<StarBase Name=\"Skirmish_Test_Base\">", "<Is_Valid_Target>Yes</Is_Valid_Target>");
+        xml.replace(xml.find("<Behavior>SELECTABLE</Behavior>"), std::string_view{"<Behavior>SELECTABLE</Behavior>"}.size(),
+            "<Behavior>SELECTABLE, SPECIAL_WEAPON, DUMMY_STAR_BASE</Behavior>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WCC-25: suitability XML loads");
+        if (!loaded.tables) continue;
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "WCC-25: suitability content binds combat");
+        if (!combat) continue;
+        const auto* station = combat.value().find(eawr::assets::object_type_crc("Skirmish_Test_Base"));
+        const auto* ship = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(station && station->valid_target == override_valid && !station->star_base,
+            "WCC-25: valid-target inheritance and override apply; XML class does not imply star-base behavior");
+        expect(ship && ship->valid_target && ship->special_weapon && ship->star_base,
+            "WCC-25: omitted valid-target defaults true; behavior flags bind independently of XML class");
+        for (int field = 0; field < 3; ++field) {
+            auto changed = *loaded.tables;
+            auto* unit = const_cast<eawr::units::UnitType*>(changed.find("Test_Frigate"));
+            if (field == 0) unit->valid_target = false;
+            if (field == 1) unit->special_weapon = false;
+            if (field == 2) unit->star_base = false;
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "WCC-25: each gameplay suitability flag enters content identity");
+        }
+    }
+}
+
+
+// These contracts use XML and existing combat interfaces so the identical tests run on BASE.
+void height_adjusted_aim() {
+    namespace t = eawr::sim::tactical;
+    namespace d = t::detail;
+    namespace m = eawr::sim::math;
+    const auto at = [](const std::int64_t x, const std::int64_t y, const std::int64_t z) {
+        return Vec3{Fixed::from_raw(raw(x)), Fixed::from_raw(raw(y)), Fixed::from_raw(raw(z))};
+    };
+    for (const bool structure : {false, true}) {
+        for (const auto adjustment : {0, 35, 30, -20}) {
+            TempTree tree;
+            auto xml = units_xml("3600", "Unit_Select_Test");
+            const std::string opening = "<SpaceUnit Name=\"Test_Frigate\">";
+            const auto start = xml.find(opening);
+            if (adjustment != 0) xml.insert(start + opening.size(),
+                "<Ranged_Target_Z_Adjust>" + std::to_string(adjustment) + "</Ranged_Target_Z_Adjust>");
+            if (structure) {
+                const auto end = xml.find("</SpaceUnit>", start);
+                xml.replace(end, std::string_view{"</SpaceUnit>"}.size(), "</SpaceStructure>");
+                xml.replace(start, opening.size(), "<SpaceStructure Name=\"Test_Frigate\">");
+            }
+            write_fixture(tree.root, xml);
+            const auto loaded = load(tree.root, models(-40.0F));
+            if (!loaded.tables) continue;
+            const auto combat = eawr::units::combat_table(*loaded.tables);
+            expect(static_cast<bool>(combat), "WWP-72: adjusted XML binds combat profiles");
+            if (!combat) continue;
+            const auto* bound = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            expect(bound != nullptr, "WWP-72: both space object classes have a combat profile");
+            if (!bound) continue;
+            auto target_profile = *bound;
+            target_profile.hardpoints.clear();
+            target_profile.target_bones.clear();
+            t::CombatProfile shooter_profile;
+            t::WeaponProfile weapon;
+            weapon.range = Fixed::from_raw(raw(1000));
+            weapon.cone_width = weapon.cone_height = Fixed::from_raw(raw(360));
+            weapon.pulse_count = 1;
+            shooter_profile.weapons = {weapon};
+            t::CombatState state;
+            state.direct = true;
+            state.attack_target = 2;
+            state.weapons.resize(1);
+            state.weapons.front().pulses_left = 1;
+            const std::vector<t::Player> players{{1, 1, 1, t::player_flag_commandable},
+                {2, 2, 2, t::player_flag_commandable}};
+            const std::vector<t::SnapshotPlayer> relations{{1, 1, false}, {2, 2, false}};
+            d::CombatUnit shooter;
+            shooter.id = 1;
+            shooter.owner = shooter.team = 1;
+            shooter.profile = &shooter_profile;
+            shooter.combat = &state;
+            shooter.transform = m::identity_matrix();
+            d::CombatUnit target;
+            target.id = 2;
+            target.owner = target.team = 2;
+            target.visible_to = 1;
+            target.position = target.previous_position = at(100, 0, 10);
+            target.transform = m::to_matrix(m::identity_quat(), target.position).value();
+            target.profile = &target_profile;
+            d::CombatWorld world;
+            world.players = players;
+            world.relationships = relations;
+            world.units = {shooter, target};
+            for (const auto hardpoint : {0U, t::object_weapon}) {
+                shooter_profile.weapons.front().hardpoint = hardpoint;
+                const auto step = d::step_combat(world, world.units.front());
+                expect(step && step.value().events.size() == 1,
+                    "WWP-19/50: hardpoint and object fallback produce a shot");
+                if (step && !step.value().events.empty()) expect(step.value().events.front().aim == at(100, 0, 10 + adjustment),
+                    "WWP-19/50/72: fallback adds the XML adjustment in world Z without model scaling");
+            }
+            // The target's adjustment must not displace an explicit attachment aim.
+            target_profile.hardpoints = {{0, at(0, 0, 0), true}, {1, at(0, 0, 60), true}};
+            state.attack_hardpoint = 0;
+            auto step = d::step_combat(world, world.units.front());
+            expect(step && step.value().events.size() == 1 && step.value().events.front().aim == target.position,
+                "WWP-19/50: ordered attachment is independent of target height adjustment");
+            // Use the same loaded adjustment as the shooter's nearest-hardpoint reference.
+            shooter_profile = *bound;
+            shooter_profile.weapons = {weapon};
+            shooter_profile.weapons.front().hardpoint = 0;
+            world.units.front().position = at(0, 0, 10);
+            world.units.front().transform = m::to_matrix(m::identity_quat(), world.units.front().position).value();
+            state.attack_hardpoint = t::no_hardpoint;
+            step = d::step_combat(world, world.units.front());
+            const auto nearest = adjustment > 30 ? 1U : 0U;
+            expect(step && step.value().events.size() == 1 && step.value().events.front().target_hardpoint == nearest,
+                "WWP-16/72: nearest attachment uses shooter height, with authored order on an exact tie");
+            target_profile.hardpoints.clear();
+            d::CollectionTrees collection;
+            world.projectile_collection = &collection;
+            t::ShotProfile shot;
+            shot.homing = true;
+            shot.turn_rate = Fixed::from_raw(raw(360));
+            shot.speed = Fixed::from_raw(raw(1));
+            shot.max_travel = Fixed::from_raw(raw(1000));
+            t::CombatEvent event;
+            event.target = 2;
+            event.target_hardpoint = t::no_hardpoint;
+            event.aim = target.position;
+            const auto missile = d::launch_projectile(event, shot, 1, false, 1, {});
+            expect(static_cast<bool>(missile), "WWP-64: missile contract launches");
+            if (!missile) continue;
+            d::ProjectileScratch scratch;
+            const auto steered = d::step_projectile(world, missile.value(), scratch);
+            event.aim = at(100, 0, 10 + adjustment);
+            const auto expected = d::launch_projectile(event, shot, 1, false, 2, {});
+            expect(steered && expected && steered.value().projectile.pitch == expected.value().pitch
+                && steered.value().projectile.step == expected.value().step,
+                "WWP-64/72 MS-07: no-hardpoint missile pursues the height-adjusted point");
+            expect(world.units.back().position == target.position && world.units.back().transform == target.transform,
+                "WWP-72: aiming leaves position and collision/model transform unchanged");
+        }
+    }
+}
+
+
 void living_collision_admission() {
     namespace t = eawr::sim::tactical;
     namespace d = t::detail;
@@ -437,7 +592,39 @@ void nested_special_tables() {
         "nested filter content binds to replay identity");
 }
 
+void projectile_defence_tables() {
+    for (const auto kind : {"MISSILE_SHIELD", "sensor_jamming"}) for (const bool radius_first : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+        const auto begin = xml.find("<Unit_Abilities_Data", ship);
+        const auto end = xml.find("</Unit_Abilities_Data>", begin);
+        const auto type = "<Type>" + std::string(kind) + "</Type>";
+        const std::string radius = "<Effective_Radius>750</Effective_Radius>";
+        xml.replace(begin, end + std::string_view{"</Unit_Abilities_Data>"}.size() - begin,
+            "<Unit_Abilities_Data SubObjectList=\"Yes\"><Unit_Ability>"
+                + (radius_first ? radius + type : type + radius)
+                + "<Expiration_Seconds>30</Expiration_Seconds><Recharge_Seconds>75</Recharge_Seconds>"
+                + "</Unit_Ability></Unit_Abilities_Data>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WPJ-17/WHE-32: defence radius XML loads in either child order");
+        if (!loaded.tables) continue;
+        const auto* unit = loaded.tables->find("Test_Frigate");
+        expect(unit && unit->abilities.size() == 1 && unit->abilities[0].effective_radius == Fixed::from_raw(raw(750)),
+            "WPJ-17/WHE-32: loader retains authored defence radius before or after Type");
+        const auto table = eawr::units::ability_table(*loaded.tables);
+        const auto* profile = table ? table.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+        expect(profile && profile->abilities.size() == 1
+            && profile->abilities[0].kind == eawr::sim::tactical::ability_kind(kind)
+            && profile->abilities[0].effective_radius == Fixed::from_raw(raw(750))
+            && profile->abilities[0].expiration_frames == 900 && profile->abilities[0].recharge_frames == 2250,
+            "WPJ-17/WHE-31/32: XML radius and timers bind to the production ability profile");
+    }
+}
+
 void concentrate_fire_tables() {
+    projectile_defence_tables();
     TempTree tree;
     auto xml = units_xml("3600", "Unit_Select_Test");
     const auto ship = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
@@ -669,6 +856,36 @@ void barrage_inputs() {
 }
 
 void synthetic_tables() {
+    {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto marker = xml.find("<SpaceUnit Name=\"Test_Frigate\">") + std::string_view{"<SpaceUnit Name=\"Test_Frigate\">"}.size();
+        xml.insert(marker, "<Death_Projectiles>Proj_Test_Small, Proj_Test_Turbo</Death_Projectiles>"
+            "<Ranged_Target_Z_Adjust>30</Ranged_Target_Z_Adjust>");
+        const auto projectile = xml.find("<Projectile Name=\"Proj_Test_Generic\">")
+            + std::string_view{"<Projectile Name=\"Proj_Test_Generic\">"}.size();
+        xml.insert(projectile, "<Projectile_Damage_Delay_Secs>0.5</Projectile_Damage_Delay_Secs>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WNO-29/32: synthetic inherited payload fixture loads");
+        if (loaded.tables) {
+            const auto* unit = loaded.tables->find("Test_Frigate");
+            const auto combat = eawr::units::combat_table(*loaded.tables);
+            const auto* profile = combat ? combat.value().find(eawr::assets::object_type_crc("Test_Frigate")) : nullptr;
+            expect(unit && unit->death_projectiles == std::vector<std::string>{"Proj_Test_Small", "Proj_Test_Turbo"}
+                && unit->death_projectile_indices.size() == 2 && profile && profile->death_projectiles.size() == 2,
+                "WNO-29: loader resolves all authored entries in order");
+            if (profile && profile->death_projectiles.size() == 2) {
+                expect(profile->ranged_target_z_adjust == Fixed::from_raw(raw(30))
+                    && profile->death_projectiles.front().damage_delay == Fixed::from_raw(raw(1) / 2),
+                    "WNO-30/32: typed height and inherited explicit delay reach the sim");
+            }
+            auto changed = *loaded.tables;
+            for (auto& ship : changed.units) if (ship.id == "Test_Frigate") ship.death_projectiles.clear();
+            expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+                "WNO-29: death payload authoring changes replay content identity");
+        }
+    }
     {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
@@ -1114,6 +1331,25 @@ void synthetic_tables() {
     const auto motion = eawr::units::motion_table(tables);
     expect(static_cast<bool>(motion), "motion table builds");
     if (!motion) return;
+    for (const auto& [general, space, station_role] : {
+            std::tuple{"DUMMY_STAR_BASE", "SPAWN_SQUADRON", true},
+            std::tuple{"SELECTABLE", "dummy_star_base", true},
+            std::tuple{"STARBASE", "SPAWN_SQUADRON", false},
+            std::tuple{"DUMMY_GROUND_STRUCTURE", "SPAWN_SQUADRON", false},
+            std::tuple{"SELECTABLE", "SPAWN_SQUADRON", false}}) {
+        auto changed = tables;
+        for (auto& unit : changed.units) if (unit.id == "Skirmish_Test_Base") {
+            unit.footprint.hazard.behavior = {general};
+            unit.footprint.hazard.space_behavior = {space};
+            unit.spawner->starting.clear();
+        }
+        const auto rebound = eawr::units::motion_table(changed);
+        const auto* profile = rebound ? rebound.value().squadrons.find_spawner(
+            eawr::assets::object_type_crc("Skirmish_Test_Base")) : nullptr;
+        expect(rebound && (profile != nullptr) == station_role
+            && (!profile || (profile->starbase && profile->entries.empty() && !profile->bays.empty())),
+            "WSL-26: station behavior in either list admits an empty authored hangar; kind alone does not");
+    }
     const auto times = [](const char* value) {
         return eawr::sim::math::multiply(Fixed::from_decimal(value).value(), Fixed::from_decimal("1.2").value()).value();
     };
@@ -1365,6 +1601,37 @@ void content_identity() {
     allowed.enabled = false;
     const auto disabled = eawr::skirmish::economy_rules(command_start, {}, allowed_tables);
     expect(disabled && disabled.value().command_bonuses.empty(), "WHE-11: disabled passive source never registers");
+}
+
+void hunt_tables() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Unit_Select_Test");
+    const std::string_view craft = "<SpaceUnit Name=\"Test_Fighter\">";
+    const auto position = xml.find(craft);
+    expect(position != std::string::npos, "hunt fixture has a craft");
+    if (position == std::string::npos) return;
+    xml.insert(position + craft.size(), R"(<Is_Force_Sensitive>Yes</Is_Force_Sensitive>
+      <Unit_Abilities_Data SubObjectList="Yes"><Unit_Ability><Type>HUNT</Type></Unit_Ability></Unit_Abilities_Data>)");
+    write_fixture(tree.root, xml);
+    const auto loaded = load(tree.root, models(-40.0F));
+    expect(loaded.tables.has_value(), "Hunt data fixture loads");
+    if (!loaded.tables) return;
+    const auto compiled = eawr::units::ability_table(*loaded.tables);
+    expect(static_cast<bool>(compiled), "Hunt ability table validates");
+    if (!compiled) return;
+    const auto* profile = compiled.value().find(eawr::assets::object_type_crc("Test_Fighter"));
+    expect(profile && profile->force_sensitive && profile->hunt_reveal_range == Fixed::from_raw(raw(500))
+        && profile->abilities.size() == 1
+        && profile->abilities[0].kind == eawr::sim::tactical::AbilityKind::hunt
+        && profile->abilities[0].expiration_frames == 0 && profile->abilities[0].recharge_frames == 0
+        && !profile->abilities[0].supports_autofire,
+        "WAB-50/54: craft Hunt binds its flag and untimed manual switch");
+    expect(!compiled.value().find(eawr::assets::object_type_crc("Test_Squadron")),
+        "AB-15: the squadron's authored Hunt does not replace its craft holders");
+    auto changed = *loaded.tables;
+    for (auto& unit : changed.units) if (unit.id == "Test_Fighter") unit.force_sensitive = false;
+    expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+        "WAB-54: force-sensitive Hunt decisions bind replay content identity");
 }
 
 void bind_frame_errors() {

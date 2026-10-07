@@ -41,7 +41,8 @@ namespace eawr::sim::tactical {
 
 session_detail::Tick::Tick(TacticalSession& session, Impl* impl, const PartitionExecutor& executor_source)
     : session_(session), impl_(impl), executor(executor_source), tick(impl->completed_tick),
-      manual_clocks_(impl->manual_clocks) {}
+      pending_starbases_(impl->starbases), pending_outcome_(impl->outcome),
+      manual_clocks_(impl->manual_clocks), projectile_defence_order_(impl->projectile_defence_order) {}
 
 void session_detail::Tick::mark(const std::string_view section, const bool begin) const {
     if (impl_->commit_observer) impl_->commit_observer(section, begin);
@@ -83,6 +84,7 @@ core::Result<TacticalTick> session_detail::Tick::run() {
     if (const auto phase = commit_survivors(); !phase) return core::Result<TacticalTick>::failure(phase.error());
     if (const auto phase = pad_lifecycle(); !phase) return core::Result<TacticalTick>::failure(phase.error());
     if (const auto phase = fighters(); !phase) return core::Result<TacticalTick>::failure(phase.error());
+    if (const auto phase = station_upgrades(); !phase) return core::Result<TacticalTick>::failure(phase.error());
     if (const auto phase = economy(); !phase) return core::Result<TacticalTick>::failure(phase.error());
     if (const auto phase = hangars(); !phase) return core::Result<TacticalTick>::failure(phase.error());
     if (const auto phase = bonuses(); !phase) return core::Result<TacticalTick>::failure(phase.error());

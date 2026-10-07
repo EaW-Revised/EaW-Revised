@@ -229,8 +229,8 @@ core::Result<void> session_detail::Tick::systems() {
     auto& asteroid_queries = asteroid_scratch.queries;
     auto& asteroid_candidates = asteroid_scratch.examined;
     asteroid_impacts.resize(inputs.size());
-    asteroid_scratch.redirected.resize(inputs.size());
-    for (auto& output : asteroid_scratch.redirected) output.clear();
+    asteroid_scratch.deliveries.resize(inputs.size());
+    for (auto& output : asteroid_scratch.deliveries) output.clear();
     asteroid_queries.assign(inputs.size(), 0);
     asteroid_candidates.assign(inputs.size(), 0);
     for (auto& output : asteroid_impacts) output.clear();
@@ -403,7 +403,24 @@ core::Result<void> session_detail::Tick::systems() {
         });
         if (!proxies) return core::Result<void>::failure(proxies.error());
     }
+    // WNO-23/42: transfer work is bounded by capture jobs and held bonus objects.
+    // Each transferred unit changes owner inside the existing partitioned service.
+    const bool transfers = std::any_of(capture_jobs.begin(), capture_jobs.end(),
+        [](const CaptureJob& job) { return job.before != job.owner; });
+    std::map<EntityId, TypeId> transfer_containers;
+    std::vector<CombatBonuses> transfer_categories;
+    if (transfers) {
+        transfer_categories.resize(tick_partition_count * impl_->bonus_categories.size());
+        for (const auto& account : staging_->ledgers.value()) for (const auto& held : account.completed) {
+            const auto host = std::lower_bound(inputs.begin(), inputs.end(), held.station,
+                [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
+            if (host != inputs.end() && host->state.entity_id == held.station)
+                transfer_containers.emplace(held.station, host->state.type_id);
+        }
+    }
     mark("systems_setup", false);
+    // WSL-38/41: gather only active repair work inside the existing partitioned entity phase.
+    std::array<std::vector<std::size_t>, tick_partition_count> repair_units;
     const auto executed = executor.execute_phase("unit-systems", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, inputs.size());
         for (auto index = range.begin; index < range.end; ++index) {
@@ -434,7 +451,18 @@ core::Result<void> session_detail::Tick::systems() {
             };
             const auto job = std::lower_bound(capture_jobs.begin(), capture_jobs.end(), unit.state.entity_id,
                 [](const CaptureJob& entry, const EntityId id) { return entry.id < id; });
-            if (job != capture_jobs.end() && job->id == unit.state.entity_id) unit.state.owner = job->owner;
+            if (job != capture_jobs.end() && job->id == unit.state.entity_id && job->before != job->owner) {
+                // Resolve the new owner's contributions without changing the live identity.
+                const auto categories = std::span(transfer_categories).subspan(
+                    partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
+                const auto bonuses = impl_->command_bonuses_for(unit, impl_->command_ledger,
+                    staging_->ledgers.value(), transfer_containers, categories, nullptr, true, job->owner);
+                const auto changed = impl_->transfer_owner(unit, job->owner, bonuses);
+                if (!changed) {
+                    errors[index] = detail::diagnostic(diagnostic_codes::worker_failure, context() + changed.error().message);
+                    continue;
+                }
+            }
             if (unit.durability) {
                 const auto& profile = *impl_->health_profile(unit);
                 if (const auto building = construction.find(unit.state.entity_id);
@@ -496,12 +524,15 @@ core::Result<void> session_detail::Tick::systems() {
             const bool locomotor_gate = footprint != nullptr && (!footprint->locomotor
                 || (unit.speed.raw() > 0 && unit.motion && unit.motion->kind != MotionKind::turn
                     && !arrivals.contains(unit.state.entity_id)));
-            if (damage_rules != nullptr && damage_rules->asteroid_damage.raw() != 0
+            if (!damage_blocked() && damage_rules != nullptr && damage_rules->asteroid_damage.raw() != 0
                 && damage_rules->asteroid_rate.raw() != 0 && footprint != nullptr && footprint->asteroid_damage
                 && layer && locomotor_gate && unit.combat && unit.durability && unit.durability->hull.raw() > 0) {
                 asteroid_queries[index] = 1;
                 bool contact = false;
                 CombatRandom random(impl_->setup.seed, tick, unit.state.entity_id, asteroid_service_slot);
+                // WHZ-12: predict only this unit's health to preserve successive hardpoint
+                // selection and random draws. Actual damage belongs to the ordered commit.
+                std::optional<LiveUnit> predicted;
                 // Center XY at this logical frame; neither swept motion nor hull/height contact.
                 auto& candidates = asteroid_scratch.candidates[partition];
                 // Flat index coordinates keep height out of the broad phase as well as exact contact.
@@ -519,8 +550,9 @@ core::Result<void> session_detail::Tick::systems() {
                     // WHZ-12: each overlapping field consumes its own inclusive probability draw.
                     const auto draw = random.uniform(0, static_cast<std::uint32_t>(math::Fixed::scale));
                     if (static_cast<std::int64_t>(draw) > damage_rules->asteroid_rate.raw()) continue;
+                    if (!predicted) predicted = unit;
                     const auto& profile = *impl_->health_profile(unit);
-                    const auto selected = random_destroyable_hardpoint(profile, *unit.durability, random);
+                    const auto selected = random_destroyable_hardpoint(profile, *predicted->durability, random);
                     const auto* combat_profile = impl_->combat.find(unit.state.type_id);
                     const auto selected_route = combat_profile != nullptr && selected != hull_target
                         ? damage_mesh_route(combat_profile->hardpoint_meshes, selected) : hull_target;
@@ -534,22 +566,13 @@ core::Result<void> session_detail::Tick::systems() {
                     hit.internal_damage_misc = false;
                     const auto arrival_defense = unit.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
                     hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw() + arrival_defense.raw());
-                    hit.take_damage_multiplier = unit.take_damage_mode;
-                    if (!redirect_recipients(unit.state.entity_id).empty()) {
-                        asteroid_scratch.redirected[index].push_back(hit);
-                        continue;
-                    }
-                    const auto hull = unit.durability->hull;
-                    const auto shields = unit.durability->shields;
-                    auto outcome = apply_hit(profile, *damage_rules, *unit.durability, hit, tick);
+                    hit.take_damage_multiplier = predicted->take_damage_mode;
+                    asteroid_scratch.deliveries[index].push_back(hit);
+                    if (!redirect_recipients(unit.state.entity_id).empty()) continue;
+                    auto outcome = apply_hit(profile, *damage_rules, *predicted->durability, hit, tick);
                     if (!outcome) { errors[index] = outcome.error(); break; }
-                    impl_->track_damage(unit, hull, shields);
-                    impl_->end_depleted_defend(unit, tick, outcome.value().storm_shield_branch);
-                    asteroid_impacts[index].push_back({unit.state.entity_id, hit, outcome.value()});
-                    if (outcome.value().damage.destroyed_hardpoint) {
-                        serviced[index].destroyed_hardpoints.push_back(*outcome.value().damage.destroyed_hardpoint);
-                    }
-                    if (outcome.value().damage.unit_destroyed) { serviced[index].unit_destroyed = true; break; }
+                    impl_->end_depleted_defend(*predicted, tick, outcome.value().storm_shield_branch);
+                    if (outcome.value().damage.unit_destroyed) break;
                 }
                 unit.asteroid_contact = contact ? std::optional(tick) : std::nullopt;
                 if (errors[index]) continue;
@@ -560,6 +583,9 @@ core::Result<void> session_detail::Tick::systems() {
                     diagnostic_codes::worker_failure, context() + transform.error().message);
                 continue;
             }
+            if (unit.durability && !serviced[index].unit_destroyed && !arrivals.contains(unit.state.entity_id)
+                && std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(),
+                    [](const auto& payers) { return !payers.empty(); })) repair_units[partition].push_back(index);
             instances[index] = impl_->instance_for(unit, transform.value(), tick + 1);
             // WSU-34: publish copied render inputs in the existing disjoint worker slots.
             if (const auto craft = craft_states.find(unit.state.entity_id); craft != craft_states.end()) {
@@ -567,6 +593,7 @@ core::Result<void> session_detail::Tick::systems() {
             }
             if (const auto squadron = squadron_states.find(unit.state.entity_id); squadron != squadron_states.end()) {
                 instances[index].squadron_in_idle_grid = squadron->second.idle_cell.has_value();
+                if (squadron->second.idle_cell) instances[index].squadron_idle_anchor = squadron->second.anchor;
                 // SND-46: copied path state in this existing disjoint snapshot slot; no new sim pass.
                 const auto& flight = squadron->second;
                 instances[index].has_movement_path = flight.mode == SquadronMode::move || flight.approach
@@ -583,43 +610,108 @@ core::Result<void> session_detail::Tick::systems() {
         }
     }
 
-    // WHE-64: environmental workers discover hits in disjoint slots. Only the sparse routed
-    // hits cross unit boundaries here, after every worker has finished, in source/member order.
+    auto& events = impacts_.value().events.value();
+    // VT-02/WCC-40/WHE-64: commit all staged environmental hits in source/field/member order.
+    // Register each destruction before the next delivery, including another routed share.
+    const auto deliver = [&](const EntityId id, Hit hit) -> core::Result<void> {
+        if (damage_blocked()) return core::Result<void>::success();
+        const auto found = std::lower_bound(inputs.begin(), inputs.end(), id,
+            [](const LiveUnit& unit, const EntityId sought) { return unit.state.entity_id < sought; });
+        if (found == inputs.end() || found->state.entity_id != id || !found->durability) return core::Result<void>::success();
+        const auto index = static_cast<std::size_t>(found - inputs.begin());
+        if (serviced[index].unit_destroyed) return core::Result<void>::success();
+        auto& unit = *found;
+        const auto* profile = impl_->health_profile(unit);
+        if (!profile) return core::Result<void>::success();
+        const auto hull = unit.durability->hull;
+        const auto shields = unit.durability->shields;
+        hit.take_damage_multiplier = unit.take_damage_mode;
+        hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw()
+            + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0));
+        const auto applied = apply_hit(*profile, *damage_rules, *unit.durability, hit, tick);
+        if (!applied) return core::Result<void>::failure(applied.error());
+        impl_->track_damage(unit, hull, shields);
+        impl_->end_depleted_defend(unit, tick, applied.value().storm_shield_branch);
+        asteroid_impacts[index].push_back({id, hit, applied.value()});
+        if (applied.value().damage.destroyed_hardpoint)
+            events.push_back(destruction_event(tick, EventKind::hardpoint_destroyed,
+                unit.state, *applied.value().damage.destroyed_hardpoint));
+        if (applied.value().damage.unit_destroyed) {
+            serviced[index].unit_destroyed = true;
+            events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state));
+        }
+        const auto updated = impl_->instance_for(unit, instances[index].fixed_transform, tick + 1);
+        instances[index].durability = updated.durability;
+        instances[index].abilities = updated.abilities;
+        return core::Result<void>::success();
+    };
     for (std::size_t source = 0; source < inputs.size(); ++source) {
+        for (const auto hardpoint : serviced[source].destroyed_hardpoints)
+            events.push_back(destruction_event(tick, EventKind::hardpoint_destroyed, inputs[source].state, hardpoint));
+        if (serviced[source].unit_destroyed && !loss_ids_.contains(inputs[source].state.entity_id))
+            events.push_back(destruction_event(tick, EventKind::unit_destroyed, inputs[source].state));
         if (serviced[source].unit_destroyed) continue;
-        for (const auto& incoming : asteroid_scratch.redirected[source]) {
-            const auto routed = redirect_damage(inputs[source].state.entity_id, incoming,
-                [&](const EntityId id, Hit hit) -> core::Result<void> {
-                const auto found = std::lower_bound(inputs.begin(), inputs.end(), id,
-                    [](const LiveUnit& unit, const EntityId sought) { return unit.state.entity_id < sought; });
-                if (found == inputs.end() || found->state.entity_id != id || !found->durability) return core::Result<void>::success();
-                const auto index = static_cast<std::size_t>(found - inputs.begin());
-                if (serviced[index].unit_destroyed) return core::Result<void>::success();
-                auto& unit = *found;
-                const auto* profile = impl_->health_profile(unit);
-                if (!profile) return core::Result<void>::success();
-                const auto hull = unit.durability->hull;
-                const auto shields = unit.durability->shields;
-                hit.take_damage_multiplier = unit.take_damage_mode;
-                hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw()
-                    + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0));
-                const auto applied = apply_hit(*profile, *damage_rules, *unit.durability, hit, tick);
-                if (!applied) return core::Result<void>::failure(applied.error());
-                impl_->track_damage(unit, hull, shields);
-                impl_->end_depleted_defend(unit, tick, applied.value().storm_shield_branch);
-                asteroid_impacts[index].push_back({id, hit, applied.value()});
-                if (applied.value().damage.destroyed_hardpoint)
-                    serviced[index].destroyed_hardpoints.push_back(*applied.value().damage.destroyed_hardpoint);
-                serviced[index].unit_destroyed = applied.value().damage.unit_destroyed;
-                const auto updated = impl_->instance_for(unit, instances[index].fixed_transform, tick + 1);
-                instances[index].durability = updated.durability;
-                instances[index].abilities = updated.abilities;
-                return core::Result<void>::success();
-            });
+        for (const auto& incoming : asteroid_scratch.deliveries[source]) {
+            if (damage_blocked() || serviced[source].unit_destroyed) break;
+            const auto routed = redirect_damage(inputs[source].state.entity_id, incoming, deliver);
             if (!routed) return core::Result<void>::failure(routed.error());
+            if (!routed.value()) {
+                if (auto delivered = deliver(inputs[source].state.entity_id, incoming); !delivered) return delivered;
+            }
         }
     }
 
+    struct RepairJob {
+        std::size_t unit{};
+        std::vector<std::vector<PlayerId>> paid;
+    };
+    std::vector<RepairJob> repairs;
+    auto& accounts = staging_->ledgers.value();
+    std::vector<RepairBudget> budgets;
+    if (std::any_of(repair_units.begin(), repair_units.end(), [](const auto& part) { return !part.empty(); }))
+        for (const auto& account : accounts) budgets.push_back({account.player, account.credits});
+    // WSL-41: reserve shared credits in unit/index/registration order. This sparse commit
+    // visits staged repairs only; health/hull arithmetic remains in disjoint worker outputs.
+    for (const auto& partition : repair_units) for (const auto index : partition) {
+        auto& unit = inputs[index];
+        if (serviced[index].unit_destroyed) continue; // deletion wins over active repair
+        const auto& profile = *impl_->health_profile(unit);
+        const auto& state = *unit.durability;
+        RepairJob job{index, reserve_hardpoint_repairs(profile, state, budgets)};
+        repairs.push_back(std::move(job));
+    }
+    for (const auto& budget : budgets) {
+        if (auto* account = impl_->ledger_of(accounts, budget.player)) {
+            // WPR-12: reserved repair spending is a debit, without positive AI credit scaling.
+            const auto debit = math::Fixed::from_raw(budget.credits.raw() - account->credits.raw());
+            const auto changed = change_credits(*account, *impl_->economy.player(budget.player), debit);
+            if (!changed) return core::Result<void>::failure(changed.error());
+        }
+    }
+    if (!repairs.empty()) {
+        const auto repaired = executor.execute_phase("hardpoint-repair", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, repairs.size());
+            for (auto job_index = range.begin; job_index < range.end; ++job_index) {
+                auto& job = repairs[job_index];
+                auto& unit = inputs[job.unit];
+                const auto& profile = *impl_->health_profile(unit);
+                auto& state = *unit.durability;
+                for (std::size_t slot = 0; slot < job.paid.size(); ++slot) {
+                    state.repairing_players[slot] = std::move(job.paid[slot]);
+                    for (const auto payer : state.repairing_players[slot]) {
+                        static_cast<void>(payer);
+                        const auto result = repair_frame(profile, state, slot, profile.hardpoints[slot].repair_cost_per_frame);
+                        if (!result) { errors[job.unit] = result.error(); break; }
+                        if (result.value().stopped) { state.repairing_players[slot].clear(); break; }
+                    }
+                }
+                const auto updated = impl_->instance_for(unit, instances[job.unit].fixed_transform, tick + 1);
+                instances[job.unit].durability = updated.durability;
+            }
+        });
+        if (!repaired) return repaired;
+        for (const auto& job : repairs) if (errors[job.unit]) return core::Result<void>::failure(*errors[job.unit]);
+    }
     return core::Result<void>::success();
 }
 
@@ -632,7 +724,7 @@ core::Result<void> session_detail::Tick::commit_survivors() {
     const auto& serviced = systems_.value().serviced.value();
     auto& pads = impl_->pad_stage.values;
     auto& capture_jobs = impl_->capture_jobs;
-    // Serial, in ascending ID: the service's destruction events; dead units leave (HD-20).
+    // Serial, in ascending ID: destruction hooks already ran at delivery; dead units leave (HD-20).
     mark("survivors", true);
     surviving_.emplace();
     auto& survivors = surviving_.value().survivors.emplace();
@@ -654,15 +746,12 @@ core::Result<void> session_detail::Tick::commit_survivors() {
             auto before = inputs[index].state;
             before.owner = job->before;
             track_victory_change(&before, &inputs[index].state, true);
-            events.push_back(Event{tick, EventKind::pad_captured, job->owner, 0, job->id});
+            // WNO-23: sequence carries the previous owner for selection/control-group removal.
+            events.push_back(Event{tick, EventKind::pad_captured, job->owner, job->before, job->id});
         }
         tick_work.level_matrix_builds += inputs[index].matrix_builds;
         tick_work.banked_matrix_builds += inputs[index].banked_matrix_builds;
-        for (const auto hardpoint : serviced[index].destroyed_hardpoints) {
-            events.push_back(destruction_event(tick, EventKind::hardpoint_destroyed, inputs[index].state, hardpoint));
-        }
         if (serviced[index].unit_destroyed) {
-            events.push_back(destruction_event(tick, EventKind::unit_destroyed, inputs[index].state));
             killed.push_back(inputs[index].state);
             continue;
         }

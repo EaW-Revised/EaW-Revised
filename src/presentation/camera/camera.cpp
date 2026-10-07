@@ -388,11 +388,12 @@ core::Result<float> apply_rotate(
     const float updated = yaw_degrees + constants.yaw_per_mouse_unit * mouse_units;
     const float span = constants.yaw_max - constants.yaw_min;
     if (span >= full_turn_degrees) {
-        // A range of a full turn or more is free rotation; wrap so continuous
-        // dragging never sticks at an authored sentinel such as +/-1000.
-        const float wrapped = std::fmod(updated - constants.yaw_min, span);
+        // PI-9: wrap at a physical turn before applying authored limits,
+        // including sentinel ranges such as +/-1000.
+        const float wrapped = std::fmod(updated + 180.0F, full_turn_degrees);
+        const float canonical = (wrapped < 0.0F ? wrapped + full_turn_degrees : wrapped) - 180.0F;
         return core::Result<float>::success(
-            constants.yaw_min + (wrapped < 0.0F ? wrapped + span : wrapped));
+            std::clamp(canonical, constants.yaw_min, constants.yaw_max));
     }
     return core::Result<float>::success(
         std::clamp(updated, constants.yaw_min, constants.yaw_max));

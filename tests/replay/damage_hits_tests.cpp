@@ -148,7 +148,87 @@ void test_zero_direct_blast() {
     return best;
 }
 
+// DG-36a: exercise the actual projectile admission gate, not just a mesh's tree.
+void test_projectile_mesh_budget() {
+    namespace d = tactical::detail;
+    tactical::CombatProfile profile;
+    profile.collision = tactical::CollisionBox{at(-200, -200, -5), at(200, 200, 5)};
+    profile.mesh_bounds = tactical::CollisionBox{at(0, -1, -1), at(0, 125, 1)};
+    for (std::int64_t index = 0; index < 32; ++index) {
+        auto triangles = plate(0, 1);
+        for (auto& triangle : triangles) {
+            for (auto* vertex : {&triangle.a, &triangle.b, &triangle.c}) {
+                vertex->y = Fixed::from_raw(vertex->y.raw() + index * 4 * one);
+            }
+        }
+        profile.meshes.push_back(tactical::collision_mesh(
+            std::move(triangles), tactical::no_hardpoint, tactical::no_hardpoint, false));
+    }
+    std::vector<tactical::SnapshotPlayer> players{{1, 1, false}, {2, 2, false}};
+    d::CombatWorld world;
+    world.relationships = players;
+    d::CombatUnit target;
+    target.id = 2;
+    target.owner = 2;
+    target.profile = &profile;
+    target.position = at(100, 0);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    world.units.push_back(target);
+    d::CollectionTrees tree;
+    const std::vector<d::CollectionTrees::Member> members{
+        {target.id, target.owner, {at(-100, -200, -5), at(300, 200, 5)}}};
+    tree.update(members, 0);
+    world.projectile_collection = &tree;
+    std::vector<std::uint8_t> before, after;
+    tree.append_state(before);
+    tactical::MeshCollisionWork admitted_work, rejected_work;
+    d::ProjectileScratch scratch, uncounted;
+    std::size_t hits = 0;
+    for (std::int64_t sample = 0; sample < 400; ++sample) {
+        // All four lanes enter the collection; only the first two enter combined bounds.
+        const auto lane = sample % 4;
+        const auto y = lane == 0 ? (sample / 4 % 32) * 4
+            : lane == 1 ? (sample / 4 % 31) * 4 + 2 : lane == 2 ? 160 : -40;
+        tactical::Projectile projectile;
+        projectile.owner = 1;
+        projectile.position = at(80, y);
+        projectile.step = at(40, 0);
+        projectile.speed = units(40);
+        projectile.max_travel = units(200);
+        auto& work = lane < 2 ? admitted_work : rejected_work;
+        const auto counted = d::step_projectile(world, projectile, scratch, &work);
+        const auto plain = d::step_projectile(world, projectile, uncounted);
+        expect(counted && plain, "DG-36a: production projectile queries succeed");
+        if (!counted || !plain) return;
+        const auto& result = counted.value();
+        expect(lane == 0 ? result.hit == target.id && result.meshed && result.contact.x == units(100)
+                        : !result.hit,
+            "DG-36a: production contact and both kinds of miss keep their expected results");
+        hits += result.hit.has_value();
+        std::vector<std::uint8_t> counted_bytes, plain_bytes;
+        d::append_projectile(counted_bytes, result.projectile);
+        d::append_projectile(plain_bytes, plain.value().projectile);
+        expect(counted_bytes == plain_bytes && result.hit == plain.value().hit
+                && result.mesh_hardpoint == plain.value().mesh_hardpoint
+                && result.meshed == plain.value().meshed && result.contact == plain.value().contact
+                && result.from == plain.value().from && result.expired == plain.value().expired,
+            "DG-36a: optional diagnostics preserve projectile state and contact results");
+    }
+    tree.append_state(after);
+    expect(before == after && hits == 100 && scratch.candidate_count == 400 && scratch.exact_count == 400,
+        "DG-36a: all 400 shots reach production admission without changing collection history");
+    expect(admitted_work.meshes == 6400 && admitted_work.boxes <= 6400 && admitted_work.triangles <= 400,
+        "DG-36a: admitted production queries stay within the shots times meshes work budget");
+    expect(rejected_work.meshes == 0 && rejected_work.boxes == 0 && rejected_work.triangles == 0,
+        "DG-36a: combined-bounds misses admit zero production mesh work");
+    std::cout << "production mesh work: admitted meshes " << admitted_work.meshes << ", boxes "
+              << admitted_work.boxes << ", triangles " << admitted_work.triangles
+              << "; combined-bounds misses meshes " << rejected_work.meshes << ", boxes "
+              << rejected_work.boxes << ", triangles " << rejected_work.triangles << '\n';
+}
+
 void test_meshes() {
+    test_projectile_mesh_budget();
     const auto all = [](std::size_t) { return true; };
     const auto placed = math::to_matrix(math::identity_quat(), at(100, 0)).value();
     std::vector<tactical::CollisionMesh> meshes{
@@ -202,18 +282,33 @@ void test_meshes() {
     };
     std::size_t agreed = 0;
     std::size_t met = 0;
+    tactical::MeshCollisionWork work;
     for (int sample = 0; sample < 400; ++sample) {
         const math::Vec3 from{Fixed::from_raw(next() * one / 10 + 100 * one), Fixed::from_raw(next() * one / 10),
             Fixed::from_raw(next() * one / 50 + 10 * one)};
         const math::Vec3 to{Fixed::from_raw(next() * one / 10 + 100 * one), Fixed::from_raw(next() * one / 10),
             Fixed::from_raw(next() * one / 50 - 10 * one)};
-        const auto fast = tactical::segment_hits_meshes(tree, all, placed, from, to);
+        const auto fast = tactical::segment_hits_meshes(tree, all, placed, from, to, &work);
         const auto slow = brute(tree, placed, from, to);
         agreed += fast && fast.value().has_value() == slow.has_value()
             && (!slow || fast.value()->fraction == slow->fraction);
         met += slow.has_value();
     }
     expect(agreed == 400 && met > 20, "DG-36: the tree finds what the brute force finds (" + std::to_string(met) + " met)");
+    // DG-36a: fixed work budget, never elapsed time. A linear scan tests 160000 triangles.
+    expect(work.meshes == 400 && work.boxes <= 40000 && work.triangles <= 20000,
+        "DG-36a: 400 queries stay within the mesh collision work budget");
+    std::cout << "mesh collision work: meshes " << work.meshes << ", boxes " << work.boxes
+              << ", triangles " << work.triangles << '\n';
+    tactical::MeshCollisionWork miss_work;
+    const auto miss = tactical::segment_hits_meshes(tree, all, placed, at(0, 200), at(200, 200), &miss_work);
+    expect(miss && !miss.value() && miss_work.meshes == 1 && miss_work.boxes == 1 && miss_work.triangles == 0,
+        "DG-36a: a root-box miss does no triangle work");
+    tactical::MeshCollisionWork disabled_work;
+    const auto disabled = tactical::segment_hits_meshes(tree, [](std::size_t) { return false; }, placed,
+        at(0, 0), at(200, 0), &disabled_work);
+    expect(disabled && !disabled.value() && disabled_work.meshes == 0 && disabled_work.boxes == 0
+            && disabled_work.triangles == 0, "DG-36a: disabled meshes do no collision work");
 
     // Validation: meshes need the box and their bounds, and must stay within 4096 units.
     auto table = combat();
@@ -474,6 +569,120 @@ void test_object_burst_clock() {
 // shots that follow aim at the hull and wear it down. Without the route (the #536 rule alone)
 // the hull plate sends every hit to the hull and the hardpoint is never touched.
 void test_aimed_routes() {
+    // DG-36b/CO-11: the projectile union must not change the ordinary tree's
+    // serialized bounds/history or equal-priority AI selection at its rebuild.
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        tactical::CombatTable table;
+        std::vector<tactical::UnitState> staged;
+        std::vector<tactical::SensorProfile> revealed;
+        std::vector<tactical::detail::CollectionTrees::Member> parent_members;
+        for (std::uint64_t id = 1; id <= 20; ++id) {
+            tactical::CombatProfile candidate;
+            candidate.type_id = 1000 + id;
+            candidate.category_bits = 2;
+            const auto x = static_cast<std::int64_t>(id) * 20;
+            candidate.collision = tactical::CollisionBox{at(x - 101, -1, -1), at(x - 99, 1, 1)};
+            if (id == 20) candidate.mesh_bounds = tactical::CollisionBox{at(x - 101, -1, -941), at(x - 99, 1, 1)};
+            table.profiles.push_back(candidate);
+            staged.push_back(unit(id, candidate.type_id, 2, at(100, 0)));
+            revealed.push_back({candidate.type_id, units(2000)});
+            parent_members.push_back({id, 2, {at(x - 1, -1, -1), at(x + 1, 1, 1)}});
+        }
+        tactical::CombatProfile scanner;
+        scanner.type_id = 2000;
+        scanner.max_attack_distance = units(2000);
+        scanner.collision = tactical::CollisionBox{at(-1, -1, -1), at(1, 1, 1)};
+        scanner.weapons = {laser()};
+        table.profiles.push_back(scanner);
+        staged.push_back(unit(100, scanner.type_id, 1, at(0, 0)));
+        revealed.push_back({scanner.type_id, units(2000)});
+        parent_members.push_back({100, 1, {at(-1, -1, -1), at(1, 1, 1)}});
+        auto created = tactical::TacticalSession::create(setup(staged), revealed, {}, {}, std::nullopt, table);
+        expect(static_cast<bool>(created), "DG-36b: ordinary-tree invariant session starts");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        tactical::detail::CollectionTrees parents;
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (std::uint64_t frame = 0; frame <= 31; ++frame) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "DG-36b: ordinary-tree invariant step succeeds");
+            if (!step) break;
+            parents.update(parent_members, frame);
+            std::vector<std::uint8_t> expected{'C', 'U', 'L', 'L'};
+            parents.append_state(expected);
+            const auto bytes = world.canonical_state_bytes();
+            const std::array<std::uint8_t, 4> tag{'C', 'U', 'L', 'L'};
+            const auto found = std::search(bytes.begin(), bytes.end(), tag.begin(), tag.end());
+            expect(found != bytes.end() && static_cast<std::size_t>(bytes.end() - found) >= expected.size()
+                && std::equal(expected.begin(), expected.end(), found),
+                "DG-36b: ordinary collection bytes keep parent bounds and persistent history");
+            const auto state = world.combat_state(100);
+            expect(state && state->attack_target == 20,
+                "CO-11: attachment bounds never displace the first tied AI target after the rebuild");
+        }
+    }
+
+    // DG-36b: both shot paths approach attached geometry outside the parent hull box.
+    for (const bool homing : {false, true}) {
+        const auto attached = [&](const bool miss, const bool destroyed) {
+            auto table = combat();
+            auto& weapon = table.profiles[0].weapons[0];
+            weapon.fire_a = at(0, 0, miss ? -80 : -60);
+            weapon.shot->homing = homing;
+            weapon.shot->turn_rate = homing ? units(3) : Fixed{};
+            auto& profile = table.profiles[2];
+            profile.hardpoints = {{0, at(0, 0, miss ? -80 : -60), true}};
+            auto triangles = plate(-5, 4);
+            for (auto& triangle : triangles) {
+                for (auto* corner : {&triangle.a, &triangle.b, &triangle.c}) {
+                    corner->z = math::add(corner->z, units(-60)).value();
+                }
+            }
+            profile.meshes = {tactical::collision_mesh(std::move(triangles), 0, 0, false)};
+            profile.mesh_bounds = tactical::CollisionBox{at(-5, -4, -64), at(-5, 4, -56)};
+            profile.aimed_routes = {0};
+            auto health = durability();
+            health.profiles[2].destroyed_with_hardpoints = false;
+            auto created = tactical::TacticalSession::create(
+                setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, corvette_type, 2, at(300, 0))}),
+                sensors(), health, {}, std::nullopt, table);
+            expect(static_cast<bool>(created), "DG-36b: detached-bound hardpoint session binds");
+            auto value = std::move(created).value();
+            if (destroyed) {
+                expect(static_cast<bool>(value.submit({{0, 2, 0}, {2},
+                    tactical::DamagePayload{units(90), 0}})), "DG-36b: generator destruction submits");
+            }
+            return value;
+        };
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto value = attached(false, false);
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t hits = 0;
+            for (unsigned frame = 0; frame < 180; ++frame) {
+                auto stepped = value.step(executor);
+                expect(static_cast<bool>(stepped), "DG-36b: attached-bound combat advances");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    hits += event.kind == tactical::CombatEventKind::projectile_hit;
+                }
+            }
+            const auto health = value.durability_state(2);
+            expect(hits > 0 && health && health->hardpoints[0] < units(90),
+                "DG-36b: laser and homing missile hit a hardpoint outside the parent collision bounds");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "DG-36b: attached-bound hits agree on 1/2/4/8 workers");
+        }
+        for (const bool destroyed : {false, true}) {
+            auto value = attached(!destroyed, destroyed);
+            const auto tally = run(value, 180);
+            const auto health = value.durability_state(2);
+            expect(tally.hits == 0 && health && health->hull == units(300),
+                "DG-36b: expanded bounds fabricate neither a mesh hit nor a destroyed-generator hit");
+        }
+    }
     const auto make = [](const bool routed) {
         auto table = combat();
         auto& profile = table.profiles[2];
@@ -569,11 +778,40 @@ void test_ordered_hardpoint_route() {
 // the target is 300 away: every projectile expires short of it and nothing is hit.
 void test_out_of_range_miss() {
     auto value = session(setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, frigate_type, 2, at(300, 0), true)}), 200);
-    const auto tally = run(value, 90);
+    Tally tally;
+    std::vector<eawr::sim::EntityId> expired;
+    const eawr::sim::InlineExecutor executor;
+    for (unsigned tick = 0; tick < 90; ++tick) {
+        const auto before = value.projectiles();
+        const std::vector<tactical::Projectile> flying(before.begin(), before.end());
+        const auto stepped = value.step(executor);
+        expect(static_cast<bool>(stepped), "WAD-07: expiry delivery step succeeds");
+        if (!stepped) return;
+        for (const auto& event : stepped.value().snapshot->combat_events()) {
+            tally.shots += event.kind == tactical::CombatEventKind::weapon_fired;
+            tally.hits += event.kind == tactical::CombatEventKind::projectile_hit;
+            if (event.kind != tactical::CombatEventKind::projectile_expired) continue;
+            expect(std::find(expired.begin(), expired.end(), event.target) == expired.end(),
+                "WAD-07: a projectile emits exactly one terminal event");
+            expired.push_back(event.target);
+            const auto previous = std::find_if(flying.begin(), flying.end(), [&](const auto& projectile) {
+                return projectile.id == event.target;
+            });
+            expect(previous != flying.end() && event.origin == previous->position
+                && event.aim != event.origin && event.shooter == 1 && event.selected_target == 2
+                && event.outcome == static_cast<std::uint32_t>(tactical::ProjectileExpiryReason::travel_limit),
+                "WAD-07: terminal delivery retains identity, final segment and travel reason");
+            expect(std::none_of(value.projectiles().begin(), value.projectiles().end(), [&](const auto& projectile) {
+                return projectile.id == event.target;
+            }), "WAD-07: terminal delivery survives the projectile's removal");
+        }
+    }
     const auto health = value.durability_state(2);
     expect(tally.shots > 0 && tally.hits == 0, "projectiles that run out of travel hit nothing");
     expect(health && health->shields.raw() == 100 * one && health->hull.raw() == 600 * one, "the target is unharmed");
     expect(value.projectiles().size() <= tally.shots, "expired projectiles leave the session");
+    expect(!expired.empty() && expired.size() + value.projectiles().size() == tally.shots,
+        "WAD-07: every removed miss has one presentation event and flying shots have none");
 }
 
 // DG-33 at the range boundary, as FoC does it: each frame tests the whole step for a hit before

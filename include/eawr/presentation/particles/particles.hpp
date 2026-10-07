@@ -44,7 +44,7 @@ struct ScalarTrack final {
     std::vector<ScalarKey> keys;
 };
 
-enum class Shape : std::uint8_t { point, direction, sphere, range, spherical_range, cylinder, torus };
+enum class Shape : std::uint8_t { point, direction, sphere, range, spherical_range, cylinder, torus, pinched_cylinder };
 enum class MeshSpawnMode : std::uint8_t { disabled, random_vertex, random_surface, every_vertex };
 struct MeshVertex final { Vec3 position{}, normal{}; };
 struct MeshSubmesh final {
@@ -68,6 +68,7 @@ struct PropertyGroup final {
     float angle_min{}, angle_max{};
     float spherical_radius_min{}, spherical_radius_max{};
     float cylinder_radius{}, cylinder_height_min{}, cylinder_height_max{};
+    float pinch_fraction{1.0F}; // PS-12: V1 loading retains the sampler's constructor default.
     float torus_radius{}, tube_radius{};
 };
 
@@ -112,9 +113,11 @@ struct EmitterDefinition final {
     std::optional<LifetimeRange> lifetime_range;
     float inward_speed{};
     Vec3 acceleration{};
+    float gravity{}; // PS-25: world negative Z, independent of local acceleration.
     bool acceleration_local{};
     float inward_acceleration{};
     float wind_response{};
+    bool wind_disturbances{};
     float terrain_elasticity{};
     ScalarTrack red, green, blue, alpha;
     ScalarTrack size;
@@ -122,6 +125,8 @@ struct EmitterDefinition final {
     ScalarTrack uv_index;
     std::uint32_t texture_size{64};
     ScalarTrack rotation_rate;
+    float rotation_variation{};
+    bool initial_rotation_only{};
     bool random_rotation{};
     bool random_rotation_direction{};
     float random_rotation_average{};
@@ -143,7 +148,7 @@ struct EmitterDefinition final {
     float tail_size{50.0F};
     bool legacy_kite_motion{}; // MD-07: V1 motion-based kite geometry.
     bool inherit_emitter_motion{};
-    // V1 parent spawn relation. Each parent particle owns a child emitter instance.
+    // V1 parent relation. Continuous trail scheduling is shared per dependent emitter.
     static constexpr std::uint32_t no_parent = 0xffffffffU;
     std::uint32_t parent_emitter{no_parent};
     bool spawn_on_parent_death{};
@@ -198,7 +203,9 @@ struct Particle final {
     bool draw_eligible{true};
     std::size_t emitter_index{};
     Vec3 position{};
+    Vec3 previous_position{}; // PS-16: segment start for dependent trail sampling.
     Vec3 velocity{};
+    Vec3 radial_velocity{}; // PS-24: retained birth-direction motion is independent of velocity.
     Vec3 motion_velocity{}; // MD-07: movement including inherited emitter motion.
     float inherited_speed_limit{};
     Vec3 acceleration{};
@@ -206,6 +213,7 @@ struct Particle final {
     Color color{0.1F, 1.0F, 0.5F, 1.0F};
     float size{1.0F};
     float rotation{};
+    float rotation_angle{}; // PS-29: accumulated radians before bin selection.
     float spawn_time{};
     float death_time{};
     // Per-particle plug-in state, public for snapshot/upload adapters only.
@@ -231,6 +239,12 @@ struct EmitterCapacity final {
     std::size_t reserved{};  // independent share of the caller's host safety budget
 };
 
+// PS-26: caller-owned scene samples copied at the presentation boundary.
+struct WindDisturbance final {
+    Vec3 position{}, velocity{};
+    float radius{}, factor{}, angular_limit{};
+};
+
 class CpuSystem final {
 public:
     explicit CpuSystem(SystemDefinition definition, std::uint32_t seed = 0x00c0ffeeU,
@@ -240,6 +254,7 @@ public:
     void set_origin(Vec3 origin);
     void set_basis(Basis3 basis);
     void set_wind(Vec3 acceleration);
+    [[nodiscard]] core::Result<void> set_wind_disturbances(std::span<const WindDisturbance> disturbances);
     [[nodiscard]] core::Result<void> set_detail(ParticleDetail detail);
     [[nodiscard]] ParticleDetail detail() const noexcept { return detail_; }
     [[nodiscard]] bool emitter_enabled(std::size_t index) const noexcept;
@@ -289,6 +304,7 @@ private:
     struct EmitterState final {
         float next_spawn{};
         bool active{true};
+        bool started{};
         std::size_t submesh{}, vertex{};
         float elapsed{};
         bool frozen{};
@@ -301,9 +317,8 @@ private:
         std::size_t emitter_index{};
         std::uint64_t parent_id{};
         Particle parent_snapshot{};
-        float next_spawn{};
-        float start_time{};
         bool active{true};
+        bool segment_scheduled{};
     };
     struct ParentEvent final { Particle parent; bool death{}; };
 
@@ -314,9 +329,13 @@ private:
                              std::size_t emitter_index, float spawn_time,
                              const Particle* parent = nullptr);
     void update_particle(Particle& particle, const EmitterDefinition& emitter, float delta);
+    void move_particle(Particle& particle, const EmitterDefinition& emitter, float delta, bool birth = false);
     void spawn_batch(std::size_t emitter_index, float spawn_time, const Particle* parent,
-                     AdvanceStats& stats, std::vector<ParentEvent>& events);
+                     AdvanceStats& stats, std::vector<ParentEvent>& events,
+                     const MeshFrame* current_frame = nullptr);
     void process_events(std::vector<ParentEvent>& events, AdvanceStats& stats);
+    void schedule_emitter(std::size_t index, const Particle* parent, float segment_delta,
+                          float before, AdvanceStats& stats, std::vector<ParentEvent>& events);
     void step(float delta_seconds, AdvanceStats& stats);
     void step_segment(float delta_seconds, AdvanceStats& stats, bool prewarming = false);
     void freeze_crossing(float delta_seconds);
@@ -327,6 +346,7 @@ private:
         std::optional<Basis3> rotation;  // absent while the basis is unchanged
     };
     [[nodiscard]] EmitterMotion emitter_motion() const;
+    [[nodiscard]] EmitterMotion emitter_motion(const MeshFrame& from, const MeshFrame& to) const;
     void follow(Particle& particle, const EmitterMotion& motion) const;
     void preroll(AdvanceStats& stats);
     [[nodiscard]] bool frozen(std::size_t emitter_index) const;
@@ -341,6 +361,8 @@ private:
     std::vector<EmitterCapacity> capacities_;
     std::vector<ParentEvent> events_;
     std::vector<ChildInstance> child_instances_;
+    struct ScheduleState final { float next_spawn{}; bool started{}; };
+    std::vector<ScheduleState> schedules_before_;
     std::uint64_t next_particle_id_{1};
     std::uint64_t next_instance_id_{1};
     std::uint32_t random_state_{};
@@ -356,14 +378,23 @@ private:
     Vec3 origin_{};
     Vec3 previous_origin_{};
     Vec3 sampled_origin_{};
+    Basis3 sampled_basis_{};
+    Vec3 update_origin_start_{};
+    Basis3 update_basis_start_{};
+    float update_before_{};
+    float update_delta_{};
     Vec3 emitter_velocity_{};
     float inherited_speed_limit_{};
     bool origin_set_{};
     Basis3 basis_{};
     Basis3 previous_basis_{};
     Vec3 wind_{};
+    std::vector<WindDisturbance> disturbances_;
     std::optional<MeshBinding> mesh_binding_;
     std::size_t mesh_vertex_count_{};
+    struct MeshVertexLocation final { std::size_t submesh{}, vertex{}; };
+    std::vector<MeshVertexLocation> mesh_vertices_;
+    std::vector<std::uint32_t> vertex_order_;
 };
 
 } // namespace eawr::presentation::particles
