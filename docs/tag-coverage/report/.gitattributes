@@ -1,0 +1,2 @@
+# The freshness gate compares generated report bytes on every platform.
+*.md text eol=lf
